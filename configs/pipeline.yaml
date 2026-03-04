@@ -85,6 +85,12 @@ pipeline:
       workdir: "."
       description: "Скрипт для перемещения тикетов из backlog/ в ready/"
 
+    script-check-conditions:
+      command: "node"
+      args: [".workflow/src/scripts/check-conditions.js"]
+      workdir: "."
+      description: "Скрипт для проверки условий тикетов в backlog/"
+
     script-move-to-review:
       command: "node"
       args: [".workflow/src/scripts/move-to-review.js"]
@@ -152,9 +158,7 @@ pipeline:
     # -------------------------------------------------------------------------
     check-conditions:
       description: "Проверить условия тикетов в backlog, вывести готовые"
-      agent: kilo-code
-      fallback_agent: qwen-code
-      skill: check-conditions
+      agent: script-check-conditions
       goto:
         has_ready:
           stage: move-to-ready
