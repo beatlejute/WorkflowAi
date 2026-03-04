@@ -161,6 +161,7 @@ pipeline:
           params:
             ready_tickets: "$result.ready_tickets"
         default: pick-next-task
+        empty: create-report
         error: create-report
 
     # -------------------------------------------------------------------------

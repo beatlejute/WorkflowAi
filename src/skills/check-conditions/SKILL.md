@@ -115,10 +115,18 @@ ready_tickets: IMPL-002, DOCS-001
 ---RESULT---
 ```
 
-Если готовых нет:
+Если готовых нет, но есть тикеты в ready:
 ```
 ---RESULT---
 status: default
+ready_tickets:
+---RESULT---
+```
+
+Если готовых нет и нет тикетов в ready:
+```
+---RESULT---
+status: empty
 ready_tickets:
 ---RESULT---
 ```
