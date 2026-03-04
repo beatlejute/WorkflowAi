@@ -50,13 +50,11 @@ function checkCondition(condition) {
 
     case 'tasks_completed':
       // Проверяет, что указанные задачи выполнены (находятся в done/)
-      if (Array.isArray(value)) {
-        return value.every(taskId => {
-          const donePath = path.join(DONE_DIR, `${taskId}.md`);
-          return fs.existsSync(donePath);
-        });
-      }
-      return false;
+      const ids = Array.isArray(value) ? value : [value];
+      return ids.every(taskId => {
+        const donePath = path.join(DONE_DIR, `${taskId}.md`);
+        return fs.existsSync(donePath);
+      });
 
     case 'date_after':
       return new Date() > new Date(value);

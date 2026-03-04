@@ -420,5 +420,5 @@ pipeline:
   execution:
     max_steps: 100
     delay_between_stages: 5
-    timeout_per_stage: 600
+    timeout_per_stage: 1800
     log_file: ".workflow/logs/pipeline.log"
