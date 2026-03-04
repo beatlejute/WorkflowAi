@@ -20,7 +20,6 @@
 
 import fs from 'fs';
 import path from 'path';
-import YAML from 'js-yaml';
 import { findProjectRoot } from '../lib/find-root.mjs';
 import { parseFrontmatter, printResult } from '../lib/utils.mjs';
 
@@ -42,11 +41,11 @@ function checkCondition(condition) {
 
   switch (type) {
     case 'file_exists':
-      const filePath = path.join(WORKFLOW_DIR, value);
+      const filePath = path.join(PROJECT_DIR, value);
       return fs.existsSync(filePath);
 
     case 'file_not_exists':
-      const filePath2 = path.join(WORKFLOW_DIR, value);
+      const filePath2 = path.join(PROJECT_DIR, value);
       return !fs.existsSync(filePath2);
 
     case 'tasks_completed':

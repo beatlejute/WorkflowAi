@@ -45,7 +45,7 @@ pipeline:
 
     qwen-code:
       command: "qwen"
-      args: ["-y", "-d", "-p"]
+      args: ["-y", "-p"]
       workdir: "."
       description: "Qwen Code — альтернативный агент для независимой проверки"
 
@@ -160,7 +160,8 @@ pipeline:
           stage: move-to-ready
           params:
             ready_tickets: "$result.ready_tickets"
-        default: create-report
+        default: pick-next-task
+        error: create-report
 
     # -------------------------------------------------------------------------
     # 1b. move-to-ready
