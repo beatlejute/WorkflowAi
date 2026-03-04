@@ -1,0 +1,117 @@
+# Конфигурация системы координации агентов
+# Версия: 1.0
+
+version: "1.0"
+
+# Информация о проекте
+project:
+  name: ""
+  description: ""
+  created_at: ""
+
+# Типы задач и их настройки
+task_types:
+  planning:
+    prefix: ARCH
+    description: "Задачи планирования и архитектуры"
+
+  implementation:
+    prefix: IMPL
+    description: "Написание и изменение кода"
+
+  bugfix:
+    prefix: FIX
+    description: "Исправление ошибок и багов"
+
+  review:
+    prefix: REVIEW
+    description: "Ревью кода и документации"
+
+  documentation:
+    prefix: DOCS
+    description: "Создание и обновление документации"
+
+  admin:
+    prefix: ADMIN
+    description: "Административные задачи"
+
+# Приоритеты задач
+priorities:
+  1:
+    name: critical
+    description: "Блокирует всю работу"
+    color: "#FF0000"
+  2:
+    name: high
+    description: "Важно для прогресса"
+    color: "#FF6600"
+  3:
+    name: medium
+    description: "Стандартный приоритет"
+    color: "#FFCC00"
+  4:
+    name: low
+    description: "Когда будет время"
+    color: "#00CC00"
+  5:
+    name: someday
+    description: "Может быть когда-нибудь"
+    color: "#CCCCCC"
+
+# Статусы задач
+statuses:
+  backlog:
+    folder: backlog
+    description: "Ожидает выполнения условий"
+  ready:
+    folder: ready
+    description: "Готов к выполнению"
+  in-progress:
+    folder: in-progress
+    description: "В работе"
+  blocked:
+    folder: blocked
+    description: "Заблокирована"
+  review:
+    folder: review
+    description: "На проверке"
+  done:
+    folder: done
+    description: "Завершена"
+
+# Типы условий для задач
+condition_types:
+  tasks_completed:
+    description: "Указанные задачи должны быть выполнены"
+    
+  date_after:
+    description: "Дата должна быть после указанной"
+    
+  date_before:
+    description: "Дата должна быть до указанной"
+    
+  file_exists:
+    description: "Указанный файл должен существовать"
+    
+  file_not_exists:
+    description: "Указанный файл не должен существовать"
+    
+  file_contains:
+    description: "Файл должен содержать указанный текст"
+    
+  manual_approval:
+    description: "Требуется ручное подтверждение"
+
+# Настройки путей
+paths:
+  plans: plans
+  tickets: tickets
+  reports: reports
+  templates: templates
+  archive: archive
+
+# Настройки отчётности
+reporting:
+  daily_report_time: "18:00"
+  sprint_length_days: 7
+  archive_completed_after_days: 30

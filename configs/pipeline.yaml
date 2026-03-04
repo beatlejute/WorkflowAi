@@ -1,0 +1,422 @@
+# =============================================================================
+# Pipeline Configuration — формат конфигурации пайплайна
+# =============================================================================
+# Описывает цепочку этапов (stages), доступных агентов, goto-логику переходов,
+# retry-стратегии и настройки выполнения.
+#
+# Runner читает этот файл и автономно оркестрирует работу:
+#   node .workflow/src/runner.mjs --config .workflow/config/pipeline.yaml
+#
+# Переменные в goto.params:
+#   $result.*   — поля из результата текущего stage
+#   $context.*  — переменные из секции context (обновляются через params)
+#   $counter.*  — значения счётчиков (обновляются стейджами type: update-counter)
+# =============================================================================
+
+pipeline:
+  name: "default"
+  version: "1.0"
+
+  # ===========================================================================
+  # Агенты (agents)
+  # ===========================================================================
+  # Каждый агент — это CLI-инструмент, который runner вызывает через child_process.
+  # Формат:
+  #   <agent-id>:
+  #     command:  <string>   — исполняемый файл (должен быть в PATH)
+  #     args:     <string[]> — аргументы командной строки
+  #     workdir:  <string>   — рабочая директория (по умолчанию ".")
+  #     description: <string> — описание агента (опционально)
+  #
+  # Runner добавляет промпт последним аргументом автоматически.
+  # ===========================================================================
+  agents:
+    claude-sonnet:
+      command: "claude"
+      args: ["--model", "claude-sonnet-4-6", "--permission-mode", "acceptEdits", "-p"]
+      workdir: "."
+      description: "Claude Sonnet — быстрая модель для простых задач"
+
+    claude-opus:
+      command: "claude"
+      args: ["--model", "claude-opus-4-6", "--permission-mode", "acceptEdits", "-p"]
+      workdir: "."
+      description: "Claude Opus — мощная модель для сложных задач"
+
+    qwen-code:
+      command: "qwen"
+      args: ["-y", "-d", "-p"]
+      workdir: "."
+      description: "Qwen Code — альтернативный агент для независимой проверки"
+
+    kilo-code:
+      command: "kilo"
+      args: ["-m", "kilo/minimax/minimax-m2.5:free", "--agent", "orchestrator", "run"]
+      workdir: "."
+      description: "Kilo Code — агент с мульти-режимами (architect, code, debug)"
+
+    kilo-glm:
+      command: "kilo"
+      args: ["-m", "zai-coding-plan/glm-4.7", "--agent", "orchestrator", "run"]
+      workdir: "."
+      description: "Kilo GLM"
+
+    kilo-deepseek:
+      command: "kilo"
+      args: ["-m", "deepseek/deepseek-reasoner", "--agent", "code", "run"]
+      workdir: "."
+      description: "Kilo deepseek"
+
+    script-move:
+      command: "node"
+      args: [".workflow/src/scripts/move-ticket.js"]
+      workdir: "."
+      description: "Скрипт для перемещения тикетов между директориями"
+
+    script-pick:
+      command: "node"
+      args: [".workflow/src/scripts/pick-next-task.js"]
+      workdir: "."
+      description: "Скрипт для выбора следующего тикета из ready/"
+
+    script-move-ready:
+      command: "node"
+      args: [".workflow/src/scripts/move-to-ready.js"]
+      workdir: "."
+      description: "Скрипт для перемещения тикетов из backlog/ в ready/"
+
+    script-move-to-review:
+      command: "node"
+      args: [".workflow/src/scripts/move-to-review.js"]
+      workdir: "."
+      description: "Скрипт для перемещения завершённых тикетов из in-progress/ в review/"
+
+  # ===========================================================================
+  # Этапы (stages)
+  # ===========================================================================
+  # Каждый stage описывает один шаг пайплайна.
+  # Формат:
+  #   <stage-id>:
+  #     description: <string>   — что делает этот этап
+  #     agent:      <agent-id>  — какой агент выполняет (ссылка на agents.*)
+  #     skill:      <skill-id>  — какой skill использовать (файл .workflow/src/skills/<skill>/SKILL.md)
+  #     goto:                   — логика переходов по результату
+  #       <status>:             — ключ = статус результата агента
+  #         stage:  <stage-id>  — следующий stage
+  #         params: <map>       — параметры, передаваемые в context следующего stage
+  #       default:              — fallback если статус не совпал ни с одним ключом
+  #
+  # Специальные значения stage:
+  #   "end" — завершение пайплайна
+  #
+  # Встроенный тип стейджа (type: update-counter):
+  #   Инкрементирует счётчик без вызова агента.
+  #   type:    update-counter  — встроенный обработчик runner'а
+  #   counter: <string>        — имя счётчика
+  #   max:     <int>           — при достижении max возвращает статус "max_reached"
+  #   goto:
+  #     default:    <stage>    — следующий стейдж (счётчик < max)
+  #     max_reached: <stage>   — стейдж при достижении max
+  # ===========================================================================
+  stages:
+
+    # -------------------------------------------------------------------------
+    # 0. pick-first-task
+    # Выбирает следующую задачу из ready/ по приоритету и зависимостям
+    # Если ready/ пуст — проверяет review/
+    # -------------------------------------------------------------------------
+    pick-first-task:
+      description: "Выбрать задачу задачу из ready по приоритету"
+      agent: script-pick
+      goto:
+        found:
+          stage: move-to-in-progress
+          params:
+            ticket_id: "$result.ticket_id"
+            target: in-progress
+        in_review:
+          stage: review-result
+          params:
+            ticket_id: "$result.ticket_id"
+            attempt: "1"
+        completed_in_progress:
+          stage: move-to-review
+          params:
+            ticket_id: "$result.ticket_id"
+        empty: check-conditions
+        error: create-report
+
+    # -------------------------------------------------------------------------
+    # 1. check-conditions
+    # Проверяет условия тикетов в backlog/, выводит список готовых
+    # -------------------------------------------------------------------------
+    check-conditions:
+      description: "Проверить условия тикетов в backlog, вывести готовые"
+      agent: kilo-code
+      fallback_agent: qwen-code
+      skill: check-conditions
+      goto:
+        has_ready:
+          stage: move-to-ready
+          params:
+            ready_tickets: "$result.ready_tickets"
+        default: create-report
+
+    # -------------------------------------------------------------------------
+    # 1b. move-to-ready
+    # Перемещает тикеты из backlog/ в ready/ (по списку из check-conditions)
+    # -------------------------------------------------------------------------
+    move-to-ready:
+      description: "Переместить готовые тикеты из backlog в ready"
+      agent: script-move-ready
+      timeout: 120
+      goto:
+        default: pick-next-task
+
+    # -------------------------------------------------------------------------
+    # 2. pick-next-task
+    # Выбирает следующую задачу из ready/ по приоритету и зависимостям
+    # Если ready/ пуст — проверяет review/
+    # -------------------------------------------------------------------------
+    pick-next-task:
+      description: "Выбрать следующую задачу из ready по приоритету"
+      agent: script-pick
+      goto:
+        found:
+          stage: move-to-in-progress
+          params:
+            ticket_id: "$result.ticket_id"
+            target: in-progress
+        in_review:
+          stage: review-result
+          params:
+            ticket_id: "$result.ticket_id"
+            attempt: "1"
+        completed_in_progress:
+          stage: move-to-review
+          params:
+            ticket_id: "$result.ticket_id"
+        empty: check-conditions
+        error: create-report
+
+    # -------------------------------------------------------------------------
+    # 2b. move-to-in-progress
+    # Перемещает тикет из ready/ в in-progress/ перед выполнением
+    # -------------------------------------------------------------------------
+    move-to-in-progress:
+      description: "Переместить тикет из ready в in-progress"
+      agent: script-move
+      timeout: 120
+      goto:
+        default:
+          stage: execute-task
+          params:
+            ticket_id: "$context.ticket_id"
+        error:
+          stage: execute-task
+          params:
+            ticket_id: "$context.ticket_id"
+
+
+    # -------------------------------------------------------------------------
+    # 3. execute-task
+    # Выполняет выбранную задачу (код, документация, план и т.д.)
+    # -------------------------------------------------------------------------
+    execute-task:
+      description: "Выполнить выбранную задачу"
+      agent: qwen-code
+      fallback_agent: kilo-deepseek
+      skill: execute-task
+      goto:
+        default:
+          stage: move-to-review
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+            target: review
+        error:
+          stage: move-to-review
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+            target: review
+
+    # -------------------------------------------------------------------------
+    # 3b. move-to-review
+    # Перемещает тикет в review/ после выполнения задачи
+    # -------------------------------------------------------------------------
+    move-to-review:
+      description: "Переместить тикет в review после выполнения"
+      agent: script-move-to-review
+      timeout: 120
+      goto:
+        default:
+          stage: review-result
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+
+    # -------------------------------------------------------------------------
+    # 4. review-result
+    # Проверяет результат выполнения на соответствие DoD тикета.
+    # Использует независимый агент (qwen-code) для объективной оценки.
+    # При failed — переходит на increment-task-attempts для учёта попытки.
+    # -------------------------------------------------------------------------
+    review-result:
+      description: "Проверить результат выполнения на соответствие DoD тикета"
+      agent: claude-sonnet
+      fallback_agent: qwen-code
+      skill: review-result
+      goto:
+        passed:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: done
+        failed:
+          stage: increment-task-attempts
+          params:
+            ticket_id: "$context.ticket_id"
+        default:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: blocked
+
+    # -------------------------------------------------------------------------
+    # 4b. increment-task-attempts
+    # Отдельный стейдж обновления счётчика попыток выполнения тикета.
+    # При достижении max — блокирует тикет. Иначе — возвращает в очередь.
+    # -------------------------------------------------------------------------
+    increment-task-attempts:
+      description: "Обновить счётчик попыток выполнения тикета"
+      type: update-counter
+      counter: task_attempts
+      max: 3
+      goto:
+        default:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: ready
+        max_reached:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: blocked
+
+    # -------------------------------------------------------------------------
+    # 5. move-ticket
+    # Перемещает тикет в целевую директорию (done/ или blocked/)
+    # -------------------------------------------------------------------------
+    move-ticket:
+      description: "Переместить тикет (done / blocked)"
+      agent: script-move
+      timeout: 120
+      goto:
+        default: pick-next-task
+
+    # -------------------------------------------------------------------------
+    # 6. create-report
+    # Создаёт итоговый отчёт по выполненным задачам текущего цикла
+    # -------------------------------------------------------------------------
+    create-report:
+      description: "Создать итоговый отчёт по выполненным задачам"
+      agent: claude-sonnet
+      fallback_agent: qwen-code
+      skill: create-report
+      goto:
+        default:
+          stage: analyze-report
+          params:
+            report_id: "$result.report_id"
+
+    # -------------------------------------------------------------------------
+    # 7. analyze-report
+    # Анализирует отчёт: план выполнен полностью или есть пробелы?
+    # При has_gaps — переходит на increment-plan-iterations для учёта итерации.
+    # -------------------------------------------------------------------------
+    analyze-report:
+      description: "Проанализировать отчёт: план выполнен полностью?"
+      agent: claude-opus
+      fallback_agent: qwen-code
+      skill: analyze-report
+      goto:
+        completed: end
+        has_gaps:
+          stage: increment-plan-iterations
+          params:
+            gaps: "$result.gaps"
+            report_id: "$context.report_id"
+
+    # -------------------------------------------------------------------------
+    # 7b. increment-plan-iterations
+    # Отдельный стейдж обновления счётчика итераций анализа плана.
+    # При достижении max — завершает пайплайн. Иначе — декомпозирует пробелы.
+    # -------------------------------------------------------------------------
+    increment-plan-iterations:
+      description: "Обновить счётчик итераций анализа плана"
+      type: update-counter
+      counter: plan_iterations
+      max: 3
+      goto:
+        default:
+          stage: decompose-gaps
+        max_reached: end
+
+    # -------------------------------------------------------------------------
+    # 8. decompose-gaps
+    # Декомпозирует недочёты из анализа отчёта в новые тикеты (backlog/)
+    # -------------------------------------------------------------------------
+    decompose-gaps:
+      description: "Декомпозировать недочёты из отчёта в новые тикеты"
+      agent: claude-sonnet
+      fallback_agent: qwen-code
+      skill: decompose-gaps
+      goto:
+        default: check-conditions
+
+  # ===========================================================================
+  # Точка входа (entry)
+  # ===========================================================================
+  # Stage, с которого начинается выполнение пайплайна.
+  # ===========================================================================
+  entry: pick-first-task
+
+  # ===========================================================================
+  # Контекст (context)
+  # ===========================================================================
+  # Переменные, доступные всем stages через $context.*.
+  # Runner автоматически обновляет context через params в goto-переходах.
+  # Начальные значения задаются здесь или через CLI:
+  #   node runner.mjs --plan PLAN-003
+  # ===========================================================================
+  context:
+    plan_id: ""              # ID плана (задаётся при запуске)
+
+  # ===========================================================================
+  # Защита файлов (protected_files)
+  # ===========================================================================
+  # Glob-паттерны файлов, в которые агентам запрещена запись.
+  # Runner проверяет эти паттерны и блокирует изменения.
+  # Пути указываются относительно корня проекта (без префикса .workflow/)
+  # ===========================================================================
+  protected_files:
+    - ".workflow/plans/**"       # Планы — только для чтения
+    - ".workflow/config/**"      # Конфигурация
+
+  # ===========================================================================
+  # Настройки выполнения (execution)
+  # ===========================================================================
+  # Параметры, управляющие поведением runner'а.
+  #
+  #   max_steps:             — абсолютный лимит шагов за один запуск (защита от зацикливания)
+  #   delay_between_stages:  — пауза между этапами в секундах
+  #   timeout_per_stage:     — таймаут на один этап в секундах (по истечении — ошибка)
+  #   log_file:              — путь к файлу логов (относительно корня проекта)
+  # ===========================================================================
+  execution:
+    max_steps: 100
+    delay_between_stages: 5
+    timeout_per_stage: 600
+    log_file: ".workflow/logs/pipeline.log"

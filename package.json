@@ -1,0 +1,24 @@
+{
+  "name": "workflow-ai",
+  "version": "1.0.0",
+  "description": "AI Agent Workflow Coordinator — kanban-based pipeline for AI coding agents",
+  "type": "module",
+  "bin": { "workflow": "./bin/workflow.mjs" },
+  "files": [
+    "bin/",
+    "src/cli.mjs",
+    "src/init.mjs",
+    "src/runner.mjs",
+    "src/lib/",
+    "src/scripts/",
+    "src/skills/",
+    "templates/",
+    "configs/",
+    "agent-templates/"
+  ],
+  "engines": { "node": ">=18.0.0" },
+  "scripts": {
+    "test": "node --test src/tests/*.test.mjs"
+  },
+  "dependencies": { "js-yaml": "^4.1.0" }
+}
