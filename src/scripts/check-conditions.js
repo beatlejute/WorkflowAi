@@ -102,10 +102,43 @@ function readTickets(dir) {
 }
 
 /**
+ * Нормализует входное значение в формат PLAN-NNN.
+ * Принимает: "PLAN-007", "7", "007", "plan-7", "plans/PLAN-007.md", "/abs/path/PLAN-007.md"
+ */
+function normalizePlanId(raw) {
+  if (!raw) return null;
+
+  // Извлекаем имя файла если передан путь
+  const basename = path.basename(raw, '.md');
+
+  // Уже в формате PLAN-NNN (регистронезависимо)
+  const full = basename.match(/^plan-(\d+)$/i);
+  if (full) return `PLAN-${String(parseInt(full[1], 10)).padStart(3, '0')}`;
+
+  // Просто цифра или число: "7", "007"
+  const num = raw.trim().match(/^(\d+)$/);
+  if (num) return `PLAN-${String(parseInt(num[1], 10)).padStart(3, '0')}`;
+
+  return null;
+}
+
+/**
+ * Извлекает plan_id из аргументов командной строки (контекст пайплайна)
+ */
+function extractPlanId() {
+  const prompt = process.argv.slice(2)[0] || '';
+  const match = prompt.match(/plan_id:\s*(\S+)/i);
+  return match ? normalizePlanId(match[1]) : null;
+}
+
+/**
  * Проверяет все тикеты в backlog/ и возвращает список готовых
  */
-function checkBacklog() {
-  const tickets = readTickets(BACKLOG_DIR);
+function checkBacklog(planId) {
+  const allTickets = readTickets(BACKLOG_DIR);
+  const tickets = planId
+    ? allTickets.filter(t => t.frontmatter.parent_plan === planId)
+    : allTickets;
 
   const ready = [];
   const waiting = [];
@@ -134,11 +167,17 @@ function checkBacklog() {
 }
 
 async function main() {
+  const planId = extractPlanId();
+
+  if (planId) {
+    console.log(`[INFO] Filtering by plan_id: ${planId}`);
+  }
+
   console.log(`[INFO] Scanning backlog/: ${BACKLOG_DIR}`);
 
-  const { ready, waiting, total } = checkBacklog();
+  const { ready, waiting, total } = checkBacklog(planId);
 
-  console.log(`[INFO] Total in backlog: ${total}`);
+  console.log(`[INFO] Total in backlog${planId ? ` (plan ${planId})` : ''}: ${total}`);
   console.log(`[INFO] Ready: ${ready.length}, Waiting: ${waiting.length}`);
 
   if (ready.length > 0) {
