@@ -256,6 +256,8 @@ pipeline:
       agent: script-move-to-review
       timeout: 120
       goto:
+        skipped:
+          stage: pick-next-task
         default:
           stage: review-result
           params:
