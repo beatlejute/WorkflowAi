@@ -4,7 +4,6 @@
 
 id: "{TYPE}-{NNN}"              # IMPL-001, FIX-015, PLAN-003
 title: "Название задачи"
-status: backlog                  # backlog | ready | in-progress | blocked | review | done
 priority: 3                      # 1-критический, 2-высокий, 3-средний, 4-низкий, 5-когда-нибудь
 
 # Тип задачи

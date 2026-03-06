@@ -51,7 +51,6 @@ function moveToReady(ticketId) {
   const content = fs.readFileSync(sourcePath, 'utf8');
   const { frontmatter, body } = parseFrontmatter(content);
 
-  frontmatter.status = 'ready';
   frontmatter.updated_at = new Date().toISOString();
 
   const newContent = serializeFrontmatter(frontmatter) + body;

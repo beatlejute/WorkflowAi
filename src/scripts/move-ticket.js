@@ -140,7 +140,6 @@ async function moveTicket(ticketId, target) {
 
   // Обновление frontmatter
   const now = new Date().toISOString();
-  frontmatter.status = target;
   frontmatter.updated_at = now;
 
   // Если переход в done, добавляем completed_at

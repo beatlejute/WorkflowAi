@@ -9,6 +9,7 @@
     "src/cli.mjs",
     "src/init.mjs",
     "src/runner.mjs",
+    "src/wf-loader.mjs",
     "src/lib/",
     "src/scripts/",
     "src/skills/",
