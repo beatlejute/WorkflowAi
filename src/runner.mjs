@@ -924,8 +924,6 @@ class PipelineRunner {
     // Инициализация контекста из CLI аргументов
     if (args.plan) {
       this.context.plan_id = args.plan;
-    } else if (!this.context.plan_id) {
-      this._detectCurrentPlanId(projectRoot);
     }
 
     // Инициализация FileGuard для защиты файлов от изменений агентами
@@ -935,32 +933,6 @@ class PipelineRunner {
 
     // Настройка graceful shutdown
     this.setupGracefulShutdown();
-  }
-
-  /**
-   * Автоматически определяет plan_id из .workflow/plans/current/
-   * Ищет первый .md файл (не .gitkeep) и читает поле id: из frontmatter
-   * @param {string} projectRoot - корневая директория проекта
-   * @returns {string} plan_id или пустая строка если не найден
-   */
-  _detectCurrentPlanId(projectRoot) {
-    const plansDir = path.resolve(projectRoot, '.workflow/plans/current');
-    if (!fs.existsSync(plansDir)) return '';
-
-    const files = fs.readdirSync(plansDir)
-      .filter(f => f.endsWith('.md') && f !== '.gitkeep.md')
-      .sort();
-
-    for (const file of files) {
-      const content = fs.readFileSync(path.join(plansDir, file), 'utf8');
-      const match = content.match(/^id:\s*["']?([^"'\n]+)["']?/m);
-      if (match) {
-        this.context.plan_id = match[1].trim();
-        return this.context.plan_id;
-      }
-    }
-
-    return '';
   }
 
   /**
@@ -977,10 +949,9 @@ class PipelineRunner {
     }
 
     if (this.context.plan_id) {
-      const source = this.args.plan ? 'CLI' : 'auto-detected';
-      this.logger.info(`Plan ID: ${this.context.plan_id} (${source})`, 'PipelineRunner');
+      this.logger.info(`Plan ID: ${this.context.plan_id}`, 'PipelineRunner');
     } else {
-      this.logger.warn('No plan_id set and no active plan found in .workflow/plans/current/', 'PipelineRunner');
+      this.logger.info('No plan_id set — processing all tickets', 'PipelineRunner');
     }
   }
 

@@ -21,7 +21,7 @@
 import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from '../lib/find-root.mjs';
-import { parseFrontmatter, printResult } from '../lib/utils.mjs';
+import { parseFrontmatter, printResult, normalizePlanId, extractPlanId } from '../lib/utils.mjs';
 
 // Корень проекта
 const PROJECT_DIR = findProjectRoot();
@@ -229,17 +229,22 @@ function findCompletedInProgress() {
 /**
  * Выбирает следующий тикет для выполнения
  */
-function pickNextTicket() {
-  const tickets = readReadyTickets();
+function filterByPlan(tickets, planId) {
+  if (!planId) return tickets;
+  return tickets.filter(t => normalizePlanId(t.frontmatter.parent_plan) === planId);
+}
+
+function pickNextTicket(planId) {
+  const tickets = filterByPlan(readReadyTickets(), planId);
 
   if (tickets.length === 0) {
     // Если ready/ пуст, проверяем review/ — нужно завершить ревью
-    let reviewTickets = readReviewTickets();
+    let reviewTickets = filterByPlan(readReviewTickets(), planId);
 
     if (reviewTickets.length === 0) {
       // Нет тикетов ни в ready/, ни в review/ — проверяем in-progress/
       // на завершённые тикеты (с заполненным Summary)
-      const completedInProgress = findCompletedInProgress();
+      const completedInProgress = filterByPlan(findCompletedInProgress(), planId);
       if (completedInProgress.length > 0) {
         const first = completedInProgress[0];
         console.log(`[INFO] Found completed ticket in in-progress/: ${first.id}`);
@@ -318,9 +323,15 @@ function pickNextTicket() {
 
 // Main entry point
 async function main() {
+  const planId = extractPlanId();
+
+  if (planId) {
+    console.log(`[INFO] Filtering by plan_id: ${planId}`);
+  }
+
   console.log(`[INFO] Scanning ready/ directory: ${READY_DIR}`);
 
-  const result = pickNextTicket();
+  const result = pickNextTicket(planId);
 
   if (result.status === 'found') {
     console.log(`[INFO] Selected ticket: ${result.ticket_id} (${result.title})`);

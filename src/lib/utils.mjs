@@ -54,6 +54,38 @@ export function printResult(result) {
 }
 
 /**
+ * Нормализует входное значение в формат PLAN-NNN.
+ * Принимает: "PLAN-007", "7", "007", "plan-7", "plans/PLAN-007.md", "/abs/path/PLAN-007.md"
+ *
+ * @param {string} raw - Входное значение
+ * @returns {string|null} Нормализованный ID плана или null
+ */
+export function normalizePlanId(raw) {
+  if (!raw) return null;
+
+  const basename = path.basename(raw, '.md');
+
+  const full = basename.match(/^plan-(\d+)$/i);
+  if (full) return `PLAN-${String(parseInt(full[1], 10)).padStart(3, '0')}`;
+
+  const num = raw.trim().match(/^(\d+)$/);
+  if (num) return `PLAN-${String(parseInt(num[1], 10)).padStart(3, '0')}`;
+
+  return null;
+}
+
+/**
+ * Извлекает plan_id из аргументов командной строки (контекст пайплайна).
+ *
+ * @returns {string|null} Нормализованный plan_id или null
+ */
+export function extractPlanId() {
+  const prompt = process.argv.slice(2)[0] || '';
+  const match = prompt.match(/plan_id:\s*(\S+)/i);
+  return match ? normalizePlanId(match[1]) : null;
+}
+
+/**
  * Возвращает абсолютный путь к корню npm-пакета через import.meta.url.
  *
  * @returns {string} Абсолютный путь к корню пакета

@@ -28,7 +28,7 @@
 import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from '../lib/find-root.mjs';
-import { parseFrontmatter, printResult } from '../lib/utils.mjs';
+import { parseFrontmatter, printResult, normalizePlanId, extractPlanId } from '../lib/utils.mjs';
 
 const PROJECT_DIR = findProjectRoot();
 const WORKFLOW_DIR = path.join(PROJECT_DIR, '.workflow');
@@ -103,42 +103,12 @@ function readTickets(dir) {
 }
 
 /**
- * Нормализует входное значение в формат PLAN-NNN.
- * Принимает: "PLAN-007", "7", "007", "plan-7", "plans/PLAN-007.md", "/abs/path/PLAN-007.md"
- */
-function normalizePlanId(raw) {
-  if (!raw) return null;
-
-  // Извлекаем имя файла если передан путь
-  const basename = path.basename(raw, '.md');
-
-  // Уже в формате PLAN-NNN (регистронезависимо)
-  const full = basename.match(/^plan-(\d+)$/i);
-  if (full) return `PLAN-${String(parseInt(full[1], 10)).padStart(3, '0')}`;
-
-  // Просто цифра или число: "7", "007"
-  const num = raw.trim().match(/^(\d+)$/);
-  if (num) return `PLAN-${String(parseInt(num[1], 10)).padStart(3, '0')}`;
-
-  return null;
-}
-
-/**
- * Извлекает plan_id из аргументов командной строки (контекст пайплайна)
- */
-function extractPlanId() {
-  const prompt = process.argv.slice(2)[0] || '';
-  const match = prompt.match(/plan_id:\s*(\S+)/i);
-  return match ? normalizePlanId(match[1]) : null;
-}
-
-/**
  * Проверяет все тикеты в backlog/ и возвращает список готовых
  */
 function checkBacklog(planId) {
   const allTickets = readTickets(BACKLOG_DIR);
   const tickets = planId
-    ? allTickets.filter(t => t.frontmatter.parent_plan === planId)
+    ? allTickets.filter(t => normalizePlanId(t.frontmatter.parent_plan) === planId)
     : allTickets;
 
   const ready = [];
