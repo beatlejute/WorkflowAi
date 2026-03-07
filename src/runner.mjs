@@ -783,9 +783,19 @@ class StageExecutor {
           if (!line.trim()) continue;
           try {
             const obj = JSON.parse(line);
+            // Claude: content_block_delta с delta.text
             if (obj.type === 'content_block_delta' && obj.delta?.text) {
               process.stdout.write(obj.delta.text);
             }
+            // Qwen/Claude: assistant message с content text
+            else if (obj.type === 'assistant' && obj.message?.content) {
+              for (const block of obj.message.content) {
+                if (block.type === 'text' && block.text) {
+                  process.stdout.write(block.text);
+                }
+              }
+            }
+            // result содержит финальный текст (дублирует assistant) — пропускаем
           } catch {
             // не JSON — выводим как есть
             process.stdout.write(line + '\n');
@@ -800,6 +810,18 @@ class StageExecutor {
 
       child.on('close', (code) => {
         clearTimeout(timeoutId);
+        // Обрабатываем остаток буфера стриминга
+        if (stdoutBuffer.trim()) {
+          try {
+            const obj = JSON.parse(stdoutBuffer);
+            if (obj.type === 'content_block_delta' && obj.delta?.text) {
+              process.stdout.write(obj.delta.text);
+            }
+          } catch {
+            process.stdout.write(stdoutBuffer + '\n');
+          }
+        }
+        process.stdout.write('\n');
 
         if (timedOut) return;
 
@@ -1101,7 +1123,8 @@ class PipelineRunner {
     return {
       steps: this.stepCount,
       tasksExecuted: this.tasksExecuted,
-      context: this.context
+      context: this.context,
+      failed: !this.running && this.stepCount < maxSteps
     };
   }
 
@@ -1437,7 +1460,7 @@ async function runPipeline(argv = process.argv.slice(2)) {
     console.log(`Steps executed: ${result.steps}`);
     console.log(`Tasks completed: ${result.tasksExecuted}`);
 
-    return { exitCode: 0, result };
+    return { exitCode: result.failed ? 1 : 0, result };
 
   } catch (err) {
     console.error(`\nError: ${err.message}`);
