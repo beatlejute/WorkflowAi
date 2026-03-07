@@ -771,9 +771,26 @@ class StageExecutor {
         reject(new Error(`Stage "${stageId}" timed out after ${timeout}s`));
       }, timeout * 1000);
 
+      let stdoutBuffer = '';
       child.stdout.on('data', (data) => {
-        stdout += data.toString();
-        process.stdout.write(data);
+        const chunk = data.toString();
+        stdout += chunk;
+        // Парсим stream-json и выводим только текст дельт
+        stdoutBuffer += chunk;
+        const lines = stdoutBuffer.split('\n');
+        stdoutBuffer = lines.pop(); // незавершённая строка остаётся в буфере
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const obj = JSON.parse(line);
+            if (obj.type === 'content_block_delta' && obj.delta?.text) {
+              process.stdout.write(obj.delta.text);
+            }
+          } catch {
+            // не JSON — выводим как есть
+            process.stdout.write(line + '\n');
+          }
+        }
       });
 
       child.stderr.on('data', (data) => {
