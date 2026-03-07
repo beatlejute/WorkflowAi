@@ -682,7 +682,7 @@ class StageExecutor {
     }
 
     // Выбираем агента: если есть agent_by_attempt и счётчик — ротация по попыткам
-    let agentId = stage.agent;
+    let agentId = stage.agent || this.pipeline.default_agent;
     if (stage.agent_by_attempt && stage.counter) {
       const attempt = this.counters[stage.counter] || 0;
       if (stage.agent_by_attempt[attempt]) {
@@ -1373,8 +1373,9 @@ function validateConfig(config) {
     const stageIds = Object.keys(pipeline.stages);
 
     for (const [stageId, stage] of Object.entries(pipeline.stages)) {
-      if (stage.agent && !agentIds.includes(stage.agent)) {
-        errors.push(`Stage "${stageId}" references non-existent agent: ${stage.agent}`);
+      const resolvedAgent = stage.agent || pipeline.default_agent;
+      if (resolvedAgent && !agentIds.includes(resolvedAgent)) {
+        errors.push(`Stage "${stageId}" references non-existent agent: ${resolvedAgent}`);
       }
 
       if (stage.goto) {
