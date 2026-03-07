@@ -51,6 +51,7 @@ function checkCondition(condition) {
       return !fs.existsSync(path.join(PROJECT_DIR, value));
 
     case 'tasks_completed': {
+      if (!value || (Array.isArray(value) && value.length === 0)) return true;
       const ids = Array.isArray(value) ? value : [value];
       return ids.every(taskId => fs.existsSync(path.join(DONE_DIR, `${taskId}.md`)));
     }

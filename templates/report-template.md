@@ -1,7 +1,8 @@
 ---
-# Шаблон отчёта для системы Kilo Code Agent Workflow
+# Шаблон отчёта
 
 id: "REPORT-{NNN}"
+title: ""                        # Краткое название отчёта
 type: daily                      # daily | sprint | milestone
 period_start: ""                 # ISO 8601
 period_end: ""

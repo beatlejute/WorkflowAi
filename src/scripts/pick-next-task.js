@@ -50,6 +50,7 @@ function checkCondition(condition) {
 
     case 'tasks_completed':
       // Проверяет, что указанные задачи выполнены (находятся в done/)
+      if (!value || (Array.isArray(value) && value.length === 0)) return true;
       const ids = Array.isArray(value) ? value : [value];
       return ids.every(taskId => {
         const donePath = path.join(DONE_DIR, `${taskId}.md`);

@@ -1,5 +1,5 @@
 ---
-# Шаблон плана для системы Kilo Code Agent Workflow
+# Шаблон плана
 
 id: "PLAN-{NNN}"
 title: "Название плана"

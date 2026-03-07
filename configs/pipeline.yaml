@@ -53,7 +53,7 @@ pipeline:
       command: "kilo"
       args: ["-m", "kilo/minimax/minimax-m2.5:free", "--agent", "orchestrator", "run"]
       workdir: "."
-      description: "Kilo Code — агент с мульти-режимами (architect, code, debug)"
+      description: "Агент с мульти-режимами (architect, code, debug)"
 
     kilo-glm:
       command: "kilo"
