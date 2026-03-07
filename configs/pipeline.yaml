@@ -233,6 +233,12 @@ pipeline:
       agent: qwen-code
       fallback_agent: kilo-deepseek
       skill: execute-task
+      counter: task_attempts
+      agent_by_attempt:
+        1: qwen-code
+        2: claude-sonnet
+        3: claude-opus
+        4: kilo-deepseek
       goto:
         default:
           stage: move-to-review
@@ -275,6 +281,7 @@ pipeline:
       agent: claude-sonnet
       fallback_agent: qwen-code
       skill: review-result
+      counter: task_attempts
       goto:
         passed:
           stage: move-ticket
@@ -294,19 +301,19 @@ pipeline:
     # -------------------------------------------------------------------------
     # 4b. increment-task-attempts
     # Отдельный стейдж обновления счётчика попыток выполнения тикета.
-    # При достижении max — блокирует тикет. Иначе — возвращает в очередь.
+    # При достижении max — блокирует тикет. Иначе — отправляет на доработку.
+    # Проверка лимита происходит ДО повторного execute-task.
     # -------------------------------------------------------------------------
     increment-task-attempts:
       description: "Обновить счётчик попыток выполнения тикета"
       type: update-counter
       counter: task_attempts
-      max: 3
+      max: 6
       goto:
         default:
-          stage: move-ticket
+          stage: execute-task
           params:
             ticket_id: "$context.ticket_id"
-            target: ready
         max_reached:
           stage: move-ticket
           params:
@@ -366,7 +373,7 @@ pipeline:
       description: "Обновить счётчик итераций анализа плана"
       type: update-counter
       counter: plan_iterations
-      max: 3
+      max: 2
       goto:
         default:
           stage: decompose-gaps

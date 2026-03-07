@@ -681,7 +681,17 @@ class StageExecutor {
       throw new Error(`Stage not found: ${stageId}`);
     }
 
-    const agentId = stage.agent;
+    // Выбираем агента: если есть agent_by_attempt и счётчик — ротация по попыткам
+    let agentId = stage.agent;
+    if (stage.agent_by_attempt && stage.counter) {
+      const attempt = this.counters[stage.counter] || 0;
+      if (stage.agent_by_attempt[attempt]) {
+        agentId = stage.agent_by_attempt[attempt];
+        if (this.logger) {
+          this.logger.info(`Agent rotation: attempt ${attempt} → ${agentId}`, stageId);
+        }
+      }
+    }
     const agent = this.pipeline.agents[agentId];
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
@@ -1155,41 +1165,6 @@ class PipelineRunner {
       // Обновляем контекст параметрами перехода
       if (transition.params) {
         this.updateContext(transition.params, result.result);
-      }
-
-      // Проверяем retry-логику с agent_by_attempt
-      if (transition.agent_by_attempt && stage.counter) {
-        const attempt = this.counters[stage.counter] || 1;
-        const maxAttempts = transition.max || 3;
-
-        if (attempt < maxAttempts) {
-          // Ещё есть попытки — переходим на указанный stage с переопределением агента
-          const nextStage = transition.stage || stageId;
-          const overrideAgent = transition.agent_by_attempt[attempt];
-
-          if (overrideAgent) {
-            // Переопределяем агента для следующей попытки
-            stage.agent = overrideAgent;
-            this.logger.info(`Retry attempt ${attempt}: overriding agent to ${overrideAgent}`, stageId);
-          }
-
-          this.logger.retry(stageId, attempt, maxAttempts);
-          this.logger.gotoTransition(stageId, nextStage, status, transition.params);
-          return nextStage;
-        } else {
-          // Попытки исчерпаны — переходим на on_max
-          this.logger.info(`Max attempts (${maxAttempts}) reached for ${stageId}`, stageId);
-          this.logger.retry(stageId, attempt, maxAttempts);
-
-          if (transition.on_max) {
-            if (transition.on_max.params) {
-              this.updateContext(transition.on_max.params, result.result);
-            }
-            const nextStage = transition.on_max.stage || 'end';
-            this.logger.gotoTransition(stageId, nextStage, status, transition.on_max.params);
-            return nextStage;
-          }
-        }
       }
 
       const nextStage = transition.stage || 'end';
