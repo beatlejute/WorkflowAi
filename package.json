@@ -23,7 +23,8 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "test": "node --test src/tests/*.test.mjs"
+    "test": "node --test src/tests/*.test.mjs",
+    "release": "npm version patch && npm publish"
   },
   "dependencies": {
     "js-yaml": "^4.1.0"
