@@ -186,6 +186,15 @@ function autoCorrectTickets() {
     }
   }
 
+  // Правила для backlog/ (защита от ошибочного перемещения завершённых тикетов)
+  processDirectory(BACKLOG_DIR, [
+    {
+      condition: (status) => status === 'passed',
+      toDir: DONE_DIR,
+      reason: 'review passed'
+    }
+  ]);
+
   // Правила для blocked/
   processDirectory(BLOCKED_DIR, [
     {
