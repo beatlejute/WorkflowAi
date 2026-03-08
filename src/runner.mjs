@@ -378,6 +378,41 @@ class PromptBuilder {
 // ResultParser — парсит вывод агентов и извлекает структурированные данные
 // ============================================================================
 class ResultParser {
+  // Карта нормализации статусов: синонимы → каноническое значение
+  static STATUS_ALIASES = {
+    pass:        'passed',
+    approved:    'passed',
+    success:     'passed',
+    succeeded:   'passed',
+    ok:          'passed',
+    accepted:    'passed',
+    lgtm:        'passed',
+    fixed:       'passed',
+    resolved:    'passed',
+    fail:        'failed',
+    rejected:    'failed',
+    denied:      'failed',
+    not_passed:  'failed',
+    err:         'error',
+    crash:       'error',
+    timeout:     'error',
+  };
+
+  /**
+   * Нормализует статус: приводит синонимы к каноническому значению
+   * @param {string} status
+   * @returns {string}
+   */
+  normalizeStatus(status) {
+    const lower = status.toLowerCase();
+    const canonical = ResultParser.STATUS_ALIASES[lower];
+    if (canonical) {
+      console.log(`[ResultParser] Normalized status: "${status}" → "${canonical}"`);
+      return canonical;
+    }
+    return status;
+  }
+
   /**
    * Парсит вывод агента и извлекает результат между маркерами
    * @param {string} output - stdout агента
@@ -396,10 +431,11 @@ class ResultParser {
       const resultBlock = output.substring(startIdx + marker.length, endIdx).trim();
       const data = this.parseResultBlock(resultBlock);
 
-      console.log(`[ResultParser] Parsed structured result for ${stageId}: status=${data.status}`);
+      const normalizedStatus = this.normalizeStatus(data.status || 'default');
+      console.log(`[ResultParser] Parsed structured result for ${stageId}: status=${normalizedStatus}`);
 
       return {
-        status: data.status || 'default',
+        status: normalizedStatus,
         data: data.data || {},
         raw: output,
         parsed: true
@@ -484,10 +520,11 @@ class ResultParser {
       }
     }
 
-    console.log(`[ResultParser] Fallback parsing for ${stageId}: status=${status}`);
+    const normalizedStatus = this.normalizeStatus(status);
+    console.log(`[ResultParser] Fallback parsing for ${stageId}: status=${normalizedStatus}`);
 
     return {
-      status,
+      status: normalizedStatus,
       data: extractedData,
       raw: output,
       parsed: false
@@ -963,10 +1000,12 @@ class PipelineRunner {
     // Базовая директория проекта вычисляется динамически
     const projectRoot = args.project ? path.resolve(args.project) : findProjectRoot();
 
-    // Инициализация Logger
-    const logFilePath = this.pipeline.execution?.log_file
-      ? path.resolve(projectRoot, this.pipeline.execution.log_file)
-      : path.resolve(projectRoot, '.workflow/logs/pipeline.log');
+    // Инициализация Logger — каждый запуск пишется в отдельный файл
+    const logDir = this.pipeline.execution?.log_file
+      ? path.dirname(path.resolve(projectRoot, this.pipeline.execution.log_file))
+      : path.resolve(projectRoot, '.workflow/logs');
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').substring(0, 19);
+    const logFilePath = path.resolve(logDir, `pipeline_${timestamp}.log`);
     this.logger = new Logger(logFilePath);
     this.loggerInitialized = false;
 

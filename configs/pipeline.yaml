@@ -304,8 +304,7 @@ pipeline:
     # -------------------------------------------------------------------------
     # 4b. increment-task-attempts
     # Отдельный стейдж обновления счётчика попыток выполнения тикета.
-    # При достижении max — блокирует тикет. Иначе — отправляет на доработку.
-    # Проверка лимита происходит ДО повторного execute-task.
+    # При достижении max — блокирует тикет. Иначе — возвращает в очередь.
     # -------------------------------------------------------------------------
     increment-task-attempts:
       description: "Обновить счётчик попыток выполнения тикета"
@@ -314,9 +313,10 @@ pipeline:
       max: 6
       goto:
         default:
-          stage: execute-task
+          stage: move-ticket
           params:
             ticket_id: "$context.ticket_id"
+            target: ready
         max_reached:
           stage: move-ticket
           params:
