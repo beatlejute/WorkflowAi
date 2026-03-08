@@ -106,14 +106,23 @@ pipeline:
   # Каждый stage описывает один шаг пайплайна.
   # Формат:
   #   <stage-id>:
-  #     description: <string>   — что делает этот этап
-  #     agent:      <agent-id>  — какой агент выполняет (ссылка на agents.*)
-  #     skill:      <skill-id>  — какой skill использовать (файл .workflow/src/skills/<skill>/SKILL.md)
-  #     goto:                   — логика переходов по результату
-  #       <status>:             — ключ = статус результата агента
-  #         stage:  <stage-id>  — следующий stage
-  #         params: <map>       — параметры, передаваемые в context следующего stage
-  #       default:              — fallback если статус не совпал ни с одним ключом
+  #     description:    <string>   — что делает этот этап
+  #     agent:          <agent-id> — какой агент выполняет (ссылка на agents.*)
+  #     fallback_agent: <agent-id> — запасной агент, если основной недоступен
+  #     skill:          <skill-id> — какой skill использовать (.workflow/src/skills/<skill>/SKILL.md)
+  #     instructions:   <string>   — доп. инструкции, передаваемые агенту в промпте
+  #     counter:        <string>   — имя счётчика попыток для этого stage
+  #     agent_by_type:             — маршрутизация агента по типу задачи (task_type)
+  #       <type>: <agent-id>       — например: impl: claude-sonnet, arch: claude-opus
+  #     agent_by_attempt:          — ротация агента по номеру попытки
+  #       <N>: <agent-id>          — например: 1: qwen-code, 2: claude-sonnet
+  #     goto:                      — логика переходов по результату
+  #       <status>:                — ключ = статус результата агента
+  #         stage:  <stage-id>     — следующий stage
+  #         params: <map>          — параметры, передаваемые в context следующего stage
+  #       default:                 — fallback если статус не совпал ни с одним ключом
+  #
+  #   Приоритет выбора агента: agent_by_attempt > agent_by_type > agent > default_agent
   #
   # Специальные значения stage:
   #   "end" — завершение пайплайна
@@ -218,14 +227,38 @@ pipeline:
       timeout: 120
       goto:
         default:
-          stage: execute-task
+          stage: check-relevance
           params:
             ticket_id: "$context.ticket_id"
         error:
-          stage: execute-task
+          stage: check-relevance
           params:
             ticket_id: "$context.ticket_id"
 
+    # -------------------------------------------------------------------------
+    # 2c. check-relevance
+    # Проверяет актуальность тикета перед выполнением (план активен, DoD не выполнен)
+    # Fail-safe: default fallback → execute-task (лучше выполнить лишний, чем пропустить)
+    # -------------------------------------------------------------------------
+    check-relevance:
+      description: "Проверить актуальность тикета перед выполнением"
+      agent: qwen-code
+      fallback_agent: claude-sonnet
+      skill: check-relevance
+      goto:
+        relevant:
+          stage: execute-task
+          params:
+            ticket_id: "$context.ticket_id"
+        irrelevant:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: done
+        default:
+          stage: execute-task
+          params:
+            ticket_id: "$context.ticket_id"
 
     # -------------------------------------------------------------------------
     # 3. execute-task
@@ -237,6 +270,13 @@ pipeline:
       fallback_agent: kilo-deepseek
       skill: execute-task
       counter: task_attempts
+      agent_by_type:
+        impl: claude-sonnet
+        fix: claude-sonnet
+        arch: claude-opus
+        review: qwen-code
+        docs: qwen-code
+        plan: claude-opus
       agent_by_attempt:
         1: qwen-code
         2: claude-sonnet

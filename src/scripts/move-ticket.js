@@ -27,12 +27,12 @@ const VALID_STATUSES = ['backlog', 'ready', 'in-progress', 'blocked', 'review', 
 
 // Таблица допустимых переходов
 const VALID_TRANSITIONS = {
-  'backlog': ['ready'],
-  'ready': ['in-progress', 'review'],
+  'backlog': ['ready', 'blocked', 'done'],
+  'ready': ['in-progress', 'review', 'backlog'],
   'in-progress': ['done', 'blocked', 'review'],
   'blocked': ['ready'],
   'review': ['done', 'ready', 'in-progress', 'blocked'],
-  'done': []
+  'done': ['ready', 'blocked']
 };
 
 /**

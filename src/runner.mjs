@@ -310,6 +310,12 @@ class PromptBuilder {
       }
     }
 
+    // Добавляем блок Instructions если поле instructions задано и непустое
+    if (stage.instructions && typeof stage.instructions === 'string' && stage.instructions.trim() !== '') {
+      parts.push('\n\nInstructions:');
+      parts.push(stage.instructions.trim());
+    }
+
     return parts.join('\n');
   }
 
@@ -718,8 +724,27 @@ class StageExecutor {
       throw new Error(`Stage not found: ${stageId}`);
     }
 
-    // Выбираем агента: если есть agent_by_attempt и счётчик — ротация по попыткам
+    // Выбираем агента по приоритету:
+    // 1. agent_by_attempt[counter] — ротация по попыткам
+    // 2. agent_by_type[task_type] — выбор по типу задачи
+    // 3. stage.agent — явно указанный агент stage
+    // 4. default_agent — глобальный дефолт
     let agentId = stage.agent || this.pipeline.default_agent;
+
+    // Приоритет 1: agent_by_type (выбор по типу задачи)
+    // task_type берётся из контекста (возвращается из pick-next-task)
+    if (stage.agent_by_type && this.context.task_type) {
+      const taskType = this.context.task_type;
+      if (stage.agent_by_type[taskType]) {
+        const typeBasedAgent = stage.agent_by_type[taskType];
+        if (this.logger) {
+          this.logger.info(`Agent by type: task_type="${taskType}" → ${typeBasedAgent}`, stageId);
+        }
+        agentId = typeBasedAgent;
+      }
+    }
+
+    // Приоритет 2: agent_by_attempt (ротация по попыткам) — перекрывает agent_by_type
     if (stage.agent_by_attempt && stage.counter) {
       const attempt = this.counters[stage.counter] || 0;
       if (stage.agent_by_attempt[attempt]) {
@@ -729,6 +754,7 @@ class StageExecutor {
         }
       }
     }
+
     const agent = this.pipeline.agents[agentId];
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);

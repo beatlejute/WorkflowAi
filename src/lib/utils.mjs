@@ -96,3 +96,60 @@ export function getPackageRoot() {
   // result/src/lib → result
   return path.resolve(__dirname, '../../');
 }
+
+/**
+ * Парсит секцию "## Ревью" тикета и возвращает статус последней записи.
+ * Поддерживает табличный и текстовый форматы.
+ *
+ * Табличный формат:
+ * | Дата | Статус | Комментарий |
+ * |------|--------|-------------|
+ * | 2026-03-08 | passed | Всё ок |
+ *
+ * Текстовый формат:
+ * - 2026-03-08: passed - Всё ок
+ * - 2026-03-08: failed - Есть замечания
+ *
+ * @param {string} content - Содержимое тикета (markdown)
+ * @returns {string|null} "passed", "failed" или null (если нет ревью)
+ */
+export function getLastReviewStatus(content) {
+  if (!content) return null;
+
+  // Находим секцию "## Ревью" — захватываем всё до следующего заголовка ## или конца файла
+  const reviewSectionMatch = content.match(/^##\s*Ревью\s*\n([\s\S]*)(?=\n^##\s|$)/m);
+  if (!reviewSectionMatch) return null;
+
+  const reviewSection = reviewSectionMatch[1].trim();
+  if (!reviewSection) return null;
+
+  // Пробуем распарсить табличный формат
+  const tableRows = reviewSection.split('\n').filter(line => line.trim().startsWith('|'));
+  if (tableRows.length >= 2) {
+    // Есть заголовок и разделитель, ищем строки с данными
+    const dataRows = tableRows.slice(2).filter(row => {
+      const cells = row.split('|').map(c => c.trim()).filter(c => c);
+      return cells.length >= 2;
+    });
+
+    if (dataRows.length > 0) {
+      const lastRow = dataRows[dataRows.length - 1];
+      const cells = lastRow.split('|').map(c => c.trim()).filter(c => c);
+      // Статус обычно во второй колонке (после даты), может содержать эмодзи (✅ passed / ❌ failed)
+      const statusRaw = cells[1]?.toLowerCase() || '';
+      if (statusRaw.includes('passed')) return 'passed';
+      if (statusRaw.includes('failed')) return 'failed';
+    }
+  }
+
+  // Пробуем распарсить текстовый формат (список)
+  const listItems = reviewSection.split('\n').filter(line => line.trim().match(/^[-*]\s/));
+  if (listItems.length > 0) {
+    const lastItem = listItems[listItems.length - 1].trim();
+    // Ищем статус в формате "- дата: passed/failed - комментарий"
+    const statusMatch = lastItem.match(/:\s*(passed|failed)\b/i);
+    if (statusMatch) return statusMatch[1].toLowerCase();
+  }
+
+  return null;
+}

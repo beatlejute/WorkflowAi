@@ -28,7 +28,7 @@
 import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from '../lib/find-root.mjs';
-import { parseFrontmatter, printResult, normalizePlanId, extractPlanId } from '../lib/utils.mjs';
+import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, serializeFrontmatter } from '../lib/utils.mjs';
 
 const PROJECT_DIR = findProjectRoot();
 const WORKFLOW_DIR = path.join(PROJECT_DIR, '.workflow');
@@ -103,6 +103,34 @@ function readTickets(dir) {
 }
 
 /**
+ * Перемещает тикет из ready/ в backlog/
+ */
+function demoteToBacklog(ticketId) {
+  const sourcePath = path.join(READY_DIR, `${ticketId}.md`);
+  const targetPath = path.join(BACKLOG_DIR, `${ticketId}.md`);
+
+  if (!fs.existsSync(sourcePath)) {
+    console.error(`[WARN] ${ticketId}: not found in ready/, skipping`);
+    return false;
+  }
+
+  const content = fs.readFileSync(sourcePath, 'utf8');
+  const { frontmatter, body } = parseFrontmatter(content);
+
+  frontmatter.updated_at = new Date().toISOString();
+
+  const newContent = serializeFrontmatter(frontmatter) + body;
+
+  if (!fs.existsSync(BACKLOG_DIR)) {
+    fs.mkdirSync(BACKLOG_DIR, { recursive: true });
+  }
+
+  fs.renameSync(sourcePath, targetPath);
+  fs.writeFileSync(targetPath, newContent, 'utf8');
+  return true;
+}
+
+/**
  * Проверяет все тикеты в backlog/ и возвращает список готовых
  */
 function checkBacklog(planId) {
@@ -137,6 +165,36 @@ function checkBacklog(planId) {
   return { ready, waiting, total: tickets.length };
 }
 
+/**
+ * Проверяет тикеты в ready/ и возвращает тикеты в backlog при невыполненных условиях
+ */
+function checkReady(planId) {
+  const allTickets = readTickets(READY_DIR);
+  const tickets = planId
+    ? allTickets.filter(t => normalizePlanId(t.frontmatter.parent_plan) === planId)
+    : allTickets;
+
+  const demoted = [];
+
+  for (const ticket of tickets) {
+    const { frontmatter, id } = ticket;
+    const conditions = frontmatter.conditions || [];
+    const dependencies = frontmatter.dependencies || [];
+
+    const depsMet = checkDependencies(dependencies);
+    const conditionsMet = conditions.every(checkCondition);
+
+    if (!depsMet || !conditionsMet) {
+      if (demoteToBacklog(id)) {
+        console.log(`[INFO] ${id}: ready/ → backlog/ (условия не выполнены)`);
+        demoted.push(id);
+      }
+    }
+  }
+
+  return { demoted, total: tickets.length };
+}
+
 async function main() {
   const planId = extractPlanId();
 
@@ -144,6 +202,13 @@ async function main() {
     console.log(`[INFO] Filtering by plan_id: ${planId}`);
   }
 
+  // Сначала демотирование невалидных тикетов из ready/
+  console.log(`[INFO] Checking ready/ for invalid tickets: ${READY_DIR}`);
+  const { demoted, total: readyTotal } = checkReady(planId);
+  console.log(`[INFO] Total in ready/${planId ? ` (plan ${planId})` : ''}: ${readyTotal}`);
+  console.log(`[INFO] Demoted to backlog: ${demoted.length}`);
+
+  // Затем проверка backlog — демотированные тикеты сразу переоцениваются
   console.log(`[INFO] Scanning backlog/: ${BACKLOG_DIR}`);
 
   const { ready, waiting, total } = checkBacklog(planId);
@@ -160,7 +225,7 @@ async function main() {
   }
 
   if (ready.length > 0) {
-    printResult({ status: 'has_ready', ready_tickets: ready.join(', ') });
+    printResult({ status: 'has_ready', ready_tickets: ready.join(', '), demoted_tickets: demoted.join(', ') });
     return;
   }
 
@@ -168,10 +233,10 @@ async function main() {
   const readyDirTickets = readTickets(READY_DIR);
   if (readyDirTickets.length > 0) {
     console.log(`[INFO] No new ready tickets, but ready/ has ${readyDirTickets.length} ticket(s)`);
-    printResult({ status: 'default', ready_tickets: '' });
+    printResult({ status: 'default', ready_tickets: '', demoted_tickets: demoted.join(', ') });
   } else {
     console.log('[INFO] No ready tickets and ready/ is empty');
-    printResult({ status: 'empty', ready_tickets: '' });
+    printResult({ status: 'empty', ready_tickets: '', demoted_tickets: demoted.join(', ') });
   }
 }
 

@@ -21,7 +21,7 @@
 import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from '../lib/find-root.mjs';
-import { parseFrontmatter, printResult, normalizePlanId, extractPlanId } from '../lib/utils.mjs';
+import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, getLastReviewStatus, serializeFrontmatter } from '../lib/utils.mjs';
 
 // Корень проекта
 const PROJECT_DIR = findProjectRoot();
@@ -31,6 +31,9 @@ const TICKETS_DIR = path.join(WORKFLOW_DIR, 'tickets');
 const READY_DIR = path.join(TICKETS_DIR, 'ready');
 const DONE_DIR = path.join(TICKETS_DIR, 'done');
 const IN_PROGRESS_DIR = path.join(TICKETS_DIR, 'in-progress');
+const BLOCKED_DIR = path.join(TICKETS_DIR, 'blocked');
+const REVIEW_DIR = path.join(TICKETS_DIR, 'review');
+const BACKLOG_DIR = path.join(TICKETS_DIR, 'backlog');
 
 
 /**
@@ -87,6 +90,155 @@ function checkDependencies(dependencies) {
     const donePath = path.join(DONE_DIR, `${depId}.md`);
     return fs.existsSync(donePath);
   });
+}
+
+/**
+ * Авто-коррекция тикетов на основе статуса ревью.
+ * Сканирует все директории и перемещает тикеты по правилам:
+ * - blocked → done (если review = passed)
+ * - blocked → backlog (если review = failed, НЕ при null)
+ * - done → backlog (если review = failed)
+ * - review → done (если review = passed)
+ * - in-progress → done (если review = passed)
+ * - ready → done (если review = passed)
+ *
+ * @returns {object} Результат: { moved: Array<{id, from, to, reason}> }
+ */
+function autoCorrectTickets() {
+  const moved = [];
+
+  /**
+   * Перемещает тикет из одной директории в другую
+   */
+  function moveTicket(ticketId, fromDir, toDir, reason) {
+    const fromPath = path.join(fromDir, `${ticketId}.md`);
+    const toPath = path.join(toDir, `${ticketId}.md`);
+
+    if (!fs.existsSync(fromPath)) {
+      return false;
+    }
+
+    try {
+      // Читаем содержимое
+      const content = fs.readFileSync(fromPath, 'utf8');
+      const { frontmatter, body } = parseFrontmatter(content);
+
+      // Обновляем updated_at
+      frontmatter.updated_at = new Date().toISOString();
+
+      // Если перемещаем в done — ставим completed_at
+      if (toDir === DONE_DIR && !frontmatter.completed_at) {
+        frontmatter.completed_at = new Date().toISOString();
+      }
+
+      // Сериализуем и записываем в новую директорию
+      const newContent = serializeFrontmatter(frontmatter) + body;
+      fs.writeFileSync(toPath, newContent, 'utf8');
+
+      // Удаляем старый файл
+      fs.unlinkSync(fromPath);
+
+      console.log(`[AUTO-CORRECT] ${ticketId}: ${path.basename(fromDir)} → ${path.basename(toDir)} (${reason})`);
+
+      moved.push({
+        id: ticketId,
+        from: path.basename(fromDir),
+        to: path.basename(toDir),
+        reason
+      });
+
+      return true;
+    } catch (e) {
+      console.error(`[ERROR] Failed to move ticket ${ticketId}: ${e.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Обрабатывает тикеты в указанной директории
+   */
+  function processDirectory(dir, rules) {
+    if (!fs.existsSync(dir)) return;
+
+    const files = fs.readdirSync(dir)
+      .filter(f => f.endsWith('.md') && f !== '.gitkeep.md');
+
+    for (const file of files) {
+      const filePath = path.join(dir, file);
+      try {
+        const content = fs.readFileSync(filePath, 'utf8');
+        const { frontmatter } = parseFrontmatter(content);
+        const ticketId = frontmatter.id || file.replace('.md', '');
+
+        // Получаем статус ревью
+        const reviewStatus = getLastReviewStatus(content);
+
+        // Применяем правила
+        for (const rule of rules) {
+          if (rule.condition(reviewStatus)) {
+            moveTicket(ticketId, dir, rule.toDir, rule.reason);
+            break; // Только одно перемещение на тикет
+          }
+        }
+      } catch (e) {
+        console.error(`[WARN] Failed to process ticket ${file}: ${e.message}`);
+      }
+    }
+  }
+
+  // Правила для blocked/
+  processDirectory(BLOCKED_DIR, [
+    {
+      condition: (status) => status === 'passed',
+      toDir: DONE_DIR,
+      reason: 'review passed'
+    },
+    {
+      condition: (status) => status === 'failed',
+      toDir: BACKLOG_DIR,
+      reason: 'review failed'
+    }
+    // null (нет ревью) — не перемещаем
+  ]);
+
+  // Правила для done/
+  processDirectory(DONE_DIR, [
+    {
+      condition: (status) => status === 'failed',
+      toDir: BACKLOG_DIR,
+      reason: 'review failed'
+    }
+    // passed или null — не перемещаем (важно для legacy-тикетов без ревью)
+  ]);
+
+  // Правила для review/
+  processDirectory(REVIEW_DIR, [
+    {
+      condition: (status) => status === 'passed',
+      toDir: DONE_DIR,
+      reason: 'review passed'
+    }
+  ]);
+
+  // Правила для in-progress/
+  processDirectory(IN_PROGRESS_DIR, [
+    {
+      condition: (status) => status === 'passed',
+      toDir: DONE_DIR,
+      reason: 'review passed'
+    }
+  ]);
+
+  // Правила для ready/
+  processDirectory(READY_DIR, [
+    {
+      condition: (status) => status === 'passed',
+      toDir: DONE_DIR,
+      reason: 'review passed'
+    }
+  ]);
+
+  return { moved };
 }
 
 /**
@@ -329,6 +481,13 @@ async function main() {
     console.log(`[INFO] Filtering by plan_id: ${planId}`);
   }
 
+  // Авто-коррекция тикетов перед выбором задачи
+  console.log('[INFO] Running auto-correction...');
+  const correctionResult = autoCorrectTickets();
+  if (correctionResult.moved.length > 0) {
+    console.log(`[INFO] Auto-corrected ${correctionResult.moved.length} ticket(s)`);
+  }
+
   console.log(`[INFO] Scanning ready/ directory: ${READY_DIR}`);
 
   const result = pickNextTicket(planId);
@@ -340,7 +499,14 @@ async function main() {
     console.log(`[INFO] ${result.reason}`);
   }
 
-  printResult(result);
+  // Добавляем информацию о авто-коррекции в результат
+  const finalResult = {
+    ...result,
+    auto_corrected: correctionResult.moved.length,
+    moved_tickets: correctionResult.moved.map(m => m.id).join(',')
+  };
+
+  printResult(finalResult);
 
   if (result.status === 'empty') {
     process.exit(0);
