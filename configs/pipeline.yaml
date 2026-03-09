@@ -270,13 +270,13 @@ pipeline:
       fallback_agent: kilo-deepseek
       skill: execute-task
       counter: task_attempts
-      agent_by_type:
-        impl: claude-sonnet
-        fix: claude-sonnet
-        arch: claude-opus
-        review: qwen-code
-        docs: qwen-code
-        plan: claude-opus
+      # agent_by_type:
+      #   impl: claude-sonnet
+      #   fix: claude-sonnet
+      #   arch: claude-opus
+      #   review: qwen-code
+      #   docs: qwen-code
+      #   plan: claude-opus
       agent_by_attempt:
         1: qwen-code
         2: claude-sonnet
