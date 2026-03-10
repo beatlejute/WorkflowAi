@@ -7,7 +7,7 @@ title: "Название задачи"
 priority: 3                      # 1-критический, 2-высокий, 3-средний, 4-низкий, 5-когда-нибудь
 
 # Тип задачи
-type: implementation             # planning | implementation | bugfix | review | documentation | admin
+type: impl                       # arch | impl | fix | review | docs | admin
 
 # Требования к агенту-исполнителю (для выбора подходящего инструмента)
 required_capabilities: []

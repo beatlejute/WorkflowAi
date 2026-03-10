@@ -11,15 +11,15 @@ project:
 
 # Типы задач и их настройки
 task_types:
-  planning:
+  arch:
     prefix: ARCH
     description: "Задачи планирования и архитектуры"
 
-  implementation:
+  impl:
     prefix: IMPL
     description: "Написание и изменение кода"
 
-  bugfix:
+  fix:
     prefix: FIX
     description: "Исправление ошибок и багов"
 
@@ -27,7 +27,7 @@ task_types:
     prefix: REVIEW
     description: "Ревью кода и документации"
 
-  documentation:
+  docs:
     prefix: DOCS
     description: "Создание и обновление документации"
 
