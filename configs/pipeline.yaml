@@ -67,6 +67,12 @@ pipeline:
       workdir: "."
       description: "Kilo deepseek"
 
+    kilo-minimax:
+      command: "kilo"
+      args: ["-m", "kilo/minimax/minimax-m2.5:free", "--agent", "code", "run"]
+      workdir: "."
+      description: "Kilo minimax"
+
     script-move:
       command: "node"
       args: [".workflow/src/scripts/move-ticket.js"]
@@ -270,13 +276,13 @@ pipeline:
       fallback_agent: kilo-deepseek
       skill: execute-task
       counter: task_attempts
-      # agent_by_type:
-      #   impl: claude-sonnet
-      #   fix: claude-sonnet
-      #   arch: claude-opus
-      #   review: qwen-code
-      #   docs: qwen-code
-      #   plan: claude-opus
+      agent_by_type:
+        impl: kilo-minimax
+      # fix: claude-sonnet
+        arch: claude-opus
+      # review: qwen-code
+      # docs: qwen-code
+        admin: kilo-minimax
       agent_by_attempt:
         1: qwen-code
         2: claude-sonnet
@@ -322,7 +328,7 @@ pipeline:
     review-result:
       description: "Проверить результат выполнения на соответствие DoD тикета"
       agent: claude-sonnet
-      fallback_agent: qwen-code
+      fallback_agent: kilo-deepseek
       skill: review-result
       counter: task_attempts
       goto:
@@ -381,7 +387,7 @@ pipeline:
     create-report:
       description: "Создать итоговый отчёт по выполненным задачам"
       agent: claude-sonnet
-      fallback_agent: qwen-code
+      fallback_agent: kilo-deepseek
       skill: create-report
       goto:
         default:
@@ -397,7 +403,7 @@ pipeline:
     analyze-report:
       description: "Проанализировать отчёт: план выполнен полностью?"
       agent: claude-opus
-      fallback_agent: qwen-code
+      fallback_agent: kilo-deepseek
       skill: analyze-report
       goto:
         completed: end
@@ -429,7 +435,7 @@ pipeline:
     decompose-gaps:
       description: "Декомпозировать недочёты из отчёта в новые тикеты"
       agent: claude-sonnet
-      fallback_agent: qwen-code
+      fallback_agent: kilo-deepseek
       skill: decompose-gaps
       goto:
         default: check-conditions
