@@ -210,6 +210,7 @@ pipeline:
           stage: move-to-in-progress
           params:
             ticket_id: "$result.ticket_id"
+            task_type: "$result.type"
             target: in-progress
         in_review:
           stage: review-result
