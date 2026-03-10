@@ -133,17 +133,8 @@ export function getLastReviewStatus(content) {
     });
 
     if (dataRows.length > 0) {
-      // Ищем строку с самой поздней датой (при равных — последняя по позиции)
-      let latestRow = dataRows[0];
-      let latestDate = '';
-      for (const row of dataRows) {
-        const cells = row.split('|').map(c => c.trim()).filter(c => c);
-        const dateStr = cells[0] || '';
-        if (dateStr >= latestDate) {
-          latestDate = dateStr;
-          latestRow = row;
-        }
-      }
+      // Последняя строка таблицы = самое свежее ревью (записи ведутся хронологически сверху вниз)
+      const latestRow = dataRows[dataRows.length - 1];
       const cells = latestRow.split('|').map(c => c.trim()).filter(c => c);
       const statusRaw = cells[1]?.toLowerCase() || '';
       if (statusRaw.includes('passed')) return 'passed';
@@ -154,16 +145,8 @@ export function getLastReviewStatus(content) {
   // Пробуем распарсить текстовый формат (список)
   const listItems = reviewSection.split('\n').filter(line => line.trim().match(/^[-*]\s/));
   if (listItems.length > 0) {
-    // Ищем элемент с самой поздней датой (при равных — последний по позиции)
-    let latestItem = listItems[0].trim();
-    let latestDate = '';
-    for (const item of listItems) {
-      const dateMatch = item.match(/(\d{4}-\d{2}-\d{2})/);
-      if (dateMatch && dateMatch[1] >= latestDate) {
-        latestDate = dateMatch[1];
-        latestItem = item.trim();
-      }
-    }
+    // Последний элемент списка = самое свежее ревью (записи ведутся хронологически)
+    const latestItem = listItems[listItems.length - 1].trim();
     const statusMatch = latestItem.match(/:\s*(passed|failed)\b/i);
     if (statusMatch) return statusMatch[1].toLowerCase();
   }
