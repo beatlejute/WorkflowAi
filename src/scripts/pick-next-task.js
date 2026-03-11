@@ -216,8 +216,13 @@ function autoCorrectTickets() {
       condition: (status) => status === 'failed',
       toDir: BACKLOG_DIR,
       reason: 'review failed'
+    },
+    {
+      condition: (status) => status === null,
+      toDir: BACKLOG_DIR,
+      reason: 'no review'
     }
-    // passed или null — не перемещаем (важно для legacy-тикетов без ревью)
+    // passed — не перемещаем
   ]);
 
   // Правила для review/
