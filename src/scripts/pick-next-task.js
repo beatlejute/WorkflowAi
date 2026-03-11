@@ -192,6 +192,11 @@ function autoCorrectTickets() {
       condition: (status) => status === 'passed',
       toDir: DONE_DIR,
       reason: 'review passed'
+    },
+    {
+      condition: (status) => status === 'skipped',
+      toDir: DONE_DIR,
+      reason: 'review skipped'
     }
   ]);
 
@@ -201,6 +206,11 @@ function autoCorrectTickets() {
       condition: (status) => status === 'passed',
       toDir: DONE_DIR,
       reason: 'review passed'
+    },
+    {
+      condition: (status) => status === 'skipped',
+      toDir: DONE_DIR,
+      reason: 'review skipped'
     },
     {
       condition: (status) => status === 'failed',
@@ -222,7 +232,7 @@ function autoCorrectTickets() {
       toDir: BACKLOG_DIR,
       reason: 'no review'
     }
-    // passed — не перемещаем
+    // passed или skipped — не перемещаем
   ]);
 
   // Правила для review/
@@ -231,6 +241,11 @@ function autoCorrectTickets() {
       condition: (status) => status === 'passed',
       toDir: DONE_DIR,
       reason: 'review passed'
+    },
+    {
+      condition: (status) => status === 'skipped',
+      toDir: DONE_DIR,
+      reason: 'review skipped'
     }
   ]);
 
@@ -240,6 +255,11 @@ function autoCorrectTickets() {
       condition: (status) => status === 'passed',
       toDir: DONE_DIR,
       reason: 'review passed'
+    },
+    {
+      condition: (status) => status === 'skipped',
+      toDir: DONE_DIR,
+      reason: 'review skipped'
     }
   ]);
 
@@ -249,6 +269,11 @@ function autoCorrectTickets() {
       condition: (status) => status === 'passed',
       toDir: DONE_DIR,
       reason: 'review passed'
+    },
+    {
+      condition: (status) => status === 'skipped',
+      toDir: DONE_DIR,
+      reason: 'review skipped'
     }
   ]);
 

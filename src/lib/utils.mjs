@@ -139,6 +139,7 @@ export function getLastReviewStatus(content) {
       const statusRaw = cells[1]?.toLowerCase() || '';
       if (statusRaw.includes('passed')) return 'passed';
       if (statusRaw.includes('failed')) return 'failed';
+      if (statusRaw.includes('skipped')) return 'skipped';
     }
   }
 
