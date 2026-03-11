@@ -285,10 +285,10 @@ pipeline:
       # docs: qwen-code
         admin: kilo-minimax
       agent_by_attempt:
-        1: qwen-code
-        2: claude-sonnet
-        3: claude-opus
-        4: kilo-deepseek
+        2: qwen-code
+        3: claude-sonnet
+        4: claude-opus
+        5: kilo-deepseek
       goto:
         default:
           stage: move-to-review

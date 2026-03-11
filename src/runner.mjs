@@ -725,28 +725,24 @@ class StageExecutor {
     }
 
     // Выбираем агента по приоритету:
-    // 1. agent_by_attempt[counter] — ротация по попыткам
-    // 2. agent_by_type[task_type] — выбор по типу задачи
+    // 1. attempt=1 → agent_by_type[task_type] (первая попытка — по типу задачи)
+    // 2. attempt>1 → agent_by_attempt[counter] (повторные попытки — ротация)
     // 3. stage.agent — явно указанный агент stage
     // 4. default_agent — глобальный дефолт
     let agentId = stage.agent || this.pipeline.default_agent;
+    const attempt = (stage.counter && this.counters[stage.counter]) || 0;
 
-    // Приоритет 1: agent_by_type (выбор по типу задачи)
-    // task_type берётся из контекста (возвращается из pick-next-task)
-    if (stage.agent_by_type && this.context.task_type) {
+    if (attempt <= 1 && stage.agent_by_type && this.context.task_type) {
+      // Первая попытка: выбор по типу задачи
       const taskType = this.context.task_type;
       if (stage.agent_by_type[taskType]) {
-        const typeBasedAgent = stage.agent_by_type[taskType];
+        agentId = stage.agent_by_type[taskType];
         if (this.logger) {
-          this.logger.info(`Agent by type: task_type="${taskType}" → ${typeBasedAgent}`, stageId);
+          this.logger.info(`Agent by type: task_type="${taskType}" → ${agentId}`, stageId);
         }
-        agentId = typeBasedAgent;
       }
-    }
-
-    // Приоритет 2: agent_by_attempt (ротация по попыткам) — перекрывает agent_by_type
-    if (stage.agent_by_attempt && stage.counter) {
-      const attempt = this.counters[stage.counter] || 0;
+    } else if (stage.agent_by_attempt && attempt > 1) {
+      // Повторные попытки: ротация по agent_by_attempt
       if (stage.agent_by_attempt[attempt]) {
         agentId = stage.agent_by_attempt[attempt];
         if (this.logger) {
