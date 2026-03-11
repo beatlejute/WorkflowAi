@@ -117,10 +117,16 @@ export function getLastReviewStatus(content) {
   if (!content) return null;
 
   // Находим секцию "## Ревью" — захватываем всё до следующего заголовка ## или конца файла
-  const reviewSectionMatch = content.match(/^##\s*Ревью\s*\n([\s\S]*)(?=\n^##\s|$)/m);
-  if (!reviewSectionMatch) return null;
+  const headerIdx = content.search(/^##\s*Ревью\s*$/m);
+  if (headerIdx === -1) return null;
 
-  const reviewSection = reviewSectionMatch[1].trim();
+  const bodyStart = content.indexOf('\n', headerIdx);
+  if (bodyStart === -1) return null;
+
+  const nextH2 = content.indexOf('\n## ', bodyStart);
+  const reviewSection = (nextH2 === -1
+    ? content.slice(bodyStart + 1)
+    : content.slice(bodyStart + 1, nextH2)).trim();
   if (!reviewSection) return null;
 
   // Пробуем распарсить табличный формат
