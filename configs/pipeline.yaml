@@ -97,6 +97,12 @@ pipeline:
       workdir: "."
       description: "Скрипт для проверки условий тикетов в backlog/"
 
+    script-check-plan-decomposed:
+      command: "node"
+      args: [".workflow/src/scripts/check-plan-decomposed.js"]
+      workdir: "."
+      description: "Скрипт для проверки, декомпозирован ли текущий план"
+
     script-move-to-review:
       command: "node"
       args: [".workflow/src/scripts/move-to-review.js"]
@@ -167,8 +173,39 @@ pipeline:
           stage: move-to-review
           params:
             ticket_id: "$result.ticket_id"
-        empty: check-conditions
+        empty: check-plan-decomposition
         error: create-report
+
+    # -------------------------------------------------------------------------
+    # 0b. check-plan-decomposition
+    # Если нет тикетов — проверяет, есть ли недекомпозированный план.
+    # Если план не декомпозирован — декомпозирует перед check-conditions.
+    # -------------------------------------------------------------------------
+    check-plan-decomposition:
+      description: "Проверить, декомпозирован ли текущий план"
+      agent: script-check-plan-decomposed
+      goto:
+        needs_decomposition:
+          stage: decompose-plan
+          params:
+            plan_file: "$result.plan_file"
+        decomposed: check-conditions
+        no_plan: check-conditions
+        default: check-conditions
+        error: check-conditions
+
+    # -------------------------------------------------------------------------
+    # 0c. decompose-plan
+    # Декомпозирует план на тикеты в backlog/
+    # -------------------------------------------------------------------------
+    decompose-plan:
+      description: "Декомпозировать план на тикеты"
+      agent: claude-sonnet
+      fallback_agent: qwen-code
+      skill: decompose-plan
+      instructions: "Декомпозируй план .workflow/$context.plan_file на тикеты."
+      goto:
+        default: check-conditions
 
     # -------------------------------------------------------------------------
     # 1. check-conditions
