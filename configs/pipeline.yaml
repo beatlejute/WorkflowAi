@@ -417,6 +417,7 @@ pipeline:
       timeout: 120
       goto:
         default: pick-next-task
+        error: pick-next-task
 
     # -------------------------------------------------------------------------
     # 6. create-report
