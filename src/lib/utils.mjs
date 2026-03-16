@@ -1,6 +1,7 @@
 import YAML from 'js-yaml';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import fs from 'fs';
 
 /**
  * Парсит YAML frontmatter из markdown-файла.
@@ -116,17 +117,26 @@ export function getPackageRoot() {
 export function getLastReviewStatus(content) {
   if (!content) return null;
 
-  // Находим секцию "## Ревью" — захватываем всё до следующего заголовка ## или конца файла
-  const headerIdx = content.search(/^##\s*Ревью\s*$/m);
-  if (headerIdx === -1) return null;
+  // Находим последний заголовок H2 "## Ревью" (только строки начинающиеся с "## ")
+  const lines = content.split('\n');
+  let lastHeaderLineIndex = -1;
+  
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith('## ') && lines[i].includes('Ревью')) {
+      lastHeaderLineIndex = i;
+    }
+  }
 
-  const bodyStart = content.indexOf('\n', headerIdx);
-  if (bodyStart === -1) return null;
+  if (lastHeaderLineIndex === -1) return null;
 
-  const nextH2 = content.indexOf('\n## ', bodyStart);
-  const reviewSection = (nextH2 === -1
-    ? content.slice(bodyStart + 1)
-    : content.slice(bodyStart + 1, nextH2)).trim();
+  // Собираем содержимое после заголовка до следующего H2 заголовка
+  const reviewLines = [];
+  for (let i = lastHeaderLineIndex + 1; i < lines.length; i++) {
+    if (lines[i].startsWith('## ')) break; // следующий H2 заголовок
+    reviewLines.push(lines[i]);
+  }
+  
+  const reviewSection = reviewLines.join('\n').trim();
   if (!reviewSection) return null;
 
   // Пробуем распарсить табличный формат
@@ -154,9 +164,96 @@ export function getLastReviewStatus(content) {
   if (listItems.length > 0) {
     // Последний элемент списка = самое свежее ревью (записи ведутся хронологически)
     const latestItem = listItems[listItems.length - 1].trim();
-    const statusMatch = latestItem.match(/:\s*(passed|failed)\b/i);
+    const statusMatch = latestItem.match(/:\s*(passed|failed|skipped)\b/i);
     if (statusMatch) return statusMatch[1].toLowerCase();
   }
 
   return null;
+}
+
+/**
+ * Загружает конфигурацию правил перемещения тикетов.
+ *
+ * @param {string} configPath - Путь к конфигурационному файлу
+ * @returns {object} Объект конфигурации с правилами
+ */
+export function loadTicketMovementRules(configPath) {
+  if (!fs.existsSync(configPath)) {
+    throw new Error(`Config file not found: ${configPath}`);
+  }
+  const content = fs.readFileSync(configPath, 'utf8');
+  return YAML.load(content);
+}
+
+/**
+ * Проверяет все тикеты плана и закрывает его если все выполнены.
+ *
+ * @param {string} workflowDir - Путь к директории .workflow/
+ * @param {string} planId - Нормализованный ID плана (например "PLAN-002")
+ * @returns {{ closed: boolean, reason: string, total: number, done: number }}
+ */
+export function checkAndClosePlan(workflowDir, planId) {
+  if (!workflowDir || !planId) {
+    return { closed: false, reason: 'Missing workflowDir or planId', total: 0, done: 0 };
+  }
+
+  const ticketsDir = path.join(workflowDir, 'tickets');
+  const allDirNames = ['backlog', 'ready', 'in-progress', 'blocked', 'review', 'done'];
+  const allTickets = [];
+
+  for (const dirName of allDirNames) {
+    const dir = path.join(ticketsDir, dirName);
+    if (!fs.existsSync(dir)) continue;
+
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.md') && f !== '.gitkeep.md');
+    for (const file of files) {
+      try {
+        const content = fs.readFileSync(path.join(dir, file), 'utf8');
+        const { frontmatter } = parseFrontmatter(content);
+        if (normalizePlanId(frontmatter.parent_plan) === planId) {
+          allTickets.push({ id: frontmatter.id || file.replace('.md', ''), dir: dirName });
+        }
+      } catch (_) { /* skip malformed */ }
+    }
+  }
+
+  const total = allTickets.length;
+  const done = allTickets.filter(t => t.dir === 'done').length;
+
+  if (total === 0) {
+    return { closed: false, reason: 'No tickets found for plan', total, done };
+  }
+
+  if (done < total) {
+    return { closed: false, reason: `${done}/${total} tickets done`, total, done };
+  }
+
+  const plansDir = path.join(workflowDir, 'plans', 'current');
+  if (!fs.existsSync(plansDir)) {
+    return { closed: false, reason: 'Plans directory not found', total, done };
+  }
+
+  const planFile = fs.readdirSync(plansDir)
+    .filter(f => f.endsWith('.md'))
+    .find(f => normalizePlanId(f) === planId);
+
+  if (!planFile) {
+    return { closed: false, reason: 'Plan file not found', total, done };
+  }
+
+  const planPath = path.join(plansDir, planFile);
+  const planContent = fs.readFileSync(planPath, 'utf8');
+  const { frontmatter, body } = parseFrontmatter(planContent);
+
+  if (frontmatter.status === 'completed') {
+    return { closed: false, reason: 'Plan already completed', total, done };
+  }
+
+  frontmatter.status = 'completed';
+  frontmatter.completed_at = new Date().toISOString();
+  frontmatter.updated_at = new Date().toISOString();
+
+  fs.writeFileSync(planPath, serializeFrontmatter(frontmatter) + body, 'utf8');
+
+  return { closed: true, reason: 'All tickets done', total, done };
 }

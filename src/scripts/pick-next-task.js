@@ -21,7 +21,10 @@
 import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from '../lib/find-root.mjs';
-import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, getLastReviewStatus, serializeFrontmatter } from '../lib/utils.mjs';
+import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, getLastReviewStatus, serializeFrontmatter, loadTicketMovementRules, checkAndClosePlan } from '../lib/utils.mjs';
+import { createLogger } from '../lib/logger.mjs';
+
+const logger = createLogger();
 
 // Корень проекта
 const PROJECT_DIR = findProjectRoot();
@@ -72,10 +75,131 @@ function checkCondition(condition) {
       return false;
 
     default:
-      // Неизвестный тип условия - считаем выполненным
-      console.error(`[WARN] Unknown condition type: ${type}`);
+      logger.warn(`Unknown condition type: ${type}`);
       return true;
   }
+}
+
+/**
+ * Парсит секцию "## Ревью" тикета и возвращает все записи ревью.
+ * @param {string} content - Содержимое тикета
+ * @returns {Array<{date: string, status: string, comment: string}>}
+ */
+function parseReviewSection(content) {
+  if (!content) return [];
+
+  const headerIdx = content.search(/^##\s*Ревью\s*$/m);
+  if (headerIdx === -1) return [];
+
+  const bodyStart = content.indexOf('\n', headerIdx);
+  if (bodyStart === -1) return [];
+
+  const nextH2 = content.indexOf('\n## ', bodyStart);
+  const reviewSection = (nextH2 === -1
+    ? content.slice(bodyStart + 1)
+    : content.slice(bodyStart + 1, nextH2)).trim();
+
+  const reviews = [];
+
+  const tableRows = reviewSection.split('\n').filter(line => line.trim().startsWith('|'));
+  if (tableRows.length >= 2) {
+    const dataRows = tableRows.slice(2).filter(row => {
+      const cells = row.split('|').map(c => c.trim()).filter(c => c);
+      return cells.length >= 2;
+    });
+
+    for (const row of dataRows) {
+      const cells = row.split('|').map(c => c.trim()).filter(c => c);
+      const date = cells[0] || '';
+      const statusRaw = cells[1]?.toLowerCase() || '';
+      const comment = cells[2] || '';
+      let status = null;
+      if (statusRaw.includes('passed')) status = 'passed';
+      else if (statusRaw.includes('failed')) status = 'failed';
+      else if (statusRaw.includes('skipped')) status = 'skipped';
+
+      if (status) {
+        reviews.push({ date, status, comment });
+      }
+    }
+  }
+
+  const listItems = reviewSection.split('\n').filter(line => line.trim().match(/^[-*]\s/));
+  for (const item of listItems) {
+    const trimmed = item.trim();
+    const dateMatch = trimmed.match(/^[-*]\s*(\d{4}-\d{2}-\d{2})/);
+    const statusMatch = trimmed.match(/:\s*(passed|failed|skipped)\b/i);
+    if (dateMatch && statusMatch) {
+      reviews.push({
+        date: dateMatch[1],
+        status: statusMatch[1].toLowerCase(),
+        comment: trimmed.replace(/^[-*]\s*\d{4}-\d{2}-\d{2}:\s*(passed|failed|skipped)\b/i, '').trim()
+      });
+    }
+  }
+
+  return reviews;
+}
+
+/**
+ * Вычисляет метрики ревью-итераций для всех тикетов
+ * @returns {object} Метрики: iterations, avgTimeToFirstPassed, failedVsPassed
+ */
+function calculateReviewMetrics() {
+  const allDirs = [BACKLOG_DIR, READY_DIR, IN_PROGRESS_DIR, BLOCKED_DIR, REVIEW_DIR, DONE_DIR];
+  const ticketMetrics = {};
+  let totalFailed = 0;
+  let totalPassed = 0;
+  let firstPassedTimes = [];
+
+  for (const dir of allDirs) {
+    if (!fs.existsSync(dir)) continue;
+
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.md') && f !== '.gitkeep.md');
+
+    for (const file of files) {
+      const filePath = path.join(dir, file);
+      try {
+        const content = fs.readFileSync(filePath, 'utf8');
+        const { frontmatter } = parseFrontmatter(content);
+        const ticketId = frontmatter.id || file.replace('.md', '');
+
+        const reviews = parseReviewSection(content);
+        if (reviews.length === 0) continue;
+
+        ticketMetrics[ticketId] = reviews.length;
+
+        for (const review of reviews) {
+          if (review.status === 'failed') totalFailed++;
+          else if (review.status === 'passed') totalPassed++;
+        }
+
+        const firstPassed = reviews.find(r => r.status === 'passed');
+        if (firstPassed && firstPassed.date) {
+          const ticketCreated = new Date(frontmatter.created_at || '1970-01-01');
+          const passedDate = new Date(firstPassed.date);
+          const daysToPass = Math.floor((passedDate - ticketCreated) / (1000 * 60 * 60 * 24));
+          if (daysToPass >= 0) {
+            firstPassedTimes.push(daysToPass);
+          }
+        }
+      } catch (e) {
+        // Skip errors
+      }
+    }
+  }
+
+  const avgTimeToFirstPassed = firstPassedTimes.length > 0
+    ? Math.round(firstPassedTimes.reduce((a, b) => a + b, 0) / firstPassedTimes.length)
+    : null;
+
+  return {
+    iterations_per_ticket: ticketMetrics,
+    total_failed: totalFailed,
+    total_passed: totalPassed,
+    avg_time_to_first_passed_days: avgTimeToFirstPassed,
+    tickets_with_reviews: Object.keys(ticketMetrics).length
+  };
 }
 
 /**
@@ -94,18 +218,22 @@ function checkDependencies(dependencies) {
 
 /**
  * Авто-коррекция тикетов на основе статуса ревью.
- * Сканирует все директории и перемещает тикеты по правилам:
- * - blocked → done (если review = passed)
- * - blocked → backlog (если review = failed, НЕ при null)
- * - done → backlog (если review = failed)
- * - review → done (если review = passed)
- * - in-progress → done (если review = passed)
- * - ready → done (если review = passed)
+ * Сканирует все директории и перемещает тикеты по правилам из конфига.
  *
+ * @param {object} config - Конфигурация правил перемещения
  * @returns {object} Результат: { moved: Array<{id, from, to, reason}> }
  */
-function autoCorrectTickets() {
+function autoCorrectTickets(config) {
   const moved = [];
+
+  const dirMap = {
+    backlog: BACKLOG_DIR,
+    ready: READY_DIR,
+    in_progress: IN_PROGRESS_DIR,
+    blocked: BLOCKED_DIR,
+    review: REVIEW_DIR,
+    done: DONE_DIR
+  };
 
   /**
    * Перемещает тикет из одной директории в другую
@@ -119,23 +247,18 @@ function autoCorrectTickets() {
     }
 
     try {
-      // Читаем содержимое
       const content = fs.readFileSync(fromPath, 'utf8');
       const { frontmatter, body } = parseFrontmatter(content);
 
-      // Обновляем updated_at
       frontmatter.updated_at = new Date().toISOString();
 
-      // Если перемещаем в done — ставим completed_at
       if (toDir === DONE_DIR && !frontmatter.completed_at) {
         frontmatter.completed_at = new Date().toISOString();
       }
 
-      // Сериализуем и записываем в новую директорию
       const newContent = serializeFrontmatter(frontmatter) + body;
       fs.writeFileSync(toPath, newContent, 'utf8');
 
-      // Удаляем старый файл
       fs.unlinkSync(fromPath);
 
       console.log(`[AUTO-CORRECT] ${ticketId}: ${path.basename(fromDir)} → ${path.basename(toDir)} (${reason})`);
@@ -149,7 +272,7 @@ function autoCorrectTickets() {
 
       return true;
     } catch (e) {
-      console.error(`[ERROR] Failed to move ticket ${ticketId}: ${e.message}`);
+      logger.error(`Failed to move ticket ${ticketId}: ${e.message}`);
       return false;
     }
   }
@@ -157,7 +280,7 @@ function autoCorrectTickets() {
   /**
    * Обрабатывает тикеты в указанной директории
    */
-  function processDirectory(dir, rules) {
+  function processDirectory(dir, rules, dirName) {
     if (!fs.existsSync(dir)) return;
 
     const files = fs.readdirSync(dir)
@@ -170,112 +293,46 @@ function autoCorrectTickets() {
         const { frontmatter } = parseFrontmatter(content);
         const ticketId = frontmatter.id || file.replace('.md', '');
 
-        // Получаем статус ревью
         const reviewStatus = getLastReviewStatus(content);
 
-        // Применяем правила
         for (const rule of rules) {
-          if (rule.condition(reviewStatus)) {
-            moveTicket(ticketId, dir, rule.toDir, rule.reason);
-            break; // Только одно перемещение на тикет
+          const ruleCondition = rule.condition;
+          let shouldMove = false;
+
+          if (ruleCondition === null) {
+            shouldMove = reviewStatus === null;
+          } else {
+            shouldMove = reviewStatus === ruleCondition;
+          }
+
+          if (shouldMove) {
+            const targetDirName = rule.to_dir;
+            const targetDir = dirMap[targetDirName];
+            if (targetDir) {
+              moveTicket(ticketId, dir, targetDir, rule.reason);
+            }
+            break;
           }
         }
       } catch (e) {
-        console.error(`[WARN] Failed to process ticket ${file}: ${e.message}`);
+        logger.warn(`Failed to process ticket ${file}: ${e.message}`);
       }
     }
   }
 
-  // Правила для backlog/ (защита от ошибочного перемещения завершённых тикетов)
-  processDirectory(BACKLOG_DIR, [
-    {
-      condition: (status) => status === 'passed',
-      toDir: DONE_DIR,
-      reason: 'review passed'
-    },
-    {
-      condition: (status) => status === 'skipped',
-      toDir: DONE_DIR,
-      reason: 'review skipped'
-    }
-  ]);
+  if (!config || !config.rules) {
+    logger.error('Ticket movement rules config not loaded');
+    return { moved };
+  }
 
-  // Правила для blocked/
-  processDirectory(BLOCKED_DIR, [
-    {
-      condition: (status) => status === 'passed',
-      toDir: DONE_DIR,
-      reason: 'review passed'
-    },
-    {
-      condition: (status) => status === 'skipped',
-      toDir: DONE_DIR,
-      reason: 'review skipped'
-    },
-    {
-      condition: (status) => status === 'failed',
-      toDir: BACKLOG_DIR,
-      reason: 'review failed'
-    }
-    // null (нет ревью) — не перемещаем
-  ]);
+  const rulesConfig = config.rules;
 
-  // Правила для done/
-  processDirectory(DONE_DIR, [
-    {
-      condition: (status) => status === 'failed',
-      toDir: BACKLOG_DIR,
-      reason: 'review failed'
-    },
-    {
-      condition: (status) => status === null,
-      toDir: BACKLOG_DIR,
-      reason: 'no review'
+  for (const [dirName, rules] of Object.entries(rulesConfig)) {
+    const dir = dirMap[dirName];
+    if (dir) {
+      processDirectory(dir, rules, dirName);
     }
-    // passed или skipped — не перемещаем
-  ]);
-
-  // Правила для review/
-  processDirectory(REVIEW_DIR, [
-    {
-      condition: (status) => status === 'passed',
-      toDir: DONE_DIR,
-      reason: 'review passed'
-    },
-    {
-      condition: (status) => status === 'skipped',
-      toDir: DONE_DIR,
-      reason: 'review skipped'
-    }
-  ]);
-
-  // Правила для in-progress/
-  processDirectory(IN_PROGRESS_DIR, [
-    {
-      condition: (status) => status === 'passed',
-      toDir: DONE_DIR,
-      reason: 'review passed'
-    },
-    {
-      condition: (status) => status === 'skipped',
-      toDir: DONE_DIR,
-      reason: 'review skipped'
-    }
-  ]);
-
-  // Правила для ready/
-  processDirectory(READY_DIR, [
-    {
-      condition: (status) => status === 'passed',
-      toDir: DONE_DIR,
-      reason: 'review passed'
-    },
-    {
-      condition: (status) => status === 'skipped',
-      toDir: DONE_DIR,
-      reason: 'review skipped'
-    }
-  ]);
+  }
 
   return { moved };
 }
@@ -438,7 +495,7 @@ function pickNextTicket(planId) {
       const completedInProgress = filterByPlan(findCompletedInProgress(), planId);
       if (completedInProgress.length > 0) {
         const first = completedInProgress[0];
-        console.log(`[INFO] Found completed ticket in in-progress/: ${first.id}`);
+        logger.info(`Found completed ticket in in-progress/: ${first.id}`);
         return {
           status: 'completed_in_progress',
           ticket_id: first.id
@@ -517,32 +574,68 @@ async function main() {
   const planId = extractPlanId();
 
   if (planId) {
-    console.log(`[INFO] Filtering by plan_id: ${planId}`);
+    logger.info(`Filtering by plan_id: ${planId}`);
   }
 
-  // Авто-коррекция тикетов перед выбором задачи
-  console.log('[INFO] Running auto-correction...');
-  const correctionResult = autoCorrectTickets();
+  const configPath = path.join(WORKFLOW_DIR, 'config', 'ticket-movement-rules.yaml');
+  let movementConfig = null;
+  try {
+    movementConfig = loadTicketMovementRules(configPath);
+    logger.info('Loaded ticket movement rules from config');
+  } catch (e) {
+    logger.warn(`Failed to load ticket movement config: ${e.message}`);
+  }
+
+  logger.info('Running auto-correction...');
+  const correctionResult = autoCorrectTickets(movementConfig);
   if (correctionResult.moved.length > 0) {
-    console.log(`[INFO] Auto-corrected ${correctionResult.moved.length} ticket(s)`);
+    logger.info(`Auto-corrected ${correctionResult.moved.length} ticket(s)`);
   }
 
-  console.log(`[INFO] Scanning ready/ directory: ${READY_DIR}`);
+  if (planId) {
+    const closeResult = checkAndClosePlan(WORKFLOW_DIR, planId);
+    if (closeResult.closed) {
+      logger.info(`Plan ${planId} closed: all ${closeResult.total} tickets done`);
+    } else if (closeResult.total > 0) {
+      logger.info(`Plan ${planId} progress: ${closeResult.done}/${closeResult.total} tickets done`);
+    }
+  }
+
+  logger.info(`Scanning ready/ directory: ${READY_DIR}`);
 
   const result = pickNextTicket(planId);
 
   if (result.status === 'found') {
-    console.log(`[INFO] Selected ticket: ${result.ticket_id} (${result.title})`);
-    console.log(`[INFO] Priority: ${result.priority}, Type: ${result.type}`);
+    logger.info(`Selected ticket: ${result.ticket_id} (${result.title})`);
+    logger.info(`Priority: ${result.priority}, Type: ${result.type}`);
   } else {
-    console.log(`[INFO] ${result.reason}`);
+    logger.info(result.reason);
   }
 
-  // Добавляем информацию о авто-коррекции в результат
+  logger.info('Calculating review metrics...');
+  const reviewMetrics = calculateReviewMetrics();
+  logger.info(`Found ${reviewMetrics.tickets_with_reviews} tickets with reviews`);
+  logger.info(`Total failed: ${reviewMetrics.total_failed}, passed: ${reviewMetrics.total_passed}`);
+
+  const metricsDir = path.join(WORKFLOW_DIR, 'metrics');
+  if (!fs.existsSync(metricsDir)) {
+    fs.mkdirSync(metricsDir, { recursive: true });
+  }
+  const metricsFile = path.join(metricsDir, 'review-metrics.json');
+  fs.writeFileSync(metricsFile, JSON.stringify(reviewMetrics, null, 2), 'utf8');
+  logger.info(`Metrics saved to ${metricsFile}`);
+
   const finalResult = {
     ...result,
     auto_corrected: correctionResult.moved.length,
-    moved_tickets: correctionResult.moved.map(m => m.id).join(',')
+    moved_tickets: correctionResult.moved.map(m => m.id).join(','),
+    review_metrics: {
+      tickets_with_reviews: reviewMetrics.tickets_with_reviews,
+      total_failed: reviewMetrics.total_failed,
+      total_passed: reviewMetrics.total_passed,
+      avg_time_to_first_passed_days: reviewMetrics.avg_time_to_first_passed_days,
+      iterations_per_ticket: reviewMetrics.iterations_per_ticket
+    }
   };
 
   printResult(finalResult);
@@ -553,7 +646,7 @@ async function main() {
 }
 
 main().catch(e => {
-  console.error(`[ERROR] ${e.message}`);
+  logger.error(e.message);
   printResult({ status: 'error', error: e.message });
   process.exit(1);
 });

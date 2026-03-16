@@ -8,16 +8,18 @@ import yaml from 'js-yaml';
 import { findProjectRoot } from './lib/find-root.mjs';
 
 // ============================================================================
-// Logger — система логирования с уровнями INFO/WARN/ERROR
+// Logger — система логирования с уровнями DEBUG/INFO/WARN/ERROR
 // ============================================================================
 class Logger {
   static LEVELS = {
+    DEBUG: -1,
     INFO: 0,
     WARN: 1,
     ERROR: 2
   };
 
   static COLORS = {
+    DEBUG: '\x1b[90m',   // gray
     INFO: '\x1b[36m',    // cyan
     WARN: '\x1b[33m',    // yellow
     ERROR: '\x1b[31m',   // red
@@ -28,6 +30,7 @@ class Logger {
     this.logFilePath = logFilePath;
     this.consoleLevel = consoleLevel;
     this.stats = {
+      debug: 0,
       info: 0,
       warn: 0,
       error: 0,
@@ -40,17 +43,6 @@ class Logger {
       startTime: null,
       endTime: null
     };
-  }
-
-  /**
-   * Создаёт директорию для логов если она не существует
-   */
-  _ensureLogDirectory() {
-    const logDir = path.dirname(this.logFilePath);
-    if (!fs.existsSync(logDir)) {
-      fs.mkdirSync(logDir, { recursive: true });
-      console.log(`[Logger] Created log directory: ${logDir}`);
-    }
   }
 
   /**
@@ -142,7 +134,8 @@ class Logger {
     this._writeToConsole(formattedMessage, level);
 
     // Обновляем статистику
-    if (level === 'INFO') this.stats.info++;
+    if (level === 'DEBUG') this.stats.debug++;
+    else if (level === 'INFO') this.stats.info++;
     else if (level === 'WARN') this.stats.warn++;
     else if (level === 'ERROR') this.stats.error++;
   }
@@ -166,6 +159,13 @@ class Logger {
    */
   error(message, stage) {
     this._log('ERROR', stage, message);
+  }
+
+  /**
+   * Логгирует DEBUG сообщение
+   */
+  debug(message, stage) {
+    this._log('DEBUG', stage, message);
   }
 
   /**
@@ -242,9 +242,10 @@ class Logger {
       '┌─────────────────────────────────────────────────────────┐',
       '│ LOG STATISTICS                                          │',
       '├─────────────────────────────────────────────────────────┤',
-      `│ INFO messages:    ${String(this.stats.info).padEnd(34)}│`,
-      `│ WARN messages:    ${String(this.stats.warn).padEnd(34)}│`,
-      `│ ERROR messages:   ${String(this.stats.error).padEnd(34)}│`,
+      `│ DEBUG messages:    ${String(this.stats.debug).padEnd(34)}│`,
+      `│ INFO messages:     ${String(this.stats.info).padEnd(34)}│`,
+      `│ WARN messages:     ${String(this.stats.warn).padEnd(34)}│`,
+      `│ ERROR messages:    ${String(this.stats.error).padEnd(34)}│`,
       '├─────────────────────────────────────────────────────────┤',
       '│ STAGE STATISTICS                                        │',
       '├─────────────────────────────────────────────────────────┤',
