@@ -655,19 +655,38 @@ class FileGuard {
   }
 
   /**
-   * Проверяет целостность защищённых файлов и откатывает несанкционированные изменения
+   * Проверяет целостность защищённых файлов и откатывает несанкционированные изменения.
+   * Обнаруживает как изменения/удаления существующих файлов, так и создание новых.
    * @returns {string[]} Список изменённых (и откаченных) файлов
    */
   checkAndRollback() {
-    if (!this.enabled || this.snapshots.size === 0) return [];
+    if (!this.enabled) return [];
 
     const violations = [];
+
+    // 1. Проверяем файлы из снимка (изменённые или удалённые)
     for (const [filePath, originalHash] of this.snapshots) {
       const currentHash = this._hashFile(filePath);
       if (currentHash !== originalHash) {
         violations.push(filePath);
         console.warn(`[FileGuard] WARNING: Protected file modified: ${filePath}`);
         this._rollbackFile(filePath);
+      }
+    }
+
+    // 2. Обнаруживаем новые файлы в защищённых директориях
+    for (const pattern of this.patterns) {
+      const baseDir = pattern.includes('*')
+        ? path.resolve(this.projectRoot, this._getBaseDir(pattern))
+        : path.resolve(this.projectRoot, pattern);
+
+      const currentFiles = this._getAllFiles(baseDir);
+      for (const filePath of currentFiles) {
+        if (this.matchesProtected(filePath) && !this.snapshots.has(filePath)) {
+          violations.push(filePath);
+          console.warn(`[FileGuard] WARNING: New file in protected area: ${filePath}`);
+          this._removeNewFile(filePath);
+        }
       }
     }
 
@@ -678,6 +697,19 @@ class FileGuard {
     }
 
     return violations;
+  }
+
+  /**
+   * Удаляет файл, созданный агентом в защищённой директории
+   * @param {string} filePath - Путь к файлу
+   */
+  _removeNewFile(filePath) {
+    try {
+      fs.unlinkSync(filePath);
+      console.warn(`[FileGuard] WARNING: Removed unauthorized new file: ${filePath}`);
+    } catch (err) {
+      console.error(`[FileGuard] ERROR: Failed to remove ${filePath}: ${err.message}`);
+    }
   }
 
   /**
