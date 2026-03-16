@@ -17,7 +17,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import YAML from 'js-yaml';
+import YAML from '../lib/js-yaml.mjs';
 import { findProjectRoot } from '../lib/find-root.mjs';
 import { parseFrontmatter, serializeFrontmatter } from '../lib/utils.mjs';
 

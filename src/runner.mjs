@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn, execSync } from 'child_process';
 import crypto from 'crypto';
-import yaml from 'js-yaml';
+import yaml from './lib/js-yaml.mjs';
 import { findProjectRoot } from './lib/find-root.mjs';
 
 // ============================================================================

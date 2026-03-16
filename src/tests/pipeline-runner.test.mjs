@@ -15,7 +15,7 @@ import assert from 'node:assert';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import yaml from 'js-yaml';
+import yaml from '../lib/js-yaml.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

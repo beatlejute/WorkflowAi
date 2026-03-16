@@ -366,16 +366,15 @@ export function initProject(targetPath = process.cwd(), options = {}) {
   const libDest = join(workflowRoot, 'src', 'lib');
   ensureDir(libDest);
   
-  const utilsSrc = join(libSrc, 'utils.mjs');
-  const findRootSrc = join(libSrc, 'find-root.mjs');
-  
-  if (existsSync(utilsSrc)) {
-    copyFile(utilsSrc, join(libDest, 'utils.mjs'));
+  const libFiles = ['utils.mjs', 'find-root.mjs', 'js-yaml.mjs', 'logger.mjs'];
+
+  for (const file of libFiles) {
+    const fileSrc = join(libSrc, file);
+    if (existsSync(fileSrc)) {
+      copyFile(fileSrc, join(libDest, file));
+    }
   }
-  if (existsSync(findRootSrc)) {
-    copyFile(findRootSrc, join(libDest, 'find-root.mjs'));
-  }
-  result.steps.push('Copied lib files (utils.mjs, find-root.mjs) → .workflow/src/lib/');
+  result.steps.push('Copied lib files (utils.mjs, find-root.mjs, js-yaml.mjs) → .workflow/src/lib/');
   
   // Step 5: Copy templates (3 templates)
   const templatesSrc = join(packageRoot, 'templates');
@@ -414,7 +413,14 @@ export function initProject(targetPath = process.cwd(), options = {}) {
     copyFile(pipelineSrc, join(configDest, 'pipeline.yaml'));
     result.steps.push('Generated pipeline.yaml (overwritten)');
   }
-  
+
+  // ticket-movement-rules.yaml — always
+  const movementRulesSrc = join(packageRoot, 'configs', 'ticket-movement-rules.yaml');
+  if (existsSync(movementRulesSrc)) {
+    copyFile(movementRulesSrc, join(configDest, 'ticket-movement-rules.yaml'));
+    result.steps.push('Generated ticket-movement-rules.yaml (overwritten)');
+  }
+
   // Step 7: Create .kilocode symlinks
   const symlinkResult = createKilocodeSymlinks(projectRoot, force);
   if (symlinkResult.success) {

@@ -1,0 +1,83 @@
+# Конфигурация правил перемещения тикетов
+# Версия: 1.0
+
+version: "1.0"
+
+# Правила перемещения тикетов на основе статуса ревью
+# Каждое правило применяется к указанной директории
+# condition: "passed" | "failed" | "skipped" | null
+#   - "passed" — ревью пройдено
+#   - "failed" — ревью провалено
+#   - "skipped" — ревью пропущено
+#   - null — ревью отсутствует (не заполнено)
+# to_dir: целевая директория перемещения
+# reason: причина перемещения (для логирования)
+
+rules:
+  # Правила для backlog/ — защита от ошибочного перемещения завершённых тикетов
+  backlog:
+    - condition: passed
+      to_dir: done
+      reason: "review passed"
+    - condition: skipped
+      to_dir: done
+      reason: "review skipped"
+
+  # Правила для blocked/
+  blocked:
+    - condition: passed
+      to_dir: done
+      reason: "review passed"
+    - condition: skipped
+      to_dir: done
+      reason: "review skipped"
+    - condition: failed
+      to_dir: backlog
+      reason: "review failed"
+    # null (нет ревью) — не перемещаем
+
+  # Правила для done/
+  done:
+    - condition: failed
+      to_dir: backlog
+      reason: "review failed"
+    - condition: null
+      to_dir: backlog
+      reason: "no review"
+    # passed или skipped — не перемещаем
+
+  # Правила для review/
+  review:
+    - condition: passed
+      to_dir: done
+      reason: "review passed"
+    - condition: skipped
+      to_dir: done
+      reason: "review skipped"
+
+  # Правила для in-progress/
+  in_progress:
+    - condition: passed
+      to_dir: done
+      reason: "review passed"
+    - condition: skipped
+      to_dir: done
+      reason: "review skipped"
+
+  # Правила для ready/
+  ready:
+    - condition: passed
+      to_dir: done
+      reason: "review passed"
+    - condition: skipped
+      to_dir: done
+      reason: "review skipped"
+
+# Директории тикетов (относительно .workflow/tickets/)
+directories:
+  backlog: backlog
+  ready: ready
+  in_progress: in-progress
+  blocked: blocked
+  review: review
+  done: done

@@ -1,4 +1,4 @@
-import YAML from 'js-yaml';
+import YAML from './js-yaml.mjs';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import fs from 'fs';
