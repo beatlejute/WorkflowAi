@@ -8,7 +8,7 @@
  *   B) Если plan_id НЕ задан — сканирует все планы в plans/current/
  *
  *   Для каждого плана:
- *   1. Если есть тикеты (backlog/, ready/, in-progress/, review/) с parent_plan == planId — decomposed
+ *   1. Если есть тикеты (backlog/, ready/, in-progress/, review/, done/, blocked/) с parent_plan == planId — decomposed
  *   2. Иначе — needs_decomposition
  *
  *   Результат:
@@ -31,7 +31,7 @@ const WORKFLOW_DIR = path.join(PROJECT_DIR, '.workflow');
 const TICKETS_DIR = path.join(WORKFLOW_DIR, 'tickets');
 const PLANS_DIR = path.join(WORKFLOW_DIR, 'plans', 'current');
 
-const TICKET_DIRS = ['backlog', 'ready', 'in-progress', 'review'];
+const TICKET_DIRS = ['backlog', 'ready', 'in-progress', 'review', 'done', 'blocked'];
 
 /**
  * Проверяет, есть ли тикеты, привязанные к данному плану
