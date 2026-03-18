@@ -878,6 +878,7 @@ class StageExecutor {
       }, timeout * 1000);
 
       let stdoutBuffer = '';
+      let agentText = ''; // собираем текстовый вывод агента для лога
       child.stdout.on('data', (data) => {
         const chunk = data.toString();
         stdout += chunk;
@@ -892,12 +893,14 @@ class StageExecutor {
             // Claude: content_block_delta с delta.text
             if (obj.type === 'content_block_delta' && obj.delta?.text) {
               process.stdout.write(obj.delta.text);
+              agentText += obj.delta.text;
             }
             // Qwen/Claude: assistant message с content text
             else if (obj.type === 'assistant' && obj.message?.content) {
               for (const block of obj.message.content) {
                 if (block.type === 'text' && block.text) {
                   process.stdout.write(block.text);
+                  agentText += block.text;
                 }
               }
             }
@@ -905,6 +908,7 @@ class StageExecutor {
           } catch {
             // не JSON — выводим как есть
             process.stdout.write(line + '\n');
+            agentText += line + '\n';
           }
         }
       });
@@ -934,6 +938,16 @@ class StageExecutor {
         // Логгируем CLI вызов
         if (this.logger) {
           this.logger.cliCall(agent.command, args, code);
+
+          // Логгируем текстовый вывод агента
+          const trimmedOutput = agentText.trim();
+          if (trimmedOutput) {
+            this.logger.info(`OUTPUT ↓`, stageId);
+            for (const line of trimmedOutput.split('\n')) {
+              this.logger.info(`  ${line}`, stageId);
+            }
+            this.logger.info(`OUTPUT ↑`, stageId);
+          }
         }
 
         // Парсим результат из вывода агента через ResultParser
