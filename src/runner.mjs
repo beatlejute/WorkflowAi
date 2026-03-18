@@ -289,7 +289,19 @@ class PromptBuilder {
    * @returns {string} Промпт для агента
    */
   build(stage, stageId) {
-    const parts = [stage.skill || stageId];
+    const skillName = stage.skill || stageId;
+    const ticketId = this.context.ticket_id;
+    const parts = [];
+
+    // Директивная первая строка — агент сразу понимает задание
+    if (ticketId) {
+      const skillPath = `.workflow/src/skills/${skillName}/SKILL.md`;
+      parts.push(`Выполни скилл "${skillName}" для тикета ${ticketId}.`);
+      parts.push(`Инструкция скилла: ${skillPath}`);
+      parts.push(`Прочитай инструкцию и выполни все шаги.`);
+    } else {
+      parts.push(skillName);
+    }
 
     // Добавляем контекст если есть непустые значения
     const contextEntries = Object.entries(this.context)
@@ -837,8 +849,15 @@ class StageExecutor {
       const timeout = this.pipeline.execution?.timeout_per_stage || 300;
       const args = [...agent.args];
 
-      // Промпт всегда передаётся последним аргументом
-      args.push(prompt);
+      // Если args содержит -p с ролью — объединяем роль и промпт в один аргумент
+      // Иначе Claude CLI интерпретирует роль как промпт, а реальный промпт игнорирует
+      const lastPIdx = args.lastIndexOf('-p');
+      if (lastPIdx !== -1 && lastPIdx < args.length - 1) {
+        const rolePrompt = args[lastPIdx + 1];
+        args[lastPIdx + 1] = `${rolePrompt}\n\n${prompt}`;
+      } else {
+        args.push(prompt);
+      }
 
       // Логгируем команду перед запуском (вместо промпта — имя skill)
       if (this.logger) {
