@@ -841,8 +841,8 @@ class StageExecutor {
       // Иначе Claude CLI интерпретирует роль как промпт, а реальный промпт игнорирует
       const lastPIdx = args.lastIndexOf('-p');
       if (lastPIdx !== -1 && lastPIdx < args.length - 1) {
-        const rolePrompt = args[lastPIdx + 1];
-        args[lastPIdx + 1] = `${rolePrompt}\n\n${prompt}`;
+        const role = args[lastPIdx + 1];
+        args[lastPIdx + 1] = `${prompt}\n\nТвоя роль: ${role}`;
       } else {
         args.push(prompt);
       }
