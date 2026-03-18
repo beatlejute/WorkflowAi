@@ -840,14 +840,11 @@ class StageExecutor {
       // Если args содержит -p с ролью — объединяем роль и промпт в один аргумент
       // Иначе Claude CLI интерпретирует роль как промпт, а реальный промпт игнорирует
       const lastPIdx = args.lastIndexOf('-p');
-      let stdinPrompt = null;
       if (lastPIdx !== -1 && lastPIdx < args.length - 1) {
         const role = args[lastPIdx + 1];
         args[lastPIdx + 1] = `${prompt}\n\nТвоя роль: ${role}`;
       } else {
-        // Передаём промпт через stdin вместо аргумента,
-        // т.к. shell: true на Windows обрезает многострочные аргументы
-        stdinPrompt = prompt;
+        args.push(prompt);
       }
 
       // Логгируем команду перед запуском (вместо промпта — имя skill)
@@ -870,10 +867,7 @@ class StageExecutor {
         shell: process.platform === 'win32' && agent.command !== 'node'
       });
 
-      // Передаём промпт через stdin или закрываем если промпт в аргументах
-      if (stdinPrompt) {
-        child.stdin.write(stdinPrompt);
-      }
+      // Закрываем stdin чтобы агент не ждал дополнительного ввода
       child.stdin.end();
 
       let stdout = '';
