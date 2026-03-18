@@ -131,13 +131,6 @@ async function main() {
 
     console.log(`[INFO] Found plan file: ${planFile}`);
 
-    const planStatus = getPlanStatus(planFile);
-    if (planStatus !== 'approved') {
-      console.log(`[INFO] Plan ${planId} has status "${planStatus}" (not "approved") — skipping decomposition`);
-      printResult({ status: 'decomposed' });
-      return;
-    }
-
     if (hasTicketsForPlan(planId)) {
       console.log(`[INFO] Plan ${planId} already has tickets — decomposed`);
       printResult({ status: 'decomposed' });

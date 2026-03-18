@@ -314,7 +314,7 @@ class PromptBuilder {
     // Добавляем блок Instructions если поле instructions задано и непустое
     if (stage.instructions && typeof stage.instructions === 'string' && stage.instructions.trim() !== '') {
       parts.push('\n\nInstructions:');
-      parts.push(stage.instructions.trim());
+      parts.push(this.interpolate(stage.instructions.trim()));
     }
 
     return parts.join('\n');
