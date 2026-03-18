@@ -34,6 +34,24 @@ const PLANS_DIR = path.join(WORKFLOW_DIR, 'plans', 'current');
 const TICKET_DIRS = ['backlog', 'ready', 'in-progress', 'review', 'done', 'blocked'];
 
 /**
+ * Читает статус плана из frontmatter.
+ * Только планы со статусом "approved" могут быть декомпозированы автоматически.
+ * Планы со статусом "draft", "active" или без статуса — пропускаются.
+ */
+function getPlanStatus(planFile) {
+  const fullPath = path.join(WORKFLOW_DIR, planFile);
+  if (!fs.existsSync(fullPath)) return null;
+  try {
+    const content = fs.readFileSync(fullPath, 'utf8');
+    const { frontmatter } = parseFrontmatter(content);
+    return frontmatter.status || null;
+  } catch (e) {
+    console.error(`[WARN] Failed to read plan status from ${planFile}: ${e.message}`);
+    return null;
+  }
+}
+
+/**
  * Проверяет, есть ли тикеты, привязанные к данному плану
  */
 function hasTicketsForPlan(planId) {
@@ -113,6 +131,13 @@ async function main() {
 
     console.log(`[INFO] Found plan file: ${planFile}`);
 
+    const planStatus = getPlanStatus(planFile);
+    if (planStatus !== 'approved') {
+      console.log(`[INFO] Plan ${planId} has status "${planStatus}" (not "approved") — skipping decomposition`);
+      printResult({ status: 'decomposed' });
+      return;
+    }
+
     if (hasTicketsForPlan(planId)) {
       console.log(`[INFO] Plan ${planId} already has tickets — decomposed`);
       printResult({ status: 'decomposed' });
@@ -137,6 +162,11 @@ async function main() {
   console.log(`[INFO] Found ${allPlans.length} plan(s) in plans/current/`);
 
   for (const { planId: pid, planFile } of allPlans) {
+    const planStatus = getPlanStatus(planFile);
+    if (planStatus !== 'approved') {
+      console.log(`[INFO] Plan ${pid} has status "${planStatus}" (not "approved") — skipping`);
+      continue;
+    }
     if (!hasTicketsForPlan(pid)) {
       console.log(`[INFO] Plan ${pid} has no tickets — needs decomposition`);
       printResult({ status: 'needs_decomposition', plan_file: planFile });
