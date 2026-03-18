@@ -765,9 +765,13 @@ class StageExecutor {
     let agentId = stage.agent || this.pipeline.default_agent;
     const attempt = (stage.counter && this.counters[stage.counter]) || 0;
 
-    if (attempt <= 1 && stage.agent_by_type && this.context.task_type) {
+    // Фоллбэк: если task_type не задан, вычисляем из префикса ticket_id (PMA-005 → pma)
+    const taskType = this.context.task_type
+      || (this.context.ticket_id && this.context.ticket_id.split('-')[0].toLowerCase())
+      || null;
+
+    if (attempt <= 1 && stage.agent_by_type && taskType) {
       // Первая попытка: выбор по типу задачи
-      const taskType = this.context.task_type;
       if (stage.agent_by_type[taskType]) {
         agentId = stage.agent_by_type[taskType];
         if (this.logger) {
