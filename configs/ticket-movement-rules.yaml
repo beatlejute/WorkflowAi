@@ -31,10 +31,7 @@ rules:
     - condition: skipped
       to_dir: done
       reason: "review skipped"
-    - condition: failed
-      to_dir: backlog
-      reason: "review failed"
-    # null (нет ревью) — не перемещаем
+    # failed и null — не перемещаем
 
   # Правила для done/
   done:

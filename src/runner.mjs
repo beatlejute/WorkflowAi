@@ -940,8 +940,14 @@ class StageExecutor {
           const err = new Error(`Agent exited with code ${code}`);
           err.code = 'NON_ZERO_EXIT';
           err.exitCode = code;
+          err.stderr = stderr;
           if (this.logger) {
             this.logger.error(`Agent exited with code ${code}`, stageId);
+            if (stderr.trim()) {
+              for (const line of stderr.trim().split('\n')) {
+                this.logger.error(`  stderr: ${line}`, stageId);
+              }
+            }
           }
           reject(err);
           return;
