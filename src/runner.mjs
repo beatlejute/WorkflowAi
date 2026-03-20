@@ -862,8 +862,6 @@ class StageExecutor {
       const child = spawn(agent.command, args, {
         cwd: path.resolve(this.projectRoot, agent.workdir || '.'),
         stdio: ['pipe', 'pipe', 'pipe'],
-        // npm-бинари (.cmd) на Windows требуют shell: true,
-        // но нативные executables (node) — нет: shell: true обрезает многострочные аргументы
         shell: process.platform === 'win32' && agent.command !== 'node'
       });
 
