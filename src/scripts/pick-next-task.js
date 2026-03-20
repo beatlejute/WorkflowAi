@@ -36,6 +36,7 @@ const DONE_DIR = path.join(TICKETS_DIR, 'done');
 const IN_PROGRESS_DIR = path.join(TICKETS_DIR, 'in-progress');
 const BLOCKED_DIR = path.join(TICKETS_DIR, 'blocked');
 const REVIEW_DIR = path.join(TICKETS_DIR, 'review');
+const ARCHIVE_DIR = path.join(TICKETS_DIR, 'archive');
 const BACKLOG_DIR = path.join(TICKETS_DIR, 'backlog');
 
 
@@ -60,7 +61,8 @@ function checkCondition(condition) {
       const ids = Array.isArray(value) ? value : [value];
       return ids.every(taskId => {
         const donePath = path.join(DONE_DIR, `${taskId}.md`);
-        return fs.existsSync(donePath);
+        const archivePath = path.join(ARCHIVE_DIR, `${taskId}.md`);
+        return fs.existsSync(donePath) || fs.existsSync(archivePath);
       });
 
     case 'date_after':
@@ -146,7 +148,7 @@ function parseReviewSection(content) {
  * @returns {object} Метрики: iterations, avgTimeToFirstPassed, failedVsPassed
  */
 function calculateReviewMetrics() {
-  const allDirs = [BACKLOG_DIR, READY_DIR, IN_PROGRESS_DIR, BLOCKED_DIR, REVIEW_DIR, DONE_DIR];
+  const allDirs = [BACKLOG_DIR, READY_DIR, IN_PROGRESS_DIR, BLOCKED_DIR, REVIEW_DIR, DONE_DIR, ARCHIVE_DIR];
   const ticketMetrics = {};
   let totalFailed = 0;
   let totalPassed = 0;
@@ -212,7 +214,8 @@ function checkDependencies(dependencies) {
 
   return dependencies.every(depId => {
     const donePath = path.join(DONE_DIR, `${depId}.md`);
-    return fs.existsSync(donePath);
+    const archivePath = path.join(ARCHIVE_DIR, `${depId}.md`);
+    return fs.existsSync(donePath) || fs.existsSync(archivePath);
   });
 }
 
@@ -232,7 +235,8 @@ function autoCorrectTickets(config) {
     in_progress: IN_PROGRESS_DIR,
     blocked: BLOCKED_DIR,
     review: REVIEW_DIR,
-    done: DONE_DIR
+    done: DONE_DIR,
+    archive: ARCHIVE_DIR
   };
 
   /**

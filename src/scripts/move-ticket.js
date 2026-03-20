@@ -23,7 +23,7 @@ const WORKFLOW_DIR = path.join(PROJECT_DIR, '.workflow');
 const TICKETS_DIR = path.join(WORKFLOW_DIR, 'tickets');
 
 // Доступные статусы
-const VALID_STATUSES = ['backlog', 'ready', 'in-progress', 'blocked', 'review', 'done'];
+const VALID_STATUSES = ['backlog', 'ready', 'in-progress', 'blocked', 'review', 'done', 'archive'];
 
 // Таблица допустимых переходов
 const VALID_TRANSITIONS = {
@@ -32,7 +32,8 @@ const VALID_TRANSITIONS = {
   'in-progress': ['done', 'blocked', 'review'],
   'blocked': ['ready'],
   'review': ['done', 'ready', 'in-progress', 'blocked'],
-  'done': ['ready', 'blocked']
+  'done': ['ready', 'blocked', 'archive'],
+  'archive': ['backlog']
 };
 
 /**

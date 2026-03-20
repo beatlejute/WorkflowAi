@@ -198,7 +198,7 @@ export function checkAndClosePlan(workflowDir, planId) {
   }
 
   const ticketsDir = path.join(workflowDir, 'tickets');
-  const allDirNames = ['backlog', 'ready', 'in-progress', 'blocked', 'review', 'done'];
+  const allDirNames = ['backlog', 'ready', 'in-progress', 'blocked', 'review', 'done', 'archive'];
   const allTickets = [];
 
   for (const dirName of allDirNames) {
@@ -218,7 +218,7 @@ export function checkAndClosePlan(workflowDir, planId) {
   }
 
   const total = allTickets.length;
-  const done = allTickets.filter(t => t.dir === 'done').length;
+  const done = allTickets.filter(t => t.dir === 'done' || t.dir === 'archive').length;
 
   if (total === 0) {
     return { closed: false, reason: 'No tickets found for plan', total, done };
@@ -255,5 +255,32 @@ export function checkAndClosePlan(workflowDir, planId) {
 
   fs.writeFileSync(planPath, serializeFrontmatter(frontmatter) + body, 'utf8');
 
-  return { closed: true, reason: 'All tickets done', total, done };
+  // Архивируем все done-тикеты этого плана
+  const archiveDir = path.join(ticketsDir, 'archive');
+  if (!fs.existsSync(archiveDir)) {
+    fs.mkdirSync(archiveDir, { recursive: true });
+  }
+
+  const archived = [];
+  const doneDir = path.join(ticketsDir, 'done');
+  if (fs.existsSync(doneDir)) {
+    const doneTickets = allTickets.filter(t => t.dir === 'done');
+    for (const ticket of doneTickets) {
+      const srcPath = path.join(doneDir, `${ticket.id}.md`);
+      const destPath = path.join(archiveDir, `${ticket.id}.md`);
+      try {
+        if (fs.existsSync(srcPath)) {
+          const content = fs.readFileSync(srcPath, 'utf8');
+          const { frontmatter: fm, body: bd } = parseFrontmatter(content);
+          fm.updated_at = new Date().toISOString();
+          fm.archived_at = new Date().toISOString();
+          fs.writeFileSync(destPath, serializeFrontmatter(fm) + bd, 'utf8');
+          fs.unlinkSync(srcPath);
+          archived.push(ticket.id);
+        }
+      } catch (_) { /* skip errors */ }
+    }
+  }
+
+  return { closed: true, reason: 'All tickets done', total, done, archived };
 }
