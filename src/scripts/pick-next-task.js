@@ -523,6 +523,12 @@ function pickNextTicket(planId) {
   const eligibleTickets = tickets.filter(ticket => {
     const { frontmatter } = ticket;
 
+    // Пропускаем тикеты, требующие ручного выполнения
+    if (frontmatter.type === 'human') {
+      logger.info(`Skipping ticket ${ticket.id}: type is 'human' (requires manual execution)`);
+      return false;
+    }
+
     // Проверка условий
     const conditions = frontmatter.conditions || [];
     const conditionsMet = conditions.every(checkCondition);
@@ -573,6 +579,61 @@ function pickNextTicket(planId) {
   };
 }
 
+/**
+ * Архивирует все done-тикеты, принадлежащие архивным планам (plans/archive/).
+ * Сканирует все планы в plans/archive/, находит их тикеты в done/ и перемещает в archive/.
+ */
+function archiveTicketsOfArchivedPlans() {
+  const archivedPlansDir = path.join(WORKFLOW_DIR, 'plans', 'archive');
+  if (!fs.existsSync(archivedPlansDir)) return { archived: [] };
+
+  // Собираем ID всех архивных планов
+  const archivedPlanIds = new Set();
+  const planFiles = fs.readdirSync(archivedPlansDir).filter(f => f.endsWith('.md'));
+  for (const file of planFiles) {
+    const id = normalizePlanId(file);
+    if (id) archivedPlanIds.add(id);
+  }
+
+  if (archivedPlanIds.size === 0) return { archived: [] };
+
+  if (!fs.existsSync(DONE_DIR)) return { archived: [] };
+
+  if (!fs.existsSync(ARCHIVE_DIR)) {
+    fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+  }
+
+  const archived = [];
+  const files = fs.readdirSync(DONE_DIR).filter(f => f.endsWith('.md') && f !== '.gitkeep.md');
+
+  for (const file of files) {
+    const filePath = path.join(DONE_DIR, file);
+    try {
+      const content = fs.readFileSync(filePath, 'utf8');
+      const { frontmatter, body } = parseFrontmatter(content);
+      const ticketPlanId = normalizePlanId(frontmatter.parent_plan);
+
+      if (!ticketPlanId || !archivedPlanIds.has(ticketPlanId)) continue;
+
+      const ticketId = frontmatter.id || file.replace('.md', '');
+
+      frontmatter.updated_at = new Date().toISOString();
+      frontmatter.archived_at = new Date().toISOString();
+
+      const destPath = path.join(ARCHIVE_DIR, file);
+      fs.writeFileSync(destPath, serializeFrontmatter(frontmatter) + body, 'utf8');
+      fs.unlinkSync(filePath);
+
+      archived.push(ticketId);
+      logger.info(`[ARCHIVE] ${ticketId}: done → archive (plan ${ticketPlanId} is archived)`);
+    } catch (e) {
+      logger.warn(`Failed to archive ticket ${file}: ${e.message}`);
+    }
+  }
+
+  return { archived };
+}
+
 // Main entry point
 async function main() {
   const planId = extractPlanId();
@@ -594,6 +655,12 @@ async function main() {
   const correctionResult = autoCorrectTickets(movementConfig);
   if (correctionResult.moved.length > 0) {
     logger.info(`Auto-corrected ${correctionResult.moved.length} ticket(s)`);
+  }
+
+  // Архивируем done-тикеты архивных планов
+  const archiveResult = archiveTicketsOfArchivedPlans();
+  if (archiveResult.archived.length > 0) {
+    logger.info(`Archived ${archiveResult.archived.length} ticket(s) from archived plans: ${archiveResult.archived.join(', ')}`);
   }
 
   if (planId) {

@@ -144,6 +144,13 @@ function checkBacklog(planId) {
 
   for (const ticket of tickets) {
     const { frontmatter, id } = ticket;
+
+    // Пропускаем тикеты, требующие ручного выполнения
+    if (frontmatter.type === 'human') {
+      console.log(`[INFO] ${id}: type is 'human', skipping (requires manual execution)`);
+      continue;
+    }
+
     const conditions = frontmatter.conditions || [];
     const dependencies = frontmatter.dependencies || [];
 

@@ -51,6 +51,12 @@ function moveToReady(ticketId) {
   const content = fs.readFileSync(sourcePath, 'utf8');
   const { frontmatter, body } = parseFrontmatter(content);
 
+  // Пропускаем тикеты, требующие ручного выполнения
+  if (frontmatter.type === 'human') {
+    console.log(`[INFO] ${ticketId}: type is 'human', skipping (requires manual execution)`);
+    return false;
+  }
+
   frontmatter.updated_at = new Date().toISOString();
 
   const newContent = serializeFrontmatter(frontmatter) + body;
