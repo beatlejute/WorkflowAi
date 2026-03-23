@@ -69,10 +69,14 @@ export function createHardlink(target, linkPath) {
   }
   rmSync(linkPath, { force: true });
 
-  if (isWindows) {
-    execSync(`mklink /H "${linkPath}" "${target}"`, { stdio: 'pipe' });
-  } else {
-    linkSync(target, linkPath);
+  try {
+    if (isWindows) {
+      execSync(`mklink /H "${linkPath}" "${target}"`, { stdio: 'pipe' });
+    } else {
+      linkSync(target, linkPath);
+    }
+  } catch {
+    cpSync(target, linkPath);
   }
 }
 

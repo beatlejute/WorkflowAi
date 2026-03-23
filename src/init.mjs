@@ -118,9 +118,10 @@ function generateSkillsTable(workflowRoot) {
  *
  * @param {string} workflowRoot - Путь к корню .workflow
  * @param {string} projectRoot - Путь к корню проекта
+ * @param {string} packageRoot - Путь к корню пакета
  */
-function generateClaudeMd(workflowRoot, projectRoot) {
-  const templatePath = join(workflowRoot, 'templates', 'agent-templates', 'CLAUDE.md.tpl');
+function generateClaudeMd(workflowRoot, projectRoot, packageRoot) {
+  const templatePath = join(packageRoot, 'agent-templates', 'CLAUDE.md.tpl');
   const destPath = join(projectRoot, 'CLAUDE.md');
   
   let content;
@@ -174,9 +175,10 @@ function generateClaudeMd(workflowRoot, projectRoot) {
  *
  * @param {string} workflowRoot - Путь к корню .workflow
  * @param {string} projectRoot - Путь к корню проекта
+ * @param {string} packageRoot - Путь к корню пакета
  */
-function generateQwenMd(workflowRoot, projectRoot) {
-  const templatePath = join(workflowRoot, 'templates', 'agent-templates', 'QWEN.md.tpl');
+function generateQwenMd(workflowRoot, projectRoot, packageRoot) {
+  const templatePath = join(packageRoot, 'agent-templates', 'QWEN.md.tpl');
   const destPath = join(projectRoot, 'QWEN.md');
   
   let content;
@@ -418,8 +420,8 @@ export function initProject(targetPath = process.cwd(), options = {}) {
   }
   
   // Step 8: Generate CLAUDE.md and QWEN.md
-  generateClaudeMd(workflowRoot, projectRoot);
-  generateQwenMd(workflowRoot, projectRoot);
+  generateClaudeMd(workflowRoot, projectRoot, packageRoot);
+  generateQwenMd(workflowRoot, projectRoot, packageRoot);
   result.steps.push('Generated CLAUDE.md and QWEN.md from agent-templates');
   
   // Step 9: Update .gitignore
