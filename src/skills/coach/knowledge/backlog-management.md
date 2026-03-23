@@ -11,8 +11,8 @@ last_updated: "2026-03-20"
 
 # Проанализированные тикеты
 analyzed_tickets:
-  - ticket_id: "GML-001"
-    ticket_file: "tickets/done/GML-001.md"
+  - ticket_id: "XXX-001"
+    ticket_file: "tickets/done/XXX-001.md"
     analyzed_date: "2026-03-20"
     coach_ticket: "COACH-005"  # тикет коуча, в рамках которого проведён анализ
     findings_count: 3
@@ -23,19 +23,19 @@ applied_changes:
   - change_id: "CHG-001"
     date: "2026-03-20"
     coach_ticket: "COACH-005"
-    target_skill: "growth-marketing-lead"
+    target_skill: "example-skill"
     changed_files:
-      - "src/skills/growth-marketing-lead/knowledge/market-sizing.md"
-      - "src/skills/growth-marketing-lead/workflows/analyze.md"
+      - "src/skills/example-skill/knowledge/market-sizing.md"
+      - "src/skills/example-skill/workflows/analyze.md"
     change_type: "improve"  # improve | fix | add | refactor
     description: "Добавлен knowledge-модуль market-sizing, уточнён воркфлоу анализа"
     based_on_tickets:
-      - "GML-001"
-      - "GML-003"
+      - "XXX-001"
+      - "XXX-003"
 
 # Скилы, прошедшие аудит
 audited_skills:
-  - skill_name: "growth-marketing-lead"
+  - skill_name: "example-skill"
     last_audit_date: "2026-03-20"
     coach_ticket: "COACH-004"
     score: 72
