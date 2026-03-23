@@ -1,6 +1,32 @@
-import { test } from 'node:test';
+import { test, beforeEach, afterEach } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { mkdirSync, rmSync } from 'node:fs';
 import { run } from '../cli.mjs';
+
+let testDir;
+let originalCwd;
+let originalWorkflowHome;
+
+beforeEach(() => {
+  originalCwd = process.cwd();
+  originalWorkflowHome = process.env.WORKFLOW_HOME;
+  testDir = join(tmpdir(), `cli-test-${Date.now()}`);
+  mkdirSync(testDir, { recursive: true });
+  process.chdir(testDir);
+  process.env.WORKFLOW_HOME = join(testDir, '.workflow-home');
+});
+
+afterEach(() => {
+  process.chdir(originalCwd);
+  if (originalWorkflowHome === undefined) {
+    delete process.env.WORKFLOW_HOME;
+  } else {
+    process.env.WORKFLOW_HOME = originalWorkflowHome;
+  }
+  rmSync(testDir, { recursive: true, force: true });
+});
 
 // ============ CLI Command Parsing Tests ============
 
@@ -123,12 +149,15 @@ test('workflow init with path executes', () => {
     loggedLines.push(args.join(' '));
   };
 
+  const initTarget = join(testDir, 'test-project');
+  mkdirSync(initTarget, { recursive: true });
+
   try {
-    run(['init', '/tmp/test-project']);
+    run(['init', initTarget]);
 
     const output = loggedLines.join('\n');
     assert.ok(
-      output.includes('Initialization completed') || 
+      output.includes('Initialization completed') ||
       output.includes('Errors:') ||
       output.length > 0,
       'init command should produce output'
