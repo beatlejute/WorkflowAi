@@ -14,8 +14,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import { findProjectRoot } from '../lib/find-root.mjs';
-import { parseFrontmatter, serializeFrontmatter, printResult } from '../lib/utils.mjs';
+import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
+import { parseFrontmatter, serializeFrontmatter, printResult } from 'workflow-ai/lib/utils.mjs';
 
 // Корень проекта
 const PROJECT_DIR = findProjectRoot();

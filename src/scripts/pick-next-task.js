@@ -20,9 +20,9 @@
 
 import fs from 'fs';
 import path from 'path';
-import { findProjectRoot } from '../lib/find-root.mjs';
-import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, getLastReviewStatus, serializeFrontmatter, loadTicketMovementRules, checkAndClosePlan } from '../lib/utils.mjs';
-import { createLogger } from '../lib/logger.mjs';
+import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
+import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, getLastReviewStatus, serializeFrontmatter, loadTicketMovementRules, checkAndClosePlan } from 'workflow-ai/lib/utils.mjs';
+import { createLogger } from 'workflow-ai/lib/logger.mjs';
 
 const logger = createLogger();
 

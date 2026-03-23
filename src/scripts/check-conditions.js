@@ -27,8 +27,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import { findProjectRoot } from '../lib/find-root.mjs';
-import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, serializeFrontmatter } from '../lib/utils.mjs';
+import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
+import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, serializeFrontmatter } from 'workflow-ai/lib/utils.mjs';
 
 const PROJECT_DIR = findProjectRoot();
 const WORKFLOW_DIR = path.join(PROJECT_DIR, '.workflow');

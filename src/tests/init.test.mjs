@@ -191,8 +191,16 @@ test('initProject updates .gitignore', () => {
 
     const gitignoreContent = readFileSync(gitignorePath, 'utf-8');
     assert.ok(
-      gitignoreContent.includes('.workflow/logs/'),
-      '.gitignore should include .workflow/logs/'
+      gitignoreContent.includes('.workflow/'),
+      '.gitignore should include .workflow/'
+    );
+    assert.ok(
+      gitignoreContent.includes('.kilocode/'),
+      '.gitignore should include .kilocode/'
+    );
+    assert.ok(
+      gitignoreContent.includes('CLAUDE.md'),
+      '.gitignore should include CLAUDE.md'
     );
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });

@@ -237,7 +237,18 @@ function generateQwenMd(workflowRoot, projectRoot, packageRoot) {
  */
 function updateGitignore(projectRoot) {
   const gitignorePath = join(projectRoot, '.gitignore');
-  const linesToAdd = ['.workflow/logs/'];
+  const linesToAdd = [
+    '',
+    '# Workflow AI specific',
+    '.workflow-state/',
+    '.cache/',
+    '.workflow/',
+    '',
+    '# AI',
+    'QWEN.md',
+    'CLAUDE.md',
+    '.kilocode/',
+  ];
   
   let currentContent = '';
   if (existsSync(gitignorePath)) {
@@ -246,10 +257,9 @@ function updateGitignore(projectRoot) {
   
   const existingLines = currentContent.split('\n').map(line => line.trim());
   
-  for (const line of linesToAdd) {
-    if (!existingLines.includes(line)) {
-      appendFileSync(gitignorePath, line + '\n');
-    }
+  const newLines = linesToAdd.filter(line => line === '' || !existingLines.includes(line));
+  if (newLines.some(line => line !== '')) {
+    appendFileSync(gitignorePath, newLines.join('\n') + '\n');
   }
 }
 
