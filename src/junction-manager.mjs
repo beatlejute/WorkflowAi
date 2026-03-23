@@ -101,6 +101,9 @@ export function createSkillJunctions(globalDir, projectSkillsDir) {
       const skillName = skill.name;
       const targetPath = join(globalSkillsDir, skillName);
       const linkPath = join(projectSkillsDir, skillName);
+      if (existsSync(linkPath) && !isJunction(linkPath)) {
+        continue;
+      }
       createJunction(targetPath, linkPath);
     }
   }

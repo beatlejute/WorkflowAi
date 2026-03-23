@@ -2,7 +2,7 @@ import { test, describe, beforeEach, afterEach } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { tmpdir, homedir } from 'node:os';
 import { join, basename } from 'node:path';
-import { existsSync, mkdirSync, rmSync, writeFileSync, readdirSync, lstatSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, lstatSync } from 'node:fs';
 import {
   createJunction,
   removeJunction,
@@ -164,6 +164,21 @@ describe('junction-manager module', () => {
       mkdirSync(emptyGlobalDir, { recursive: true });
       createSkillJunctions(emptyGlobalDir, join(projectDir, 'skills'));
       assert.strictEqual(existsSync(join(projectDir, 'skills')), false);
+    });
+
+    test('preserves ejected skills and does not overwrite them', () => {
+      const projectSkillsDir = join(projectDir, 'skills');
+      createSkillJunctions(globalDir, projectSkillsDir);
+      ejectSkill('skill1', globalDir, projectSkillsDir);
+      const customContent = '# Custom Skill 1';
+      writeFileSync(join(projectSkillsDir, 'skill1', 'SKILL.md'), customContent);
+
+      createSkillJunctions(globalDir, projectSkillsDir);
+
+      assert.strictEqual(isJunction(join(projectSkillsDir, 'skill1')), false);
+      const content = readFileSync(join(projectSkillsDir, 'skill1', 'SKILL.md'), 'utf-8');
+      assert.strictEqual(content, customContent);
+      assert.strictEqual(isJunction(join(projectSkillsDir, 'skill2')), true);
     });
   });
 
