@@ -39,7 +39,11 @@ function moveToReview(ticketId) {
   const targetPath = path.join(REVIEW_DIR, `${ticketId}.md`);
 
   if (!fs.existsSync(sourcePath)) {
-    // Ticket may have been moved directly to done/ by the agent — treat as already done
+    // Ticket may have been moved by the agent — check other locations
+    const reviewPath = path.join(REVIEW_DIR, `${ticketId}.md`);
+    if (fs.existsSync(reviewPath)) {
+      return { status: 'skipped', ticket_id: ticketId, reason: `${ticketId} already in review/` };
+    }
     const donePath = path.join(TICKETS_DIR, 'done', `${ticketId}.md`);
     if (fs.existsSync(donePath)) {
       return { status: 'skipped', ticket_id: ticketId, reason: `${ticketId} already in done/` };

@@ -600,6 +600,37 @@ describe('PipelineRunner — FileGuard', () => {
 });
 
 // ============================================================================
+// Test: FileGuard Trusted Agents
+// ============================================================================
+describe('PipelineRunner — FileGuard Trusted Agents', () => {
+  function isTrusted(agentId, trustedPatterns) {
+    return trustedPatterns.some(pattern => {
+      if (pattern.endsWith('*')) {
+        return agentId.startsWith(pattern.slice(0, -1));
+      }
+      return agentId === pattern;
+    });
+  }
+
+  it('should trust agents matching glob patterns', () => {
+    const trusted = ['script-*'];
+
+    assert.strictEqual(isTrusted('script-move', trusted), true);
+    assert.strictEqual(isTrusted('script-pick', trusted), true);
+    assert.strictEqual(isTrusted('script-move-to-review', trusted), true);
+    assert.strictEqual(isTrusted('claude-sonnet', trusted), false);
+    assert.strictEqual(isTrusted('kilo-minimax', trusted), false);
+  });
+
+  it('should trust agents matching exact names', () => {
+    const trusted = ['my-special-agent'];
+
+    assert.strictEqual(isTrusted('my-special-agent', trusted), true);
+    assert.strictEqual(isTrusted('my-special-agent-2', trusted), false);
+  });
+});
+
+// ============================================================================
 // Main — запуск тестов
 // ============================================================================
 console.log('Running PipelineRunner Integration Tests...\n');

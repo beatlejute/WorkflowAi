@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, appen
 import { join, resolve, dirname, basename } from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { getGlobalDir, ensureGlobalDir } from './global-dir.mjs';
+import { createSkillJunctions, createScriptHardlinks } from './junction-manager.mjs';
 
 /**
  * Возвращает абсолютный путь к корню npm-пакета через import.meta.url.
@@ -325,7 +327,7 @@ export function initProject(targetPath = process.cwd(), options = {}) {
     errors: []
   };
   
-  // Step 1: Create .workflow/ structure (17 directories)
+  // Step 1: Create .workflow/ structure (15 directories)
   const directories = [
     'tickets/backlog',
     'tickets/ready',
@@ -339,43 +341,26 @@ export function initProject(targetPath = process.cwd(), options = {}) {
     'logs',
     'templates',
     'config',
-    'src/skills',
-    'src/scripts',
-    'src/lib'
+    'src/skills'
   ];
   
   for (const dir of directories) {
     ensureDir(join(workflowRoot, dir));
   }
-  result.steps.push('Created .workflow/ directory structure (17 directories)');
-  
-  // Step 2: Copy skills recursively
-  const srcSkillsSrc = join(packageRoot, 'src', 'skills');
-  const srcSkillsDest = join(workflowRoot, 'src', 'skills');
-  copyDirRecursive(srcSkillsSrc, srcSkillsDest);
-  result.steps.push('Copied skills from getPackageRoot()/src/skills/ → .workflow/src/skills/');
-  
-  // Step 3: Copy scripts
-  const srcScriptsSrc = join(packageRoot, 'src', 'scripts');
-  const srcScriptsDest = join(workflowRoot, 'src', 'scripts');
-  copyDirRecursive(srcScriptsSrc, srcScriptsDest);
-  result.steps.push('Copied scripts from getPackageRoot()/src/scripts/ → .workflow/src/scripts/');
-  
-  // Step 4: Copy lib (utils.mjs + find-root.mjs)
-  const libSrc = join(packageRoot, 'src', 'lib');
-  const libDest = join(workflowRoot, 'src', 'lib');
-  ensureDir(libDest);
-  
-  const libFiles = ['utils.mjs', 'find-root.mjs', 'js-yaml.mjs', 'logger.mjs'];
+  result.steps.push('Created .workflow/ directory structure (15 directories)');
 
-  for (const file of libFiles) {
-    const fileSrc = join(libSrc, file);
-    if (existsSync(fileSrc)) {
-      copyFile(fileSrc, join(libDest, file));
-    }
-  }
-  result.steps.push('Copied lib files (utils.mjs, find-root.mjs, js-yaml.mjs) → .workflow/src/lib/');
-  
+  // Step 2: Ensure global dir and create skill junctions
+  const globalDir = getGlobalDir();
+  ensureGlobalDir(packageRoot);
+  const srcSkillsDest = join(workflowRoot, 'src', 'skills');
+  createSkillJunctions(globalDir, srcSkillsDest);
+  result.steps.push('Created skill junctions from global dir → .workflow/src/skills/');
+
+  // Step 3: Create script hardlinks
+  const srcScriptsDest = join(workflowRoot, 'src', 'scripts');
+  createScriptHardlinks(globalDir, srcScriptsDest);
+  result.steps.push('Created script hardlinks from global dir → .workflow/src/scripts/');
+
   // Step 5: Copy templates (3 templates)
   const templatesSrc = join(packageRoot, 'templates');
   const templatesDest = join(workflowRoot, 'templates');

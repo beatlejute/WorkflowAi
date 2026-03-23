@@ -543,13 +543,30 @@ class ResultParser {
 // FileGuard — защита файлов от несанкционированного изменения агентами
 // ============================================================================
 class FileGuard {
-  constructor(patterns, projectRoot = process.cwd()) {
+  constructor(patterns, projectRoot = process.cwd(), trustedAgents = []) {
     // Паттерны указаны относительно корня проекта
     this.patterns = (patterns || []).map(p => p.replace(/\\/g, '/'));
     this.enabled = this.patterns.length > 0;
     this.snapshots = new Map();
     // projectRoot — корневая директория проекта, относительно которой указаны паттерны
     this.projectRoot = projectRoot;
+    // Доверенные агенты — для них FileGuard не откатывает изменения
+    this.trustedAgents = trustedAgents;
+  }
+
+  /**
+   * Проверяет, является ли агент доверенным (пропускает FileGuard)
+   * Поддерживает glob-паттерны: "script-*" соответствует "script-move", "script-pick" и т.д.
+   * @param {string} agentId - ID агента
+   * @returns {boolean}
+   */
+  isTrusted(agentId) {
+    return this.trustedAgents.some(pattern => {
+      if (pattern.endsWith('*')) {
+        return agentId.startsWith(pattern.slice(0, -1));
+      }
+      return agentId === pattern;
+    });
   }
 
   /**
@@ -805,8 +822,9 @@ class StageExecutor {
       console.log(`  Skill: ${stage.skill}`);
     }
 
-    // Снимаем snapshot защищённых файлов перед выполнением
-    if (this.fileGuard) {
+    // Снимаем snapshot защищённых файлов перед выполнением (кроме trusted agents)
+    const skipGuard = this.fileGuard && this.fileGuard.isTrusted(agentId);
+    if (this.fileGuard && !skipGuard) {
       this.fileGuard.takeSnapshot();
     }
 
@@ -818,8 +836,8 @@ class StageExecutor {
       this.logger.stageComplete(stageId, result.status, result.exitCode);
     }
 
-    // Проверяем и откатываем несанкционированные изменения
-    if (this.fileGuard) {
+    // Проверяем и откатываем несанкционированные изменения (кроме trusted agents)
+    if (this.fileGuard && !skipGuard) {
       const violations = this.fileGuard.checkAndRollback();
       if (violations.length > 0) {
         result.violations = violations;
@@ -1100,7 +1118,8 @@ class PipelineRunner {
 
     // Инициализация FileGuard для защиты файлов от изменений агентами
     const protectedPatterns = this.pipeline.protected_files || [];
-    this.fileGuard = new FileGuard(protectedPatterns, projectRoot);
+    const trustedAgents = this.pipeline.trusted_agents || [];
+    this.fileGuard = new FileGuard(protectedPatterns, projectRoot, trustedAgents);
     this.projectRoot = projectRoot;
 
     // Настройка graceful shutdown
@@ -1573,4 +1592,4 @@ async function runPipeline(argv = process.argv.slice(2)) {
 }
 
 // Export for use as ES module
-export { runPipeline, parseArgs, PipelineRunner };
+export { runPipeline, parseArgs, PipelineRunner, FileGuard };

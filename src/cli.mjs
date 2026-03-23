@@ -3,8 +3,10 @@
 import { initProject } from './init.mjs';
 import { runPipeline } from './runner.mjs';
 import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getGlobalDir, refreshGlobalDir, ensureGlobalDir } from './global-dir.mjs';
+import { createSkillJunctions, createScriptHardlinks, ejectSkill, listSkillsWithStatus } from './junction-manager.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkgPath = join(__dirname, '..', 'package.json');
@@ -14,6 +16,9 @@ const HELP_TEXT = `workflow-ai v1.0.0
 Usage:
   workflow init [path] [--force]   Initialize .workflow/ in target directory
   workflow run [options]           Run the AI pipeline
+  workflow update [path]           Update global dir and recreate junctions/hardlinks
+  workflow eject <skill> [path]    Eject a skill (copy from global to project)
+  workflow list [path]             List skills with status (shared/ejected/project-only)
   workflow help                    Show this help
   workflow version                 Show version
 
@@ -76,6 +81,70 @@ async function runInit(args) {
   }
 }
 
+function getPackageRoot() {
+  return resolve(__dirname, '..');
+}
+
+function getWorkflowRoot(projectRoot) {
+  return join(projectRoot, '.workflow');
+}
+
+function runUpdate(args) {
+  const projectRoot = resolve(args._[0] || process.cwd());
+  const workflowRoot = getWorkflowRoot(projectRoot);
+  const packageRoot = getPackageRoot();
+  const globalDir = getGlobalDir();
+
+  refreshGlobalDir(packageRoot);
+  console.log('✅ Global dir updated (~/.workflow/)');
+
+  const skillsDir = join(workflowRoot, 'src', 'skills');
+  createSkillJunctions(globalDir, skillsDir);
+  console.log('✅ Skill junctions recreated');
+
+  const scriptsDir = join(workflowRoot, 'src', 'scripts');
+  createScriptHardlinks(globalDir, scriptsDir);
+  console.log('✅ Script hardlinks recreated');
+}
+
+function runEject(args) {
+  const skillName = args._[0];
+  if (!skillName) {
+    console.error('Error: skill name is required. Usage: workflow eject <skill>');
+    process.exit(1);
+  }
+  const projectRoot = resolve(args._[1] || process.cwd());
+  const workflowRoot = getWorkflowRoot(projectRoot);
+  const globalDir = getGlobalDir();
+  const skillsDir = join(workflowRoot, 'src', 'skills');
+
+  ejectSkill(skillName, globalDir, skillsDir);
+  console.log(`✅ Skill "${skillName}" ejected (copied to project)`);
+}
+
+function runList(args) {
+  const projectRoot = resolve(args._[0] || process.cwd());
+  const workflowRoot = getWorkflowRoot(projectRoot);
+  const globalDir = getGlobalDir();
+  const skillsDir = join(workflowRoot, 'src', 'skills');
+
+  const skills = listSkillsWithStatus(globalDir, skillsDir);
+
+  if (skills.length === 0) {
+    console.log('No skills found.');
+    return;
+  }
+
+  const maxName = Math.max(...skills.map(s => s.name.length), 4);
+  const maxStatus = Math.max(...skills.map(s => s.status.length), 6);
+
+  console.log(`${'Skill'.padEnd(maxName)}  ${'Status'.padEnd(maxStatus)}`);
+  console.log(`${'─'.repeat(maxName)}  ${'─'.repeat(maxStatus)}`);
+  for (const skill of skills) {
+    console.log(`${skill.name.padEnd(maxName)}  ${skill.status.padEnd(maxStatus)}`);
+  }
+}
+
 async function runRun(args) {
   // Expose wf's node_modules to child ESM scripts via a custom loader
   const loaderPath = join(__dirname, 'wf-loader.mjs');
@@ -108,6 +177,15 @@ export function run(argv) {
       break;
     case 'run':
       runRun(args);
+      break;
+    case 'update':
+      runUpdate(args);
+      break;
+    case 'eject':
+      runEject(args);
+      break;
+    case 'list':
+      runList(args);
       break;
     case 'help':
       showHelp();

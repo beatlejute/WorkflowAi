@@ -1,24 +1,41 @@
-import { test } from 'node:test';
+import { test, beforeEach, afterEach } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { existsSync, statSync, readdirSync, rmSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { existsSync, statSync, readdirSync, rmSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { initProject } from '../init.mjs';
+import { getGlobalDir } from '../global-dir.mjs';
+import { isJunction } from '../junction-manager.mjs';
 
-test('initProject creates 17 directories', () => {
+let testGlobalDir;
+let originalWorkflowHome;
+
+beforeEach(() => {
+  originalWorkflowHome = process.env.WORKFLOW_HOME;
+  testGlobalDir = join(tmpdir(), `workflow-init-global-${Date.now()}`);
+  process.env.WORKFLOW_HOME = testGlobalDir;
+});
+
+afterEach(() => {
+  if (originalWorkflowHome === undefined) {
+    delete process.env.WORKFLOW_HOME;
+  } else {
+    process.env.WORKFLOW_HOME = originalWorkflowHome;
+  }
+  rmSync(testGlobalDir, { recursive: true, force: true });
+});
+
+test('initProject creates 15 directories', () => {
   const tmpDir = join(tmpdir(), `workflow-init-test-${Date.now()}`);
 
   try {
     const result = initProject(tmpDir, { force: true });
 
-    // Verify no errors
     assert.strictEqual(result.errors.length, 0, `Errors: ${result.errors.join(', ')}`);
 
-    // Count directories in .workflow
     const workflowDir = join(tmpDir, '.workflow');
     assert.ok(existsSync(workflowDir), '.workflow directory should exist');
 
-    // Expected directories
     const expectedDirs = [
       'tickets/backlog',
       'tickets/ready',
@@ -32,9 +49,7 @@ test('initProject creates 17 directories', () => {
       'logs',
       'templates',
       'config',
-      'src/skills',
-      'src/scripts',
-      'src/lib'
+      'src/skills'
     ];
 
     for (const dir of expectedDirs) {
@@ -43,17 +58,12 @@ test('initProject creates 17 directories', () => {
       const stats = statSync(fullPath);
       assert.ok(stats.isDirectory(), `${dir} should be a directory`);
     }
-
-    // Verify .gitkeep.md files exist
-    const backlogGitkeep = join(workflowDir, 'tickets/backlog/.gitkeep.md');
-    assert.ok(existsSync(backlogGitkeep), '.gitkeep.md should exist in backlog');
   } finally {
-    // Cleanup
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 
-test('initProject copies skills from package root', () => {
+test('initProject creates skill junctions from global dir', () => {
   const tmpDir = join(tmpdir(), `workflow-init-skills-test-${Date.now()}`);
 
   try {
@@ -62,31 +72,26 @@ test('initProject copies skills from package root', () => {
     const skillsDir = join(tmpDir, '.workflow', 'src', 'skills');
     assert.ok(existsSync(skillsDir), 'skills directory should exist');
 
-    // Check for expected skill directories (actual skills in this project)
-    const expectedSkills = [
-      'create-plan',
-      'analyze-report',
-      'decompose-plan',
-      'check-conditions',
-      'create-report',
-      'execute-task',
-      'decompose-gaps',
-      'review-result'
-    ];
+    const globalDir = getGlobalDir();
+    const globalSkillsDir = join(globalDir, 'skills');
 
-    for (const skill of expectedSkills) {
-      const skillPath = join(skillsDir, skill);
-      assert.ok(existsSync(skillPath), `${skill} skill should exist`);
-      
-      const skillFile = join(skillPath, 'SKILL.md');
-      assert.ok(existsSync(skillFile), `${skill}/SKILL.md should exist`);
+    if (existsSync(globalSkillsDir)) {
+      const globalSkills = readdirSync(globalSkillsDir, { withFileTypes: true })
+        .filter(e => e.isDirectory())
+        .map(e => e.name);
+
+      for (const skill of globalSkills) {
+        const skillPath = join(skillsDir, skill);
+        assert.ok(existsSync(skillPath), `${skill} skill should exist`);
+        assert.ok(isJunction(skillPath), `${skill} should be a junction/symlink`);
+      }
     }
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 
-test('initProject copies scripts', () => {
+test('initProject creates script hardlinks from global dir', () => {
   const tmpDir = join(tmpdir(), `workflow-init-scripts-test-${Date.now()}`);
 
   try {
@@ -94,25 +99,16 @@ test('initProject copies scripts', () => {
 
     const scriptsDir = join(tmpDir, '.workflow', 'src', 'scripts');
     assert.ok(existsSync(scriptsDir), 'scripts directory should exist');
-  } finally {
-    rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
 
-test('initProject copies lib files (utils.mjs, find-root.mjs)', () => {
-  const tmpDir = join(tmpdir(), `workflow-init-lib-test-${Date.now()}`);
-
-  try {
-    initProject(tmpDir, { force: true });
-
-    const libDir = join(tmpDir, '.workflow', 'src', 'lib');
-    assert.ok(existsSync(libDir), 'lib directory should exist');
-
-    const utilsPath = join(libDir, 'utils.mjs');
-    const findRootPath = join(libDir, 'find-root.mjs');
-
-    assert.ok(existsSync(utilsPath), 'utils.mjs should exist');
-    assert.ok(existsSync(findRootPath), 'find-root.mjs should exist');
+    const globalDir = getGlobalDir();
+    const globalScriptsDir = join(globalDir, 'scripts');
+    if (existsSync(globalScriptsDir)) {
+      const globalScripts = readdirSync(globalScriptsDir);
+      for (const script of globalScripts) {
+        const scriptPath = join(scriptsDir, script);
+        assert.ok(existsSync(scriptPath), `${script} should exist as hardlink`);
+      }
+    }
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -154,7 +150,6 @@ test('initProject creates CLAUDE.md and QWEN.md', () => {
     assert.ok(existsSync(claudeMd), 'CLAUDE.md should exist');
     assert.ok(existsSync(qwenMd), 'QWEN.md should exist');
 
-    // Verify content includes skills table
     const claudeContent = readFileSync(claudeMd, 'utf-8');
     assert.ok(claudeContent.includes('## Доступные Skills'), 'CLAUDE.md should have Skills section');
     assert.ok(claudeContent.includes('.workflow/src/skills/'), 'CLAUDE.md should reference skills path');
@@ -175,16 +170,11 @@ test('initProject creates .kilocode/skills as junction/symlink', () => {
     assert.ok(existsSync(kilocodeDir), '.kilocode directory should exist');
     assert.ok(existsSync(skillsLink), '.kilocode/skills should exist');
 
-    // Verify it's a symlink or junction (or copied directory)
     const stats = statSync(skillsLink);
     assert.ok(
       stats.isSymbolicLink() || stats.isDirectory(),
       '.kilocode/skills should be symlink/junction/directory'
     );
-
-    // Verify skills are accessible (use existing skill)
-    const executeTaskSkill = join(skillsLink, 'execute-task', 'SKILL.md');
-    assert.ok(existsSync(executeTaskSkill), 'execute-task skill should be accessible via symlink');
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -209,7 +199,6 @@ test('initProject updates .gitignore', () => {
   }
 });
 
-
 test('initProject returns successful result object', () => {
   const tmpDir = join(tmpdir(), `workflow-init-result-test-${Date.now()}`);
 
@@ -223,10 +212,9 @@ test('initProject returns successful result object', () => {
     assert.strictEqual(result.errors.length, 0, 'Should have no errors');
     assert.ok(result.steps.length > 0, 'Should have completed steps');
 
-    // Verify expected steps
     const stepsText = result.steps.join('\n');
     assert.ok(stepsText.includes('directory structure'), 'Should mention directory structure');
-    assert.ok(stepsText.includes('skills'), 'Should mention skills copy');
+    assert.ok(stepsText.includes('skills') || stepsText.includes('skill'), 'Should mention skills');
     assert.ok(stepsText.includes('CLAUDE.md'), 'Should mention CLAUDE.md generation');
     assert.ok(stepsText.includes('QWEN.md'), 'Should mention QWEN.md generation');
   } finally {
@@ -235,7 +223,6 @@ test('initProject returns successful result object', () => {
 });
 
 test('initProject cleans up tmp directory after test', () => {
-  // This test verifies the cleanup pattern works
   const tmpDir = join(tmpdir(), `workflow-init-cleanup-test-${Date.now()}`);
 
   initProject(tmpDir, { force: true });

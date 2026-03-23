@@ -12,6 +12,8 @@
     "src/init.mjs",
     "src/runner.mjs",
     "src/wf-loader.mjs",
+    "src/global-dir.mjs",
+    "src/junction-manager.mjs",
     "src/lib/",
     "src/scripts/",
     "src/skills/",
