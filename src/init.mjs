@@ -95,13 +95,16 @@ function generateSkillsTable(workflowRoot) {
     'move-ticket': 'Перемещение тикета',
     'pick-next-task': 'Выбор следующей задачи',
     'decompose-gaps': 'Декомпозиция пробелов',
-    'review-result': 'Ревью результата'
+    'review-result': 'Ревью результата',
+    'check-relevance': 'Проверка актуальности',
+    'coach': 'Коуч скилов',
+    'deep-research': 'Глубокий ресерч'
   };
   
   let table = '| Задача | Инструкция |\n|--------|------------|\n';
   
   const skillDirs = readdirSync(skillsDir, { withFileTypes: true })
-    .filter(entry => entry.isDirectory())
+    .filter(entry => entry.isDirectory() || entry.isSymbolicLink())
     .map(entry => entry.name);
   
   for (const skillDir of skillDirs) {

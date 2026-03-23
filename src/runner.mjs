@@ -622,7 +622,7 @@ class FileGuard {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
       const entryPath = path.join(dir, entry.name).replace(/\\/g, '/');
-      if (entry.isDirectory()) {
+      if (entry.isDirectory() || entry.isSymbolicLink()) {
         files.push(...this._getAllFiles(entryPath));
       } else {
         files.push(entryPath);
