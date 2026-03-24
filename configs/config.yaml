@@ -43,6 +43,10 @@ task_types:
     prefix: HUMAN
     description: "Задачи, требующие действия человека"
 
+  rsh:
+    prefix: RSH
+    description: "Deep Research — глубокие исследования, анализ рынка/конкурентов/трендов, сбор бенчмарков, текстовые отчёты"
+
 # Приоритеты задач
 priorities:
   1:

@@ -43,6 +43,12 @@ pipeline:
       workdir: "."
       description: "Claude Opus — мощная модель для сложных задач"
 
+    claude-coach:
+      command: "claude"
+      args: ["--model", "claude-opus-4-6", "--permission-mode", "acceptEdits", "-p", "coach"]
+      workdir: "."
+      description: "Claude Opus — coach"
+
     qwen-code:
       command: "qwen"
       args: ["-y", "-p"]
@@ -315,6 +321,7 @@ pipeline:
       skill: execute-task
       counter: task_attempts
       agent_by_type:
+        coach: claude-coach
         impl: kilo-minimax
       # fix: claude-sonnet
         arch: claude-opus
