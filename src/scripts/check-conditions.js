@@ -145,12 +145,6 @@ function checkBacklog(planId) {
   for (const ticket of tickets) {
     const { frontmatter, id } = ticket;
 
-    // Пропускаем тикеты, требующие ручного выполнения
-    if (frontmatter.type === 'human') {
-      console.log(`[INFO] ${id}: type is 'human', skipping (requires manual execution)`);
-      continue;
-    }
-
     const conditions = frontmatter.conditions || [];
     const dependencies = frontmatter.dependencies || [];
 
@@ -159,6 +153,9 @@ function checkBacklog(planId) {
 
     if (depsMet && conditionsMet) {
       ready.push(id);
+      if (frontmatter.type === 'human') {
+        console.log(`[INFO] ${id}: type is 'human', moved to ready/ (requires manual execution)`);
+      }
     } else {
       const reasons = [];
       if (!depsMet) reasons.push(`ждёт зависимости: ${dependencies.join(', ')}`);
