@@ -35,6 +35,14 @@ task_types:
     prefix: ADMIN
     description: "Административные задачи"
 
+  coach:
+    prefix: COACH
+    description: "Улучшение и аудит скилов (обрабатывается коуч-скилом)"
+
+  human:
+    prefix: HUMAN
+    description: "Задачи, требующие действия человека"
+
 # Приоритеты задач
 priorities:
   1:
