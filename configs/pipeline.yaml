@@ -49,6 +49,12 @@ pipeline:
       workdir: "."
       description: "Claude Opus — coach"
 
+    claude-qa:
+      command: "claude"
+      args: ["--model", "claude-sonnet-4-6", "--permission-mode", "bypassPermissions ", "-p", "manual-testing"]
+      workdir: "."
+      description: "Claude Opus — QA"
+
     qwen-code:
       command: "qwen"
       args: ["-y", "-p"]
@@ -322,6 +328,7 @@ pipeline:
       counter: task_attempts
       agent_by_type:
         coach: claude-coach
+        qa: claude-qa
         impl: kilo-minimax
       # fix: claude-sonnet
         arch: claude-opus

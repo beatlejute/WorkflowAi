@@ -35,6 +35,10 @@ task_types:
     prefix: ADMIN
     description: "Административные задачи"
 
+  qa:
+    prefix: QA
+    description: "Написание тестов, проверка coverage, E2E-сценарии, тест-планы, валидация качества"
+
   coach:
     prefix: COACH
     description: "Улучшение и аудит скилов (обрабатывается коуч-скилом)"
