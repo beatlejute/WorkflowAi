@@ -33,19 +33,19 @@ pipeline:
   agents:
     claude-sonnet:
       command: "claude"
-      args: ["--model", "claude-sonnet-4-6", "--permission-mode", "acceptEdits", "-p"]
+      args: ["--model", "claude-sonnet-4-6", "--permission-mode", "bypassPermissions ", "-p"]
       workdir: "."
       description: "Claude Sonnet — быстрая модель для простых задач"
 
     claude-opus:
       command: "claude"
-      args: ["--model", "claude-opus-4-6", "--permission-mode", "acceptEdits", "-p"]
+      args: ["--model", "claude-opus-4-6", "--permission-mode", "bypassPermissions ", "-p"]
       workdir: "."
       description: "Claude Opus — мощная модель для сложных задач"
 
     claude-coach:
       command: "claude"
-      args: ["--model", "claude-opus-4-6", "--permission-mode", "acceptEdits", "-p", "coach"]
+      args: ["--model", "claude-opus-4-6", "--permission-mode", "bypassPermissions ", "-p", "coach"]
       workdir: "."
       description: "Claude Opus — coach"
 
