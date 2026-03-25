@@ -855,14 +855,35 @@ class StageExecutor {
       const timeout = this.pipeline.execution?.timeout_per_stage || 300;
       const args = [...agent.args];
 
-      // Если args содержит -p с ролью — объединяем роль и промпт в один аргумент
-      // Иначе Claude CLI интерпретирует роль как промпт, а реальный промпт игнорирует
+      // Формируем финальный промпт (с ролью если есть -p с значением)
       const lastPIdx = args.lastIndexOf('-p');
+      let finalPrompt;
       if (lastPIdx !== -1 && lastPIdx < args.length - 1) {
         const role = args[lastPIdx + 1];
-        args[lastPIdx + 1] = `${prompt}\n\nТвоя роль: ${role}`;
+        finalPrompt = `${prompt}\n\nТвоя роль: ${role}`;
       } else {
-        args.push(prompt);
+        finalPrompt = prompt;
+      }
+
+      // На Windows shell: true обрезает многострочные аргументы на \n (cmd.exe).
+      // Поэтому передаём промпт через stdin, а -p оставляем без значения (print mode).
+      const useShell = process.platform === 'win32' && agent.command !== 'node';
+      const useStdin = useShell && finalPrompt.includes('\n');
+
+      if (useStdin) {
+        // Убираем значение промпта из аргументов — оно пойдёт через stdin
+        if (lastPIdx !== -1 && lastPIdx < args.length - 1) {
+          // -p было с ролью-промптом — убираем значение, оставляем -p (print mode)
+          args.splice(lastPIdx + 1, 1);
+        }
+        // Для агентов без -p (kilo и т.д.) — промпт не добавляем в args, он пойдёт через stdin
+      } else {
+        // Однострочный промпт или не Windows — передаём через аргумент
+        if (lastPIdx !== -1 && lastPIdx < args.length - 1) {
+          args[lastPIdx + 1] = finalPrompt;
+        } else {
+          args.push(finalPrompt);
+        }
       }
 
       // Логгируем команду перед запуском (вместо промпта — имя skill)
@@ -880,11 +901,16 @@ class StageExecutor {
       const child = spawn(agent.command, args, {
         cwd: path.resolve(this.projectRoot, agent.workdir || '.'),
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: process.platform === 'win32' && agent.command !== 'node'
+        shell: useShell
       });
 
-      // Закрываем stdin чтобы агент не ждал дополнительного ввода
-      child.stdin.end();
+      // Передаём промпт через stdin или закрываем если не нужно
+      if (useStdin) {
+        child.stdin.write(finalPrompt);
+        child.stdin.end();
+      } else {
+        child.stdin.end();
+      }
 
       let stdout = '';
       let stderr = '';

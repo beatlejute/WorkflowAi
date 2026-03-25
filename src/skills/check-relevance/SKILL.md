@@ -229,8 +229,3 @@ reason: dod_completed
 - `relevant` → перейти к `execute-task`
 - `irrelevant` → переместить тикет в `done/` с пометкой
 - `default` (fallback) → `execute-task` (fail-safe)
-
-## Связанные skills
-
-- `execute-task` — выполняет задачу после проверки актуальности
-- `move-ticket` — перемещает неактуальные тикеты в done/
