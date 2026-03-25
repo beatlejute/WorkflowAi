@@ -94,4 +94,5 @@
 
 1. Прочитай шаблон: `.workflow/templates/plan-template.md`
 2. Определи следующий ID: найди все файлы `PLAN-*.md` в `.workflow/plans/` (рекурсивно), возьми максимальный номер и прибавь 1. Если файлов нет — начни с `PLAN-001`.
-3. Сохрани в: `.workflow/plans/current/PLAN-{NNN}.md`
+3. **Статус: `draft`** — план создаётся как черновик. Утверждение (`approved`) делает стейкхолдер. См. `knowledge/plan-lifecycle.md`.
+4. Сохрани в: `.workflow/plans/current/PLAN-{NNN}.md`

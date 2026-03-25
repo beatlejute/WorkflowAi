@@ -3,7 +3,7 @@
 
 id: "PLAN-{NNN}"
 title: "Название плана"
-status: draft                    # draft | active | completed | archived
+status: draft                    # draft | approved | active | completed | archived
 author: architect
 
 created_at: ""                   # ISO 8601
