@@ -2,10 +2,48 @@
 
 import fs from 'fs';
 import path from 'path';
-import { spawn, execSync } from 'child_process';
+import { spawn, execSync, exec } from 'child_process';
 import crypto from 'crypto';
 import yaml from './lib/js-yaml.mjs';
 import { findProjectRoot } from './lib/find-root.mjs';
+
+// ============================================================================
+// killProcessTree — убивает процесс и всех его потомков
+// На Windows child.kill() не убивает дочерние процессы (npx → node → python),
+// поэтому используем taskkill /T /F для уничтожения всего дерева.
+// ============================================================================
+function killProcessTree(child, logger = null) {
+  const pid = child.pid;
+  if (!pid) return;
+
+  if (process.platform === 'win32') {
+    try {
+      execSync(`taskkill /pid ${pid} /T /F`, { stdio: 'pipe' });
+    } catch {
+      // Процесс уже завершился — это нормально
+    }
+  } else {
+    // Unix: отправляем SIGTERM, через 5 сек — SIGKILL если ещё жив
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      return; // процесс уже завершился
+    }
+
+    setTimeout(() => {
+      try {
+        // Проверяем что процесс ещё жив (kill(0) не убивает, только проверяет)
+        process.kill(pid, 0);
+        child.kill('SIGKILL');
+        if (logger) {
+          logger.warn(`Process ${pid} did not exit after SIGTERM, sent SIGKILL`, 'ProcessCleanup');
+        }
+      } catch {
+        // Процесс уже завершился после SIGTERM — всё ок
+      }
+    }, 5000);
+  }
+}
 
 // ============================================================================
 // Logger — система логирования с уровнями DEBUG/INFO/WARN/ERROR
@@ -761,6 +799,19 @@ class StageExecutor {
     // Инициализируем билдер и парсер
     this.promptBuilder = new PromptBuilder(context, counters, previousResults);
     this.resultParser = new ResultParser();
+
+    // Трекинг активных дочерних процессов для cleanup
+    this.activeChildren = new Set();
+  }
+
+  /**
+   * Убивает все активные дочерние процессы
+   */
+  killAllChildren() {
+    for (const child of this.activeChildren) {
+      killProcessTree(child, this.logger);
+    }
+    this.activeChildren.clear();
   }
 
   /**
@@ -904,6 +955,9 @@ class StageExecutor {
         shell: useShell
       });
 
+      // Регистрируем дочерний процесс для cleanup
+      this.activeChildren.add(child);
+
       // Передаём промпт через stdin или закрываем если не нужно
       if (useStdin) {
         child.stdin.write(finalPrompt);
@@ -916,10 +970,11 @@ class StageExecutor {
       let stderr = '';
       let timedOut = false;
 
-      // Таймаут
+      // Таймаут — убиваем всё дерево процессов (на Windows child.kill не убивает внуков)
       const timeoutId = setTimeout(() => {
         timedOut = true;
-        child.kill('SIGTERM');
+        killProcessTree(child, this.logger);
+        this.activeChildren.delete(child);
         if (this.logger) {
           this.logger.timeout(stageId, timeout);
         }
@@ -969,6 +1024,7 @@ class StageExecutor {
 
       child.on('close', (code) => {
         clearTimeout(timeoutId);
+        this.activeChildren.delete(child);
         // Обрабатываем остаток буфера стриминга
         if (stdoutBuffer.trim()) {
           try {
@@ -1040,6 +1096,7 @@ class StageExecutor {
 
       child.on('error', (err) => {
         clearTimeout(timeoutId);
+        this.activeChildren.delete(child);
         if (!timedOut) {
           if (this.logger) {
             this.logger.error(`CLI error: ${err.message}`, stageId);
@@ -1156,6 +1213,9 @@ class PipelineRunner {
     this.fileGuard = new FileGuard(protectedPatterns, projectRoot, trustedAgents);
     this.projectRoot = projectRoot;
 
+    // Текущий executor для доступа к activeChildren при shutdown
+    this.currentExecutor = null;
+
     // Настройка graceful shutdown
     this.setupGracefulShutdown();
   }
@@ -1250,8 +1310,9 @@ class PipelineRunner {
         if (stage.type === 'update-counter') {
           result = this.executeUpdateCounter(this.currentStage, stage);
         } else {
-          const executor = new StageExecutor(this.config, this.context, this.counters, {}, this.fileGuard, this.logger, this.projectRoot);
-          result = await executor.execute(this.currentStage);
+          this.currentExecutor = new StageExecutor(this.config, this.context, this.counters, {}, this.fileGuard, this.logger, this.projectRoot);
+          result = await this.currentExecutor.execute(this.currentStage);
+          this.currentExecutor = null;
         }
 
         this.logger.info(`Stage ${this.currentStage} completed with status: ${result.status}`, 'PipelineRunner');
@@ -1435,13 +1496,32 @@ class PipelineRunner {
   setupGracefulShutdown() {
     const shutdown = (signal) => {
       if (this.logger) {
-        this.logger.info(`Received ${signal}. Shutting down gracefully...`, 'PipelineRunner');
+        this.logger.info(`Received ${signal}. Killing child processes and shutting down...`, 'PipelineRunner');
       }
       this.running = false;
+      // Убиваем все активные дочерние процессы (включая внуков на Windows)
+      if (this.currentExecutor) {
+        this.currentExecutor.killAllChildren();
+      }
     };
 
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+    // Финальный cleanup при выходе процесса — синхронный, последний шанс убить детей
+    process.on('exit', () => {
+      if (this.currentExecutor && this.currentExecutor.activeChildren.size > 0) {
+        for (const child of this.currentExecutor.activeChildren) {
+          if (child.pid) {
+            if (process.platform === 'win32') {
+              try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe' }); } catch {}
+            } else {
+              try { child.kill('SIGKILL'); } catch {}
+            }
+          }
+        }
+      }
+    });
   }
 }
 
