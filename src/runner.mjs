@@ -1002,8 +1002,16 @@ class StageExecutor {
         // Парсим результат из вывода агента через ResultParser
         const result = this.resultParser.parse(stdout, stageId);
 
-        // Если exit code ≠ 0 — это ошибка, которая может триггерить fallback
-        if (code !== 0) {
+        // Если exit code ≠ 0, но результат уже распарсен — используем его
+        if (code !== 0 && result.parsed && result.status && result.status !== 'default') {
+          if (this.logger) {
+            this.logger.warn(
+              `Agent exited with code ${code}, but RESULT was parsed (status: ${result.status}). Using parsed result.`,
+              stageId
+            );
+          }
+          // Проваливаемся в resolve ниже
+        } else if (code !== 0) {
           const err = new Error(`Agent exited with code ${code}`);
           err.code = 'NON_ZERO_EXIT';
           err.exitCode = code;

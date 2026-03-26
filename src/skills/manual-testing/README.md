@@ -18,7 +18,8 @@ manual-testing/
 │   ├── testing-types.md                  # Типы и подходы к тестированию
 │   ├── browser-tools.md                  # Инструменты работы с браузером (Playwright MCP)
 │   ├── desktop-tools.md                  # Инструменты работы с desktop-приложениями (Windows-MCP)
-│   └── test-case-design.md              # Техники проектирования тест-кейсов
+│   ├── test-case-design.md              # Техники проектирования тест-кейсов
+│   └── sandbox-testing.md              # Тестирование в изолированной среде (Windows Sandbox)
 ├── algorithms/
 │   ├── test-prioritization.md            # Приоритизация тест-кейсов
 │   └── bug-severity.md                   # Определение severity/priority бага
