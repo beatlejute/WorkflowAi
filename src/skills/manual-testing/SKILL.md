@@ -64,6 +64,7 @@ ticket_prefix: QA
 | `knowledge/desktop-tools.md` | При тестировании desktop-приложений (VSCode, Electron) — команды Windows-MCP, паттерны |
 | `knowledge/test-case-design.md` | При написании тест-кейсов — техники проектирования |
 | `knowledge/sandbox-testing.md` | При тестировании в изолированной среде — Windows Sandbox, .wsb конфиги, подключение MCP через сеть |
+| `../shared/*` | **Перед началом работы** проверь `../shared/README.md` — загрузи все модули, релевантные текущей задаче (карта UI продукта, предметные знания и др.) |
 
 ## Загрузка алгоритмов
 

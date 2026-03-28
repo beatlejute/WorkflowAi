@@ -8,40 +8,86 @@ import yaml from './lib/js-yaml.mjs';
 import { findProjectRoot } from './lib/find-root.mjs';
 
 // ============================================================================
-// killProcessTree — убивает процесс и всех его потомков
-// На Windows child.kill() не убивает дочерние процессы (npx → node → python),
-// поэтому используем taskkill /T /F для уничтожения всего дерева.
+// killProcessTree — убивает процесс и всех его потомков рекурсивно.
+// На Windows child.kill() не убивает дочерние процессы (npx → node → python).
+// taskkill /T /F не находит сирот (чей parent уже завершился).
+// Поэтому: сначала собираем всё дерево PID через wmic, потом убиваем снизу вверх.
 // ============================================================================
+function getDescendantPids(pid) {
+  if (process.platform !== 'win32') return [];
+  try {
+    const output = execSync(
+      `wmic process where (ParentProcessId=${pid}) get ProcessId /FORMAT:LIST`,
+      { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' }
+    );
+    const pids = [];
+    for (const line of output.split('\n')) {
+      const match = line.match(/ProcessId=(\d+)/);
+      if (match) {
+        const childPid = parseInt(match[1], 10);
+        pids.push(childPid);
+        // Рекурсивно собираем внуков
+        pids.push(...getDescendantPids(childPid));
+      }
+    }
+    return pids;
+  } catch {
+    return [];
+  }
+}
+
 function killProcessTree(child, logger = null) {
   const pid = child.pid;
   if (!pid) return;
 
   if (process.platform === 'win32') {
-    try {
-      execSync(`taskkill /pid ${pid} /T /F`, { stdio: 'pipe' });
-    } catch {
-      // Процесс уже завершился — это нормально
+    // Собираем всех потомков ДО убийства (иначе дерево разорвётся)
+    const allPids = [...getDescendantPids(pid), pid];
+
+    // Убиваем снизу вверх (сначала внуки, потом дети, потом root)
+    for (const p of allPids) {
+      try {
+        execSync(`taskkill /pid ${p} /F`, { stdio: 'pipe' });
+      } catch {
+        // Процесс уже завершился
+      }
+    }
+
+    if (logger && allPids.length > 1) {
+      logger.info(`Killed process tree: ${allPids.join(' → ')}`, 'ProcessCleanup');
     }
   } else {
     // Unix: отправляем SIGTERM, через 5 сек — SIGKILL если ещё жив
     try {
       child.kill('SIGTERM');
     } catch {
-      return; // процесс уже завершился
+      return;
     }
 
     setTimeout(() => {
       try {
-        // Проверяем что процесс ещё жив (kill(0) не убивает, только проверяет)
         process.kill(pid, 0);
         child.kill('SIGKILL');
         if (logger) {
           logger.warn(`Process ${pid} did not exit after SIGTERM, sent SIGKILL`, 'ProcessCleanup');
         }
       } catch {
-        // Процесс уже завершился после SIGTERM — всё ок
+        // Процесс уже завершился после SIGTERM
       }
     }, 5000);
+  }
+}
+
+// killPid — убивает один PID (для cleanup сирот)
+function killPid(pid) {
+  try {
+    if (process.platform === 'win32') {
+      execSync(`taskkill /pid ${pid} /F`, { stdio: 'pipe' });
+    } else {
+      process.kill(pid, 'SIGKILL');
+    }
+  } catch {
+    // уже завершился
   }
 }
 
@@ -802,16 +848,59 @@ class StageExecutor {
 
     // Трекинг активных дочерних процессов для cleanup
     this.activeChildren = new Set();
+    // Все PID'ы потомков (включая внуков), собранные при жизни процесса
+    this.trackedPids = new Set();
+    // Интервал для периодического сбора PID-дерева
+    this._pidScanInterval = null;
   }
 
   /**
-   * Убивает все активные дочерние процессы
+   * Начинает периодический сбор PID'ов потомков для всех активных child processes.
+   * Нужно потому что при завершении промежуточного процесса (npx, cmd.exe)
+   * дерево разрывается и потомки становятся сиротами — их уже не найти через parent PID.
+   */
+  _startPidTracking() {
+    if (this._pidScanInterval || process.platform !== 'win32') return;
+    this._pidScanInterval = setInterval(() => {
+      for (const child of this.activeChildren) {
+        if (child.pid) {
+          this.trackedPids.add(child.pid);
+          for (const pid of getDescendantPids(child.pid)) {
+            this.trackedPids.add(pid);
+          }
+        }
+      }
+    }, 3000);
+  }
+
+  /**
+   * Останавливает периодический сбор PID'ов
+   */
+  _stopPidTracking() {
+    if (this._pidScanInterval) {
+      clearInterval(this._pidScanInterval);
+      this._pidScanInterval = null;
+    }
+  }
+
+  /**
+   * Убивает все активные дочерние процессы и все ранее найденные PID'ы потомков
    */
   killAllChildren() {
+    this._stopPidTracking();
+
+    // Сначала убиваем известные child objects через killProcessTree
     for (const child of this.activeChildren) {
       killProcessTree(child, this.logger);
+      if (child.pid) this.trackedPids.delete(child.pid);
     }
     this.activeChildren.clear();
+
+    // Затем убиваем все ранее собранные PID'ы-сироты которые могли остаться
+    for (const pid of this.trackedPids) {
+      killPid(pid);
+    }
+    this.trackedPids.clear();
   }
 
   /**
@@ -957,6 +1046,8 @@ class StageExecutor {
 
       // Регистрируем дочерний процесс для cleanup
       this.activeChildren.add(child);
+      if (child.pid) this.trackedPids.add(child.pid);
+      this._startPidTracking();
 
       // Передаём промпт через stdin или закрываем если не нужно
       if (useStdin) {
@@ -1025,6 +1116,7 @@ class StageExecutor {
       child.on('close', (code) => {
         clearTimeout(timeoutId);
         this.activeChildren.delete(child);
+        if (this.activeChildren.size === 0) this._stopPidTracking();
         // Обрабатываем остаток буфера стриминга
         if (stdoutBuffer.trim()) {
           try {
@@ -1215,6 +1307,8 @@ class PipelineRunner {
 
     // Текущий executor для доступа к activeChildren при shutdown
     this.currentExecutor = null;
+    // Все PID'ы потомков всех executor'ов — для cleanup сирот при выходе
+    this.allTrackedPids = new Set();
 
     // Настройка graceful shutdown
     this.setupGracefulShutdown();
@@ -1312,6 +1406,10 @@ class PipelineRunner {
         } else {
           this.currentExecutor = new StageExecutor(this.config, this.context, this.counters, {}, this.fileGuard, this.logger, this.projectRoot);
           result = await this.currentExecutor.execute(this.currentStage);
+          // Сохраняем tracked PIDs для cleanup сирот при выходе
+          for (const pid of this.currentExecutor.trackedPids) {
+            this.allTrackedPids.add(pid);
+          }
           this.currentExecutor = null;
         }
 
@@ -1503,14 +1601,20 @@ class PipelineRunner {
       if (this.currentExecutor) {
         this.currentExecutor.killAllChildren();
       }
+      // Убиваем сирот от предыдущих stage'ей
+      for (const pid of this.allTrackedPids) {
+        killPid(pid);
+      }
+      this.allTrackedPids.clear();
     };
 
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-    // Финальный cleanup при выходе процесса — синхронный, последний шанс убить детей
+    // Финальный cleanup при выходе процесса — синхронный, последний шанс убить детей и сирот
     process.on('exit', () => {
-      if (this.currentExecutor && this.currentExecutor.activeChildren.size > 0) {
+      // Убиваем активные child objects (если shutdown во время работы stage)
+      if (this.currentExecutor) {
         for (const child of this.currentExecutor.activeChildren) {
           if (child.pid) {
             if (process.platform === 'win32') {
@@ -1520,6 +1624,21 @@ class PipelineRunner {
             }
           }
         }
+        // Добавляем PID'ы текущего executor'а
+        for (const pid of this.currentExecutor.trackedPids) {
+          this.allTrackedPids.add(pid);
+        }
+      }
+
+      // Убиваем все ранее собранные PID'ы потомков (сироты от всех stage'ей)
+      for (const pid of this.allTrackedPids) {
+        try {
+          if (process.platform === 'win32') {
+            execSync(`taskkill /pid ${pid} /F`, { stdio: 'pipe' });
+          } else {
+            process.kill(pid, 'SIGKILL');
+          }
+        } catch {}
       }
     });
   }
