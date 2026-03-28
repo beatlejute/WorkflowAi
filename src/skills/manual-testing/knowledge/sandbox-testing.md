@@ -155,6 +155,54 @@ echo [3/3] Starting windows-mcp server on port 8000...
 6. Сравнить скриншоты и поведение
 ```
 
+## Персистенция evidence из Sandbox
+
+**⚠️ КРИТИЧЕСКИ ВАЖНО: Sandbox — эфемерная среда. Все файлы внутри Sandbox удаляются при закрытии.**
+
+Если ты сохраняешь скриншоты или артефакты через `PowerShell` внутри Sandbox — они окажутся в файловой системе Sandbox (`C:\Users\WDAGUtilityAccount\...`), а **не на хосте**. При закрытии Sandbox всё будет потеряно.
+
+### Как сохранять evidence на хост
+
+| Способ | Описание | Когда использовать |
+|--------|----------|-------------------|
+| **Mapped folder (ReadOnly: false)** | Сохраняй файлы в mapped folder с `ReadOnly: false` — они записываются напрямую на диск хоста | Рекомендуемый способ. Настрой в .wsb: `<ReadOnly>false</ReadOnly>` для папки проекта |
+| **FileSystem MCP** | Используй `FileSystem` MCP-инструмент для записи файлов на хост | Если mapped folder read-only |
+| **Clipboard** | Скопируй содержимое через `clipboard` MCP и вставь на хосте | Для небольших текстовых данных |
+
+### Паттерн сохранения скриншотов
+
+```
+# Внутри Sandbox — сохранить скриншот в mapped folder (ReadOnly: false)
+PowerShell → "Add-Type -AssemblyName System.Drawing; ...Save('C:\Users\WDAGUtilityAccount\Desktop\project\reports\screenshot.png')"
+
+# Путь ДОЛЖЕН быть в mapped folder с ReadOnly: false
+# Проверь .wsb: <ReadOnly>false</ReadOnly> для папки reports/
+```
+
+### Типичная ловушка: ReadOnly mapped folder
+
+Если проект замаплен с `ReadOnly: true` (типичная конфигурация для безопасности), то `PowerShell Save()` внутри Sandbox **не запишет файл на хост** — он либо упадёт с ошибкой, либо запишет в эфемерную FS Sandbox.
+
+**Проверь .wsb:** если `<ReadOnly>true</ReadOnly>` для папки проекта — PowerShell-скриншоты внутри Sandbox **не персистятся**.
+
+### Рекомендуемый способ: Screenshot MCP + запись на хосте
+
+```
+1. Sandbox MCP → Screenshot (возвращает изображение в контекст агента)
+2. Хост → Write/Bash (сохранить base64-данные в reports/*.png на хосте)
+```
+
+Альтернатива: сохранять через `FileSystem` MCP в writable mapped folder (например `sandbox-env`), затем скопировать на хост через Bash.
+
+### Self-check: evidence на хосте
+
+После сохранения evidence **обязательно проверь на хосте** (не в Sandbox):
+```
+# На хосте (через обычный Bash, НЕ через Sandbox MCP):
+ls reports/*.png
+```
+Если 0 файлов — evidence потеряны. Пересохрани через Screenshot MCP + Write на хосте.
+
 ## Ограничения
 
 | Ограничение | Описание | Обходной путь |
