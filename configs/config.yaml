@@ -124,6 +124,7 @@ paths:
   tickets: tickets
   reports: reports
   templates: templates
+  plan_templates: plans/templates
   archive: archive
 
 # Настройки отчётности

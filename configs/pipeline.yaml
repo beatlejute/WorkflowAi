@@ -121,6 +121,12 @@ pipeline:
       workdir: "."
       description: "Скрипт для перемещения завершённых тикетов из in-progress/ в review/"
 
+    script-check-templates:
+      command: "node"
+      args: [".workflow/src/scripts/check-plan-templates.js"]
+      workdir: "."
+      description: "Проверка и активация шаблонов планов по триггерам"
+
       
   default_agent: qwen-code
 
@@ -185,8 +191,23 @@ pipeline:
           stage: move-to-review
           params:
             ticket_id: "$result.ticket_id"
-        empty: check-plan-decomposition
+        empty: check-plan-templates
         error: create-report
+
+    # -------------------------------------------------------------------------
+    # 0a. check-plan-templates
+    # Проверяет шаблоны планов в plans/templates/.
+    # Если триггер сработал — создаёт план в plans/current/ со статусом approved.
+    # Всегда переходит на check-plan-decomposition.
+    # -------------------------------------------------------------------------
+    check-plan-templates:
+      description: "Проверить шаблоны планов и создать планы по триггерам"
+      agent: script-check-templates
+      goto:
+        plan_created: check-plan-decomposition
+        no_triggers: check-plan-decomposition
+        default: check-plan-decomposition
+        error: check-plan-decomposition
 
     # -------------------------------------------------------------------------
     # 0b. check-plan-decomposition

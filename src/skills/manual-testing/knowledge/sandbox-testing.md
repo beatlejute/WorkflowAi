@@ -49,18 +49,23 @@ Sandbox не имеет предустановленных Python/pip/winget. И
 ### Структура офлайн-пакета
 
 ```
-sandbox-env/                      # Маппится на Desktop Sandbox
+tmp/sandbox/                      # Маппится на Desktop\sandbox-env в Sandbox
 ├── setup.cmd                     # Автозапуск: pip install + старт сервера
+├── pylibs/                       # uv и другие Python-утилиты
 └── tools/
     ├── python/                   # Python Embeddable (портативный, без установки)
     │   ├── python.exe
     │   ├── python313._pth        # import site раскомментирован
     │   ├── Lib/site-packages/    # pip предустановлен
     │   └── Scripts/              # windows-mcp.exe после pip install
-    └── wheels/                   # Все зависимости windows-mcp офлайн
-        ├── windows_mcp-*.whl
-        ├── fastmcp-*.whl
-        └── ... (90+ wheels)
+    ├── node/                     # Node.js портативный
+    │   ├── node.exe
+    │   └── npm.cmd
+    ├── wheels/                   # Все зависимости windows-mcp офлайн
+    │   ├── windows_mcp-*.whl
+    │   ├── fastmcp-*.whl
+    │   └── ... (90+ wheels)
+    └── workflow-ai-1.0.49.tgz   # workflow-ai npm-пакет
 ```
 
 ### setup.cmd (автозапуск)
@@ -92,11 +97,13 @@ echo [3/3] Starting windows-mcp server on port 8000...
 <Configuration>
   <MappedFolders>
     <MappedFolder>
-      <HostFolder>path\to\project</HostFolder>
-      <ReadOnly>true</ReadOnly>
+      <HostFolder>d:\Dev\workflowAiVsCode</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\workflowAiVsCode</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
     </MappedFolder>
     <MappedFolder>
-      <HostFolder>path\to\sandbox-env</HostFolder>
+      <HostFolder>d:\Dev\workflowAiVsCode\tmp\sandbox</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\sandbox-env</SandboxFolder>
       <ReadOnly>false</ReadOnly>
     </MappedFolder>
   </MappedFolders>
@@ -120,6 +127,24 @@ echo [3/3] Starting windows-mcp server on port 8000...
 | `ClipboardRedirection` | `Enable` | Общий буфер обмена хост↔Sandbox |
 | `LogonCommand` | Путь к скрипту | Автоматический запуск при старте Sandbox |
 
+## Quick-start checklist (перед тестированием)
+
+Минимальный набор проверок перед началом тест-кейсов. **Не трать MCP-бюджет на полную разведку инфраструктуры** — достаточно 3-4 вызовов:
+
+```
+1. Screenshot → MCP работает, Sandbox активен (визуальный контекст)
+2. PowerShell → Test-Path "<path-to-portable-vscode>" (VSCode доступен)
+3. PowerShell → Test-Path "<path-to-test-workspace>" (тестовый workspace доступен)
+4. → Переходи к запуску VSCode и тест-кейсам
+```
+
+**⛔ Hard gate:** если к 5-му MCP-вызову ты не запустил VSCode или не начал первый TC — **СТОП**. Пересмотри план. Ты тратишь бюджет на подготовку вместо тестирования.
+
+**Антипаттерны:**
+- 10+ MCP-вызовов на `Get-ChildItem`, `Test-Path`, `echo test > write-test.txt`, `Select-String` до первого тест-кейса. При бюджете 70-100 вызовов это 10-15% на разведку.
+- **Установка/запуск продукта из CLI перед UI-тестированием.** Если тикет тестирует UI расширения (sidebar, StatusBar, горячие клавиши) — **не устанавливай и не запускай CLI-инструменты** (`workflow run`, `npm install` и т.д.). Pipeline запускается через UI расширения, а не через терминал. CLI-запуск тестирует другой код path и не подтверждает работоспособность UI.
+- **Создание собственных конфигурационных файлов.** Не перезаписывай `pipeline.yaml` и другие конфиги без проверки — тестовый workspace может уже содержать подготовленные данные. Сначала проверь существующий конфиг, затем решай нужны ли изменения.
+
 ## Паттерны тестирования в Sandbox
 
 ### Полный цикл тестирования расширения VSCode
@@ -129,8 +154,7 @@ echo [3/3] Starting windows-mcp server on port 8000...
 2. Дождаться установки зависимостей (LogonCommand)
 3. Подключиться к windows-mcp внутри Sandbox через streamable-http
 4. shell → "code --extensionDevelopmentPath=C:\Users\WDAGUtilityAccount\Desktop\workflowAiVsCode d:\tmp"
-5. wait → 10 (VSCode + расширение загружаются)
-6. screenshot → начальное состояние
+5. screenshot → начальное состояние (латентность MCP достаточна для загрузки VSCode)
 7. Выполнить тест-кейсы через windows-mcp (snapshot, click, type, shortcut)
 8. Зафиксировать результаты (скриншоты сохраняются через mapped folder)
 9. Закрыть Sandbox
@@ -169,30 +193,38 @@ echo [3/3] Starting windows-mcp server on port 8000...
 | **FileSystem MCP** | Используй `FileSystem` MCP-инструмент для записи файлов на хост | Если mapped folder read-only |
 | **Clipboard** | Скопируй содержимое через `clipboard` MCP и вставь на хосте | Для небольших текстовых данных |
 
-### Паттерн сохранения скриншотов
+### Паттерн сохранения скриншотов (ГОТОВЫЙ РЕЦЕПТ)
+
+**Перед началом проверь `.wsb`** — как замаплен проект: `ReadOnly: true` или `false`.
+
+#### Если проект замаплен с `ReadOnly: false` (РЕКОМЕНДУЕМАЯ конфигурация)
+
+Сохраняй скриншоты **напрямую в `reports/`** внутри Sandbox — они записываются на диск хоста:
 
 ```
-# Внутри Sandbox — сохранить скриншот в mapped folder (ReadOnly: false)
-PowerShell → "Add-Type -AssemblyName System.Drawing; ...Save('C:\Users\WDAGUtilityAccount\Desktop\project\reports\screenshot.png')"
-
-# Путь ДОЛЖЕН быть в mapped folder с ReadOnly: false
-# Проверь .wsb: <ReadOnly>false</ReadOnly> для папки reports/
+# 1 MCP-вызов — сохранить скриншот напрямую в reports/ (пишется на хост)
+PowerShell → "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp = New-Object System.Drawing.Bitmap($b.Width,$b.Height); $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen(0,0,0,0,$b.Size); $bmp.Save('C:\Users\WDAGUtilityAccount\Desktop\workflowAiVsCode\reports\TICKET-ID-screenshot-TC-NNN.png'); $g.Dispose(); $bmp.Dispose()"
 ```
 
-### Типичная ловушка: ReadOnly mapped folder
+**Итого: 1 MCP-вызов на скриншот.** Файл сразу появляется на хосте.
 
-Если проект замаплен с `ReadOnly: true` (типичная конфигурация для безопасности), то `PowerShell Save()` внутри Sandbox **не запишет файл на хост** — он либо упадёт с ошибкой, либо запишет в эфемерную FS Sandbox.
+#### Если проект замаплен с `ReadOnly: true` (fallback)
 
-**Проверь .wsb:** если `<ReadOnly>true</ReadOnly>` для папки проекта — PowerShell-скриншоты внутри Sandbox **не персистятся**.
-
-### Рекомендуемый способ: Screenshot MCP + запись на хосте
+Бинарная запись (PNG через `Save()`, `File.Copy()`) в ReadOnly mapped folder **заблокирована** даже если `New-Item` и `Out-File` работают. Используй двухшаговый паттерн:
 
 ```
-1. Sandbox MCP → Screenshot (возвращает изображение в контекст агента)
-2. Хост → Write/Bash (сохранить base64-данные в reports/*.png на хосте)
+# Шаг 1: Внутри Sandbox — сохранить в writable mapped folder (sandbox-env)
+PowerShell → "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp = New-Object System.Drawing.Bitmap($b.Width,$b.Height); $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen(0,0,0,0,$b.Size); $bmp.Save('C:\Users\WDAGUtilityAccount\Desktop\sandbox-env\TICKET-ID-screenshot-TC-NNN.png'); $g.Dispose(); $bmp.Dispose()"
+
+# Шаг 2: На хосте — скопировать из sandbox-env в reports/
+Bash → cp "<host-path-to-sandbox-env>/TICKET-ID-screenshot-TC-NNN.png" "<project-root>/reports/TICKET-ID-screenshot-TC-NNN.png"
 ```
 
-Альтернатива: сохранять через `FileSystem` MCP в writable mapped folder (например `sandbox-env`), затем скопировать на хост через Bash.
+**Итого: 2 MCP-вызова.** Не экспериментируй с другими способами — `Get-Acl`, retry `Save`, try/catch не помогут.
+
+### Self-check: evidence на хосте
+
+**⚠️ Конечный путь evidence — всегда `reports/` на хосте.** Self-check проверяет именно `reports/*.png`.
 
 ### Self-check: evidence на хосте
 
@@ -211,7 +243,7 @@ ls reports/*.png
 | Время запуска | 30-60 сек на старт + установка зависимостей | Pre-built скрипты, портативные версии |
 | Один экземпляр | Только один Sandbox одновременно | Последовательное тестирование |
 | Windows 11 24H2+ | Sandbox MCP требует новую версию | Для старых версий — ручной запуск .wsb + скрипты |
-| Производительность | UI может быть медленнее, чем на хосте | Увеличить `wait` между действиями |
+| Производительность | UI может быть медленнее, чем на хосте | Латентность MCP (3-10 сек) компенсирует — `Wait` не нужен |
 
 ## Когда использовать Sandbox vs хост
 
@@ -223,5 +255,44 @@ ls reports/*.png
 | Тестирование установщика | Нет | Да |
 | Регулярные регрессии | Да (быстрее) | Опционально |
 | Воспроизведение бага окружения | Не всегда | Да |
+
+## Стабильность MCP-соединения и Sandbox
+
+**⚠️ Sandbox может закрыться в любой момент** — по таймауту, из-за нехватки ресурсов хоста, или при случайном закрытии окна. При закрытии Sandbox MCP-соединение (`sandbox-desktop`) обрывается без предупреждения.
+
+### Приоритизация тест-кейсов по длительности
+
+Планируй порядок TC с учётом риска disconnect:
+
+| Фаза | Тип TC | Примеры | MCP-вызовов |
+|------|--------|---------|-------------|
+| **Сначала** | Быстрые проверки (Snapshot + визуальная верификация) | Idle-состояние, наличие UI-элементов, sidebar-секции | 2-3 на TC |
+| **Затем** | Действие + немедленная проверка | Запуск → скриншот, клик → проверка результата | 4-6 на TC |
+| **В конце** | Длительные TC с ожиданием | Stop Pipeline (запуск + ожидание 15-30с + действие), Clear History | 6-10 на TC |
+
+**Правило:** чем дольше TC выполняется — тем выше риск что MCP отключится в процессе. Выполняй быстрые TC первыми, чтобы максимизировать покрытие за сессию.
+
+### При MCP disconnect
+
+1. **Немедленно зафиксируй результаты** — обнови тикет со всеми выполненными TC, пока контекст свежий
+2. **Не пытайся переподключиться** в текущей сессии — Sandbox закрылся, MCP-сервер больше не работает
+3. **Перечисли оставшиеся TC** в тикете для следующей сессии
+4. **Evidence на хосте сохранены** — mapped folder (ReadOnly: false) пишет напрямую на диск хоста, закрытие Sandbox не удаляет их
+
+### Антипаттерн: длительный TC в начале сессии
+
+Не начинай с TC, который требует запуска pipeline → ожидания 30с → действия (Stop). Если MCP отключится в середине — потеряешь и этот TC, и все быстрые TC которые мог бы успеть выполнить.
+
+### Антипаттерн: ожидание автоматической смены UI-состояния
+
+Не трать MCP-вызовы на цикл `Wait → Screenshot → «ещё не сменилось» → Wait → Screenshot...` в ожидании перехода состояния (например, `Completed → Idle`). Если нужно повторить действие — запускай его сразу (Command Palette → команда), не дожидаясь промежуточного состояния. UI-команды работают в любом состоянии.
+
+```
+# ❌ ПЛОХО — 6 MCP-вызовов впустую
+Wait(5) → Screenshot → "ещё Completed" → Wait(8) → Screenshot → "ещё Completed" → Snapshot
+
+# ✅ ХОРОШО — сразу запустить повторно
+Shortcut(ctrl+shift+p) → Type("WF: Run Pipeline") → Snapshot → ...
+```
 
 <!-- РАСШИРЕНИЕ: добавляй новые паттерны изолированного тестирования ниже -->
