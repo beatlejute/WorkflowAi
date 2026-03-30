@@ -36,47 +36,7 @@ ticket_prefix: RSH
 
 ## ⛔ Основной инструмент исследования: perplexity-research
 
-**ОБЯЗАТЕЛЬНО:** Все исследования выполняются через `perplexity-research.js`. Это НЕ опциональный инструмент — это основной метод сбора данных для RSH-тикетов. **Запрещено** подменять его встроенным web_search/web_fetch другого агента. Даже если тикет указывает другой инструмент — используй `perplexity-research.js` (тикет описывает *что* собрать, а *как* — решает этот скил).
-
-Скрипт вызывает Perplexity API напрямую (без tool use) через kilo proxy. Perplexity даёт верифицированные источники с прямыми URL — качество выше, чем у обычного web search.
-
-### Вызов
-
-```bash
-# Базовый (deep research, медленно, ~5-10 минут, но глубоко)
-node .workflow/src/skills/deep-research/scripts/perplexity-research.js "тема исследования"
-
-# Быстрый (sonar, ~10-30 сек, менее глубокий)
-node .workflow/src/skills/deep-research/scripts/perplexity-research.js --model perplexity/sonar "тема"
-
-# С кастомным системным промптом
-node .workflow/src/skills/deep-research/scripts/perplexity-research.js --system "Ты аналитик рынка VPN..." "тема"
-```
-
-### Модели
-
-| Модель | Скорость | Глубина | Когда использовать |
-|--------|----------|---------|-------------------|
-| `perplexity/sonar-deep-research` | 5-10 мин | Максимальная | По умолчанию, основные исследования |
-| `perplexity/sonar-pro` | 10-30 сек | Высокая | Когда нужен быстрый ответ с источниками |
-| `perplexity/sonar` | 5-15 сек | Средняя | Простые справки, проверка фактов |
-| `perplexity/sonar-reasoning-pro` | 30-60 сек | Высокая | Аналитические вопросы с рассуждениями |
-
-### Результат
-
-Скрипт выводит markdown в stdout. Агент сам решает куда записать результат (например в `reports/`).
-
-### Workflow
-
-1. Основной агент получает RSH-тикет
-2. Формирует запрос для исследования из описания тикета
-3. **Запускает `perplexity-research.js` через bash** — это обязательный шаг, не заменяемый другими инструментами
-4. Анализирует, дополняет и оформляет финальный отчёт в `reports/`
-5. В секции «Agent used» указывает `perplexity-research.js` + модель
-
-**ВАЖНО:** Для работы скрипта необходим HTTPS_PROXY (настроен в env).
-
-**Если скрипт не работает** (ошибка сети, 403, таймаут) — зафиксируй ошибку в тикете и используй WebSearch/WebFetch как **fallback**, явно указав причину: «perplexity-research.js недоступен: {ошибка}».
+**ОБЯЗАТЕЛЬНО:** Все исследования выполняются через `perplexity-research.js`. Запрещено подменять web_search/web_fetch. При работе с perplexity → загрузи `knowledge/perplexity-config.md`.
 
 ## Загрузка знаний
 
@@ -85,6 +45,7 @@ node .workflow/src/skills/deep-research/scripts/perplexity-research.js --system 
 | `knowledge/research-methodology.md` | **ВСЕГДА** — методология проведения исследований |
 | `knowledge/source-evaluation.md` | При оценке надёжности источников |
 | `knowledge/data-validation.md` | При верификации найденных данных |
+| `knowledge/perplexity-config.md` | При работе с perplexity-research.js — вызов, модели, fallback |
 
 ## Загрузка алгоритмов
 

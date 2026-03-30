@@ -17,9 +17,11 @@ manual-testing/
 ├── knowledge/
 │   ├── testing-types.md                  # Типы и подходы к тестированию
 │   ├── browser-tools.md                  # Инструменты работы с браузером (Playwright MCP)
-│   ├── desktop-tools.md                  # Инструменты работы с desktop-приложениями (Windows-MCP)
+│   ├── desktop-tools-core.md              # Desktop-инструменты: core (Click, Type, Screenshot, Scrape, навигация)
+│   ├── desktop-tools-advanced.md          # Desktop-инструменты: advanced (Snapshot, MultiEdit, Registry, Process)
 │   ├── test-case-design.md              # Техники проектирования тест-кейсов
-│   └── sandbox-testing.md              # Тестирование в изолированной среде (Windows Sandbox)
+│   ├── sandbox-core.md                 # Sandbox: quick-start, evidence persistence, ограничения
+│   └── sandbox-advanced.md             # Sandbox: .wsb конфиг, MCP disconnect, continuation
 ├── algorithms/
 │   ├── test-prioritization.md            # Приоритизация тест-кейсов
 │   └── bug-severity.md                   # Определение severity/priority бага

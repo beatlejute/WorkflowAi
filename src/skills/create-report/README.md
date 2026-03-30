@@ -10,8 +10,10 @@ create-report/
 ├── README.md                             # Документация
 ├── workflows/
 │   └── standard.md                       # Стандартный отчёт об итерации
-└── knowledge/
-    └── report-metrics.md                 # Формулы velocity, метрики прогресса, пороги
+├── knowledge/
+│   └── report-metrics.md                 # Формулы velocity, метрики прогресса, пороги
+└── algorithms/
+    └── metric-calculation.md             # Расчёт velocity, plan health, распределения, аномалий
 ```
 
 ## Как это работает

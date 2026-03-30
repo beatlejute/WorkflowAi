@@ -6,25 +6,11 @@
 
 ```
 deep-research/
-├── SKILL.md                          # Ядро: роль, маршрутизация, принципы
-├── README.md                         # Документация
-├── workflows/
-│   ├── market.md                     # Исследование рынка
-│   ├── competitor.md                 # Анализ конкурентов
-│   ├── trend.md                      # Исследование трендов
-│   ├── benchmark.md                  # Сбор бенчмарков
-│   ├── technology.md                 # Обзор технологий
-│   └── custom.md                     # Кастомное исследование
-├── knowledge/
-│   ├── research-methodology.md       # Методология исследований
-│   ├── source-evaluation.md          # Оценка надёжности источников
-│   └── data-validation.md            # Валидация данных
-├── algorithms/
-│   ├── source-scoring.md             # Скоринг источников (1-10)
-│   └── synthesis.md                  # Синтез выводов
-└── templates/
-    ├── research-report.md            # Полный исследовательский отчёт
-    └── brief-summary.md              # Краткая справка
+├── SKILL.md              # Ядро: роль, маршрутизация, принципы
+├── workflows/            # market, competitor, trend, benchmark, technology, custom, base-checklist
+├── knowledge/            # research-methodology, source-evaluation, data-validation, perplexity-config
+├── algorithms/           # source-scoring, synthesis
+└── templates/            # research-report, brief-summary
 ```
 
 ## Как это работает

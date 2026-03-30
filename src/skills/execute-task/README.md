@@ -8,6 +8,8 @@
 execute-task/
 ├── SKILL.md                    # Ядро: роль, ограничения, принципы
 ├── README.md                   # Этот файл
+├── algorithms/
+│   └── execution-strategy.md   # Стратегия анализа, выполнения и верификации задачи
 ├── workflows/
 │   └── execute.md              # Единый универсальный воркфлоу выполнения
 └── knowledge/

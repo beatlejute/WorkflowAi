@@ -42,7 +42,7 @@
 
 Для каждого тест-кейса:
 1. Подготовь тестовые данные
-2. Выполни шаги через подходящий инструмент (см. таблицу в SKILL.md → «Выбор инструмента») — `knowledge/browser-tools.md` или `knowledge/desktop-tools.md`. Для изолированной среды — `knowledge/sandbox-testing.md`
+2. Выполни шаги через подходящий инструмент (см. таблицу в SKILL.md → «Выбор инструмента») — `knowledge/browser-tools.md` или `knowledge/desktop-tools-core.md`. Для изолированной среды — `knowledge/sandbox-core.md`
 3. Сравни результат с ожидаемым из AC
 4. Зафиксируй: `PASS` / `FAIL` / `BLOCKED`
 5. При `FAIL` — скриншот + детальное описание расхождения

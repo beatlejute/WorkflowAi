@@ -8,10 +8,14 @@
 create-plan/
 ├── SKILL.md                          # Ядро: роль, маршрутизация, принципы
 ├── README.md                         # Документация
+├── algorithms/
+│   └── risk-assessment.md            # Матрица рисков, критерии, митигация
 ├── workflows/
 │   └── create.md                     # Создание плана из ТЗ / спецификации
 └── knowledge/
-    └── plan-completeness.md          # Чеклист полноты плана, правила извлечения данных
+    ├── plan-completeness.md          # Чеклист полноты плана
+    ├── plan-lifecycle.md             # Статусы планов
+    └── task-verification-pairs.md    # Парные задачи верификации
 ```
 
 ## Как это работает

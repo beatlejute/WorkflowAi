@@ -36,8 +36,8 @@
 
 Для каждого тест-кейса:
 1. Прочитай предусловия и подготовь данные
-2. Определи инструмент (см. таблицу в SKILL.md → «Выбор инструмента»). Для изолированной среды — `knowledge/sandbox-testing.md`
-3. Выполни шаги через выбранный инструмент — `knowledge/browser-tools.md` или `knowledge/desktop-tools.md`
+2. Определи инструмент (см. таблицу в SKILL.md → «Выбор инструмента»). Для изолированной среды — `knowledge/sandbox-core.md`
+3. Выполни шаги через выбранный инструмент — `knowledge/browser-tools.md` или `knowledge/desktop-tools-core.md`
 4. Сравни фактический результат с ожидаемым
 4. Зафиксируй статус: `PASS` / `FAIL` / `BLOCKED` / `SKIPPED`
 5. При `FAIL` — скриншот + баг-репорт → `templates/bug-report.md`
