@@ -8,143 +8,6 @@ import yaml from './lib/js-yaml.mjs';
 import { findProjectRoot } from './lib/find-root.mjs';
 
 // ============================================================================
-// ProcessTracker — файловый трекинг дочерних процессов.
-//
-// Проблема: runner spawn → claude CLI → npx → node (MCP-сервер).
-// При жёстком завершении runner'а (kill, закрытие терминала) process.on('exit')
-// не срабатывает, MCP-серверы остаются сиротами навсегда.
-//
-// Решение: PID-файл (.workflow/logs/.runner-pids).
-// - Перед spawn: записываем снапшот существующих PID'ов в файл
-// - При старте runner'а: читаем файл, вычисляем сирот (текущие − снапшот), убиваем
-// - Файл переживает крэш/kill — cleanup гарантирован при следующем запуске
-// ============================================================================
-const PIDFILE_NAME = '.runner-pids';
-
-function getPidFilePath(projectRoot) {
-  return path.resolve(projectRoot, '.workflow/logs', PIDFILE_NAME);
-}
-
-function getProcessSnapshot() {
-  if (process.platform !== 'win32') return new Set();
-  try {
-    const output = execSync(
-      'wmic process where "name=\'node.exe\' or name=\'python.exe\' or name=\'python3.exe\' or name=\'cmd.exe\'" get ProcessId /FORMAT:LIST',
-      { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8', timeout: 5000 }
-    );
-    const pids = new Set();
-    for (const line of output.split('\n')) {
-      const match = line.match(/ProcessId=(\d+)/);
-      if (match) pids.add(parseInt(match[1], 10));
-    }
-    return pids;
-  } catch {
-    return new Set();
-  }
-}
-
-/**
- * Записывает снапшот + runner PID в файл.
- * Формат: JSON { runnerPid, snapshot: [...], timestamp }
- */
-function writePidFile(pidFilePath, snapshot) {
-  try {
-    const dir = path.dirname(pidFilePath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(pidFilePath, JSON.stringify({
-      runnerPid: process.pid,
-      snapshot: [...snapshot],
-      timestamp: new Date().toISOString()
-    }));
-  } catch { /* non-critical */ }
-}
-
-/**
- * Читает PID-файл. Возвращает { runnerPid, snapshot } или null.
- */
-function readPidFile(pidFilePath) {
-  try {
-    if (!fs.existsSync(pidFilePath)) return null;
-    const data = JSON.parse(fs.readFileSync(pidFilePath, 'utf-8'));
-    return {
-      runnerPid: data.runnerPid,
-      snapshot: new Set(data.snapshot || [])
-    };
-  } catch {
-    return null;
-  }
-}
-
-function removePidFile(pidFilePath) {
-  try { fs.unlinkSync(pidFilePath); } catch { /* ok */ }
-}
-
-/**
- * Cleanup сирот от предыдущего запуска.
- * Читает PID-файл, берёт текущие процессы, убивает разницу (текущие − снапшот).
- * Пропускает собственный PID runner'а.
- */
-function cleanupOrphansFromFile(pidFilePath, logger = null) {
-  const saved = readPidFile(pidFilePath);
-  if (!saved) return;
-
-  // Проверяем что предыдущий runner мёртв (иначе не трогаем — он ещё работает)
-  if (saved.runnerPid && isProcessAlive(saved.runnerPid)) {
-    return;
-  }
-
-  const currentPids = getProcessSnapshot();
-  const orphans = [];
-  for (const pid of currentPids) {
-    if (!saved.snapshot.has(pid) && pid !== process.pid) {
-      orphans.push(pid);
-    }
-  }
-
-  if (orphans.length > 0) {
-    killPids(orphans, logger);
-  }
-
-  removePidFile(pidFilePath);
-}
-
-function isProcessAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function killPids(pids, logger = null) {
-  if (pids.length === 0) return;
-  if (process.platform === 'win32') {
-    for (const pid of pids) {
-      try {
-        execSync(`taskkill /pid ${pid} /F`, { stdio: 'pipe' });
-      } catch { /* already dead */ }
-    }
-  } else {
-    for (const pid of pids) {
-      try { process.kill(pid, 'SIGKILL'); } catch { /* already dead */ }
-    }
-  }
-  if (logger) {
-    logger.info(`Cleaned up ${pids.length} orphan process(es): ${pids.join(', ')}`, 'ProcessCleanup');
-  }
-}
-
-function killChildProcess(child) {
-  if (!child.pid) return;
-  if (process.platform === 'win32') {
-    try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe' }); } catch {}
-  } else {
-    try { child.kill('SIGTERM'); } catch {}
-  }
-}
-
-// ============================================================================
 // Logger — система логирования с уровнями DEBUG/INFO/WARN/ERROR
 // ============================================================================
 class Logger {
@@ -899,36 +762,21 @@ class StageExecutor {
     this.promptBuilder = new PromptBuilder(context, counters, previousResults);
     this.resultParser = new ResultParser();
 
-    // Трекинг активных дочерних процессов для cleanup
-    this.activeChildren = new Set();
-    // Снапшот PID'ов перед spawn — для вычисления порождённых процессов
-    this.preSpawnSnapshot = new Set();
+    // Текущий дочерний процесс агента (для kill при shutdown)
+    this.currentChild = null;
   }
 
   /**
-   * Убивает все активные дочерние процессы и порождённых ими сирот.
-   * Snapshot-based: сравнивает текущие PID'ы с снапшотом до spawn,
-   * новые процессы = порождённые нашим агентом (включая внуков/MCP-серверов).
+   * Убивает текущий дочерний процесс агента
    */
-  killAllChildren() {
-    // Убиваем прямых детей через taskkill /T (best effort)
-    for (const child of this.activeChildren) {
-      killChildProcess(child);
+  killCurrentChild() {
+    const child = this.currentChild;
+    if (!child || !child.pid) return;
+    if (process.platform === 'win32') {
+      try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe' }); } catch {}
+    } else {
+      try { child.kill('SIGTERM'); } catch {}
     }
-    this.activeChildren.clear();
-
-    // Snapshot-based: убиваем все процессы, появившиеся после spawn
-    if (this.preSpawnSnapshot.size > 0) {
-      const currentPids = getProcessSnapshot();
-      const orphans = [];
-      for (const pid of currentPids) {
-        if (!this.preSpawnSnapshot.has(pid) && pid !== process.pid) {
-          orphans.push(pid);
-        }
-      }
-      killPids(orphans, this.logger);
-    }
-    this.preSpawnSnapshot = new Set();
   }
 
   /**
@@ -1066,19 +914,12 @@ class StageExecutor {
         }
       }
 
-      // Снапшот PID'ов до spawn — для snapshot-based cleanup сирот
-      if (this.preSpawnSnapshot.size === 0) {
-        this.preSpawnSnapshot = getProcessSnapshot();
-      }
-
       const child = spawn(agent.command, args, {
         cwd: path.resolve(this.projectRoot, agent.workdir || '.'),
         stdio: ['pipe', 'pipe', 'pipe'],
         shell: useShell
       });
-
-      // Регистрируем дочерний процесс для cleanup
-      this.activeChildren.add(child);
+      this.currentChild = child;
 
       // Передаём промпт через stdin или закрываем если не нужно
       if (useStdin) {
@@ -1092,10 +933,15 @@ class StageExecutor {
       let stderr = '';
       let timedOut = false;
 
-      // Таймаут — убиваем child + snapshot-based cleanup через killAllChildren
+      // Таймаут
       const timeoutId = setTimeout(() => {
         timedOut = true;
-        this.killAllChildren();  // убьёт child + сирот по snapshot
+        // На Windows SIGTERM игнорируется — используем taskkill /T /F для убийства дерева
+        if (process.platform === 'win32' && child.pid) {
+          try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe' }); } catch {}
+        } else {
+          child.kill('SIGTERM');
+        }
         if (this.logger) {
           this.logger.timeout(stageId, timeout);
         }
@@ -1144,8 +990,8 @@ class StageExecutor {
       });
 
       child.on('close', (code) => {
+        this.currentChild = null;
         clearTimeout(timeoutId);
-        this.activeChildren.delete(child);
         // Обрабатываем остаток буфера стриминга
         if (stdoutBuffer.trim()) {
           try {
@@ -1217,7 +1063,6 @@ class StageExecutor {
 
       child.on('error', (err) => {
         clearTimeout(timeoutId);
-        this.activeChildren.delete(child);
         if (!timedOut) {
           if (this.logger) {
             this.logger.error(`CLI error: ${err.message}`, stageId);
@@ -1333,13 +1178,7 @@ class PipelineRunner {
     const trustedAgents = this.pipeline.trusted_agents || [];
     this.fileGuard = new FileGuard(protectedPatterns, projectRoot, trustedAgents);
     this.projectRoot = projectRoot;
-
-    // Текущий executor для доступа к activeChildren при shutdown
     this.currentExecutor = null;
-    // Путь к PID-файлу для cleanup сирот между запусками
-    this.pidFilePath = getPidFilePath(projectRoot);
-    // Снапшот PID'ов перед стартом пайплайна — для snapshot-based cleanup
-    this.preRunSnapshot = new Set();
 
     // Настройка graceful shutdown
     this.setupGracefulShutdown();
@@ -1405,13 +1244,6 @@ class PipelineRunner {
 
     const maxSteps = this.pipeline.execution?.max_steps || 100;
     const delayBetweenStages = this.pipeline.execution?.delay_between_stages || 5;
-
-    // Cleanup сирот от предыдущего запуска (если runner был убит жёстко)
-    cleanupOrphansFromFile(this.pidFilePath, this.logger);
-
-    // Снапшот процессов до старта + запись PID-файла
-    this.preRunSnapshot = getProcessSnapshot();
-    writePidFile(this.pidFilePath, this.preRunSnapshot);
 
     this.logger.info('=== Pipeline Runner Started ===', 'PipelineRunner');
     this.logger.info(`Entry stage: ${this.pipeline.entry}`, 'PipelineRunner');
@@ -1498,9 +1330,6 @@ class PipelineRunner {
 
     // Записываем итоговый summary
     this.logger.writeSummary();
-
-    // Cleanup: убиваем процессы-сироты, порождённые агентами во время пайплайна
-    this._cleanupOrphans();
 
     return {
       steps: this.stepCount,
@@ -1628,61 +1457,20 @@ class PipelineRunner {
   /**
    * Настройка graceful shutdown
    */
-  /**
-   * Snapshot-based cleanup: убивает процессы, появившиеся после старта пайплайна.
-   * Сравнивает текущие PID'ы node/python/cmd с снапшотом до run() —
-   * разница = процессы порождённые агентами (включая MCP-серверы-сироты).
-   */
-  _cleanupOrphans() {
-    if (this.preRunSnapshot.size === 0) return;
-    const currentPids = getProcessSnapshot();
-    const orphans = [];
-    for (const pid of currentPids) {
-      if (!this.preRunSnapshot.has(pid) && pid !== process.pid) {
-        orphans.push(pid);
-      }
-    }
-    if (orphans.length > 0) {
-      killPids(orphans, this.logger);
-    }
-    // PID-файл больше не нужен — cleanup выполнен
-    removePidFile(this.pidFilePath);
-  }
-
   setupGracefulShutdown() {
     const shutdown = (signal) => {
       if (this.logger) {
-        this.logger.info(`Received ${signal}. Killing child processes and shutting down...`, 'PipelineRunner');
+        this.logger.info(`Received ${signal}. Shutting down gracefully...`, 'PipelineRunner');
       }
       this.running = false;
-      // Убиваем активные дочерние процессы текущего stage
+      // Убиваем текущего агента
       if (this.currentExecutor) {
-        this.currentExecutor.killAllChildren();
+        this.currentExecutor.killCurrentChild();
       }
-      // Snapshot-based: убиваем всех сирот от всех stage'ей
-      this._cleanupOrphans();
     };
 
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
-
-    // Финальный синхронный cleanup при выходе — последний шанс убить сирот
-    process.on('exit', () => {
-      // Убиваем активные child objects (если exit во время работы stage)
-      if (this.currentExecutor) {
-        for (const child of this.currentExecutor.activeChildren) {
-          if (child.pid) {
-            if (process.platform === 'win32') {
-              try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe' }); } catch {}
-            } else {
-              try { child.kill('SIGKILL'); } catch {}
-            }
-          }
-        }
-      }
-      // Snapshot-based cleanup
-      this._cleanupOrphans();
-    });
   }
 }
 

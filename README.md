@@ -52,6 +52,7 @@ The `workflow init` command creates the `.workflow/` directory structure:
 │   └── ticket-movement-rules.yaml
 ├── plans/
 │   ├── current/                  # Current development plans
+│   ├── templates/                # Plan templates with triggers (recurring plans)
 │   └── archive/                  # Archived plans
 ├── tickets/
 │   ├── backlog/                  # Awaiting conditions
@@ -74,20 +75,21 @@ The `workflow init` command creates the `.workflow/` directory structure:
 The `workflow run` command executes a multi-stage pipeline:
 
 1. **pick-first-task** — select ticket from ready queue
-2. **check-plan-decomposition** — verify plan is decomposed into tickets
-3. **decompose-plan** — break down plan into tickets (if needed)
-4. **check-conditions** — validate ticket readiness conditions
-5. **move-to-ready** — move tickets from backlog to ready
-6. **pick-next-task** — select next ticket for execution
-7. **move-to-in-progress** — start execution
-8. **check-relevance** — verify ticket is still relevant
-9. **execute-task** — perform the work via AI agent
-10. **move-to-review** — submit for review
-11. **review-result** — validate results against Definition of Done
-12. **increment-task-attempts** — track retry attempts
-13. **move-ticket** — move to done/blocked based on review
-14. **create-report** — generate execution report
-15. **analyze-report / decompose-gaps** — analyze results and iterate
+2. **check-plan-templates** — evaluate plan template triggers, create plans if fired
+3. **check-plan-decomposition** — verify plan is decomposed into tickets
+4. **decompose-plan** — break down plan into tickets (if needed)
+5. **check-conditions** — validate ticket readiness conditions
+6. **move-to-ready** — move tickets from backlog to ready
+7. **pick-next-task** — select next ticket for execution
+8. **move-to-in-progress** — start execution
+9. **check-relevance** — verify ticket is still relevant
+10. **execute-task** — perform the work via AI agent
+11. **move-to-review** — submit for review
+12. **review-result** — validate results against Definition of Done
+13. **increment-task-attempts** — track retry attempts
+14. **move-ticket** — move to done/blocked based on review
+15. **create-report** — generate execution report
+16. **analyze-report / decompose-gaps** — analyze results and iterate
 
 ### Supported Agents
 
@@ -120,6 +122,34 @@ Built-in skills for different task types:
 Skills are stored globally in `~/.workflow/skills/` and symlinked into projects.
 
 Use `workflow eject <skill>` to copy a skill into the project for customization.
+
+## Plan Templates
+
+Plan templates allow recurring plans to be created automatically. Templates live in `.workflow/plans/templates/` and contain trigger conditions in their frontmatter.
+
+### Template Format
+
+```yaml
+id: "TMPL-001"
+title: "Daily manual testing"
+type: template
+trigger:
+  type: daily          # daily | weekly | date_after | interval_days
+  params: {}           # type-specific params
+last_triggered: ""     # auto-updated on trigger
+enabled: true
+```
+
+### Trigger Types
+
+| Type | Params | Description |
+|------|--------|-------------|
+| `daily` | — | Once per day |
+| `weekly` | `days_of_week: [1,3,5]` (0=Sun) | On specific weekdays |
+| `date_after` | `date: "2026-04-01"` | Once after a specific date |
+| `interval_days` | `days: 3` | Every N days |
+
+When a trigger fires, the pipeline creates a plan in `plans/current/` with status `approved`, then the normal decomposition flow proceeds.
 
 ## Task Types
 

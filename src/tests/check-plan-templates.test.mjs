@@ -114,48 +114,78 @@ test('trigger without type returns false', () => {
 
 // ============ generateNextPlanId tests ============
 
+function createPlansStructure() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'plans-root-'));
+  const currentDir = path.join(root, 'current');
+  const archiveDir = path.join(root, 'archive');
+  fs.mkdirSync(currentDir);
+  fs.mkdirSync(archiveDir);
+  return { root, currentDir, archiveDir };
+}
+
 test('generateNextPlanId returns PLAN-001 for empty directory', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plans-test-'));
+  const { root, currentDir } = createPlansStructure();
   try {
-    assert.strictEqual(generateNextPlanId(tmpDir), 'PLAN-001');
+    assert.strictEqual(generateNextPlanId(currentDir), 'PLAN-001');
   } finally {
-    fs.rmSync(tmpDir, { recursive: true });
+    fs.rmSync(root, { recursive: true });
   }
 });
 
 test('generateNextPlanId returns PLAN-001 for non-existent directory', () => {
-  assert.strictEqual(generateNextPlanId('/non/existent/dir'), 'PLAN-001');
+  assert.strictEqual(generateNextPlanId('/non/existent/current'), 'PLAN-001');
 });
 
 test('generateNextPlanId increments from existing plan', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plans-test-'));
+  const { root, currentDir } = createPlansStructure();
   try {
-    fs.writeFileSync(path.join(tmpDir, 'PLAN-001.md'), '# Plan 1');
-    assert.strictEqual(generateNextPlanId(tmpDir), 'PLAN-002');
+    fs.writeFileSync(path.join(currentDir, 'PLAN-001.md'), '# Plan 1');
+    assert.strictEqual(generateNextPlanId(currentDir), 'PLAN-002');
   } finally {
-    fs.rmSync(tmpDir, { recursive: true });
+    fs.rmSync(root, { recursive: true });
   }
 });
 
 test('generateNextPlanId finds max with gaps', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plans-test-'));
+  const { root, currentDir } = createPlansStructure();
   try {
-    fs.writeFileSync(path.join(tmpDir, 'PLAN-001.md'), '# Plan 1');
-    fs.writeFileSync(path.join(tmpDir, 'PLAN-003.md'), '# Plan 3');
-    assert.strictEqual(generateNextPlanId(tmpDir), 'PLAN-004');
+    fs.writeFileSync(path.join(currentDir, 'PLAN-001.md'), '# Plan 1');
+    fs.writeFileSync(path.join(currentDir, 'PLAN-003.md'), '# Plan 3');
+    assert.strictEqual(generateNextPlanId(currentDir), 'PLAN-004');
   } finally {
-    fs.rmSync(tmpDir, { recursive: true });
+    fs.rmSync(root, { recursive: true });
   }
 });
 
 test('generateNextPlanId ignores non-plan files', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plans-test-'));
+  const { root, currentDir } = createPlansStructure();
   try {
-    fs.writeFileSync(path.join(tmpDir, 'PLAN-002.md'), '# Plan 2');
-    fs.writeFileSync(path.join(tmpDir, 'README.md'), '# Readme');
-    fs.writeFileSync(path.join(tmpDir, 'TMPL-001.md'), '# Template');
-    assert.strictEqual(generateNextPlanId(tmpDir), 'PLAN-003');
+    fs.writeFileSync(path.join(currentDir, 'PLAN-002.md'), '# Plan 2');
+    fs.writeFileSync(path.join(currentDir, 'README.md'), '# Readme');
+    fs.writeFileSync(path.join(currentDir, 'TMPL-001.md'), '# Template');
+    assert.strictEqual(generateNextPlanId(currentDir), 'PLAN-003');
   } finally {
-    fs.rmSync(tmpDir, { recursive: true });
+    fs.rmSync(root, { recursive: true });
+  }
+});
+
+test('generateNextPlanId considers archive directory', () => {
+  const { root, currentDir, archiveDir } = createPlansStructure();
+  try {
+    fs.writeFileSync(path.join(archiveDir, 'PLAN-005.md'), '# Plan 5');
+    assert.strictEqual(generateNextPlanId(currentDir), 'PLAN-006');
+  } finally {
+    fs.rmSync(root, { recursive: true });
+  }
+});
+
+test('generateNextPlanId picks max across current and archive', () => {
+  const { root, currentDir, archiveDir } = createPlansStructure();
+  try {
+    fs.writeFileSync(path.join(currentDir, 'PLAN-002.md'), '# Plan 2');
+    fs.writeFileSync(path.join(archiveDir, 'PLAN-007.md'), '# Plan 7');
+    assert.strictEqual(generateNextPlanId(currentDir), 'PLAN-008');
+  } finally {
+    fs.rmSync(root, { recursive: true });
   }
 });

@@ -244,6 +244,7 @@ ls reports/*.png
 | Один экземпляр | Только один Sandbox одновременно | Последовательное тестирование |
 | Windows 11 24H2+ | Sandbox MCP требует новую версию | Для старых версий — ручной запуск .wsb + скрипты |
 | Производительность | UI может быть медленнее, чем на хосте | Латентность MCP (3-10 сек) компенсирует — `Wait` не нужен |
+| FileSystem events | Mapped folders в Sandbox используют Hyper-V виртуализацию — OS-native filesystem notifications (ReadDirectoryChangesW, inotify) **не пробрасываются** из хоста в guest. Приложения внутри Sandbox, использующие FileSystemWatcher, не получат событий о файлах, изменённых через mapped folder | TC, зависящие от автоматического обнаружения изменений файлов (FileWatcher, hot-reload), пометь **BLOCKED** с причиной «mapped folder не генерирует filesystem events». Не расследуй — это известное ограничение виртуализации |
 
 ## Когда использовать Sandbox vs хост
 
