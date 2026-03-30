@@ -796,6 +796,7 @@ class StageExecutor {
     // 3. stage.agent — явно указанный агент stage
     // 4. default_agent — глобальный дефолт
     let agentId = stage.agent || this.pipeline.default_agent;
+    let fallbackModelId = stage.fallback_agent;  // fallback_model из agent_by_type имеет приоритет
     const attempt = (stage.counter && this.counters[stage.counter]) || 0;
 
     // Фоллбэк: если task_type не задан, вычисляем из префикса ticket_id (PMA-005 → pma)
@@ -805,8 +806,17 @@ class StageExecutor {
 
     if (attempt <= 1 && stage.agent_by_type && taskType) {
       // Первая попытка: выбор по типу задачи
-      if (stage.agent_by_type[taskType]) {
-        agentId = stage.agent_by_type[taskType];
+      const agentConfig = stage.agent_by_type[taskType];
+      if (agentConfig) {
+        // Поддержка формата: { agent: string, fallback_model: string } или просто string
+        if (typeof agentConfig === 'object' && agentConfig.agent) {
+          agentId = agentConfig.agent;
+          if (agentConfig.fallback_model) {
+            fallbackModelId = agentConfig.fallback_model;
+          }
+        } else {
+          agentId = agentConfig;
+        }
         if (this.logger) {
           this.logger.info(`Agent by type: task_type="${taskType}" → ${agentId}`, stageId);
         }
@@ -844,8 +854,8 @@ class StageExecutor {
       this.fileGuard.takeSnapshot();
     }
 
-    // Вызываем CLI-агента с поддержкой fallback
-    const result = await this.callAgentWithFallback(agent, prompt, stageId, stage.skill, stage.fallback_agent);
+    // Вызываем CLI-агента с поддержкой fallback (приоритет: fallback_model из agent_by_type > stage.fallback_agent)
+    const result = await this.callAgentWithFallback(agent, prompt, stageId, stage.skill, fallbackModelId);
 
     // Логгируем завершение stage
     if (this.logger) {

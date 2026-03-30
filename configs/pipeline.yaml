@@ -144,6 +144,9 @@ pipeline:
   #     counter:        <string>   — имя счётчика попыток для этого stage
   #     agent_by_type:             — маршрутизация агента по типу задачи (task_type)
   #       <type>: <agent-id>       — например: impl: claude-sonnet, arch: claude-opus
+  #       <type>:                  — или расширенный формат с fallback_model:
+  #         agent: <agent-id>
+  #         fallback_model: <agent-id>
   #     agent_by_attempt:          — ротация агента по номеру попытки
   #       <N>: <agent-id>          — например: 1: qwen-code, 2: claude-sonnet
   #     goto:                      — логика переходов по результату
@@ -348,14 +351,21 @@ pipeline:
       skill: execute-task
       counter: task_attempts
       agent_by_type:
-        coach: claude-coach
-        qa: claude-qa
-        impl: kilo-minimax
-      # fix: claude-sonnet
-        arch: claude-opus
-      # review: qwen-code
-      # docs: qwen-code
-        admin: kilo-minimax
+        coach:
+          agent: claude-coach
+          fallback_model: claude-sonnet
+        qa:
+          agent: claude-qa
+          fallback_model: claude-sonnet
+        impl:
+          agent: kilo-minimax
+          fallback_model: kilo-glm
+        arch:
+          agent: claude-opus
+          fallback_model: claude-sonnet
+        admin:
+          agent: kilo-minimax
+          fallback_model: kilo-glm
       agent_by_attempt:
         2: qwen-code
         3: claude-sonnet
