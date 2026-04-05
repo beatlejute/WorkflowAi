@@ -42,10 +42,10 @@
 
 Для каждого тест-кейса:
 1. Подготовь тестовые данные
-2. Выполни шаги через подходящий инструмент (см. таблицу в SKILL.md → «Выбор инструмента») — `knowledge/browser-tools.md` или `knowledge/desktop-tools-core.md`. Для изолированной среды — `knowledge/sandbox-core.md`
+2. Выполни шаги через подходящий инструмент (см. таблицу в SKILL.md → «Выбор инструмента») — `knowledge/browser-tools.md` или `knowledge/desktop-tools-core.md`. **Desktop: загрузи `knowledge/sandbox-core.md`** — тестирование ТОЛЬКО через Sandbox
 3. Сравни результат с ожидаемым из AC
 4. Зафиксируй: `PASS` / `FAIL` / `BLOCKED`
-5. При `FAIL` — скриншот + детальное описание расхождения
+5. При `FAIL` — a11y assertion + детальное описание расхождения
 
 ### 4. Оцени покрытие AC
 

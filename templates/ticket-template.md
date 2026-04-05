@@ -36,6 +36,9 @@ dependencies: []
 # Условия выполнения - все должны быть истинны для начала работы
 conditions: []
   # - type: tasks_completed      # Все зависимости выполнены
+  #   value:                     # YAML-массив ID задач
+  #     - IMPL-001
+  #     - IMPL-002
   # - type: date_after           # После определённой даты
   #   value: "2026-03-01"
   # - type: file_exists          # Файл должен существовать

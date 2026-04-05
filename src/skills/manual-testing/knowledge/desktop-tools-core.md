@@ -59,10 +59,11 @@ Snapshot — ~5-10k tokens. Чрезмерное использование вы
 
 ## Выбор MCP-сервера
 
+**⛔ Desktop-приложения тестируются ТОЛЬКО через Sandbox.** Используй `sandbox-desktop`.
+
 | Среда | MCP-сервер | Префикс вызова |
 |-------|-----------|----------------|
-| Хост | `windows-mcp` | `mcp__windows-mcp__*` |
-| Windows Sandbox | `sandbox-desktop` | `mcp__sandbox-desktop__*` |
+| Windows Sandbox (обязательно) | `sandbox-desktop` | `mcp__sandbox-desktop__*` |
 
 Проверь `.mcp.json` проекта. В Sandbox **не используй `Wait`** — латентность MCP (3-10 сек) достаточна для обновления UI.
 
@@ -70,6 +71,6 @@ Snapshot — ~5-10k tokens. Чрезмерное использование вы
 
 - **Ctrl+Click невозможен** через MCP (нет модификаторов). Альтернативы: F12, Command Palette, Ctrl+P
 - A11y tree не всегда гранулярен до символа
-- На хосте — начинай с `screenshot`, в Sandbox — с `snapshot` (a11y tree надёжнее)
+- В Sandbox начинай с `snapshot` — a11y tree надёжнее для верификации
 
 <!-- РАСШИРЕНИЕ: добавляй новые core-паттерны ниже -->

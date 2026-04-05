@@ -33,6 +33,8 @@ const PROJECT_DIR = findProjectRoot();
 const WORKFLOW_DIR = path.join(PROJECT_DIR, '.workflow');
 const TEMPLATES_DIR = path.join(WORKFLOW_DIR, 'plans', 'templates');
 const PLANS_DIR = path.join(WORKFLOW_DIR, 'plans', 'current');
+const TICKETS_DIR = path.join(WORKFLOW_DIR, 'tickets');
+const DONE_DIR = 'done';
 
 /**
  * Проверяет, сработал ли триггер шаблона.
@@ -156,6 +158,51 @@ function updateTemplateLastTriggered(templatePath, frontmatter, body, todayStr) 
   console.log(`[INFO] Updated last_triggered for ${frontmatter.id} to ${todayStr}`);
 }
 
+/**
+ * Проверяет, есть ли незавершённые тикеты по планам, созданным из данного шаблона.
+ * Тикет считается незавершённым, если он находится не в done/.
+ *
+ * @param {string} templateId — ID шаблона (например, "TMPL-001")
+ * @returns {boolean} true если есть активные тикеты
+ */
+export function hasActiveTicketsForTemplate(templateId) {
+  // 1. Найти все планы с source_template === templateId
+  const planPaths = [];
+  if (fs.existsSync(PLANS_DIR)) {
+    for (const file of fs.readdirSync(PLANS_DIR).filter(f => f.endsWith('.md'))) {
+      const content = fs.readFileSync(path.join(PLANS_DIR, file), 'utf8');
+      const { frontmatter } = parseFrontmatter(content);
+      if (frontmatter.source_template === templateId) {
+        planPaths.push(`plans/current/${file}`);
+      }
+    }
+  }
+
+  if (planPaths.length === 0) return false;
+
+  // 2. Проверить тикеты во всех папках кроме done/
+  if (!fs.existsSync(TICKETS_DIR)) return false;
+
+  const ticketDirs = fs.readdirSync(TICKETS_DIR, { withFileTypes: true })
+    .filter(d => d.isDirectory() && d.name !== DONE_DIR)
+    .map(d => d.name);
+
+  for (const dir of ticketDirs) {
+    const dirPath = path.join(TICKETS_DIR, dir);
+    const files = fs.readdirSync(dirPath).filter(f => f.endsWith('.md'));
+
+    for (const file of files) {
+      const content = fs.readFileSync(path.join(dirPath, file), 'utf8');
+      const { frontmatter } = parseFrontmatter(content);
+      if (frontmatter.parent_plan && planPaths.includes(frontmatter.parent_plan)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 async function main() {
   if (!fs.existsSync(TEMPLATES_DIR)) {
     console.log('[INFO] Templates directory does not exist, nothing to check');
@@ -208,6 +255,11 @@ async function main() {
       }
 
       console.log(`[INFO] Template ${frontmatter.id}: trigger fired!`);
+
+      if (hasActiveTicketsForTemplate(frontmatter.id)) {
+        console.log(`[INFO] Template ${frontmatter.id}: skipped — active tickets exist from previous plan`);
+        continue;
+      }
 
       const planId = generateNextPlanId(PLANS_DIR);
       createPlanFromTemplate(templatePath, frontmatter, body, planId, todayStr);

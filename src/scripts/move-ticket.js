@@ -10,30 +10,43 @@
  *   node move-ticket.js IMPL-001 in-progress
  */
 
-import fs from 'fs';
-import path from 'path';
-import YAML from 'workflow-ai/lib/js-yaml.mjs';
-import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
-import { parseFrontmatter, printResult, serializeFrontmatter } from 'workflow-ai/lib/utils.mjs';
+import fs from "fs";
+import path from "path";
+import YAML from "workflow-ai/lib/js-yaml.mjs";
+import { findProjectRoot } from "workflow-ai/lib/find-root.mjs";
+import {
+  parseFrontmatter,
+  printResult,
+  serializeFrontmatter,
+  getLastReviewStatus,
+} from "workflow-ai/lib/utils.mjs";
 
 // Корень проекта
 const PROJECT_DIR = findProjectRoot();
 // Базовая директория workflow
-const WORKFLOW_DIR = path.join(PROJECT_DIR, '.workflow');
-const TICKETS_DIR = path.join(WORKFLOW_DIR, 'tickets');
+const WORKFLOW_DIR = path.join(PROJECT_DIR, ".workflow");
+const TICKETS_DIR = path.join(WORKFLOW_DIR, "tickets");
 
 // Доступные статусы
-const VALID_STATUSES = ['backlog', 'ready', 'in-progress', 'blocked', 'review', 'done', 'archive'];
+const VALID_STATUSES = [
+  "backlog",
+  "ready",
+  "in-progress",
+  "blocked",
+  "review",
+  "done",
+  "archive",
+];
 
 // Таблица допустимых переходов
 const VALID_TRANSITIONS = {
-  'backlog': ['ready', 'blocked', 'done'],
-  'ready': ['in-progress', 'review', 'backlog'],
-  'in-progress': ['done', 'blocked', 'review'],
-  'blocked': ['ready'],
-  'review': ['done', 'ready', 'in-progress', 'blocked'],
-  'done': ['ready', 'blocked', 'archive'],
-  'archive': ['backlog']
+  backlog: ["ready", "blocked", "done"],
+  ready: ["in-progress", "review", "backlog"],
+  "in-progress": ["done", "blocked", "review"],
+  blocked: ["ready"],
+  review: ["done", "ready", "in-progress", "blocked"],
+  done: ["ready", "blocked", "archive"],
+  archive: ["backlog"],
 };
 
 /**
@@ -59,14 +72,17 @@ function isValidTransition(from, to) {
     return { valid: false, error: `Неверный исходный статус: ${from}` };
   }
   if (!VALID_STATUSES.includes(to)) {
-    return { valid: false, error: `Неверный целевой статус: ${to}. Доступные: ${VALID_STATUSES.join(', ')}` };
+    return {
+      valid: false,
+      error: `Неверный целевой статус: ${to}. Доступные: ${VALID_STATUSES.join(", ")}`,
+    };
   }
 
   const allowedTransitions = VALID_TRANSITIONS[from] || [];
   if (!allowedTransitions.includes(to)) {
     return {
       valid: false,
-      error: `Переход из ${from} в ${to} недопустим. Доступные переходы: ${allowedTransitions.join(', ') || 'нет'}`
+      error: `Переход из ${from} в ${to} недопустим. Доступные переходы: ${allowedTransitions.join(", ") || "нет"}`,
     };
   }
 
@@ -93,9 +109,9 @@ async function moveTicket(ticketId, target) {
 
   if (!sourceDir) {
     return {
-      status: 'error',
+      status: "error",
       ticket_id: ticketId,
-      error: `Тикет ${ticketId} не найден ни в одной из директорий`
+      error: `Тикет ${ticketId} не найден ни в одной из директорий`,
     };
   }
 
@@ -103,11 +119,11 @@ async function moveTicket(ticketId, target) {
   const transitionCheck = isValidTransition(currentStatus, target);
   if (!transitionCheck.valid) {
     return {
-      status: 'error',
+      status: "error",
       ticket_id: ticketId,
       from: currentStatus,
       to: target,
-      error: transitionCheck.error
+      error: transitionCheck.error,
     };
   }
 
@@ -118,12 +134,12 @@ async function moveTicket(ticketId, target) {
   // Чтение файла тикета
   let content;
   try {
-    content = fs.readFileSync(sourcePath, 'utf8');
+    content = fs.readFileSync(sourcePath, "utf8");
   } catch (e) {
     return {
-      status: 'error',
+      status: "error",
       ticket_id: ticketId,
-      error: `Не удалось прочитать файл: ${e.message}`
+      error: `Не удалось прочитать файл: ${e.message}`,
     };
   }
 
@@ -133,9 +149,9 @@ async function moveTicket(ticketId, target) {
     ({ frontmatter, body } = parseFrontmatter(content));
   } catch (e) {
     return {
-      status: 'error',
+      status: "error",
       ticket_id: ticketId,
-      error: e.message
+      error: e.message,
     };
   }
 
@@ -144,12 +160,23 @@ async function moveTicket(ticketId, target) {
   frontmatter.updated_at = now;
 
   // Если переход в done, добавляем completed_at
-  if (target === 'done' && currentStatus !== 'done') {
+  if (target === "done" && currentStatus !== "done") {
     frontmatter.completed_at = now;
   }
 
+  // Fallback: если тикет идёт в done из review, но агент не записал секцию "## Ревью" — дописываем
+  if (
+    target === "done" &&
+    currentStatus === "review" &&
+    getLastReviewStatus(content) === null
+  ) {
+    const date = now.slice(0, 16).replace("T", " ");
+    const reviewSection = `\n## Ревью\n\n| Дата | Статус | Самари |\n|------|--------|--------|\n| ${date} | ✅ passed | Pipeline fallback: агент не записал секцию ревью |\n`;
+    body = body.trimEnd() + "\n" + reviewSection;
+  }
+
   // Если переход из blocked, удаляем blocked_reason
-  if (currentStatus === 'blocked' && frontmatter.blocked_reason) {
+  if (currentStatus === "blocked" && frontmatter.blocked_reason) {
     delete frontmatter.blocked_reason;
   }
 
@@ -166,28 +193,28 @@ async function moveTicket(ticketId, target) {
     fs.renameSync(sourcePath, targetPath);
   } catch (e) {
     return {
-      status: 'error',
+      status: "error",
       ticket_id: ticketId,
-      error: `Не удалось переместить файл: ${e.message}`
+      error: `Не удалось переместить файл: ${e.message}`,
     };
   }
 
   // Запись обновлённого контента
   try {
-    fs.writeFileSync(targetPath, newContent, 'utf8');
+    fs.writeFileSync(targetPath, newContent, "utf8");
   } catch (e) {
     return {
-      status: 'error',
+      status: "error",
       ticket_id: ticketId,
-      error: `Не удалось записать файл: ${e.message}`
+      error: `Не удалось записать файл: ${e.message}`,
     };
   }
 
   return {
-    status: 'moved',
+    status: "moved",
     ticket_id: ticketId,
     from: currentStatus,
-    to: target
+    to: target,
   };
 }
 
@@ -208,21 +235,26 @@ if (rawArgs.length >= 2) {
   ticketId = ticketMatch?.[1];
   target = targetMatch?.[1];
   if (!ticketId || !target) {
-    console.error('[ERROR] Cannot parse ticket_id or target from pipeline context');
-    printResult({ status: 'error', error: 'Missing ticket_id or target in pipeline context' });
+    console.error(
+      "[ERROR] Cannot parse ticket_id or target from pipeline context",
+    );
+    printResult({
+      status: "error",
+      error: "Missing ticket_id or target in pipeline context",
+    });
     process.exit(1);
   }
 } else {
-  console.error('Usage: node move-ticket.js <ticket_id> <target>');
-  console.error('Example: node move-ticket.js IMPL-001 in-progress');
-  console.error('Available targets:', VALID_STATUSES.join(', '));
-  printResult({ status: 'error', error: 'Missing arguments' });
+  console.error("Usage: node move-ticket.js <ticket_id> <target>");
+  console.error("Example: node move-ticket.js IMPL-001 in-progress");
+  console.error("Available targets:", VALID_STATUSES.join(", "));
+  printResult({ status: "error", error: "Missing arguments" });
   process.exit(1);
 }
 
-moveTicket(ticketId, target).then(result => {
+moveTicket(ticketId, target).then((result) => {
   printResult(result);
-  if (result.status === 'error') {
+  if (result.status === "error") {
     process.exit(1);
   }
 });

@@ -55,11 +55,17 @@ ticket_prefix: CHK
 ```
 ---RESULT---
 status: relevant | irrelevant
-reason: <причина, если irrelevant>
+reason: <причина — см. допустимые значения ниже>
 ---RESULT---
 ```
 
-Допустимые значения `reason`: `already_skipped`, `review_failed_needs_rework`, `plan_inactive`, `dod_completed`, `dependencies_inactive`, `blocked`.
+Допустимые значения `reason`:
+- при `status: irrelevant`: `already_skipped`, `plan_inactive`, `dod_completed`, `dependencies_inactive`, `blocked`
+- при `status: relevant`: `review_failed_needs_rework`, `needs_review`
+
+> ⛔ `review_failed_needs_rework` и `needs_review` — маркеры только для `relevant`. Запрещено использовать со `status: irrelevant`.
+
+> ⛔ DoD completed + ревью отсутствует → `relevant (needs_review)`, НЕ `irrelevant`. Без этого тикет попадает в `done/` без ревью → auto-correct возвращает в backlog → бесконечный цикл.
 
 ## Границы компетенции
 
