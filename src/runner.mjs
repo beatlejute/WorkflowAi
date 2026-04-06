@@ -1030,6 +1030,15 @@ class StageExecutor {
             }
             this.logger.info(`OUTPUT ↑`, stageId);
           }
+
+          // Логгируем stderr независимо от exit code
+          if (stderr.trim()) {
+            this.logger.warn(`STDERR ↓`, stageId);
+            for (const line of stderr.trim().split('\n')) {
+              this.logger.warn(`  ${line}`, stageId);
+            }
+            this.logger.warn(`STDERR ↑`, stageId);
+          }
         }
 
         // Парсим результат из вывода агента через ResultParser
