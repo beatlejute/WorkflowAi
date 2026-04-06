@@ -1,6 +1,6 @@
 {
   "name": "workflow-ai",
-  "version": "1.0.56",
+  "version": "1.0.57",
   "description": "AI Agent Workflow Coordinator — kanban-based pipeline for AI coding agents",
   "type": "module",
   "bin": {
