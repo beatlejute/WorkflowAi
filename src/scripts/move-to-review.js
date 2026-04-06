@@ -27,6 +27,7 @@ const PROJECT_DIR = findProjectRoot();
 const TICKETS_DIR = path.join(PROJECT_DIR, ".workflow", "tickets");
 const IN_PROGRESS_DIR = path.join(TICKETS_DIR, "in-progress");
 const REVIEW_DIR = path.join(TICKETS_DIR, "review");
+const ARCHIVE_DIR = path.join(TICKETS_DIR, "archive");
 
 /**
  * Парсит ticket_id из промпта (контекста pipeline runner)
@@ -54,6 +55,7 @@ function moveToReview(ticketId) {
       };
     }
     const donePath = path.join(TICKETS_DIR, "done", `${ticketId}.md`);
+    const archivePath = path.join(ARCHIVE_DIR, `${ticketId}.md`);
     if (fs.existsSync(donePath)) {
       // Проверяем, есть ли у тикета ревью — если нет, перемещаем в review/
       const doneContent = fs.readFileSync(donePath, "utf8");
@@ -79,6 +81,13 @@ function moveToReview(ticketId) {
         status: "skipped",
         ticket_id: ticketId,
         reason: `${ticketId} already in done/ with review`,
+      };
+    }
+    if (fs.existsSync(archivePath)) {
+      return {
+        status: "skipped",
+        ticket_id: ticketId,
+        reason: `${ticketId} already in archive/`,
       };
     }
     return {

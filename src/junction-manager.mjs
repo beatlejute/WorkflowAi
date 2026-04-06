@@ -109,24 +109,59 @@ export function createSkillJunctions(globalDir, projectSkillsDir) {
   }
 }
 
-export function createScriptHardlinks(globalDir, projectScriptsDir) {
+export function createScriptJunction(globalDir, projectScriptsDir) {
   const globalScriptsDir = join(globalDir, 'scripts');
   if (!existsSync(globalScriptsDir)) {
     return;
   }
-  if (!existsSync(projectScriptsDir)) {
-    mkdirSync(projectScriptsDir, { recursive: true });
+
+  // If local (ejected) scripts dir exists, don't overwrite
+  if (existsSync(projectScriptsDir) && !isJunction(projectScriptsDir)) {
+    return;
   }
 
-  const files = readdirSync(globalScriptsDir);
-  for (const file of files) {
-    const targetPath = join(globalScriptsDir, file);
-    const stats = lstatSync(targetPath);
-    if (stats.isFile()) {
-      const linkPath = join(projectScriptsDir, file);
-      createHardlink(targetPath, linkPath);
-    }
+  createJunction(globalScriptsDir, projectScriptsDir);
+}
+
+export function createConfigJunction(globalDir, projectConfigDir) {
+  const globalConfigDir = join(globalDir, 'configs');
+  if (!existsSync(globalConfigDir)) {
+    return;
   }
+
+  // If local (ejected) config dir exists, don't overwrite
+  if (existsSync(projectConfigDir) && !isJunction(projectConfigDir)) {
+    return;
+  }
+
+  createJunction(globalConfigDir, projectConfigDir);
+}
+
+export function ejectConfigs(globalDir, projectConfigDir) {
+  const globalConfigDir = join(globalDir, 'configs');
+
+  if (!existsSync(globalConfigDir)) {
+    throw new Error('Configs do not exist in global dir');
+  }
+
+  removeJunction(projectConfigDir);
+  cpSync(globalConfigDir, projectConfigDir, { recursive: true });
+}
+
+export function ejectScripts(globalDir, projectScriptsDir) {
+  const globalScriptsDir = join(globalDir, 'scripts');
+
+  if (!existsSync(globalScriptsDir)) {
+    throw new Error('Scripts do not exist in global dir');
+  }
+
+  removeJunction(projectScriptsDir);
+  cpSync(globalScriptsDir, projectScriptsDir, { recursive: true });
+}
+
+/** @deprecated Use createScriptJunction instead */
+export function createScriptHardlinks(globalDir, projectScriptsDir) {
+  createScriptJunction(globalDir, projectScriptsDir);
 }
 
 export function ejectSkill(skillName, globalDir, projectSkillsDir) {

@@ -26,8 +26,10 @@ workflow run
 |---------|-------------|
 | `workflow init [path] [--force]` | Initialize `.workflow/` directory with kanban board structure |
 | `workflow run [options]` | Execute the AI pipeline |
-| `workflow update [path]` | Update global dir and recreate junctions/hardlinks |
+| `workflow update [path]` | Update global dir and recreate junctions |
 | `workflow eject <skill> [path]` | Eject a skill (copy from global to project) |
+| `workflow eject-scripts [path]` | Eject scripts (copy from global to project) |
+| `workflow eject-configs [path]` | Eject configs (copy from global to project) |
 | `workflow list [path]` | List skills with status (shared/ejected/project-only) |
 | `workflow help` | Show help |
 | `workflow version` | Show version |
@@ -46,10 +48,7 @@ The `workflow init` command creates the `.workflow/` directory structure:
 
 ```
 .workflow/
-├── config/
-│   ├── config.yaml               # Workflow configuration
-│   ├── pipeline.yaml             # Pipeline stages and agents
-│   └── ticket-movement-rules.yaml
+├── config/                       # → junction to ~/.workflow/configs/ (eject to customize)
 ├── plans/
 │   ├── current/                  # Current development plans
 │   ├── templates/                # Plan templates with triggers (recurring plans)
@@ -66,8 +65,8 @@ The `workflow init` command creates the `.workflow/` directory structure:
 ├── metrics/                      # Performance metrics
 ├── templates/                    # Ticket/plan/report templates
 └── src/
-    ├── skills/                   # Skill instructions (symlinks to global)
-    └── scripts/                  # Automation scripts (hardlinks to global)
+    ├── skills/                   # Skill instructions (junctions to global, per-skill)
+    └── scripts/                  # Automation scripts (junction to global)
 ```
 
 ## Pipeline
@@ -119,9 +118,21 @@ Built-in skills for different task types:
 | `execute-task` | Task execution |
 | `review-result` | Result review against DoD |
 
-Skills are stored globally in `~/.workflow/skills/` and symlinked into projects.
+Skills are stored globally in `~/.workflow/skills/` and linked into projects via junctions.
 
 Use `workflow eject <skill>` to copy a skill into the project for customization.
+
+## Scripts
+
+Scripts are stored globally in `~/.workflow/scripts/` and linked as a single junction into `.workflow/src/scripts/`.
+
+Use `workflow eject-scripts` to copy scripts into the project for customization.
+
+## Configs
+
+Configs are stored globally in `~/.workflow/configs/` and linked as a single junction into `.workflow/config/`.
+
+Use `workflow eject-configs` to copy configs into the project for customization.
 
 ## Plan Templates
 
@@ -186,7 +197,7 @@ workflow-ai/
 │   ├── runner.mjs           # Core pipeline orchestrator
 │   ├── init.mjs             # Project initialization
 │   ├── global-dir.mjs       # Global ~/.workflow/ management
-│   ├── junction-manager.mjs # Symlink/hardlink management
+│   ├── junction-manager.mjs # Junction/symlink management
 │   ├── wf-loader.mjs        # Config loader
 │   ├── lib/                 # Utility libraries
 │   └── tests/               # Test suite

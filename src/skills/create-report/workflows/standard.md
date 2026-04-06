@@ -55,13 +55,39 @@ anomalies: [{"id": "IMPL-001", "title": "...", "recommendation": "..."}]
 - Результат (из секции Result)
 - Проблемы (если были)
 
-### 5. Сформировать статистику
+### 5. Рассчитать метрики
+
+**Автоматический расчёт (рекомендуется):**
+
+Если известен ID активного плана (`PLAN-NNN`):
+
+```bash
+node .workflow/src/skills/create-report/scripts/calc-metrics.js <PLAN-NNN>
+```
+
+Скрипт выводит результат в формате:
+```
+---RESULT---
+{
+  "plan_id": "PLAN-NNN",
+  "total_tickets": N,
+  "velocity": { "done_count": N, "days_elapsed": N, "velocity_day": N, "velocity_week": N },
+  "plan_health": { "total_tickets": N, "done_tickets": N, "completion_pct": N, "expected_pct": N, "delta": N, "health_status": "ON_TRACK|AT_RISK|OFF_TRACK" },
+  "distribution": { "<type>": { "count": N, "pct": N } },
+  "anomalies": [{ "type": "...", "severity": "...", "message": "..." }]
+}
+---RESULT---
+```
+
+Используй готовые данные из JSON для заполнения отчёта. Не пересчитывай метрики вручную.
+
+**Ручной расчёт (если скрипт недоступен):**
 
 Загрузить `knowledge/report-metrics.md` для формул и метрик.
 
 Рассчитать:
 - Количество задач по статусам (done, in-progress, blocked, ready, backlog)
-- Распределение по типам (IMPL, FIX, DOCS, REVIEW и т.д.)
+- Распределение по типам
 - Velocity (задач / единица времени)
 - Процент выполнения плана
 

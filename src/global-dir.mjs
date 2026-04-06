@@ -35,18 +35,23 @@ function copyDirectory(src, dest) {
   cpSync(src, dest, { recursive: true });
 }
 
-function copySkillsAndScripts(packageRoot) {
+function copySkillsScriptsAndConfigs(packageRoot) {
   const globalDir = getGlobalDir();
   const srcSkills = join(packageRoot, 'src', 'skills');
   const srcScripts = join(packageRoot, 'src', 'scripts');
+  const srcConfigs = join(packageRoot, 'configs');
   const destSkills = join(globalDir, 'skills');
   const destScripts = join(globalDir, 'scripts');
+  const destConfigs = join(globalDir, 'configs');
 
   if (existsSync(srcSkills)) {
     copyDirectory(srcSkills, destSkills);
   }
   if (existsSync(srcScripts)) {
     copyDirectory(srcScripts, destScripts);
+  }
+  if (existsSync(srcConfigs)) {
+    copyDirectory(srcConfigs, destConfigs);
   }
 }
 
@@ -67,7 +72,7 @@ export function ensureGlobalDir(packageRoot) {
   const globalDir = getGlobalDir();
   if (!existsSync(globalDir)) {
     mkdirSync(globalDir, { recursive: true });
-    copySkillsAndScripts(packageRoot);
+    copySkillsScriptsAndConfigs(packageRoot);
     const version = getPackageVersion(packageRoot);
     writeFileSync(join(globalDir, '.version'), version);
     return;
@@ -75,7 +80,7 @@ export function ensureGlobalDir(packageRoot) {
   if (isGlobalDirStale(packageRoot)) {
     const version = getPackageVersion(packageRoot);
     writeFileSync(join(globalDir, '.version'), version);
-    copySkillsAndScripts(packageRoot);
+    copySkillsScriptsAndConfigs(packageRoot);
   }
 }
 
@@ -86,5 +91,5 @@ export function refreshGlobalDir(packageRoot) {
   }
   const version = getPackageVersion(packageRoot);
   writeFileSync(join(globalDir, '.version'), version);
-  copySkillsAndScripts(packageRoot);
+  copySkillsScriptsAndConfigs(packageRoot);
 }

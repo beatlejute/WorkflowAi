@@ -31,7 +31,31 @@
 
 > Загрузи `algorithms/progress-assessment.md`
 
-Метрики процесса:
+#### 3a. Автоматический расчёт (основной путь)
+
+Запусти скрипт расчёта метрик:
+
+```bash
+node .workflow/src/skills/analyze-report/scripts/calc-plan-metrics.js <PLAN-NNN>
+```
+
+Где `<PLAN-NNN>` — ID анализируемого плана.
+
+Прочитай JSON из блока `---RESULT---`. Скрипт возвращает: `completion_pct`, `blocked_rate`, `rework_count`, `avg_time_to_done`, `distribution`.
+
+Используй готовые метрики для:
+- **Throughput**: `completion_pct` + `distribution` (завершено / всего)
+- **Blockers**: `blocked_rate` + `distribution.blocked`
+- **Rework**: `rework_count`
+
+#### 3b. Дополнительные метрики (вручную)
+
+Скрипт не рассчитывает — собери самостоятельно:
+- **Quality**: % тикетов, прошедших ревью с первого раза (проверь историю ревью в тикетах)
+
+#### 3c. Fallback (если скрипт недоступен)
+
+Собери все метрики вручную:
 - **Throughput**: сколько тикетов завершено / сколько было в плане
 - **Quality**: % тикетов, прошедших ревью с первого раза
 - **Blockers**: количество и длительность блокировок

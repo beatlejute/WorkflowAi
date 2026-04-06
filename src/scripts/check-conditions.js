@@ -36,6 +36,7 @@ const TICKETS_DIR = path.join(WORKFLOW_DIR, 'tickets');
 const BACKLOG_DIR = path.join(TICKETS_DIR, 'backlog');
 const READY_DIR = path.join(TICKETS_DIR, 'ready');
 const DONE_DIR = path.join(TICKETS_DIR, 'done');
+const ARCHIVE_DIR = path.join(TICKETS_DIR, 'archive');
 
 /**
  * Проверяет одно условие тикета
@@ -53,7 +54,10 @@ function checkCondition(condition) {
     case 'tasks_completed': {
       if (!value || (Array.isArray(value) && value.length === 0)) return true;
       const ids = Array.isArray(value) ? value : [value];
-      return ids.every(taskId => fs.existsSync(path.join(DONE_DIR, `${taskId}.md`)));
+      return ids.every(taskId =>
+        fs.existsSync(path.join(DONE_DIR, `${taskId}.md`)) ||
+        fs.existsSync(path.join(ARCHIVE_DIR, `${taskId}.md`))
+      );
     }
 
     case 'date_after':
@@ -76,7 +80,10 @@ function checkCondition(condition) {
  */
 function checkDependencies(dependencies) {
   if (!dependencies || dependencies.length === 0) return true;
-  return dependencies.every(depId => fs.existsSync(path.join(DONE_DIR, `${depId}.md`)));
+  return dependencies.every(depId =>
+    fs.existsSync(path.join(DONE_DIR, `${depId}.md`)) ||
+    fs.existsSync(path.join(ARCHIVE_DIR, `${depId}.md`))
+  );
 }
 
 /**
