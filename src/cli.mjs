@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getGlobalDir, refreshGlobalDir, ensureGlobalDir } from './global-dir.mjs';
-import { createSkillJunctions, createScriptHardlinks, ejectSkill, listSkillsWithStatus } from './junction-manager.mjs';
+import { createSkillJunctions, createScriptJunction, createConfigJunction, ejectSkill, ejectScripts, ejectConfigs, listSkillsWithStatus } from './junction-manager.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkgPath = join(__dirname, '..', 'package.json');
@@ -14,13 +14,15 @@ const pkgPath = join(__dirname, '..', 'package.json');
 const HELP_TEXT = `workflow-ai v1.0.0
 
 Usage:
-  workflow init [path] [--force]   Initialize .workflow/ in target directory
-  workflow run [options]           Run the AI pipeline
-  workflow update [path]           Update global dir and recreate junctions/hardlinks
-  workflow eject <skill> [path]    Eject a skill (copy from global to project)
-  workflow list [path]             List skills with status (shared/ejected/project-only)
-  workflow help                    Show this help
-  workflow version                 Show version
+  workflow init [path] [--force]     Initialize .workflow/ in target directory
+  workflow run [options]             Run the AI pipeline
+  workflow update [path]               Update global dir and recreate junctions
+  workflow eject <skill> [path]      Eject a skill (copy from global to project)
+  workflow eject-scripts [path]      Eject scripts (copy from global to project)
+  workflow eject-configs [path]      Eject configs (copy from global to project)
+  workflow list [path]               List skills with status (shared/ejected/project-only)
+  workflow help                      Show this help
+  workflow version                   Show version
 
 Run options:
   --plan <plan>      Plan ID to execute
@@ -94,7 +96,6 @@ function runUpdate(args) {
   const workflowRoot = getWorkflowRoot(projectRoot);
   const packageRoot = getPackageRoot();
   const globalDir = getGlobalDir();
-
   refreshGlobalDir(packageRoot);
   console.log('✅ Global dir updated (~/.workflow/)');
 
@@ -103,8 +104,12 @@ function runUpdate(args) {
   console.log('✅ Skill junctions recreated');
 
   const scriptsDir = join(workflowRoot, 'src', 'scripts');
-  createScriptHardlinks(globalDir, scriptsDir);
-  console.log('✅ Script hardlinks recreated');
+  createScriptJunction(globalDir, scriptsDir);
+  console.log('✅ Script junction recreated');
+
+  const configDir = join(workflowRoot, 'config');
+  createConfigJunction(globalDir, configDir);
+  console.log('✅ Config junction recreated');
 }
 
 function runEject(args) {
@@ -120,6 +125,26 @@ function runEject(args) {
 
   ejectSkill(skillName, globalDir, skillsDir);
   console.log(`✅ Skill "${skillName}" ejected (copied to project)`);
+}
+
+function runEjectScripts(args) {
+  const projectRoot = resolve(args._[0] || process.cwd());
+  const workflowRoot = getWorkflowRoot(projectRoot);
+  const globalDir = getGlobalDir();
+  const scriptsDir = join(workflowRoot, 'src', 'scripts');
+
+  ejectScripts(globalDir, scriptsDir);
+  console.log('✅ Scripts ejected (copied to project)');
+}
+
+function runEjectConfigs(args) {
+  const projectRoot = resolve(args._[0] || process.cwd());
+  const workflowRoot = getWorkflowRoot(projectRoot);
+  const globalDir = getGlobalDir();
+  const configDir = join(workflowRoot, 'config');
+
+  ejectConfigs(globalDir, configDir);
+  console.log('✅ Configs ejected (copied to project)');
 }
 
 function runList(args) {
@@ -183,6 +208,12 @@ export function run(argv) {
       break;
     case 'eject':
       runEject(args);
+      break;
+    case 'eject-scripts':
+      runEjectScripts(args);
+      break;
+    case 'eject-configs':
+      runEjectConfigs(args);
       break;
     case 'list':
       runList(args);

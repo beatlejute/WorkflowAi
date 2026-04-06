@@ -3,7 +3,7 @@ import { join, resolve, dirname, basename } from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getGlobalDir, ensureGlobalDir } from './global-dir.mjs';
-import { createSkillJunctions, createScriptHardlinks } from './junction-manager.mjs';
+import { createSkillJunctions, createScriptJunction, createConfigJunction } from './junction-manager.mjs';
 
 /**
  * Возвращает абсолютный путь к корню npm-пакета через import.meta.url.
@@ -231,6 +231,21 @@ function generateQwenMd(workflowRoot, projectRoot, packageRoot) {
 }
 
 /**
+ * Генерирует .kilocodemodes из шаблона agent-templates/kilocodemodes.tpl.
+ *
+ * @param {string} projectRoot - Путь к корню проекта
+ * @param {string} packageRoot - Путь к корню пакета
+ */
+function generateKilocodemodes(projectRoot, packageRoot) {
+  const templatePath = join(packageRoot, 'agent-templates', 'kilocodemodes.tpl');
+  const destPath = join(projectRoot, '.kilocodemodes');
+
+  if (existsSync(templatePath)) {
+    copyFileSync(templatePath, destPath);
+  }
+}
+
+/**
  * Обновляет .gitignore, добавляя указанные строки.
  *
  * @param {string} projectRoot - Путь к корню проекта
@@ -248,6 +263,7 @@ function updateGitignore(projectRoot) {
     'QWEN.md',
     'CLAUDE.md',
     '.kilocode/',
+    '.kilocodemodes',
   ];
   
   let currentContent = '';
@@ -355,7 +371,6 @@ export function initProject(targetPath = process.cwd(), options = {}) {
     'reports',
     'logs',
     'templates',
-    'config',
     'src/skills'
   ];
   
@@ -371,10 +386,10 @@ export function initProject(targetPath = process.cwd(), options = {}) {
   createSkillJunctions(globalDir, srcSkillsDest);
   result.steps.push('Created skill junctions from global dir → .workflow/src/skills/');
 
-  // Step 3: Create script hardlinks
+  // Step 3: Create script junction
   const srcScriptsDest = join(workflowRoot, 'src', 'scripts');
-  createScriptHardlinks(globalDir, srcScriptsDest);
-  result.steps.push('Created script hardlinks from global dir → .workflow/src/scripts/');
+  createScriptJunction(globalDir, srcScriptsDest);
+  result.steps.push('Created script junction from global dir → .workflow/src/scripts/');
 
   // Step 5: Copy templates (3 templates)
   const templatesSrc = join(packageRoot, 'templates');
@@ -391,35 +406,10 @@ export function initProject(targetPath = process.cwd(), options = {}) {
   }
   result.steps.push('Copied 3 templates → .workflow/templates/');
   
-  // Step 6: Generate config files
+  // Step 6: Create config junction
   const configDest = join(workflowRoot, 'config');
-  ensureDir(configDest);
-  
-  // config.yaml — only if not exists (fresh only)
-  const configYamlDest = join(configDest, 'config.yaml');
-  if (!existsSync(configYamlDest) || force) {
-    const configYamlSrc = join(packageRoot, 'configs', 'config.yaml');
-    if (existsSync(configYamlSrc)) {
-      copyFile(configYamlSrc, configYamlDest);
-      result.steps.push('Generated config.yaml (fresh)');
-    }
-  } else {
-    result.warnings.push('config.yaml already exists, skipped (use --force to overwrite)');
-  }
-  
-  // pipeline.yaml — always
-  const pipelineSrc = join(packageRoot, 'configs', 'pipeline.yaml');
-  if (existsSync(pipelineSrc)) {
-    copyFile(pipelineSrc, join(configDest, 'pipeline.yaml'));
-    result.steps.push('Generated pipeline.yaml (overwritten)');
-  }
-
-  // ticket-movement-rules.yaml — always
-  const movementRulesSrc = join(packageRoot, 'configs', 'ticket-movement-rules.yaml');
-  if (existsSync(movementRulesSrc)) {
-    copyFile(movementRulesSrc, join(configDest, 'ticket-movement-rules.yaml'));
-    result.steps.push('Generated ticket-movement-rules.yaml (overwritten)');
-  }
+  createConfigJunction(globalDir, configDest);
+  result.steps.push('Created config junction from global dir → .workflow/config/');
 
   // Step 7: Create .kilocode symlinks
   const symlinkResult = createKilocodeSymlinks(projectRoot, force);
@@ -432,10 +422,11 @@ export function initProject(targetPath = process.cwd(), options = {}) {
     result.errors.push(symlinkResult.warning || 'Failed to create .kilocode symlinks');
   }
   
-  // Step 8: Generate CLAUDE.md and QWEN.md
+  // Step 8: Generate CLAUDE.md, QWEN.md and .kilocodemodes
   generateClaudeMd(workflowRoot, projectRoot, packageRoot);
   generateQwenMd(workflowRoot, projectRoot, packageRoot);
-  result.steps.push('Generated CLAUDE.md and QWEN.md from agent-templates');
+  generateKilocodemodes(projectRoot, packageRoot);
+  result.steps.push('Generated CLAUDE.md, QWEN.md and .kilocodemodes from agent-templates');
   
   // Step 9: Update .gitignore
   updateGitignore(projectRoot);

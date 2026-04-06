@@ -8,10 +8,10 @@
 ## Выход
 
 - `status`: `relevant` | `irrelevant`
-- `reason` (при **irrelevant**): `already_skipped` | `plan_inactive` | `dod_completed` | `dependencies_inactive` | `blocked`
-- `reason` (при **relevant**): `review_failed_needs_rework` | `needs_review`
+- `reason` (при **irrelevant**): `already_skipped` | `plan_inactive` | `dod_completed` | `dependencies_inactive`
+- `reason` (при **relevant**): `review_failed_needs_rework` | `needs_review` | `blocked`
 
-> ⛔ **`review_failed_needs_rework` используется ТОЛЬКО со `status: relevant`.** Использование со `status: irrelevant` — ошибка алгоритма.
+> ⛔ **`review_failed_needs_rework` и `blocked` используются ТОЛЬКО со `status: relevant`.** Использование со `status: irrelevant` — ошибка алгоритма.
 
 ## Алгоритм (шаги выполняются последовательно, первый irrelevant — стоп)
 
@@ -30,8 +30,10 @@
 
 ### Шаг 2. Проверить статус blocked
 
-1. Если есть секция `## Блокировки` с активными блокировками → `irrelevant` (reason: `blocked`)
-2. Если frontmatter содержит `blocked: true` → `irrelevant` (reason: `blocked`)
+> ⛔ **Блокировка ≠ нерелевантность.** Заблокированный тикет остаётся актуальным — его нужно выполнить, просто сейчас есть препятствие. Решение о переводе в `blocked/` принимает execute-task, не check-relevance.
+
+1. Если есть секция `## Блокировки` с активными блокировками → **СТОП**: `relevant` (reason: `blocked`). Новую запись в ревью НЕ добавлять.
+2. Если frontmatter содержит `blocked: true` → **СТОП**: `relevant` (reason: `blocked`). Новую запись в ревью НЕ добавлять.
 
 ### Шаг 3. Проверить родительский план
 
@@ -65,7 +67,7 @@
 1. Убедись, что в ответе будет блок `---RESULT---` с полями `status` и `reason`
 2. Если вердикт `irrelevant` — убедись, что шаг 7 (запись в ревью) ВЫПОЛНЕН ПЕРВЫМ, до вывода RESULT-блока
 3. Если вердикт `relevant` — убедись, что ты НЕ сделал никаких записей в файл тикета. Если сделал `⏭ skipped` запись — удали её немедленно
-4. Проверь: `reason: review_failed_needs_rework` допустим ТОЛЬКО совместно со `status: relevant`
+4. Проверь: `reason: review_failed_needs_rework` и `reason: blocked` допустимы ТОЛЬКО совместно со `status: relevant`
 
 ### Шаг 7. Запись при irrelevant
 
@@ -94,7 +96,7 @@
 |---|----------|-----------|--------|--------|------------|
 | 0 | Последнее ревью `⏭ skipped` | Уже проверен | `irrelevant` | `already_skipped` | |
 | 0 | Последнее ревью `❌ failed` | Нужна доработка | **`relevant`** | `review_failed_needs_rework` | ⛔ статус RELEVANT, не irrelevant |
-| 2 | Тикет заблокирован | Blocked | `irrelevant` | `blocked` | |
+| 2 | Тикет заблокирован | Есть препятствие | **`relevant`** | `blocked` | ⛔ статус RELEVANT — execute-task решает что делать |
 | 3 | План неактивен | Plan inactive | `irrelevant` | `plan_inactive` | |
 | 4 | DoD выполнен, ревью `✅ passed` | Задача сделана | `irrelevant` | `dod_completed` | |
 | 4 | DoD выполнен, ревью отсутствует | Нужно ревью | **`relevant`** | `needs_review` | ⛔ не irrelevant — иначе auto-correct loop |

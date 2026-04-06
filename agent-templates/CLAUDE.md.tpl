@@ -21,6 +21,14 @@
 | Выбор следующей задачи | `node .workflow/src/scripts/pick-next-task.js` |
 | Перемещение готовых в ready | `node .workflow/src/scripts/move-to-ready.js` |
 
+### Кастомизация (eject)
+
+| Действие | Команда |
+|----------|---------|
+| Eject скила | `workflow eject <skill-name>` |
+| Eject скриптов | `workflow eject-scripts` |
+| Eject конфигов | `workflow eject-configs` |
+
 ## Workflow
 
 1. **Планирование**: Создай план в `.workflow/plans/current/`
