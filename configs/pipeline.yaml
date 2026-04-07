@@ -53,7 +53,7 @@ pipeline:
       command: "claude"
       args: ["--model", "claude-sonnet-4-6", "--permission-mode", "bypassPermissions", "-p", "manual-testing"]
       workdir: "."
-      description: "Claude Opus — QA"
+      description: "Claude — QA"
 
     kilo-qa:
       command: "kilo"
@@ -157,6 +157,12 @@ pipeline:
       workdir: "."
       description: "Проверка и активация шаблонов планов по триггерам"
 
+    script-check-mcp:
+      command: "node"
+      args: [".workflow/src/scripts/check-mcp.js"]
+      workdir: "."
+      description: "Проверка доступности MCP-серверов"
+
       
   default_agent: qwen-code
 
@@ -214,6 +220,7 @@ pipeline:
           stage: move-to-in-progress
           params:
             ticket_id: "$result.ticket_id"
+            task_type: "$result.type"
             target: in-progress
         in_review:
           stage: review-result
@@ -356,7 +363,7 @@ pipeline:
       timeout: 120
       goto:
         relevant:
-          stage: execute-task
+          stage: check-mcp
           params:
             ticket_id: "$context.ticket_id"
         irrelevant:
@@ -364,6 +371,40 @@ pipeline:
           params:
             ticket_id: "$context.ticket_id"
             target: done
+        default:
+          stage: check-mcp
+          params:
+            ticket_id: "$context.ticket_id"
+
+    # -------------------------------------------------------------------------
+    # 2d. check-mcp
+    # Проверяет доступность MCP-серверов перед запуском задач, которым они нужны.
+    # Список типов тикетов задаётся в context.mcp_require_for (см. секцию context
+    # в конце файла). Это проектная настройка — менять там.
+    #
+    # Поведение:
+    #   - task_type входит в mcp_require_for + MCP доступны → status: ok      → execute-task
+    #   - task_type входит в mcp_require_for + MCP упали   → status: fail    → blocked
+    #   - task_type НЕ входит в mcp_require_for             → status: skipped → execute-task
+    # -------------------------------------------------------------------------
+    check-mcp:
+      description: "Проверить доступность MCP-серверов для типов тикетов из mcp_require_for"
+      agent: script-check-mcp
+      timeout: 60
+      goto:
+        ok:
+          stage: execute-task
+          params:
+            ticket_id: "$context.ticket_id"
+        skipped:
+          stage: execute-task
+          params:
+            ticket_id: "$context.ticket_id"
+        fail:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: blocked
         default:
           stage: execute-task
           params:
@@ -567,6 +608,7 @@ pipeline:
   # ===========================================================================
   context:
     plan_id: ""              # ID плана (задаётся при запуске)
+    mcp_require_for: "qa"    # comma-separated типы тикетов, для которых check-mcp проверяет MCP
 
   # ===========================================================================
   # Защита файлов (protected_files)
