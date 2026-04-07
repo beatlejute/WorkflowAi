@@ -45,7 +45,7 @@ pipeline:
 
     claude-coach:
       command: "claude"
-      args: ["--model", "claude-opus-4-6", "--permission-mode", "bypassPermissions", "-p", "coach"]
+      args: ["--model", "claude-sonnet-4-6", "--permission-mode", "bypassPermissions", "-p", "coach"]
       workdir: "."
       description: "Claude Opus — coach"
 
@@ -55,15 +55,33 @@ pipeline:
       workdir: "."
       description: "Claude Opus — QA"
 
+    kilo-qa:
+      command: "kilo"
+      args: ["-m", "kilo/qwen/qwen3.6-plus:free", "--agent", "manual-testing", "run"]
+      workdir: "."
+      description: "Kilo QA"
+
     qwen-code:
       command: "qwen"
       args: ["-y", "-p"]
       workdir: "."
       description: "Qwen Code — альтернативный агент для независимой проверки"
 
+    qwen-coach:
+      command: "qwen"
+      args: ["-y", "-p", "coach"]
+      workdir: "."
+      description: "Qwen Code — coach"
+
+    qwen-qa:
+      command: "qwen"
+      args: ["-y", "-p", "manual-testing"]
+      workdir: "."
+      description: "Qwen Code — QA"
+
     kilo-code:
       command: "kilo"
-      args: ["-m", "kilo/minimax/minimax-m2.5:free", "--agent", "orchestrator", "run"]
+      args: ["-m", "kilo/kilo-auto/free", "--agent", "orchestrator", "run"]
       workdir: "."
       description: "Агент с мульти-режимами (architect, code, debug)"
 
@@ -84,6 +102,12 @@ pipeline:
       args: ["-m", "kilo/minimax/minimax-m2.5:free", "--agent", "code", "run"]
       workdir: "."
       description: "Kilo minimax"
+
+    kilo-free:
+      command: "kilo"
+      args: ["-m", "kilo/kilo-auto/free", "--agent", "code", "run"]
+      workdir: "."
+      description: "Kilo free"
 
     script-move:
       command: "node"
@@ -353,19 +377,16 @@ pipeline:
       agent_by_type:
         coach:
           agent: claude-coach
-          fallback_model: claude-sonnet
+          fallback_model: qwen-coach
         qa:
-          agent: claude-qa
-          fallback_model: claude-sonnet
-        impl:
-          agent: kilo-minimax
-          fallback_model: kilo-glm
-        arch:
-          agent: claude-opus
-          fallback_model: claude-sonnet
-        admin:
-          agent: kilo-minimax
-          fallback_model: kilo-glm
+          agent: qwen-qa
+          fallback_model: claude-qa
+        impl: kilo-free
+      # fix: claude-sonnet
+        arch: claude-opus
+      # review: qwen-code
+      # docs: qwen-code
+        admin: kilo-free
       agent_by_attempt:
         2: qwen-code
         3: claude-sonnet
@@ -411,7 +432,7 @@ pipeline:
     review-result:
       description: "Проверить результат выполнения на соответствие DoD тикета"
       agent: claude-sonnet
-      fallback_agent: kilo-deepseek
+      fallback_agent: qwen-code
       skill: review-result
       counter: task_attempts
       goto:
