@@ -16,6 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import yaml from '../lib/js-yaml.mjs';
+import { FileGuard } from '../runner.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -627,6 +628,175 @@ describe('PipelineRunner — FileGuard Trusted Agents', () => {
 
     assert.strictEqual(isTrusted('my-special-agent', trusted), true);
     assert.strictEqual(isTrusted('my-special-agent-2', trusted), false);
+  });
+});
+
+// ============================================================================
+// Test: FileGuard protect_structure mode
+// ============================================================================
+describe('FileGuard — protect_structure mode', () => {
+  const PROJECT_ROOT = path.resolve(__dirname, '..');
+  const TEST_BASE = 'temp_fileguard_test';
+
+  function createTestDir() {
+    const dirName = TEST_BASE + '_' + Date.now();
+    fs.mkdirSync(dirName, { recursive: true });
+    return dirName;
+  }
+
+  function cleanupTestDir(dirName) {
+    try {
+      if (fs.existsSync(dirName)) {
+        const files = fs.readdirSync(dirName);
+        for (const file of files) {
+          try { fs.unlinkSync(path.join(dirName, file)); } catch {}
+        }
+        try { fs.rmdirSync(dirName); } catch {}
+      }
+    } catch {}
+  }
+
+  it('TC-001: mode=structure — new file in protected dir should be removed', () => {
+    const dirName = createTestDir();
+    try {
+      const patterns = [{ pattern: dirName + '/**', mode: 'structure' }];
+      const fileGuard = new FileGuard(patterns, '.', [], []);
+
+      const newFileInProtected = path.join(dirName, 'agent_created.txt');
+      fs.writeFileSync(newFileInProtected, 'created by agent');
+
+      fileGuard.takeSnapshot();
+
+      const violations = fileGuard.checkAndRollback();
+
+      const found = violations.some(v => v.endsWith('agent_created.txt'));
+      assert.strictEqual(found, true, 'New file should be detected as violation');
+      assert.strictEqual(fs.existsSync(newFileInProtected), false, 'New file should be removed');
+    } finally {
+      cleanupTestDir(dirName);
+    }
+  });
+
+  it('TC-002: mode=structure — deleted file should be restored via writeFileSync', () => {
+    const dirName = createTestDir();
+    try {
+      const protectedFile = path.join(dirName, 'file.txt');
+      const originalContent = Buffer.from('original content');
+      fs.writeFileSync(protectedFile, originalContent);
+
+      const patterns = [{ pattern: dirName + '/file.txt', mode: 'structure' }];
+      const fileGuard = new FileGuard(patterns, '.', [], []);
+
+      fileGuard.takeSnapshot();
+
+      fs.unlinkSync(protectedFile);
+      assert.strictEqual(fs.existsSync(protectedFile), false, 'File should be deleted');
+
+      const violations = fileGuard.checkAndRollback();
+
+      const found = violations.some(v => v.endsWith('file.txt'));
+      assert.strictEqual(found, true, 'Deleted file should be detected as violation');
+      assert.strictEqual(fs.existsSync(protectedFile), true, 'File should be restored');
+      assert.strictEqual(fs.readFileSync(protectedFile).equals(originalContent), true, 'Content should match original');
+    } finally {
+      cleanupTestDir(dirName);
+    }
+  });
+
+  it('TC-003: mode=structure — modified content should NOT be rolled back', () => {
+    const dirName = createTestDir();
+    try {
+      const protectedFile = path.join(dirName, 'file.txt');
+      fs.writeFileSync(protectedFile, 'original content');
+
+      const patterns = [{ pattern: dirName + '/file.txt', mode: 'structure' }];
+      const fileGuard = new FileGuard(patterns, '.', [], []);
+
+      fileGuard.takeSnapshot();
+
+      fs.writeFileSync(protectedFile, 'modified by agent');
+
+      const violations = fileGuard.checkAndRollback();
+
+      const found = violations.some(v => v.endsWith('file.txt'));
+      assert.strictEqual(found, false, 'Modified content should NOT be detected as violation');
+      assert.strictEqual(fs.readFileSync(protectedFile, 'utf8'), 'modified by agent', 'Content should remain changed');
+    } finally {
+      cleanupTestDir(dirName);
+    }
+  });
+
+  it('TC-004: mode=full (default) — modified content should be rolled back (regression)', () => {
+    const dirName = createTestDir();
+    try {
+      const protectedFile = path.join(dirName, 'file.txt');
+      fs.writeFileSync(protectedFile, 'original content');
+
+      const patterns = [{ pattern: dirName + '/file.txt', mode: 'full' }];
+      const fileGuard = new FileGuard(patterns, '.', [], []);
+
+      fileGuard.takeSnapshot();
+
+      fs.writeFileSync(protectedFile, 'modified by agent');
+
+      const violations = fileGuard.checkAndRollback();
+
+      const found = violations.some(v => v.endsWith('file.txt'));
+      assert.strictEqual(found, true, 'Modified content should be detected as violation');
+      assert.strictEqual(fs.readFileSync(protectedFile, 'utf8'), 'original content', 'Content should be rolled back');
+    } finally {
+      cleanupTestDir(dirName);
+    }
+  });
+
+  it('TC-005: mixed config — string + object formats should both parse correctly', () => {
+    const patterns = [
+      'temp_fileguard_test/*.txt',
+      { pattern: 'temp_fileguard_test/**/*.md', mode: 'structure' }
+    ];
+    const fileGuard = new FileGuard(patterns, PROJECT_ROOT, [], []);
+
+    assert.strictEqual(fileGuard.enabled, true, 'FileGuard should be enabled');
+    assert.strictEqual(fileGuard.patterns.length, 2, 'Should have 2 patterns');
+
+    const txtPattern = fileGuard.patterns.find(p => p.pattern === 'temp_fileguard_test/*.txt');
+    assert.strictEqual(txtPattern?.mode, 'full', 'String pattern should default to full mode');
+
+    const mdPattern = fileGuard.patterns.find(p => p.pattern.includes('.md'));
+    assert.strictEqual(mdPattern?.mode, 'structure', 'Object pattern should use specified mode');
+  });
+});
+
+// ============================================================================
+// Test: FileGuard isTrusted (stageId)
+// ============================================================================
+describe('FileGuard — isTrusted with stageId', () => {
+  const PROJECT_ROOT = path.resolve(__dirname, '..');
+  const patterns = ['temp_fileguard_test/**'];
+
+  it('TC-006: isTrusted returns true when stageId matches trusted_stages', () => {
+    const fileGuard = new FileGuard(patterns, PROJECT_ROOT, [], ['execute-task', 'review-result']);
+
+    assert.strictEqual(fileGuard.isTrusted('some-agent', 'execute-task'), true, 'Should be trusted by stageId');
+    assert.strictEqual(fileGuard.isTrusted('some-agent', 'review-result'), true, 'Should be trusted by stageId');
+    assert.strictEqual(fileGuard.isTrusted('some-agent', 'other-stage'), false, 'Should not be trusted');
+  });
+
+  it('TC-007: isTrusted returns true when agentId matches trusted_agents (regression)', () => {
+    const fileGuard = new FileGuard(patterns, PROJECT_ROOT, ['script-*', 'kilo-agent'], []);
+
+    assert.strictEqual(fileGuard.isTrusted('script-move', null), true, 'script-* should match');
+    assert.strictEqual(fileGuard.isTrusted('script-pick', null), true, 'script-* should match');
+    assert.strictEqual(fileGuard.isTrusted('kilo-agent', null), true, 'Exact match should work');
+    assert.strictEqual(fileGuard.isTrusted('claude-opus', null), false, 'Should not match');
+  });
+
+  it('TC-008: isTrusted returns false when neither agentId nor stageId match', () => {
+    const fileGuard = new FileGuard(patterns, PROJECT_ROOT, ['trusted-agent'], ['trusted-stage']);
+
+    assert.strictEqual(fileGuard.isTrusted('untrusted-agent', 'untrusted-stage'), false, 'Should not be trusted');
+    assert.strictEqual(fileGuard.isTrusted('untrusted-agent', 'trusted-stage'), true, 'Stage match should work');
+    assert.strictEqual(fileGuard.isTrusted('trusted-agent', 'untrusted-stage'), true, 'Agent match should work');
   });
 });
 
