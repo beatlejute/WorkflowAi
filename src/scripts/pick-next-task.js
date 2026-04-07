@@ -543,6 +543,25 @@ function pickNextTicket(planId) {
       return false;
     }
 
+    // Обнаружение и удаление дубликатов: тикет не должен существовать в других колонках
+    const ticketFileName = `${ticket.id}.md`;
+    const otherDirs = [DONE_DIR, IN_PROGRESS_DIR, REVIEW_DIR, BLOCKED_DIR];
+    const duplicateDir = otherDirs.find(dir =>
+      fs.existsSync(path.join(dir, ticketFileName))
+    );
+    if (duplicateDir) {
+      const dirName = path.basename(duplicateDir);
+      logger.warn(`Duplicate detected: ${ticket.id} exists in ready/ and ${dirName}/. Moving ready/ copy to archive/`);
+      const archivePath = path.join(ARCHIVE_DIR, ticketFileName);
+      try {
+        fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+        fs.renameSync(ticket.filePath, archivePath);
+      } catch (err) {
+        logger.error(`Failed to archive duplicate ${ticket.id}: ${err.message}`);
+      }
+      return false;
+    }
+
     return true;
   });
 

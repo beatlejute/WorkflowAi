@@ -59,7 +59,7 @@ ticket_prefix: RPT
 - Структурированный markdown с заголовками, таблицами, списками
 - Метрики в табличном виде с формулами из `knowledge/report-metrics.md`
 - Шаблон отчёта: `.workflow/templates/report-template.md`
-- Нумерация: `REPORT-{NNN}` (следующий после максимального)
+- Нумерация: `REPORT-{NNN}` — генерируется через скрипт `get-next-id.js` (см. workflow `standard.md`, шаг 8)
 
 ## Границы компетенции
 
