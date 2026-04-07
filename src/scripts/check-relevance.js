@@ -15,13 +15,13 @@
 
 import fs from "fs";
 import path from "path";
-import YAML from "../lib/js-yaml.mjs";
-import { findProjectRoot } from "../lib/find-root.mjs";
+import YAML from "workflow-ai/lib/js-yaml.mjs";
+import { findProjectRoot } from "workflow-ai/lib/find-root.mjs";
 import {
   parseFrontmatter,
   serializeFrontmatter,
   getLastReviewStatus,
-} from "../lib/utils.mjs";
+} from "workflow-ai/lib/utils.mjs";
 
 const PROJECT_DIR = findProjectRoot();
 const WORKFLOW_DIR = path.join(PROJECT_DIR, ".workflow");
@@ -258,13 +258,16 @@ async function main() {
     console.error("Example: node check-relevance.js .workflow/tickets/in-progress/IMPL-001.md");
     process.exit(1);
   } else if (args.length === 1) {
-    const prompt = args[0];
-    const ticketMatch = prompt.match(/ticket_id:\s*(\S+)/);
+    const arg = args[0];
+    const ticketMatch = arg.match(/ticket_id:\s*(\S+)/);
     if (ticketMatch) {
       const ticketId = ticketMatch[1];
       ticketPath = path.join(TICKETS_DIR, "in-progress", `${ticketId}.md`);
+    } else if (/^[A-Z]+-\d+$/i.test(arg)) {
+      // Чистый ticket_id (например, IMPL-001) — резолвим в in-progress
+      ticketPath = path.join(TICKETS_DIR, "in-progress", `${arg}.md`);
     } else {
-      ticketPath = args[0];
+      ticketPath = arg;
     }
   } else {
     ticketPath = args[0];

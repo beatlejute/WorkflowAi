@@ -139,6 +139,12 @@ pipeline:
       workdir: "."
       description: "Скрипт для проверки, декомпозирован ли текущий план"
 
+    script-check-relevance:
+      command: "node"
+      args: [".workflow/src/scripts/check-relevance.js"]
+      workdir: "."
+      description: "Скрипт проверки актуальности тикета (заменяет скил check-relevance)"
+
     script-move-to-review:
       command: "node"
       args: [".workflow/src/scripts/move-to-review.js"]
@@ -345,10 +351,9 @@ pipeline:
     # Fail-safe: default fallback → execute-task (лучше выполнить лишний, чем пропустить)
     # -------------------------------------------------------------------------
     check-relevance:
-      description: "Проверить актуальность тикета перед выполнением"
-      agent: qwen-code
-      fallback_agent: claude-sonnet
-      skill: check-relevance
+      description: "Проверить актуальность тикета перед выполнением (детерминированный скрипт)"
+      agent: script-check-relevance
+      timeout: 120
       goto:
         relevant:
           stage: execute-task

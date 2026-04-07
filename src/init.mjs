@@ -96,7 +96,6 @@ function generateSkillsTable(workflowRoot) {
     'pick-next-task': 'Выбор следующей задачи',
     'decompose-gaps': 'Декомпозиция пробелов',
     'review-result': 'Ревью результата',
-    'check-relevance': 'Проверка актуальности',
     'coach': 'Коуч скилов',
     'deep-research': 'Глубокий ресерч'
   };

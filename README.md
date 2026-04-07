@@ -81,7 +81,7 @@ The `workflow run` command executes a multi-stage pipeline:
 6. **move-to-ready** — move tickets from backlog to ready
 7. **pick-next-task** — select next ticket for execution
 8. **move-to-in-progress** — start execution
-9. **check-relevance** — verify ticket is still relevant
+9. **check-relevance** — verify ticket is still relevant (script-based, no LLM)
 10. **execute-task** — perform the work via AI agent
 11. **move-to-review** — submit for review
 12. **review-result** — validate results against Definition of Done
@@ -108,7 +108,6 @@ Built-in skills for different task types:
 | Skill | Description |
 |-------|-------------|
 | `analyze-report` | Report analysis |
-| `check-relevance` | Ticket relevance verification |
 | `coach` | Skill management and improvement |
 | `create-plan` | Plan creation |
 | `create-report` | Report generation |
