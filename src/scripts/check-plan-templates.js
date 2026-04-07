@@ -89,16 +89,18 @@ export function evaluateTrigger(trigger, lastTriggered, now = new Date()) {
  * @returns {string}
  */
 export function generateNextPlanId(plansDir) {
-  if (!fs.existsSync(plansDir)) return 'PLAN-001';
-
-  const files = fs.readdirSync(plansDir).filter(f => f.endsWith('.md'));
+  const archiveDir = path.join(path.dirname(plansDir), 'archive');
   let maxNum = 0;
 
-  for (const file of files) {
-    const match = file.match(/^PLAN-(\d+)\.md$/i);
-    if (match) {
-      const num = parseInt(match[1], 10);
-      if (num > maxNum) maxNum = num;
+  for (const dir of [plansDir, archiveDir]) {
+    if (!fs.existsSync(dir)) continue;
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.md'));
+    for (const file of files) {
+      const match = file.match(/^PLAN-(\d+)\.md$/i);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        if (num > maxNum) maxNum = num;
+      }
     }
   }
 
