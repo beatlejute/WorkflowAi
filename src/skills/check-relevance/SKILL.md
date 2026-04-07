@@ -60,10 +60,12 @@ reason: <причина — см. допустимые значения ниже
 ```
 
 Допустимые значения `reason`:
-- при `status: irrelevant`: `already_skipped`, `plan_inactive`, `dod_completed`, `dependencies_inactive`, `blocked`
-- при `status: relevant`: `review_failed_needs_rework`, `needs_review`
+- при `status: irrelevant`: `already_skipped`, `plan_inactive`, `dod_completed`, `dependencies_inactive`
+- при `status: relevant`: `review_failed_needs_rework`, `needs_review`, `blocked`
 
-> ⛔ `review_failed_needs_rework` и `needs_review` — маркеры только для `relevant`. Запрещено использовать со `status: irrelevant`.
+> ⛔ `review_failed_needs_rework`, `needs_review` и `blocked` — маркеры только для `relevant`. Запрещено использовать со `status: irrelevant`.
+
+> ⛔ Блокировка ≠ нерелевантность. Заблокированный тикет остаётся актуальным — решение о переводе в `blocked/` принимает следующий по пайплайну скил выполнения, не check-relevance.
 
 > ⛔ DoD completed + ревью отсутствует → `relevant (needs_review)`, НЕ `irrelevant`. Без этого тикет попадает в `done/` без ревью → auto-correct возвращает в backlog → бесконечный цикл.
 

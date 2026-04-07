@@ -543,30 +543,46 @@ class ResultParser {
 // FileGuard — защита файлов от несанкционированного изменения агентами
 // ============================================================================
 class FileGuard {
-  constructor(patterns, projectRoot = process.cwd(), trustedAgents = []) {
-    // Паттерны указаны относительно корня проекта
-    this.patterns = (patterns || []).map(p => p.replace(/\\/g, '/'));
-    this.enabled = this.patterns.length > 0;
+  constructor(patterns, projectRoot = process.cwd(), trustedAgents = [], trustedStages = []) {
+    this.enabled = patterns && patterns.length > 0;
     this.snapshots = new Map();
+    this.patterns = (patterns || []).map(p => {
+      if (typeof p === 'string') {
+        return { pattern: p.replace(/\\/g, '/'), mode: 'full' };
+      }
+      return { pattern: p.pattern.replace(/\\/g, '/'), mode: p.mode || 'full' };
+    });
     // projectRoot — корневая директория проекта, относительно которой указаны паттерны
     this.projectRoot = projectRoot;
     // Доверенные агенты — для них FileGuard не откатывает изменения
     this.trustedAgents = trustedAgents;
+    // Доверенные стейджи — для них FileGuard не откатывает изменения
+    this.trustedStages = trustedStages;
   }
 
   /**
-   * Проверяет, является ли агент доверенным (пропускает FileGuard)
+   * Проверяет, является ли агент или стейдж доверенным (пропускает FileGuard)
    * Поддерживает glob-паттерны: "script-*" соответствует "script-move", "script-pick" и т.д.
    * @param {string} agentId - ID агента
+   * @param {string} [stageId] - ID стейджа (опционально)
    * @returns {boolean}
    */
-  isTrusted(agentId) {
-    return this.trustedAgents.some(pattern => {
+  isTrusted(agentId, stageId) {
+    // Проверка по trustedAgents (glob-паттерны)
+    const agentMatch = this.trustedAgents.some(pattern => {
       if (pattern.endsWith('*')) {
         return agentId.startsWith(pattern.slice(0, -1));
       }
       return agentId === pattern;
     });
+    if (agentMatch) return true;
+
+    // Проверка по trustedStages (точное совпадение)
+    if (stageId && this.trustedStages.includes(stageId)) {
+      return true;
+    }
+
+    return false;
   }
 
   /**
@@ -575,9 +591,8 @@ class FileGuard {
    * @returns {boolean}
    */
   matchesProtected(filePath) {
-    // Получаем относительный путь от projectRoot для сопоставления с паттерном
     const relativePath = path.relative(this.projectRoot, filePath).replace(/\\/g, '/');
-    return this.patterns.some(pattern => this._matchGlob(relativePath, pattern));
+    return this.patterns.some(p => this._matchGlob(relativePath, p.pattern));
   }
 
   /**
@@ -649,20 +664,26 @@ class FileGuard {
     if (!this.enabled) return;
     this.snapshots.clear();
 
-    for (const pattern of this.patterns) {
+    for (const { pattern, mode } of this.patterns) {
       if (!pattern.includes('*')) {
-        // Прямой путь к файлу — преобразуем в абсолютный
         const absolutePath = path.resolve(this.projectRoot, pattern);
         if (fs.existsSync(absolutePath)) {
-          this.snapshots.set(absolutePath, this._hashFile(absolutePath));
+          if (mode === 'structure') {
+            this.snapshots.set(absolutePath, { hash: this._hashFile(absolutePath), content: fs.readFileSync(absolutePath, null), mode: 'structure' });
+          } else {
+            this.snapshots.set(absolutePath, this._hashFile(absolutePath));
+          }
         }
       } else {
-        // Glob-паттерн: сканируем базовую директорию относительно projectRoot
         const baseDir = path.resolve(this.projectRoot, this._getBaseDir(pattern));
         const files = this._getAllFiles(baseDir);
         for (const filePath of files) {
           if (this.matchesProtected(filePath)) {
-            this.snapshots.set(filePath, this._hashFile(filePath));
+            if (mode === 'structure') {
+              this.snapshots.set(filePath, { hash: this._hashFile(filePath), content: fs.readFileSync(filePath, null), mode: 'structure' });
+            } else {
+              this.snapshots.set(filePath, this._hashFile(filePath));
+            }
           }
         }
       }
@@ -681,18 +702,30 @@ class FileGuard {
 
     const violations = [];
 
-    // 1. Проверяем файлы из снимка (изменённые или удалённые)
-    for (const [filePath, originalHash] of this.snapshots) {
-      const currentHash = this._hashFile(filePath);
-      if (currentHash !== originalHash) {
-        violations.push(filePath);
-        console.warn(`[FileGuard] WARNING: Protected file modified: ${filePath}`);
-        this._rollbackFile(filePath);
+    for (const [filePath, snapshot] of this.snapshots) {
+      const mode = snapshot.mode || 'full';
+      if (mode === 'structure') {
+        if (!fs.existsSync(filePath)) {
+          violations.push(filePath);
+          console.warn(`[FileGuard] WARNING: Protected file deleted: ${filePath}`);
+          try {
+            fs.writeFileSync(filePath, snapshot.content);
+            console.warn(`[FileGuard] WARNING: Restored deleted file: ${filePath}`);
+          } catch (err) {
+            console.error(`[FileGuard] ERROR: Failed to restore ${filePath}: ${err.message}`);
+          }
+        }
+      } else {
+        const currentHash = this._hashFile(filePath);
+        if (currentHash !== snapshot) {
+          violations.push(filePath);
+          console.warn(`[FileGuard] WARNING: Protected file modified: ${filePath}`);
+          this._rollbackFile(filePath);
+        }
       }
     }
 
-    // 2. Обнаруживаем новые файлы в защищённых директориях
-    for (const pattern of this.patterns) {
+    for (const { pattern, mode } of this.patterns) {
       const baseDir = pattern.includes('*')
         ? path.resolve(this.projectRoot, this._getBaseDir(pattern))
         : path.resolve(this.projectRoot, pattern);
@@ -848,8 +881,8 @@ class StageExecutor {
       console.log(`  Skill: ${stage.skill}`);
     }
 
-    // Снимаем snapshot защищённых файлов перед выполнением (кроме trusted agents)
-    const skipGuard = this.fileGuard && this.fileGuard.isTrusted(agentId);
+    // Снимаем snapshot защищённых файлов перед выполнением (кроме trusted agents и trusted stages)
+    const skipGuard = this.fileGuard && this.fileGuard.isTrusted(agentId, stageId);
     if (this.fileGuard && !skipGuard) {
       this.fileGuard.takeSnapshot();
     }
@@ -1195,7 +1228,8 @@ class PipelineRunner {
     // Инициализация FileGuard для защиты файлов от изменений агентами
     const protectedPatterns = this.pipeline.protected_files || [];
     const trustedAgents = this.pipeline.trusted_agents || [];
-    this.fileGuard = new FileGuard(protectedPatterns, projectRoot, trustedAgents);
+    const trustedStages = this.pipeline.trusted_stages || [];
+    this.fileGuard = new FileGuard(protectedPatterns, projectRoot, trustedAgents, trustedStages);
     this.projectRoot = projectRoot;
     this.currentExecutor = null;
 

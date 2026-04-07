@@ -1,23 +1,29 @@
 # Состояния тикетов и критерии неактуальности
 
-## Расположение тикетов по колонкам
+## Расположение тикетов по папкам
 
-| Колонка | Путь | Семантика |
-|---------|------|-----------|
-| backlog | `.workflow/tickets/backlog/` | Запланирован, не готов к работе |
-| ready | `.workflow/tickets/ready/` | Готов к выполнению |
-| in-progress | `.workflow/tickets/in-progress/` | Взят в работу |
-| done | `.workflow/tickets/done/` | Завершён |
-| blocked | `.workflow/tickets/blocked/` | Заблокирован |
+| Папка | Путь | Семантика | Зависимость в этой папке |
+|-------|------|-----------|--------------------------|
+| backlog | `.workflow/tickets/backlog/` | Запланирован, не готов к работе | ✅ актуальна (ждёт своей очереди) |
+| ready | `.workflow/tickets/ready/` | Готов к выполнению | ✅ актуальна |
+| in-progress | `.workflow/tickets/in-progress/` | Взят в работу | ✅ актуальна |
+| review | `.workflow/tickets/review/` | На ревью результата | ✅ актуальна |
+| blocked | `.workflow/tickets/blocked/` | Заблокирован препятствием | ⚠️ зависит от причины (см. ниже) |
+| done | `.workflow/tickets/done/` | Успешно завершён | ✅ **актуальна — задача выполнена** |
+| archive | `.workflow/tickets/archive/` | Архивирован вместе с планом | ✅ актуальна (исторически выполнена) |
+
+> **⛔ КРИТИЧНО:** папки `done/` и `archive/` — это **валидные завершённые состояния**. Зависимость, лежащая в `done/` или `archive/`, считается **выполненной и актуальной**. Не путай «завершённость» с «отсутствием» — это разные семантики.
 
 ## Критерии неактуальности тикета
 
 | Критерий | Проверка | Вердикт |
 |----------|----------|---------|
 | Уже пропущен | Последнее ревью имеет статус `⏭ skipped` | `irrelevant` (reason: `already_skipped`) |
-| DoD выполнен | Все `[x]` в Definition of Done И ревью НЕ `❌ failed` | `irrelevant` (reason: `dod_completed`) |
-| Заблокирован | Секция `## Блокировки` или frontmatter blocked | `irrelevant` (reason: `blocked`) |
-| Зависимости неактуальны | Зависимый тикет в `blocked/` с причиной «неактуально» или удалён | `irrelevant` (reason: `dependencies_inactive`) |
+| DoD выполнен | Все `[x]` в Definition of Done И ревью НЕ `❌ failed` И ревью `✅ passed` | `irrelevant` (reason: `dod_completed`) |
+| План неактивен | Родительский план в статусе `completed`/`archived`/`cancelled` | `irrelevant` (reason: `plan_inactive`) |
+| Зависимости неактуальны | Зависимый тикет в `blocked/` с причиной «неактуально» ИЛИ полностью отсутствует во всех 7 папках tickets/ | `irrelevant` (reason: `dependencies_inactive`) |
+
+> **⛔ Блокировка ≠ нерелевантность.** Заблокированный тикет — это **`relevant` (reason: `blocked`)**, а не `irrelevant`. Решение о переводе в `blocked/` принимает execute-task, не check-relevance. См. таблицу решений в `algorithms/relevance-check.md`.
 
 ## Особые случаи
 
