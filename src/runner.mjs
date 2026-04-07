@@ -630,10 +630,12 @@ class FileGuard {
    * Рекурсивно получает все файлы в директории
    * @param {string} dir - Директория для сканирования
    * @returns {string[]} Список путей к файлам (нормализованных через /)
-   */
+    */
   _getAllFiles(dir) {
     const files = [];
     if (!fs.existsSync(dir)) return files;
+    const stats = fs.statSync(dir);
+    if (!stats.isDirectory()) return files;
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
       const entryPath = path.join(dir, entry.name).replace(/\\/g, '/');
