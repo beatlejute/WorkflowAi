@@ -391,8 +391,13 @@ pipeline:
       description: "Проверить доступность MCP-серверов для типов тикетов из mcp_require_for"
       agent: script-check-mcp
       timeout: 60
+      # ВАЖНО: workflow-ai runner нормализует статусы через STATUS_ALIASES:
+      #   "ok"   → "passed"
+      #   "fail" → "failed"
+      # Поэтому в goto используются канонические passed/failed, а не ok/fail из вывода скрипта.
+      # "skipped" не входит в таблицу синонимов, остаётся как есть.
       goto:
-        ok:
+        passed:
           stage: execute-task
           params:
             ticket_id: "$context.ticket_id"
@@ -400,7 +405,7 @@ pipeline:
           stage: execute-task
           params:
             ticket_id: "$context.ticket_id"
-        fail:
+        failed:
           stage: move-ticket
           params:
             ticket_id: "$context.ticket_id"

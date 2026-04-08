@@ -43,8 +43,10 @@
  *   ---RESULT---
  *
  * Exit code:
- *   0 — status: ok | skipped
- *   1 — status: fail (хотя бы один обязательный сервер недоступен)
+ *   0 — всегда (статус решает goto в pipeline.yaml).
+ *   Runner workflow-ai при exitCode != 0 переписывает наш status на "failed",
+ *   что ломает маршрутизацию. Поэтому валим логический результат через status,
+ *   а не через exit code.
  */
 
 import fs from 'fs';
@@ -226,18 +228,18 @@ function formatRow(r) {
   if (mcpRead.missing) {
     console.log('[check-mcp] .mcp.json отсутствует — серверы не настроены.');
     emitResult('fail', 'mcp.json missing');
-    process.exit(1);
+    process.exit(0);
   }
   if (mcpRead.error) {
     console.error(`[check-mcp] не удалось распарсить .mcp.json: ${mcpRead.error}`);
     emitResult('fail', `mcp.json parse error: ${mcpRead.error}`);
-    process.exit(1);
+    process.exit(0);
   }
   const servers = mcpRead.data && mcpRead.data.mcpServers;
   if (!servers || Object.keys(servers).length === 0) {
     console.log('[check-mcp] .mcp.json не содержит ни одного MCP-сервера.');
     emitResult('fail', 'no mcp servers configured');
-    process.exit(1);
+    process.exit(0);
   }
 
   const settings = readJson(settingsPath).data || null;
@@ -268,5 +270,5 @@ function formatRow(r) {
   }
   const failNames = failed.map((f) => f.name).join(', ');
   emitResult('fail', `unavailable: ${failNames}`);
-  process.exit(1);
+  process.exit(0);
 })();
