@@ -163,7 +163,13 @@ pipeline:
       workdir: "."
       description: "Проверка доступности MCP-серверов"
 
-      
+    script-verify-artifacts:
+      command: "node"
+      args: [".workflow/src/skills/review-result/scripts/verify-artifacts.js"]
+      workdir: "."
+      description: "Механическая предпроверка артефактов тикета перед AI-ревью (DoD %, result_filled, files_exist)"
+
+
   default_agent: qwen-code
 
   # ===========================================================================
@@ -223,7 +229,7 @@ pipeline:
             task_type: "$result.type"
             target: in-progress
         in_review:
-          stage: review-result
+          stage: verify-artifacts
           params:
             ticket_id: "$result.ticket_id"
             attempt: "1"
@@ -323,7 +329,7 @@ pipeline:
             task_type: "$result.type"
             target: in-progress
         in_review:
-          stage: review-result
+          stage: verify-artifacts
           params:
             ticket_id: "$result.ticket_id"
             attempt: "1"
@@ -469,6 +475,39 @@ pipeline:
         skipped:
           stage: pick-next-task
         default:
+          stage: verify-artifacts
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+
+    # -------------------------------------------------------------------------
+    # 3c. verify-artifacts
+    # Механическая предпроверка артефактов тикета перед AI-ревью.
+    # Блокирует AI-рационализацию: если DoD пустой или Result не заполнен —
+    # сразу failed → increment-task-attempts, без вызова дорогой модели.
+    # Критерии failed: result_filled==false | dod_completion_pct==0 | missing_files.
+    # Runner нормализует ok→passed, fail→failed через STATUS_ALIASES.
+    # -------------------------------------------------------------------------
+    verify-artifacts:
+      description: "Механическая предпроверка артефактов тикета перед AI-ревью"
+      agent: script-verify-artifacts
+      timeout: 60
+      goto:
+        passed:
+          stage: review-result
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+        failed:
+          stage: increment-task-attempts
+          params:
+            ticket_id: "$context.ticket_id"
+        default:
+          stage: review-result
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+        error:
           stage: review-result
           params:
             ticket_id: "$context.ticket_id"

@@ -20,25 +20,29 @@
 Запусти скрипт верификации артефактов:
 
 ```bash
-node .workflow/src/skills/review-result/scripts/verify-artifacts.js <ticket-path>
+node .workflow/src/skills/review-result/scripts/verify-artifacts.js <ticket-id|ticket-path>
 ```
 
-Где `<ticket-path>` — путь к файлу тикета (например, `.workflow/tickets/review/IMPL-006.md`).
+Где аргумент — либо ticket_id (`IMPL-006`), либо путь к файлу тикета (`.workflow/tickets/review/IMPL-006.md`).
 
-Прочитай JSON из блока `---RESULT---`. Скрипт возвращает:
-- `files_exist` — список файлов из «Изменённые файлы» с флагом `exists`
+Прочитай key-value пары из блока `---RESULT---`. Скрипт возвращает:
+- `status` — `passed` (все проверки ok) или `failed` (есть критические проблемы)
 - `dod_completion_pct` — процент выполнения DoD (0–100)
-- `result_filled` — заполнена ли секция Summary в Result
+- `dod_total` / `dod_completed` — абсолютные счётчики DoD-чекбоксов
+- `result_filled` — заполнена ли секция Summary в Result (`true` / `false`)
+- `missing_files` — comma-separated список файлов из «Изменённые файлы», которых физически нет
+- `fail_reasons` — (только при failed) перечисление критериев, которые привели к отказу
 
 **Быстрый отказ по результатам скрипта:**
 
 | Условие | Действие |
 |---------|----------|
+| `status: failed` | → итоговый вердикт `failed`, не запускать содержательное AI-ревью |
 | `result_filled == false` | → `failed`: секция Result пуста |
-| `dod_completion_pct == 0` | → `failed`: ни один пункт DoD не отмечен |
-| `files_exist` содержит `exists: false` | Зафиксировать как issue, продолжить AI-ревью |
+| `dod_completion_pct == 0` | → `failed`: ни один пункт DoD не отмечен. **Это жёсткое правило:** запрещено интерпретировать таблицу `PASS`/`FAIL` в тексте Result как замену `- [x]` в DoD. Source of truth — только чекбоксы `- [x]`. Если исполнитель не проставил их — это его ошибка, повод для `failed`, а не для AI-рационализации. |
+| `missing_files` не пуст | Зафиксировать как issue, продолжить AI-ревью |
 
-Если скрипт показал критические проблемы (`result_filled == false` или `dod_completion_pct == 0`) — переходи сразу к шагу 5 (формирование вердикта `failed`).
+Если скрипт показал критические проблемы — переходи сразу к шагу 5 (формирование вердикта `failed`) и запиши в issues поле `fail_reasons` из вывода скрипта.
 
 **Ручная проверка (fallback):**
 

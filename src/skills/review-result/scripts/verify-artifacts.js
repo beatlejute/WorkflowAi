@@ -8,10 +8,21 @@
  * - DoD completion %
  * - Заполненность секции Result (Summary)
  *
- * Использование:
- *   node verify-artifacts.js <path-to-ticket>
+ * Использование (как стейдж пайплайна):
+ *   node verify-artifacts.js "<prompt>"
+ *   Парсит ticket_id из Context-блока в промпте, резолвит в .workflow/tickets/review/{id}.md
  *
- * Вывод: JSON через ---RESULT---
+ * Использование (как standalone-скрипт):
+ *   node verify-artifacts.js <path-to-ticket>
+ *   node verify-artifacts.js <TICKET-ID>
+ *
+ * Вывод (для runner'а):
+ *   ---RESULT---
+ *   status: passed|failed
+ *   dod_completion_pct: <int>
+ *   result_filled: <bool>
+ *   missing_files: <comma-separated list or empty>
+ *   ---RESULT---
  */
 
 import fs from 'fs';
@@ -20,6 +31,8 @@ import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { parseFrontmatter } from 'workflow-ai/lib/utils.mjs';
 
 const PROJECT_DIR = findProjectRoot();
+const TICKETS_DIR = path.join(PROJECT_DIR, '.workflow', 'tickets');
+const REVIEW_STATUSES = ['review', 'in-progress', 'done', 'ready', 'backlog'];
 
 function parseChangedFiles(body) {
   const files = [];
@@ -131,23 +144,107 @@ function verifyTicket(ticketPath) {
   };
 }
 
+function resolveTicketPath(arg) {
+  // 1. Явный путь — absolute или relative
+  if (arg.includes('/') || arg.includes('\\') || arg.endsWith('.md')) {
+    return path.isAbsolute(arg) ? arg : path.resolve(process.cwd(), arg);
+  }
+
+  // 2. Чистый ticket_id (QA-009) — резолвим по статусам
+  if (/^[A-Z]+-\d+$/i.test(arg)) {
+    for (const status of REVIEW_STATUSES) {
+      const candidate = path.join(TICKETS_DIR, status, `${arg}.md`);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+    return path.join(TICKETS_DIR, 'review', `${arg}.md`);
+  }
+
+  // 3. Промпт от runner'а — ищем "ticket_id: XXX" в тексте
+  const match = arg.match(/ticket_id:\s*([A-Z]+-\d+)/i);
+  if (match) {
+    return resolveTicketPath(match[1]);
+  }
+
+  return null;
+}
+
+function formatVerdict(result) {
+  const missingFiles = result.files_exist
+    .filter((f) => !f.exists)
+    .map((f) => f.path);
+
+  // Критерии failed:
+  //   - result_filled == false (секция Result пуста)
+  //   - dod_completion_pct == 0 (ни один пункт DoD не отмечен)
+  //   - есть отсутствующие файлы из "Изменённые файлы"
+  const failReasons = [];
+  if (!result.result_filled) {
+    failReasons.push('result_filled=false');
+  }
+  if (result.dod_completion_pct === 0) {
+    failReasons.push('dod_completion_pct=0');
+  }
+  if (missingFiles.length > 0) {
+    failReasons.push(`missing_files=${missingFiles.join(',')}`);
+  }
+
+  const status = failReasons.length === 0 ? 'passed' : 'failed';
+
+  return { status, missingFiles, failReasons };
+}
+
 function main() {
   const args = process.argv.slice(2);
-  
+
   if (args.length === 0) {
-    console.error('Usage: node verify-artifacts.js <path-to-ticket>');
+    console.error('Usage: node verify-artifacts.js <path-to-ticket|ticket_id|prompt>');
     process.exit(1);
   }
-  
-  const ticketPath = args[0];
-  
+
+  const arg = args.join(' ');
+  const ticketPath = resolveTicketPath(arg);
+
+  if (!ticketPath) {
+    console.error('Error: could not resolve ticket path from argument');
+    console.log('---RESULT---');
+    console.log('status: failed');
+    console.log('reason: ticket_path_unresolved');
+    console.log('---RESULT---');
+    process.exit(1);
+  }
+
+  if (!fs.existsSync(ticketPath)) {
+    console.error(`Error: ticket file not found: ${ticketPath}`);
+    console.log('---RESULT---');
+    console.log('status: failed');
+    console.log(`reason: ticket_file_not_found`);
+    console.log(`ticket_path: ${ticketPath}`);
+    console.log('---RESULT---');
+    process.exit(1);
+  }
+
   try {
     const result = verifyTicket(ticketPath);
+    const verdict = formatVerdict(result);
+
     console.log('---RESULT---');
-    console.log(JSON.stringify(result, null, 2));
+    console.log(`status: ${verdict.status}`);
+    console.log(`ticket_id: ${result.ticket_id || ''}`);
+    console.log(`dod_completion_pct: ${result.dod_completion_pct}`);
+    console.log(`dod_total: ${result.dod_checked}`);
+    console.log(`dod_completed: ${result.dod_completed}`);
+    console.log(`result_filled: ${result.result_filled}`);
+    console.log(`missing_files: ${verdict.missingFiles.join(',')}`);
+    if (verdict.failReasons.length > 0) {
+      console.log(`fail_reasons: ${verdict.failReasons.join('; ')}`);
+    }
     console.log('---RESULT---');
   } catch (err) {
     console.error(`Error: ${err.message}`);
+    console.log('---RESULT---');
+    console.log('status: failed');
+    console.log(`reason: ${err.message.replace(/\n/g, ' ')}`);
+    console.log('---RESULT---');
     process.exit(1);
   }
 }
