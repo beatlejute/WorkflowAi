@@ -243,6 +243,11 @@ pipeline:
           stage: move-to-review
           params:
             ticket_id: "$result.ticket_id"
+        in_progress:
+          stage: check-relevance
+          params:
+            ticket_id: "$result.ticket_id"
+            task_type: "$result.type"
         empty: check-plan-templates
         error: create-report
 
@@ -371,6 +376,11 @@ pipeline:
           stage: move-to-review
           params:
             ticket_id: "$result.ticket_id"
+        in_progress:
+          stage: check-relevance
+          params:
+            ticket_id: "$result.ticket_id"
+            task_type: "$result.type"
         empty: check-conditions
         error: create-report
 
