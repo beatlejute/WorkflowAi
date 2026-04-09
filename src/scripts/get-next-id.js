@@ -3,11 +3,18 @@
 /**
  * get-next-id.js - Универсальный генератор ID для тикетов, планов и других артефактов
  *
- * Использование:
- *   node get-next-id.js --prefix TASK --dir tickets
- *   node get-next-id.js --prefix PLAN --dir plans
+ * Режимы:
  *
- * Вывод: следующий ID через ---RESULT---, например: TASK-007
+ *   1) Одиночный префикс (legacy, для create-plan / create-report):
+ *      node get-next-id.js --prefix TASK --dir tickets
+ *      node get-next-id.js --prefix PLAN --dir plans
+ *      Вывод: { status: "success", id: "TASK-007" }
+ *
+ *   2) Карта по всем префиксам из config.yaml (для decompose-plan):
+ *      node get-next-id.js --all-from-config
+ *      Читает .workflow/config/config.yaml → task_types.*.prefix,
+ *      для каждого префикса возвращает следующий свободный номер по .workflow/tickets/.
+ *      Вывод: { status: "success", id_ranges: { TASK: 8, QA: 26, HUMAN: 2, ... } }
  */
 
 import fs from "fs";
@@ -21,6 +28,7 @@ function parseArgs() {
   const args = process.argv.slice(2);
   let prefix = null;
   let dir = null;
+  let allFromConfig = false;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--prefix" && i + 1 < args.length) {
@@ -29,10 +37,12 @@ function parseArgs() {
     } else if (args[i] === "--dir" && i + 1 < args.length) {
       dir = args[i + 1];
       i++;
+    } else if (args[i] === "--all-from-config") {
+      allFromConfig = true;
     }
   }
 
-  return { prefix, dir };
+  return { prefix, dir, allFromConfig };
 }
 
 function findMaxNumber(targetDir, prefix) {
@@ -71,28 +81,73 @@ function formatNumber(num) {
   return num.toString().padStart(3, "0");
 }
 
-async function main() {
-  const { prefix, dir } = parseArgs();
+/**
+ * Извлекает значения prefix из .workflow/config/config.yaml → task_types.*.prefix.
+ * Минимальный YAML-парсер: не тянем зависимость, читаем только нужную секцию.
+ * Возвращает массив уникальных префиксов в порядке появления.
+ */
+function readPrefixesFromConfig() {
+  const configPath = path.join(PROJECT_DIR, ".workflow", "config", "config.yaml");
 
-  if (!prefix || !dir) {
-    console.error("Usage: node get-next-id.js --prefix <PREFIX> --dir <DIRECTORY>");
-    console.error("Example: node get-next-id.js --prefix TASK --dir tickets");
-    printResult({
-      status: "error",
-      error: "Missing required arguments: --prefix and --dir",
-    });
-    process.exit(1);
+  if (!fs.existsSync(configPath)) {
+    throw new Error(`config.yaml not found: ${configPath}`);
   }
 
-  let targetDir;
+  const text = fs.readFileSync(configPath, "utf8");
+  const lines = text.split(/\r?\n/);
 
+  const prefixes = [];
+  let inTaskTypes = false;
+  let taskTypesIndent = -1;
+
+  for (const rawLine of lines) {
+    // Убрать комментарии
+    const line = rawLine.replace(/\s+#.*$/, "").replace(/^#.*$/, "");
+    if (line.trim() === "") continue;
+
+    const indent = line.length - line.trimStart().length;
+
+    if (!inTaskTypes) {
+      if (/^task_types\s*:\s*$/.test(line.trim())) {
+        inTaskTypes = true;
+        taskTypesIndent = indent;
+      }
+      continue;
+    }
+
+    // Вышли из секции task_types (вернулись на тот же или меньший отступ с новым ключом)
+    if (indent <= taskTypesIndent && line.trim() !== "") {
+      break;
+    }
+
+    const m = line.match(/^\s*prefix\s*:\s*["']?([A-Z][A-Z0-9_]*)["']?\s*$/);
+    if (m) {
+      const p = m[1];
+      if (!prefixes.includes(p)) {
+        prefixes.push(p);
+      }
+    }
+  }
+
+  if (prefixes.length === 0) {
+    throw new Error("No prefixes found in config.yaml → task_types.*.prefix");
+  }
+
+  return prefixes;
+}
+
+function resolveTargetDir(dir) {
   if (dir === "tickets") {
-    targetDir = path.join(PROJECT_DIR, ".workflow", "tickets");
+    return path.join(PROJECT_DIR, ".workflow", "tickets");
   } else if (dir === "plans") {
-    targetDir = path.join(PROJECT_DIR, ".workflow", "plans");
+    return path.join(PROJECT_DIR, ".workflow", "plans");
   } else {
-    targetDir = path.join(PROJECT_DIR, dir);
+    return path.join(PROJECT_DIR, dir);
   }
+}
+
+async function runSinglePrefix(prefix, dir) {
+  const targetDir = resolveTargetDir(dir);
 
   if (!fs.existsSync(targetDir)) {
     const nextId = `${prefix}-001`;
@@ -105,6 +160,55 @@ async function main() {
   const nextId = `${prefix}-${formatNumber(nextNum)}`;
 
   printResult({ status: "success", id: nextId });
+}
+
+async function runAllFromConfig() {
+  const prefixes = readPrefixesFromConfig();
+  const ticketsDir = path.join(PROJECT_DIR, ".workflow", "tickets");
+
+  const idRanges = {};
+  for (const prefix of prefixes) {
+    const maxNum = fs.existsSync(ticketsDir) ? findMaxNumber(ticketsDir, prefix) : 0;
+    idRanges[prefix] = maxNum + 1;
+  }
+
+  // Параллельно возвращаем JSON-строку, потому что runner workflow-ai
+  // при подстановке $context.<key> в строку instructions применяет неявный
+  // toString() — объекты превращаются в "[object Object]". Скалярная
+  // JSON-строка подставляется корректно, декомпозитор распарсит её сам.
+  printResult({
+    status: "success",
+    id_ranges: idRanges,
+    id_ranges_json: JSON.stringify(idRanges),
+  });
+}
+
+async function main() {
+  const { prefix, dir, allFromConfig } = parseArgs();
+
+  if (allFromConfig) {
+    try {
+      await runAllFromConfig();
+    } catch (err) {
+      console.error(err.message);
+      printResult({ status: "error", error: err.message });
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (!prefix || !dir) {
+    console.error("Usage:");
+    console.error("  node get-next-id.js --prefix <PREFIX> --dir <DIRECTORY>");
+    console.error("  node get-next-id.js --all-from-config");
+    printResult({
+      status: "error",
+      error: "Missing required arguments: either --all-from-config, or both --prefix and --dir",
+    });
+    process.exit(1);
+  }
+
+  await runSinglePrefix(prefix, dir);
 }
 
 main();

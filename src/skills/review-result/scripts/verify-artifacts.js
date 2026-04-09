@@ -36,22 +36,29 @@ const REVIEW_STATUSES = ['review', 'in-progress', 'done', 'ready', 'backlog'];
 
 function parseChangedFiles(body) {
   const files = [];
-  const changedFilesRegex = /^###\s*(Изменённые файлы|Changed files)\s*$/gm;
+  const changedFilesRegex = /^###\s*(?:Изменённые файлы|Changed files)\s*$/gm;
   const match = changedFilesRegex.exec(body);
-  
+
   if (!match) return files;
-  
+
+  // Граница H3-секции — следующий H3 ИЛИ H2 (что встретится раньше),
+  // иначе захватываем соседние подзаголовки вроде "### Время выполнения",
+  // где в backticks лежат команды и цитаты, которые парсер принимает за пути.
   const startIdx = match.index + match[0].length;
+  const nextH3 = body.indexOf('\n### ', startIdx);
   const nextH2 = body.indexOf('\n## ', startIdx);
-  const sectionEnd = nextH2 === -1 ? body.length : nextH2;
+  const candidates = [nextH3, nextH2].filter((i) => i !== -1);
+  const sectionEnd = candidates.length > 0 ? Math.min(...candidates) : body.length;
   const sectionContent = body.substring(startIdx, sectionEnd);
-  
-  const filePathRegex = /`([^`]+)`/g;
+
+  // Пути принимаем только из строк-буллетов ("- `path`" или "* `path`"):
+  // это страхует от ложных срабатываний на цитатах/командах в инлайн-коде.
+  const bulletFileRegex = /^[-*]\s+`([^`]+)`/gm;
   let fileMatch;
-  while ((fileMatch = filePathRegex.exec(sectionContent)) !== null) {
+  while ((fileMatch = bulletFileRegex.exec(sectionContent)) !== null) {
     files.push(fileMatch[1]);
   }
-  
+
   return files;
 }
 
@@ -66,7 +73,9 @@ function checkFilesExist(filePaths) {
 }
 
 function parseDoDCompletion(body) {
-  const dodSectionRegex = /^##\s*(Критерии готовности|Definition of Done)\s*$/gm;
+  // Канонический формат в этом проекте — "## Критерии готовности (Definition of Done)",
+  // но поддерживаем и чистые варианты (обе локали, с/без уточнения в скобках).
+  const dodSectionRegex = /^##\s*(?:Критерии готовности|Definition of Done)(?:\s*\([^)]*\))?\s*$/gm;
   const match = dodSectionRegex.exec(body);
   
   if (!match) return { checked: 0, completed: 0, percentage: 0 };

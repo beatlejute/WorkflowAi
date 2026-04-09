@@ -139,6 +139,12 @@ pipeline:
       workdir: "."
       description: "Скрипт для проверки, декомпозирован ли текущий план"
 
+    script-get-all-ids:
+      command: "node"
+      args: [".workflow/src/scripts/get-next-id.js", "--all-from-config"]
+      workdir: "."
+      description: "Выделяет стартовые номера для всех префиксов из config.yaml → task_types (используется стадией allocate-ticket-ids перед decompose-plan)"
+
     script-check-relevance:
       command: "node"
       args: [".workflow/src/scripts/check-relevance.js"]
@@ -265,7 +271,7 @@ pipeline:
       agent: script-check-plan-decomposed
       goto:
         needs_decomposition:
-          stage: decompose-plan
+          stage: allocate-ticket-ids
           params:
             plan_file: "$result.plan_file"
         decomposed: check-conditions
@@ -274,15 +280,43 @@ pipeline:
         error: check-conditions
 
     # -------------------------------------------------------------------------
-    # 0c. decompose-plan
+    # 0c. allocate-ticket-ids
+    # Выделяет стартовые номера для всех префиксов из config.yaml → task_types
+    # ДО запуска декомпозиции. Результат (id_ranges) передаётся в context и
+    # далее в decompose-plan через instructions. Это устраняет класс ошибок
+    # с коллизиями ID, когда агент-декомпозитор начинает нумерацию с 001
+    # (инцидент 2026-04-08, PLAN-008: fallback qwen после падения Sonnet с 529).
+    # Архитектурный принцип: решения про ID принимает инфраструктура, а не агент.
+    # -------------------------------------------------------------------------
+    allocate-ticket-ids:
+      description: "Выделить стартовые номера ID для всех префиксов перед декомпозицией"
+      agent: script-get-all-ids
+      timeout: 60
+      goto:
+        default:
+          stage: decompose-plan
+          params:
+            plan_file: "$context.plan_file"
+            id_ranges_json: "$result.id_ranges_json"
+        error: check-conditions
+
+    # -------------------------------------------------------------------------
+    # 0d. decompose-plan
     # Декомпозирует план на тикеты в backlog/
+    # На входе ОБЯЗАТЕЛЬНО: plan_file и id_ranges_json (выделенные стадией
+    # allocate-ticket-ids). id_ranges_json — это JSON-строка вида
+    # {"QA":26,"HUMAN":2,...}; декомпозитор парсит её сам (см. decompose.md,
+    # шаг 9.0). Передача именно строки, а не объекта, обусловлена тем, что
+    # runner workflow-ai при подстановке $context.* в instructions применяет
+    # неявный toString() — объекты превращаются в "[object Object]".
+    # Декомпозитор НЕ вызывает get-next-id.js самостоятельно.
     # -------------------------------------------------------------------------
     decompose-plan:
       description: "Декомпозировать план на тикеты"
       agent: claude-sonnet
       fallback_agent: qwen-code
       skill: decompose-plan
-      instructions: "Декомпозируй план .workflow/$context.plan_file на тикеты."
+      instructions: "Декомпозируй план .workflow/$context.plan_file на тикеты. ID тикетов бери ТОЛЬКО из JSON-карты id_ranges_json=$context.id_ranges_json — это стартовые номера по префиксам в формате {\"PREFIX\":N_start,...}, уже выделенные стадией allocate-ticket-ids. Распарси JSON, используй значения как есть. НЕ вызывай get-next-id.js и НЕ изобретай номера самостоятельно. Подробности: см. шаг 9.0 в workflows/decompose.md."
       goto:
         default: check-conditions
 
@@ -436,8 +470,8 @@ pipeline:
           agent: claude-coach
           fallback_model: qwen-coach
         qa:
-          agent: qwen-qa
-          fallback_model: claude-qa
+          agent: claude-qa
+          fallback_model: kilo-qa
         impl: kilo-free
       # fix: claude-sonnet
         arch: claude-opus
