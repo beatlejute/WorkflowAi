@@ -406,6 +406,38 @@ function readReviewTickets() {
 }
 
 /**
+ * Считывает все тикеты из директории in-progress/
+ */
+function readInProgressTickets() {
+  if (!fs.existsSync(IN_PROGRESS_DIR)) {
+    return [];
+  }
+
+  const files = fs.readdirSync(IN_PROGRESS_DIR)
+    .filter(f => f.endsWith('.md') && f !== '.gitkeep.md');
+
+  const tickets = [];
+
+  for (const file of files) {
+    const filePath = path.join(IN_PROGRESS_DIR, file);
+    try {
+      const content = fs.readFileSync(filePath, 'utf8');
+      const { frontmatter } = parseFrontmatter(content);
+
+      tickets.push({
+        id: frontmatter.id || file.replace('.md', ''),
+        frontmatter,
+        filePath
+      });
+    } catch (e) {
+      console.error(`[WARN] Failed to read in-progress ticket ${file}: ${e.message}`);
+    }
+  }
+
+  return tickets;
+}
+
+/**
  * Проверяет, заполнен ли раздел результатов (Summary) в тикете
  */
 function hasFilledResult(body) {
@@ -503,6 +535,20 @@ function pickNextTicket(planId) {
         return {
           status: 'completed_in_progress',
           ticket_id: first.id
+        };
+      }
+
+      // Нет завершённых — проверяем незавершённые тикеты в in-progress/
+      const allInProgress = filterByPlan(readInProgressTickets(), planId);
+      if (allInProgress.length > 0) {
+        const first = allInProgress[0];
+        logger.info(`Found incomplete ticket in in-progress/: ${first.id}`);
+        return {
+          status: 'in_progress',
+          ticket_id: first.id,
+          priority: first.frontmatter.priority,
+          title: first.frontmatter.title,
+          type: first.frontmatter.type
         };
       }
     }
