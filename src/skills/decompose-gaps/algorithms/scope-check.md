@@ -47,6 +47,14 @@ FUNCTION check_scope(gap, report, plan) → {in_scope, reason, check_failed}
   IF matching_task == NULL:
     RETURN {false, "Нет соответствующей задачи в исходном плане", "2"}
 
+  # Шаг 2a: Проверка exclusions из scope плана
+  plan_exclusions = извлечь секцию «Исключено из scope» / «Excluded from scope» из plan
+
+  IF plan_exclusions != NULL:
+    FOR EACH exclusion IN plan_exclusions:
+      IF gap описывает работу, подпадающую под exclusion:
+        RETURN {false, "Gap подпадает под исключение из scope плана: '{exclusion}'", "2a"}
+
   IF gap описывает расширение scope (новый функционал, не заявленный в плане):
     RETURN {false, "Расширение scope за рамки плана", "2"}
 
