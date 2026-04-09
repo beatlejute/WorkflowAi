@@ -98,7 +98,9 @@ function parseDoDCompletion(body) {
 }
 
 function checkResultSection(body) {
-  const resultSectionRegex = /^##\s*(Результат выполнения|Result)\s*$/m;
+  // Порядок альтернатив важен: «Результат выполнения» перед «Результат»,
+  // чтобы более длинный вариант матчился первым.
+  const resultSectionRegex = /^##\s*(Результат выполнения|Результат|Result)\s*$/m;
   const sectionMatch = resultSectionRegex.exec(body);
   
   if (!sectionMatch) return { exists: false, summaryFilled: false };
@@ -154,24 +156,26 @@ function verifyTicket(ticketPath) {
 }
 
 function resolveTicketPath(arg) {
-  // 1. Явный путь — absolute или relative
+  // 1. Промпт от runner'а — ищем "ticket_id: XXX" в тексте.
+  //    Проверяем первым, потому что промпт содержит пути (plans/current/...)
+  //    и символы '/', '\', '.md', которые ложно срабатывают в проверке на путь.
+  const promptMatch = arg.match(/ticket_id:\s*([A-Z]+-\d+)/i);
+  if (promptMatch) {
+    return resolveTicketPath(promptMatch[1]);
+  }
+
+  // 2. Явный путь — absolute или relative
   if (arg.includes('/') || arg.includes('\\') || arg.endsWith('.md')) {
     return path.isAbsolute(arg) ? arg : path.resolve(process.cwd(), arg);
   }
 
-  // 2. Чистый ticket_id (QA-009) — резолвим по статусам
+  // 3. Чистый ticket_id (QA-009) — резолвим по статусам
   if (/^[A-Z]+-\d+$/i.test(arg)) {
     for (const status of REVIEW_STATUSES) {
       const candidate = path.join(TICKETS_DIR, status, `${arg}.md`);
       if (fs.existsSync(candidate)) return candidate;
     }
     return path.join(TICKETS_DIR, 'review', `${arg}.md`);
-  }
-
-  // 3. Промпт от runner'а — ищем "ticket_id: XXX" в тексте
-  const match = arg.match(/ticket_id:\s*([A-Z]+-\d+)/i);
-  if (match) {
-    return resolveTicketPath(match[1]);
   }
 
   return null;
