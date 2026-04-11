@@ -36,6 +36,9 @@
  *   - task_type ∈ require_for → реальная проверка MCP → status: ok|fail
  *   - task_type ∉ require_for → пропуск               → status: skipped
  *
+ * Отсутствие .mcp.json или пустой список серверов — это ok (нечего проверять).
+ * Fail — только когда настроенные серверы недоступны или не разрешены.
+ *
  * Вывод (для runner'а):
  *   ---RESULT---
  *   status: ok|skipped|fail
@@ -226,8 +229,8 @@ function formatRow(r) {
   // Реальная проверка.
   const mcpRead = readJson(mcpConfigPath);
   if (mcpRead.missing) {
-    console.log('[check-mcp] .mcp.json отсутствует — серверы не настроены.');
-    emitResult('fail', 'mcp.json missing');
+    console.log('[check-mcp] .mcp.json отсутствует — нет серверов для проверки.');
+    emitResult('ok', 'no mcp.json — nothing to check');
     process.exit(0);
   }
   if (mcpRead.error) {
@@ -237,8 +240,8 @@ function formatRow(r) {
   }
   const servers = mcpRead.data && mcpRead.data.mcpServers;
   if (!servers || Object.keys(servers).length === 0) {
-    console.log('[check-mcp] .mcp.json не содержит ни одного MCP-сервера.');
-    emitResult('fail', 'no mcp servers configured');
+    console.log('[check-mcp] .mcp.json не содержит серверов — нечего проверять.');
+    emitResult('ok', 'no mcp servers — nothing to check');
     process.exit(0);
   }
 

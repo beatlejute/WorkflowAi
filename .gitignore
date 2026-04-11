@@ -50,3 +50,5 @@ QWEN.md
 CLAUDE.md
 .kilocode/
 .kilocodemodes
+.mcp.json
+.claude/settings.local.json
