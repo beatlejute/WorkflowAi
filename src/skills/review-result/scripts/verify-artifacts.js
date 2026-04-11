@@ -102,27 +102,34 @@ function checkResultSection(body) {
   // чтобы более длинный вариант матчился первым.
   const resultSectionRegex = /^##\s*(Результат выполнения|Результат|Result)\s*$/m;
   const sectionMatch = resultSectionRegex.exec(body);
-  
+
   if (!sectionMatch) return { exists: false, summaryFilled: false };
-  
+
   const startIdx = sectionMatch.index + sectionMatch[0].length;
   const nextH2 = body.indexOf('\n## ', startIdx);
   const sectionEnd = nextH2 === -1 ? body.length : nextH2;
   const sectionContent = body.substring(startIdx, sectionEnd);
-  
+
+  // Сначала пытаемся найти явную подсекцию Summary
   const summaryRegex = /^###\s*(Summary|Что сделано)\s*$/m;
   const summaryMatch = summaryRegex.exec(sectionContent);
-  
-  if (!summaryMatch) return { exists: true, summaryFilled: false };
-  
-  const summaryStartIdx = summaryMatch.index + summaryMatch[0].length;
-  const nextSubsection = sectionContent.indexOf('\n### ', summaryStartIdx);
-  const summaryEnd = nextSubsection === -1 ? sectionContent.length : nextSubsection;
-  const summaryContent = sectionContent.substring(summaryStartIdx, summaryEnd);
-  
+
+  let summaryContent;
+  if (summaryMatch) {
+    // Есть явная подсекция — берём контент только из неё
+    const summaryStartIdx = summaryMatch.index + summaryMatch[0].length;
+    const nextSubsection = sectionContent.indexOf('\n### ', summaryStartIdx);
+    const summaryEnd = nextSubsection === -1 ? sectionContent.length : nextSubsection;
+    summaryContent = sectionContent.substring(summaryStartIdx, summaryEnd);
+  } else {
+    // Нет явной Summary — проверяем, есть ли вообще контент в секции Result
+    // (любые подсекции, таблицы, текст считаются заполненной секцией)
+    summaryContent = sectionContent;
+  }
+
   const withoutComments = summaryContent.replace(/<!--[\s\S]*?-->/g, '').trim();
   const hasContent = withoutComments.length > 0;
-  
+
   return {
     exists: true,
     summaryFilled: hasContent
