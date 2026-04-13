@@ -175,6 +175,12 @@ pipeline:
       workdir: "."
       description: "Механическая предпроверка артефактов тикета перед AI-ревью (DoD %, result_filled, files_exist)"
 
+    script-complete-plan:
+      command: "node"
+      args: [".workflow/src/scripts/complete-plan.js"]
+      workdir: "."
+      description: "Завершает план (status: completed) и архивирует done-тикеты"
+
 
   default_agent: qwen-code
 
@@ -479,9 +485,7 @@ pipeline:
         coach:
           agent: claude-coach
           fallback_model: qwen-coach
-        qa:
-          agent: claude-qa
-          fallback_model: kilo-qa
+        qa: claude-qa
         impl: kilo-free
       # fix: claude-sonnet
         arch: claude-opus
@@ -645,12 +649,30 @@ pipeline:
       fallback_agent: kilo-deepseek
       skill: analyze-report
       goto:
-        completed: end
+        completed: complete-plan
         has_gaps:
           stage: increment-plan-iterations
           params:
             gaps: "$result.gaps"
             report_id: "$context.report_id"
+
+    # -------------------------------------------------------------------------
+    # 7a. complete-plan
+    # Завершает план: обновляет status → completed, архивирует done-тикеты.
+    # Если plan_id не задан в контексте — ищет единственный активный план.
+    # При not_ready (не все тикеты завершены) — тоже завершает пайплайн (end),
+    # т.к. analyze-report уже подтвердил completed.
+    # -------------------------------------------------------------------------
+    complete-plan:
+      description: "Завершить план (status: completed) и архивировать тикеты"
+      agent: script-complete-plan
+      timeout: 120
+      goto:
+        completed: end
+        not_ready: end
+        no_plan: end
+        default: end
+        error: end
 
     # -------------------------------------------------------------------------
     # 7b. increment-plan-iterations
