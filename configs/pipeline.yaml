@@ -182,7 +182,7 @@ pipeline:
       description: "Завершает план (status: completed) и архивирует done-тикеты"
 
 
-  default_agent: qwen-code
+  default_agent: claude-sonnet
 
   # ===========================================================================
   # Этапы (stages)
