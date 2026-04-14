@@ -181,6 +181,18 @@ pipeline:
       workdir: "."
       description: "Завершает план (status: completed) и архивирует done-тикеты"
 
+    script-verify-atomicity:
+      command: "node"
+      args: [".workflow/src/skills/decompose-plan/scripts/verify-atomicity.js"]
+      workdir: "."
+      description: "Машинная проверка атомарности тикетов после декомпозиции"
+
+    script-check-atomicity-limit:
+      command: "node"
+      args: [".workflow/src/skills/decompose-plan/scripts/check-atomicity-limit.js"]
+      workdir: "."
+      description: "Проверка лимита попыток атомарности без инкремента счётчика"
+
 
   default_agent: claude-sonnet
 
@@ -327,9 +339,70 @@ pipeline:
       agent: claude-sonnet
       fallback_agent: qwen-code
       skill: decompose-plan
-      instructions: "Декомпозируй план .workflow/$context.plan_file на тикеты. ID тикетов бери ТОЛЬКО из JSON-карты id_ranges_json=$context.id_ranges_json — это стартовые номера по префиксам в формате {\"PREFIX\":N_start,...}, уже выделенные стадией allocate-ticket-ids. Распарси JSON, используй значения как есть. НЕ вызывай get-next-id.js и НЕ изобретай номера самостоятельно. Подробности: см. шаг 9.0 в workflows/decompose.md."
+      instructions: "Декомпозируй план .workflow/$context.plan_file на тикеты. ID тикетов бери ТОЛЬКО из JSON-карты id_ranges_json=$context.id_ranges_json — это стартовые номера по префиксам в формате {\"PREFIX\":N_start,...}, уже выделенные стадией allocate-ticket-ids. Распарси JSON, используй значения как есть. НЕ вызывай get-next-id.js и НЕ изобретай номера самостоятельно. Подробности: см. шаг 9.0 в workflows/decompose.md. При наличии $context.atomicity_failures — учти их при декомпозиции: исправь неатомарные тикеты."
       goto:
-        default: check-conditions
+        default: check-atomicity-limit
+
+    # -------------------------------------------------------------------------
+    # 0e. check-atomicity-limit
+    # Проверяет counter atomicity_check_attempts без инкремента перед запуском verify-atomicity.
+    # Если counter >= max (3) — bypass на check-conditions (защита от бесконечного цикла).
+    # ВАЖНО: использует скрипт (НЕ update-counter), чтобы НЕ инкрементировать счётчик.
+    # Инкремент происходит только в increment-atomicity-counter при failed verify-atomicity.
+    # -------------------------------------------------------------------------
+    check-atomicity-limit:
+      description: "Проверить лимит попыток проверки атомарности (без инкремента)"
+      agent: script-check-atomicity-limit
+      timeout: 10
+      goto:
+        passed:
+          stage: verify-atomicity
+        failed:
+          stage: check-conditions
+        default:
+          stage: verify-atomicity
+        error:
+          stage: check-conditions
+
+    # -------------------------------------------------------------------------
+    # 0f. verify-atomicity
+    # Машинная проверка атомарности тикетов после декомпозиции.
+    # При passed → check-conditions. При failed → increment-atomicity-counter →
+    # decompose-plan (feedback loop с atomicity_failures в context).
+    # -------------------------------------------------------------------------
+    verify-atomicity:
+      description: "Машинная проверка атомарности тикетов после декомпозиции"
+      agent: script-verify-atomicity
+      timeout: 60
+      goto:
+        passed:
+          stage: check-conditions
+        failed:
+          stage: increment-atomicity-counter
+          params:
+            atomicity_failures: "$result.atomicity_failures"
+        default:
+          stage: check-conditions
+        error:
+          stage: check-conditions
+
+    # -------------------------------------------------------------------------
+    # 0g. increment-atomicity-counter
+    # Инкрементирует counter при failed verify-atomicity.
+    # При max_reached — bypass на check-conditions. Иначе — возврат на decompose-plan.
+    # -------------------------------------------------------------------------
+    increment-atomicity-counter:
+      description: "Инкрементировать счётчик попыток проверки атомарности"
+      type: update-counter
+      counter: atomicity_check_attempts
+      max: 3
+      goto:
+        default:
+          stage: decompose-plan
+          params:
+            atomicity_failures: "$context.atomicity_failures"
+        max_reached:
+          stage: check-conditions
 
     # -------------------------------------------------------------------------
     # 1. check-conditions
