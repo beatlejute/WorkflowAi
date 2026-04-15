@@ -648,7 +648,7 @@ pipeline:
     # -------------------------------------------------------------------------
     review-result:
       description: "Проверить результат выполнения на соответствие DoD тикета"
-      agents: [claude-sonnet, qwen-code, kilo-deepseek]
+      agents: [qwen-code, claude-sonnet, kilo-deepseek]
       skill: review-result
       counter: task_attempts
       goto:
