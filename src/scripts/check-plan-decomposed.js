@@ -1,20 +1,26 @@
 #!/usr/bin/env node
 
 /**
- * check-plan-decomposed.js — Проверяет, есть ли недекомпозированные планы.
+ * check-plan-decomposed.js — Проверяет состояние декомпозиции планов.
  *
  * Логика:
  *   A) Если plan_id задан — проверяет только этот план
  *   B) Если plan_id НЕ задан — сканирует все планы в plans/current/
  *
- *   Для каждого плана:
- *   1. Если есть тикеты (backlog/, ready/, in-progress/, review/, done/, blocked/) с parent_plan == planId — decomposed
- *   2. Иначе — needs_decomposition
+ *   Для каждого плана в режиме B учитывается его status:
+ *   - draft / completed / archived → skip
+ *   - approved + нет тикетов → needs_decomposition (→ decompose-plan)
+ *   - approved + есть тикеты   → awaiting_atomicity (→ verify-atomicity):
+ *                                тикеты созданы, но атомарность не подтверждена
+ *                                (status плана ещё не активирован).
+ *   - active + есть тикеты    → decomposed (→ check-conditions)
+ *   - active + нет тикетов    → аномалия, logs warn, skip
  *
  *   Результат:
- *   - needs_decomposition + plan_file — найден первый недекомпозированный план
- *   - decomposed — все планы декомпозированы
- *   - no_plan — нет планов в plans/current/
+ *   - needs_decomposition + plan_file — найден approved-план без тикетов
+ *   - awaiting_atomicity + plan_file  — найден approved-план с тикетами (ждёт verify-atomicity)
+ *   - decomposed                      — все активные планы имеют тикеты, штатный поток
+ *   - no_plan                         — нет планов в plans/current/
  *
  * Использование:
  *   node check-plan-decomposed.js "plan_id: PLAN-007"
@@ -35,8 +41,9 @@ const TICKET_DIRS = ['backlog', 'ready', 'in-progress', 'review', 'done', 'block
 
 /**
  * Читает статус плана из frontmatter.
- * Только планы со статусом "approved" могут быть декомпозированы автоматически.
- * Планы со статусом "draft", "active" или без статуса — пропускаются.
+ * Возвращает актуальный статус (draft / approved / active / completed / archived)
+ * или null при ошибке. Pipeline различает approved (ожидает декомпозиции или
+ * атомарности) и active (прошёл атомарность, в работе).
  */
 function getPlanStatus(planFile) {
   const fullPath = path.join(WORKFLOW_DIR, planFile);
@@ -131,14 +138,29 @@ async function main() {
 
     console.log(`[INFO] Found plan file: ${planFile}`);
 
-    if (hasTicketsForPlan(planId)) {
-      console.log(`[INFO] Plan ${planId} already has tickets — decomposed`);
+    const planStatus = getPlanStatus(planFile);
+    const hasTickets = hasTicketsForPlan(planId);
+
+    if (hasTickets && planStatus === 'active') {
+      console.log(`[INFO] Plan ${planId} is active and has tickets — decomposed`);
       printResult({ status: 'decomposed' });
       return;
     }
 
-    console.log(`[INFO] Plan ${planId} has no tickets — needs decomposition`);
-    printResult({ status: 'needs_decomposition', plan_file: planFile });
+    if (hasTickets && planStatus === 'approved') {
+      console.log(`[INFO] Plan ${planId} is approved and has tickets — awaiting atomicity verification`);
+      printResult({ status: 'awaiting_atomicity', plan_file: planFile });
+      return;
+    }
+
+    if (!hasTickets) {
+      console.log(`[INFO] Plan ${planId} has no tickets — needs decomposition`);
+      printResult({ status: 'needs_decomposition', plan_file: planFile });
+      return;
+    }
+
+    console.log(`[INFO] Plan ${planId} has tickets but status="${planStatus}" — treating as decomposed`);
+    printResult({ status: 'decomposed' });
     return;
   }
 
@@ -156,19 +178,35 @@ async function main() {
 
   for (const { planId: pid, planFile } of allPlans) {
     const planStatus = getPlanStatus(planFile);
-    if (planStatus !== 'approved') {
-      console.log(`[INFO] Plan ${pid} has status "${planStatus}" (not "approved") — skipping`);
+
+    if (planStatus !== 'approved' && planStatus !== 'active') {
+      console.log(`[INFO] Plan ${pid} has status "${planStatus}" — skipping`);
       continue;
     }
-    if (!hasTicketsForPlan(pid)) {
-      console.log(`[INFO] Plan ${pid} has no tickets — needs decomposition`);
+
+    const hasTickets = hasTicketsForPlan(pid);
+
+    if (planStatus === 'approved' && !hasTickets) {
+      console.log(`[INFO] Plan ${pid} is approved with no tickets — needs decomposition`);
       printResult({ status: 'needs_decomposition', plan_file: planFile });
       return;
     }
-    console.log(`[INFO] Plan ${pid} already decomposed`);
+
+    if (planStatus === 'approved' && hasTickets) {
+      console.log(`[INFO] Plan ${pid} is approved and has tickets — awaiting atomicity verification`);
+      printResult({ status: 'awaiting_atomicity', plan_file: planFile });
+      return;
+    }
+
+    if (planStatus === 'active' && !hasTickets) {
+      console.log(`[WARN] Plan ${pid} is active but has no tickets — anomaly, skipping`);
+      continue;
+    }
+
+    console.log(`[INFO] Plan ${pid} is active and has tickets — decomposed`);
   }
 
-  console.log('[INFO] All plans are decomposed');
+  console.log('[INFO] All eligible plans are decomposed');
   printResult({ status: 'decomposed' });
 }
 
