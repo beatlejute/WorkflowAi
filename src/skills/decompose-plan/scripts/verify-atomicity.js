@@ -28,6 +28,54 @@ import path from 'path';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { parseFrontmatter } from 'workflow-ai/lib/utils.mjs';
 
+function resolvePlanAbsolutePath(planFile, projectDir) {
+  if (path.isAbsolute(planFile)) return planFile;
+  if (planFile.startsWith('.workflow/') || planFile.startsWith('.workflow\\')) {
+    return path.join(projectDir, planFile);
+  }
+  return path.join(projectDir, '.workflow', planFile);
+}
+
+function activatePlan(planAbsPath) {
+  if (!fs.existsSync(planAbsPath)) {
+    return { activated: false, reason: 'plan_file_not_found', path: planAbsPath };
+  }
+
+  const content = fs.readFileSync(planAbsPath, 'utf8');
+  const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n?/);
+  if (!fmMatch) {
+    return { activated: false, reason: 'frontmatter_not_found', path: planAbsPath };
+  }
+
+  const fmBlock = fmMatch[1];
+  const statusMatch = fmBlock.match(/^status:\s*(.+)$/m);
+  const currentStatus = statusMatch ? statusMatch[1].trim().replace(/^["']|["']$/g, '') : '';
+
+  if (['active', 'completed', 'archived'].includes(currentStatus)) {
+    return { activated: false, reason: 'already_terminal_status', current_status: currentStatus };
+  }
+
+  const nowIso = new Date().toISOString();
+  let newFmBlock = fmBlock;
+
+  if (statusMatch) {
+    newFmBlock = newFmBlock.replace(/^status:\s*.+$/m, 'status: active');
+  } else {
+    newFmBlock = newFmBlock + '\nstatus: active';
+  }
+
+  if (/^updated_at:\s*/m.test(newFmBlock)) {
+    newFmBlock = newFmBlock.replace(/^updated_at:\s*.*$/m, `updated_at: ${nowIso}`);
+  } else {
+    newFmBlock = newFmBlock + `\nupdated_at: ${nowIso}`;
+  }
+
+  const newContent = content.replace(fmMatch[0], `---\n${newFmBlock}\n---\n`);
+  fs.writeFileSync(planAbsPath, newContent, 'utf8');
+
+  return { activated: true, previous_status: currentStatus, new_status: 'active', path: planAbsPath };
+}
+
 const DOD_THRESHOLD_FAIL = 7;
 const DOD_THRESHOLD_WARN = 5;
 const STEPS_THRESHOLD_FAIL = 5;
@@ -308,10 +356,29 @@ function main() {
 
   const status = ticketsFailed > 0 ? 'failed' : 'passed';
 
+  let activation = null;
+  if (status === 'passed') {
+    const planAbsPath = resolvePlanAbsolutePath(planFile, PROJECT_DIR);
+    activation = activatePlan(planAbsPath);
+  }
+
   console.log('---RESULT---');
   console.log(`status: ${status}`);
   console.log(`tickets_checked: ${results.length}`);
   console.log(`tickets_failed: ${ticketsFailed}`);
+
+  if (activation) {
+    if (activation.activated) {
+      console.log(`plan_status: active`);
+      console.log(`plan_previous_status: ${activation.previous_status || 'draft'}`);
+    } else {
+      console.log(`plan_status_unchanged: true`);
+      console.log(`plan_status_reason: ${activation.reason}`);
+      if (activation.current_status) {
+        console.log(`plan_current_status: ${activation.current_status}`);
+      }
+    }
+  }
 
   if (failures.length > 0) {
     console.log('atomicity_failures:');
