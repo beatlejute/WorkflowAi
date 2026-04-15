@@ -286,15 +286,26 @@ pipeline:
 
     # -------------------------------------------------------------------------
     # 0b. check-plan-decomposition
-    # Если нет тикетов — проверяет, есть ли недекомпозированный план.
-    # Если план не декомпозирован — декомпозирует перед check-conditions.
+    # Проверяет состояние декомпозиции планов и статус активации.
+    # Результаты:
+    #   - needs_decomposition  — approved-план без тикетов → allocate-ticket-ids → decompose
+    #   - awaiting_atomicity   — approved-план с тикетами, но без активации → verify-atomicity
+    #                            (защита от сценария: decompose отработал, но verify-atomicity
+    #                            был пропущен/прерван — план не должен тихо уйти в check-conditions
+    #                            со статусом approved; атомарность обязана быть проверена до активации).
+    #   - decomposed           — active-план с тикетами → штатный check-conditions
+    #   - no_plan / default    — нет работы для pipeline → check-conditions
     # -------------------------------------------------------------------------
     check-plan-decomposition:
-      description: "Проверить, декомпозирован ли текущий план"
+      description: "Проверить состояние декомпозиции и активации планов"
       agent: script-check-plan-decomposed
       goto:
         needs_decomposition:
           stage: allocate-ticket-ids
+          params:
+            plan_file: "$result.plan_file"
+        awaiting_atomicity:
+          stage: check-atomicity-limit
           params:
             plan_file: "$result.plan_file"
         decomposed: check-conditions
@@ -357,21 +368,27 @@ pipeline:
       goto:
         passed:
           stage: verify-atomicity
+          params:
+            plan_file: "$context.plan_file"
         failed:
           stage: check-conditions
         default:
           stage: verify-atomicity
+          params:
+            plan_file: "$context.plan_file"
         error:
           stage: check-conditions
 
     # -------------------------------------------------------------------------
     # 0f. verify-atomicity
     # Машинная проверка атомарности тикетов после декомпозиции.
-    # При passed → check-conditions. При failed → increment-atomicity-counter →
-    # decompose-plan (feedback loop с atomicity_failures в context).
+    # При passed → plan.status: approved → active (через activatePlan в скрипте) → check-conditions.
+    # При failed → increment-atomicity-counter → decompose-plan (feedback loop с atomicity_failures).
+    # plan_file берётся из $context (передан через decompose-plan.params или через
+    # check-plan-decomposition → check-atomicity-limit при awaiting_atomicity-сценарии).
     # -------------------------------------------------------------------------
     verify-atomicity:
-      description: "Машинная проверка атомарности тикетов после декомпозиции"
+      description: "Машинная проверка атомарности тикетов и активация плана при passed"
       agent: script-verify-atomicity
       timeout: 60
       goto:
