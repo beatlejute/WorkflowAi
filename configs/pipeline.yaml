@@ -568,12 +568,12 @@ pipeline:
           agents: [claude-sonnet, qwen-code]
           instructions: "Твоя роль: coach"
         qa:
-          agents: [claude-sonnet, qwen-code, claude-opus]
+          agents: [qwen-code, claude-sonnet, claude-opus]
           instructions: "Твоя роль: manual-testing"
         impl:
           agents: [kilo-free, qwen-code, claude-sonnet, kilo-deepseek]
         arch:
-          agents: [claude-opus, claude-sonnet]
+          agents: [claude-opus, claude-sonnet, kilo-deepseek]
         admin:
           agents: [kilo-free, qwen-code]
       goto:
