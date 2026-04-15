@@ -665,7 +665,7 @@ pipeline:
           stage: move-ticket
           params:
             ticket_id: "$context.ticket_id"
-            target: blocked
+            target: backlog
         error:
           stage: increment-task-attempts
           params:
