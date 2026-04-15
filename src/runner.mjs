@@ -852,7 +852,94 @@ class StageExecutor {
   }
 
   /**
-   * Выполняет stage через CLI-агента с поддержкой fallback_agent
+   * Строит список кандидатов-агентов для стейджа с учётом типа задачи,
+   * required_capabilities и номера попытки. Возвращает:
+   *   { agentId, effectiveStage } — если кандидат найден,
+   *   { blocked: 'no_capable_agent' | 'attempts_exhausted', reason } — иначе.
+   *
+   * Алгоритм:
+   *   1. Список берётся из stage.agents_by_type[task_type].agents,
+   *      иначе stage.agents, иначе pipeline.default_agents.
+   *   2. Список фильтруется: агент должен покрывать все required_capabilities.
+   *   3. Берётся элемент [attempt-1] (1-based attempt).
+   *   4. Скрипт-агенты (stage.agent: script-*) обрабатываются в отдельной ветке
+   *      execute() — сюда не попадают.
+   */
+  resolveAgent(stage, stageId) {
+    const attempt = (stage.counter && this.counters[stage.counter]) || 1;
+
+    // Task type: явно из context либо из префикса ticket_id
+    const taskType = this.context.task_type
+      || (this.context.ticket_id && this.context.ticket_id.split('-')[0].toLowerCase())
+      || null;
+
+    // Выбор источника списка агентов и instructions
+    let agentIds;
+    let instructions = stage.instructions;
+    const byType = stage.agents_by_type && taskType && stage.agents_by_type[taskType];
+    if (byType && Array.isArray(byType.agents)) {
+      agentIds = byType.agents;
+      if (byType.instructions !== undefined) instructions = byType.instructions;
+    } else if (Array.isArray(stage.agents)) {
+      agentIds = stage.agents;
+    } else if (Array.isArray(this.pipeline.default_agents)) {
+      agentIds = this.pipeline.default_agents;
+    } else {
+      throw new Error(`Stage "${stageId}": no agents list and no default_agents`);
+    }
+
+    // Требуемые capabilities тикета из context.required_capabilities.
+    // Приходит из pick-next-task.js как JSON-строка (из-за toString() в $context.*),
+    // либо уже как массив (при прямом задании в pipeline.context).
+    let required = [];
+    const raw = this.context.required_capabilities;
+    if (Array.isArray(raw)) {
+      required = raw;
+    } else if (typeof raw === 'string' && raw.trim() !== '') {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) required = parsed;
+      } catch {
+        // Не JSON — игнорируем
+      }
+    }
+
+    // Фильтр по capability-совместимости
+    const covers = (agentId) => {
+      const agent = this.pipeline.agents[agentId];
+      if (!agent) return false;
+      const caps = Array.isArray(agent.capabilities) ? agent.capabilities : [];
+      return required.every(r => caps.includes(r));
+    };
+    const compatible = agentIds.filter(covers);
+
+    if (compatible.length === 0) {
+      return {
+        blocked: 'no_capable_agent',
+        reason: `No agent in [${agentIds.join(', ')}] covers required_capabilities [${required.join(', ')}]`,
+        attempt
+      };
+    }
+
+    // Курсор = (attempt - 1), clamped
+    const cursor = attempt - 1;
+    if (cursor >= compatible.length) {
+      return {
+        blocked: 'attempts_exhausted',
+        reason: `Attempt ${attempt} exceeds compatible agents list length (${compatible.length})`,
+        attempt,
+        triedAgents: compatible
+      };
+    }
+
+    const agentId = compatible[cursor];
+    // Клонируем stage с подменой instructions (для agents_by_type override)
+    const effectiveStage = { ...stage, instructions };
+    return { agentId, effectiveStage, attempt, compatible };
+  }
+
+  /**
+   * Выполняет stage через выбранного CLI-агента (новая модель выбора).
    * @param {string} stageId - ID stage из конфигурации
    * @returns {Promise<{status: string, output: string, result?: object}>}
    */
@@ -862,86 +949,67 @@ class StageExecutor {
       throw new Error(`Stage not found: ${stageId}`);
     }
 
-    // Выбираем агента по приоритету:
-    // 1. attempt=1 → agent_by_type[task_type] (первая попытка — по типу задачи)
-    // 2. attempt>1 → agent_by_attempt[counter] (повторные попытки — ротация)
-    // 3. stage.agent — явно указанный агент stage
-    // 4. default_agent — глобальный дефолт
-    let agentId = stage.agent || this.pipeline.default_agent;
-    let fallbackModelId = stage.fallback_agent;  // fallback_model из agent_by_type имеет приоритет
-    const attempt = (stage.counter && this.counters[stage.counter]) || 0;
+    // Legacy-ветка: скрипт-стейдж (детерминированный). Capability-фильтр не применяется.
+    if (stage.agent && !stage.agents) {
+      const agent = this.pipeline.agents[stage.agent];
+      if (!agent) throw new Error(`Agent not found: ${stage.agent}`);
+      const prompt = this.promptBuilder.build(stage, stageId);
+      if (this.logger) this.logger.stageStart(stageId, stage.agent, stage.skill);
 
-    // Фоллбэк: если task_type не задан, вычисляем из префикса ticket_id (PMA-005 → pma)
-    const taskType = this.context.task_type
-      || (this.context.ticket_id && this.context.ticket_id.split('-')[0].toLowerCase())
-      || null;
+      const skipGuard = this.fileGuard && this.fileGuard.isTrusted(stage.agent, stageId);
+      if (this.fileGuard && !skipGuard) this.fileGuard.takeSnapshot();
 
-    if (attempt <= 1 && stage.agent_by_type && taskType) {
-      // Первая попытка: выбор по типу задачи
-      const agentConfig = stage.agent_by_type[taskType];
-      if (agentConfig) {
-        // Поддержка формата: { agent: string, fallback_model: string } или просто string
-        if (typeof agentConfig === 'object' && agentConfig.agent) {
-          agentId = agentConfig.agent;
-          if (agentConfig.fallback_model) {
-            fallbackModelId = agentConfig.fallback_model;
-          }
-        } else {
-          agentId = agentConfig;
-        }
-        if (this.logger) {
-          this.logger.info(`Agent by type: task_type="${taskType}" → ${agentId}`, stageId);
-        }
+      const result = await this.callAgent(agent, prompt, stageId, stage.skill);
+
+      if (this.logger) this.logger.stageComplete(stageId, result.status, result.exitCode);
+      if (this.fileGuard && !skipGuard) {
+        const violations = this.fileGuard.checkAndRollback();
+        if (violations.length > 0) result.violations = violations;
       }
-    } else if (stage.agent_by_attempt && attempt > 1) {
-      // Повторные попытки: ротация по agent_by_attempt
-      if (stage.agent_by_attempt[attempt]) {
-        agentId = stage.agent_by_attempt[attempt];
-        if (this.logger) {
-          this.logger.info(`Agent rotation: attempt ${attempt} → ${agentId}`, stageId);
-        }
-      }
+      return result;
     }
 
+    // Новая ветка: список кандидатов с фильтром по capabilities
+    const resolved = this.resolveAgent(stage, stageId);
+    if (resolved.blocked) {
+      if (this.logger) {
+        this.logger.error(
+          `Stage "${stageId}" blocked: ${resolved.blocked} — ${resolved.reason}`,
+          stageId
+        );
+      }
+      return {
+        status: 'blocked',
+        blocked_reason: resolved.blocked,
+        output: resolved.reason,
+        result: { blocked: resolved.blocked, reason: resolved.reason },
+        exitCode: 0,
+        parsed: false
+      };
+    }
+
+    const { agentId, effectiveStage } = resolved;
     const agent = this.pipeline.agents[agentId];
-    if (!agent) {
-      throw new Error(`Agent not found: ${agentId}`);
-    }
+    const prompt = this.promptBuilder.build(effectiveStage, stageId);
 
-    // Формируем промпт для агента через PromptBuilder
-    const prompt = this.promptBuilder.build(stage, stageId);
-
-    // Логгируем старт stage
     if (this.logger) {
-      this.logger.stageStart(stageId, agentId, stage.skill);
-    } else {
-      console.log(`\n[StageExecutor] Executing stage: ${stageId}`);
-      console.log(`  Agent: ${agentId} (${agent.command})`);
-      console.log(`  Skill: ${stage.skill}`);
+      this.logger.info(
+        `Agent selected: ${agentId} (attempt ${resolved.attempt}, compatible=[${resolved.compatible.join(', ')}])`,
+        stageId
+      );
+      this.logger.stageStart(stageId, agentId, effectiveStage.skill);
     }
 
-    // Снимаем snapshot защищённых файлов перед выполнением (кроме trusted agents и trusted stages)
     const skipGuard = this.fileGuard && this.fileGuard.isTrusted(agentId, stageId);
-    if (this.fileGuard && !skipGuard) {
-      this.fileGuard.takeSnapshot();
-    }
+    if (this.fileGuard && !skipGuard) this.fileGuard.takeSnapshot();
 
-    // Вызываем CLI-агента с поддержкой fallback (приоритет: fallback_model из agent_by_type > stage.fallback_agent)
-    const result = await this.callAgentWithFallback(agent, prompt, stageId, stage.skill, fallbackModelId);
+    const result = await this.callAgent(agent, prompt, stageId, effectiveStage.skill);
 
-    // Логгируем завершение stage
-    if (this.logger) {
-      this.logger.stageComplete(stageId, result.status, result.exitCode);
-    }
-
-    // Проверяем и откатываем несанкционированные изменения (кроме trusted agents)
+    if (this.logger) this.logger.stageComplete(stageId, result.status, result.exitCode);
     if (this.fileGuard && !skipGuard) {
       const violations = this.fileGuard.checkAndRollback();
-      if (violations.length > 0) {
-        result.violations = violations;
-      }
+      if (violations.length > 0) result.violations = violations;
     }
-
     return result;
   }
 
@@ -952,37 +1020,18 @@ class StageExecutor {
     return new Promise((resolve, reject) => {
       const timeout = this.pipeline.execution?.timeout_per_stage || 300;
       const args = [...agent.args];
-
-      // Формируем финальный промпт (с ролью если есть -p с значением)
-      const lastPIdx = args.lastIndexOf('-p');
-      let finalPrompt;
-      if (lastPIdx !== -1 && lastPIdx < args.length - 1) {
-        const role = args[lastPIdx + 1];
-        finalPrompt = `${prompt}\n\nТвоя роль: ${role}`;
-      } else {
-        finalPrompt = prompt;
-      }
+      const finalPrompt = prompt;
 
       // На Windows shell: true обрезает многострочные аргументы на \n (cmd.exe).
-      // Поэтому передаём промпт через stdin, а -p оставляем без значения (print mode).
+      // Поэтому передаём промпт через stdin, а -p (если есть) оставляем как флаг print mode.
       const useShell = process.platform === 'win32' && agent.command !== 'node';
       const useStdin = useShell && finalPrompt.includes('\n');
 
-      if (useStdin) {
-        // Убираем значение промпта из аргументов — оно пойдёт через stdin
-        if (lastPIdx !== -1 && lastPIdx < args.length - 1) {
-          // -p было с ролью-промптом — убираем значение, оставляем -p (print mode)
-          args.splice(lastPIdx + 1, 1);
-        }
-        // Для агентов без -p (kilo и т.д.) — промпт не добавляем в args, он пойдёт через stdin
-      } else {
+      if (!useStdin) {
         // Однострочный промпт или не Windows — передаём через аргумент
-        if (lastPIdx !== -1 && lastPIdx < args.length - 1) {
-          args[lastPIdx + 1] = finalPrompt;
-        } else {
-          args.push(finalPrompt);
-        }
+        args.push(finalPrompt);
       }
+      // Иначе промпт пойдёт через stdin, args остаются как есть.
 
       // Логгируем команду перед запуском (вместо промпта — имя skill)
       if (this.logger) {
@@ -1164,72 +1213,6 @@ class StageExecutor {
     });
   }
 
-  /**
-   * Вызывает CLI-агента с поддержкой fallback_agent
-   * При ошибке основного агента (exit code ≠ 0, ENOENT, таймаут) переключается на fallback_agent
-   * @param {object} agent - Основной агент из конфигурации
-   * @param {string} prompt - Промпт для агента
-   * @param {string} stageId - ID stage для логирования
-   * @param {string} skillId - ID skill для логирования
-   * @param {string|null} fallbackAgentId - ID fallback агента (опционально)
-   * @returns {Promise<{status: string, output: string, result?: object, exitCode: number}>}
-   */
-  async callAgentWithFallback(agent, prompt, stageId, skillId, fallbackAgentId) {
-    try {
-      // Пытаемся вызвать основной агент
-      return await this.callAgent(agent, prompt, stageId, skillId);
-    } catch (err) {
-      // Проверяем, есть ли fallback_agent
-      if (!fallbackAgentId) {
-        // Fallback не задан — пробрасываем ошибку
-        throw err;
-      }
-
-      // Проверяем тип ошибки — должна быть retry-able
-      const isRetryableError =
-        err.code === 'ENOENT' ||  // Команда не найдена
-        err.code === 'ETIMEDOUT' ||  // Таймаут
-        err.code === 'NON_ZERO_EXIT' ||  // Exit code ≠ 0
-        err.message.includes('timed out');  // Таймаут от timeoutId
-
-      if (!isRetryableError) {
-        // Неретраемая ошибка — пробрасываем
-        throw err;
-      }
-
-      // Логгируем переключение на fallback_agent
-      if (this.logger) {
-        this.logger.warn(`Primary agent failed, switching to fallback: ${fallbackAgentId}`, stageId);
-      } else {
-        console.log(`[StageExecutor] Primary agent failed, switching to fallback: ${fallbackAgentId}`);
-      }
-
-      // Находим fallback агента в конфигурации
-      const fallbackAgent = this.pipeline.agents[fallbackAgentId];
-      if (!fallbackAgent) {
-        const errMsg = `Fallback agent not found: ${fallbackAgentId}`;
-        if (this.logger) {
-          this.logger.error(errMsg, stageId);
-        } else {
-          console.error(`[StageExecutor] ${errMsg}`);
-        }
-        throw err;  // Пробрасываем оригинальную ошибку
-      }
-
-      // Вызываем fallback агента
-      try {
-        return await this.callAgent(fallbackAgent, prompt, stageId, skillId);
-      } catch (fallbackErr) {
-        // Если fallback тоже упал — пробрасываем ошибку fallback агента
-        if (this.logger) {
-          this.logger.error(`Fallback agent also failed: ${fallbackErr.message}`, stageId);
-        } else {
-          console.error(`[StageExecutor] Fallback agent also failed: ${fallbackErr.message}`);
-        }
-        throw fallbackErr;
-      }
-    }
-  }
 }
 
 // ============================================================================
@@ -1747,4 +1730,5 @@ async function runPipeline(argv = process.argv.slice(2)) {
 }
 
 // Export for use as ES module
-export { runPipeline, parseArgs, PipelineRunner, FileGuard };
+export { runPipeline, parseArgs, PipelineRunner, FileGuard, StageExecutor };
+export default { runPipeline, parseArgs, PipelineRunner, FileGuard, StageExecutor };
