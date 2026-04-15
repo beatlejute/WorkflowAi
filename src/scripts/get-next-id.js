@@ -47,7 +47,7 @@ function parseArgs() {
 
 function findMaxNumber(targetDir, prefix) {
   let maxNum = 0;
-  const regex = new RegExp(`^${prefix}-(\\d{3})\\.md$`, "i");
+  const regex = new RegExp(`^${prefix}-(\\d+)\\.md$`, "i");
 
   function scanDirectory(dir) {
     if (!fs.existsSync(dir)) {
