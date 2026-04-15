@@ -56,10 +56,19 @@ function parseChangedFiles(body) {
   const bulletFileRegex = /^[-*]\s+`([^`]+)`/gm;
   let fileMatch;
   while ((fileMatch = bulletFileRegex.exec(sectionContent)) !== null) {
-    files.push(fileMatch[1]);
+    files.push(stripLineSuffix(fileMatch[1]));
   }
 
   return files;
+}
+
+// Поддержка отраслевой нотации ссылок на код: `path:line`, `path:start-end`.
+// Суффикс указывает на строки в файле, но не является частью имени файла —
+// отрезаем его перед проверкой существования на диске. Не трогаем `C:\...` на
+// Windows (после двоеточия идёт не число, а разделитель пути).
+function stripLineSuffix(filePath) {
+  const match = filePath.match(/^(.*?):(\d+)(?:-\d+)?$/);
+  return match ? match[1] : filePath;
 }
 
 function checkFilesExist(filePaths) {
