@@ -666,6 +666,10 @@ pipeline:
           params:
             ticket_id: "$context.ticket_id"
             target: blocked
+        error:
+          stage: increment-task-attempts
+          params:
+            ticket_id: "$context.ticket_id"
 
     # -------------------------------------------------------------------------
     # 4b. increment-task-attempts
@@ -709,11 +713,24 @@ pipeline:
       description: "Создать итоговый отчёт по выполненным задачам"
       agents: [claude-sonnet, qwen-code, kilo-deepseek]
       skill: create-report
+      counter: create_report_attempts
       goto:
         default:
           stage: analyze-report
           params:
             report_id: "$result.report_id"
+        error:
+          stage: increment-create-report-attempts
+
+    # Счётчик попыток для create-report (ротация моделей при API-ошибках)
+    increment-create-report-attempts:
+      description: "Обновить счётчик попыток create-report"
+      type: update-counter
+      counter: create_report_attempts
+      max: 3
+      goto:
+        default: create-report
+        max_reached: end
 
     # -------------------------------------------------------------------------
     # 7. analyze-report
@@ -724,6 +741,7 @@ pipeline:
       description: "Проанализировать отчёт: план выполнен полностью?"
       agents: [claude-opus, claude-sonnet, kilo-deepseek]
       skill: analyze-report
+      counter: analyze_report_attempts
       goto:
         completed: complete-plan
         has_gaps:
@@ -731,6 +749,18 @@ pipeline:
           params:
             gaps: "$result.gaps"
             report_id: "$context.report_id"
+        error:
+          stage: increment-analyze-report-attempts
+
+    # Счётчик попыток для analyze-report (ротация моделей при API-ошибках)
+    increment-analyze-report-attempts:
+      description: "Обновить счётчик попыток analyze-report"
+      type: update-counter
+      counter: analyze_report_attempts
+      max: 3
+      goto:
+        default: analyze-report
+        max_reached: end
 
     # -------------------------------------------------------------------------
     # 7a. complete-plan
