@@ -548,7 +548,8 @@ function pickNextTicket(planId) {
           ticket_id: first.id,
           priority: first.frontmatter.priority,
           title: first.frontmatter.title,
-          type: first.frontmatter.type
+          type: first.frontmatter.type,
+          required_capabilities: JSON.stringify(first.frontmatter.required_capabilities || [])
         };
       }
     }
@@ -559,7 +560,8 @@ function pickNextTicket(planId) {
         ticket_id: reviewTickets[0].id,
         priority: reviewTickets[0].frontmatter.priority,
         title: reviewTickets[0].frontmatter.title,
-        type: reviewTickets[0].frontmatter.type
+        type: reviewTickets[0].frontmatter.type,
+        required_capabilities: JSON.stringify(reviewTickets[0].frontmatter.required_capabilities || [])
       };
     }
     return { status: 'empty', reason: 'No tickets in ready/' };
@@ -640,7 +642,8 @@ function pickNextTicket(planId) {
     ticket_id: selected.id,
     priority: selected.frontmatter.priority,
     title: selected.frontmatter.title,
-    type: selected.frontmatter.type
+    type: selected.frontmatter.type,
+    required_capabilities: JSON.stringify(selected.frontmatter.required_capabilities || [])
   };
 }
 

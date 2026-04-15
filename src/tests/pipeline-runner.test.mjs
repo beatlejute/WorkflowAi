@@ -487,37 +487,98 @@ describe('PipelineRunner — Full Pipeline Cycle', () => {
     assert.strictEqual(context.plan_id, 'PLAN-TEST', 'Should preserve original context');
   });
 
-  it('should handle retry with agent rotation', () => {
+  it('resolveAgent: выбирает агента по индексу attempt из списка с фильтром capabilities', async () => {
+    const { default: runner } = await import('../runner.mjs');
+    const { StageExecutor } = runner;
+
+    const config = {
+      pipeline: {
+        agents: {
+          'claude-sonnet': { command: 'claude', args: [], capabilities: ['text', 'multimodal'] },
+          'qwen-code': { command: 'qwen', args: [], capabilities: ['text'] },
+          'claude-opus': { command: 'claude', args: [], capabilities: ['text', 'multimodal'] }
+        },
+        default_agents: ['claude-sonnet'],
+        stages: {},
+        context: {}
+      }
+    };
+    const context = { ticket_id: 'QA-1', task_type: 'qa', required_capabilities: '["multimodal"]' };
+    const counters = { task_attempts: 1 };
+    const exec = new StageExecutor(config, context, counters);
+
     const stage = {
       counter: 'task_attempts',
-      goto: {
-        failed: {
-          stage: 'execute-task',
-          agent_by_attempt: {
-            1: 'claude-opus',
-            2: 'qwen-code',
-            3: 'claude-opus'
-          },
-          max: 3,
-          on_max: { stage: 'move-ticket', params: { target: 'blocked' } }
-        }
+      agents: ['qwen-code', 'claude-sonnet', 'claude-opus']
+    };
+
+    const r1 = exec.resolveAgent(stage, 'execute-task');
+    // qwen-code отфильтрован (нет multimodal), остаётся [claude-sonnet, claude-opus]
+    assert.strictEqual(r1.agentId, 'claude-sonnet', 'Attempt 1 → первый совместимый');
+
+    counters.task_attempts = 2;
+    const r2 = exec.resolveAgent(stage, 'execute-task');
+    assert.strictEqual(r2.agentId, 'claude-opus', 'Attempt 2 → второй совместимый');
+
+    counters.task_attempts = 3;
+    const r3 = exec.resolveAgent(stage, 'execute-task');
+    assert.strictEqual(r3.blocked, 'attempts_exhausted', 'Attempt > длины → blocked');
+  });
+
+  it('resolveAgent: blocked=no_capable_agent если ни один агент не покрывает capability', async () => {
+    const { default: runner } = await import('../runner.mjs');
+    const { StageExecutor } = runner;
+
+    const config = {
+      pipeline: {
+        agents: {
+          'qwen-code': { command: 'qwen', args: [], capabilities: ['text'] },
+          'kilo-free': { command: 'kilo', args: [], capabilities: ['text'] }
+        },
+        default_agents: ['qwen-code'],
+        stages: {},
+        context: {}
+      }
+    };
+    const context = { ticket_id: 'QA-1', task_type: 'qa', required_capabilities: '["multimodal"]' };
+    const counters = { task_attempts: 1 };
+    const exec = new StageExecutor(config, context, counters);
+
+    const stage = { counter: 'task_attempts', agents: ['qwen-code', 'kilo-free'] };
+    const r = exec.resolveAgent(stage, 'execute-task');
+    assert.strictEqual(r.blocked, 'no_capable_agent');
+  });
+
+  it('resolveAgent: agents_by_type перекрывает stage.agents и instructions', async () => {
+    const { default: runner } = await import('../runner.mjs');
+    const { StageExecutor } = runner;
+
+    const config = {
+      pipeline: {
+        agents: {
+          'claude-sonnet': { command: 'claude', args: [], capabilities: ['text', 'multimodal'] },
+          'qwen-code': { command: 'qwen', args: [], capabilities: ['text'] }
+        },
+        stages: {},
+        context: {}
+      }
+    };
+    const context = { ticket_id: 'QA-1', task_type: 'qa' };
+    const counters = { task_attempts: 1 };
+    const exec = new StageExecutor(config, context, counters);
+
+    const stage = {
+      counter: 'task_attempts',
+      agents: ['qwen-code'],
+      instructions: 'default instr',
+      agents_by_type: {
+        qa: { agents: ['claude-sonnet'], instructions: 'Твоя роль: manual-testing' }
       }
     };
 
-    const counters = { task_attempts: 0 };
-    const agentSequence = [];
-
-    // Симуляция 3 попыток
-    for (let i = 1; i <= 3; i++) {
-      counters[stage.counter] = i;
-      const attempt = counters[stage.counter];
-
-      if (stage.goto.failed.agent_by_attempt[attempt]) {
-        agentSequence.push(stage.goto.failed.agent_by_attempt[attempt]);
-      }
-    }
-
-    assert.deepStrictEqual(agentSequence, ['claude-opus', 'qwen-code', 'claude-opus']);
+    const r = exec.resolveAgent(stage, 'execute-task');
+    assert.strictEqual(r.agentId, 'claude-sonnet');
+    assert.strictEqual(r.effectiveStage.instructions, 'Твоя роль: manual-testing');
   });
 });
 

@@ -23,90 +23,71 @@ pipeline:
   # Каждый агент — это CLI-инструмент, который runner вызывает через child_process.
   # Формат:
   #   <agent-id>:
-  #     command:  <string>   — исполняемый файл (должен быть в PATH)
-  #     args:     <string[]> — аргументы командной строки
-  #     workdir:  <string>   — рабочая директория (по умолчанию ".")
-  #     description: <string> — описание агента (опционально)
+  #     command:      <string>   — исполняемый файл (должен быть в PATH)
+  #     args:         <string[]> — аргументы командной строки
+  #     workdir:      <string>   — рабочая директория (по умолчанию ".")
+  #     capabilities: <string[]> — возможности агента (text, multimodal, ...)
+  #     description:  <string>   — описание агента (опционально)
   #
   # Runner добавляет промпт последним аргументом автоматически.
+  # Роль (skill) передаётся через stage.instructions, а не через args.
+  # Скрипт-агенты (script-*) — детерминированы, capabilities к ним не применяются.
   # ===========================================================================
   agents:
     claude-sonnet:
       command: "claude"
       args: ["--model", "claude-sonnet-4-6", "--permission-mode", "bypassPermissions", "-p"]
       workdir: "."
-      description: "Claude Sonnet — быстрая модель для простых задач"
+      capabilities: [text, multimodal]
+      description: "Claude Sonnet — быстрая модель, поддержка изображений"
 
     claude-opus:
       command: "claude"
       args: ["--model", "claude-opus-4-6", "--permission-mode", "bypassPermissions", "-p"]
       workdir: "."
-      description: "Claude Opus — мощная модель для сложных задач"
-
-    claude-coach:
-      command: "claude"
-      args: ["--model", "claude-sonnet-4-6", "--permission-mode", "bypassPermissions", "-p", "coach"]
-      workdir: "."
-      description: "Claude Opus — coach"
-
-    claude-qa:
-      command: "claude"
-      args: ["--model", "claude-sonnet-4-6", "--permission-mode", "bypassPermissions", "-p", "manual-testing"]
-      workdir: "."
-      description: "Claude — QA"
-
-    kilo-qa:
-      command: "kilo"
-      args: ["-m", "kilo/qwen/qwen3.6-plus:free", "--agent", "manual-testing", "run"]
-      workdir: "."
-      description: "Kilo QA"
+      capabilities: [text, multimodal]
+      description: "Claude Opus — мощная модель, поддержка изображений"
 
     qwen-code:
       command: "qwen"
       args: ["-y", "-p"]
       workdir: "."
-      description: "Qwen Code — альтернативный агент для независимой проверки"
-
-    qwen-coach:
-      command: "qwen"
-      args: ["-y", "-p", "coach"]
-      workdir: "."
-      description: "Qwen Code — coach"
-
-    qwen-qa:
-      command: "qwen"
-      args: ["-y", "-p", "manual-testing"]
-      workdir: "."
-      description: "Qwen Code — QA"
+      capabilities: [text]
+      description: "Qwen Code — кодовый агент, только текст"
 
     kilo-code:
       command: "kilo"
       args: ["-m", "kilo/kilo-auto/free", "--agent", "orchestrator", "run"]
       workdir: "."
-      description: "Агент с мульти-режимами (architect, code, debug)"
+      capabilities: [text]
+      description: "Kilo мульти-режимный (architect, code, debug)"
 
     kilo-glm:
       command: "kilo"
       args: ["-m", "zai-coding-plan/glm-4.7", "--agent", "orchestrator", "run"]
       workdir: "."
+      capabilities: [text]
       description: "Kilo GLM"
 
     kilo-deepseek:
       command: "kilo"
       args: ["-m", "deepseek/deepseek-reasoner", "--agent", "code", "run"]
       workdir: "."
+      capabilities: [text]
       description: "Kilo deepseek"
 
     kilo-minimax:
       command: "kilo"
       args: ["-m", "kilo/minimax/minimax-m2.5:free", "--agent", "code", "run"]
       workdir: "."
+      capabilities: [text]
       description: "Kilo minimax"
 
     kilo-free:
       command: "kilo"
       args: ["-m", "kilo/kilo-auto/free", "--agent", "code", "run"]
       workdir: "."
+      capabilities: [text]
       description: "Kilo free"
 
     script-move:
@@ -194,7 +175,8 @@ pipeline:
       description: "Проверка лимита попыток атомарности без инкремента счётчика"
 
 
-  default_agent: claude-sonnet
+  # Дефолтный список агентов для стейджа, если у него не задан свой agents / agents_by_type.
+  default_agents: [claude-sonnet, qwen-code]
 
   # ===========================================================================
   # Этапы (stages)
@@ -203,25 +185,29 @@ pipeline:
   # Формат:
   #   <stage-id>:
   #     description:    <string>   — что делает этот этап
-  #     agent:          <agent-id> — какой агент выполняет (ссылка на agents.*)
-  #     fallback_agent: <agent-id> — запасной агент, если основной недоступен
+  #     agents:         <id[]>     — упорядоченный список кандидатов (по приоритету)
   #     skill:          <skill-id> — какой skill использовать (.workflow/src/skills/<skill>/SKILL.md)
   #     instructions:   <string>   — доп. инструкции, передаваемые агенту в промпте
   #     counter:        <string>   — имя счётчика попыток для этого stage
-  #     agent_by_type:             — маршрутизация агента по типу задачи (task_type)
-  #       <type>: <agent-id>       — например: impl: claude-sonnet, arch: claude-opus
-  #       <type>:                  — или расширенный формат с fallback_model:
-  #         agent: <agent-id>
-  #         fallback_model: <agent-id>
-  #     agent_by_attempt:          — ротация агента по номеру попытки
-  #       <N>: <agent-id>          — например: 1: qwen-code, 2: claude-sonnet
+  #     agents_by_type:            — маршрутизация списка агентов по типу задачи (task_type);
+  #                                   полностью перекрывает stage.agents / stage.instructions
+  #       <type>:
+  #         agents: <id[]>
+  #         instructions: <string>
   #     goto:                      — логика переходов по результату
   #       <status>:                — ключ = статус результата агента
   #         stage:  <stage-id>     — следующий stage
   #         params: <map>          — параметры, передаваемые в context следующего stage
   #       default:                 — fallback если статус не совпал ни с одним ключом
   #
-  #   Приоритет выбора агента: agent_by_attempt > agent_by_type > agent > default_agent
+  # Логика выбора агента (единая для всех стейджей):
+  #   1. Взять список: agents_by_type[task_type].agents (если задан), иначе stage.agents,
+  #      иначе pipeline.default_agents.
+  #   2. Отфильтровать по required_capabilities тикета: агент должен покрывать ВСЕ.
+  #   3. Если список пуст → тикет/стейдж уходит в blocked со статусом "no_capable_agent".
+  #   4. Попытка N (1-based) берёт элемент N списка.
+  #   5. Если N > длины списка → blocked "attempts_exhausted".
+  #   6. Любая неудача (exit≠0 / review: failed) → cursor++, attempt++.
   #
   # Специальные значения stage:
   #   "end" — завершение пайплайна
@@ -251,21 +237,25 @@ pipeline:
           params:
             ticket_id: "$result.ticket_id"
             task_type: "$result.type"
+            required_capabilities: "$result.required_capabilities"
             target: in-progress
         in_review:
           stage: verify-artifacts
           params:
             ticket_id: "$result.ticket_id"
+            required_capabilities: "$result.required_capabilities"
             attempt: "1"
         completed_in_progress:
           stage: move-to-review
           params:
             ticket_id: "$result.ticket_id"
+            required_capabilities: "$result.required_capabilities"
         in_progress:
           stage: check-relevance
           params:
             ticket_id: "$result.ticket_id"
             task_type: "$result.type"
+            required_capabilities: "$result.required_capabilities"
         empty: check-plan-templates
         error: create-report
 
@@ -347,8 +337,7 @@ pipeline:
     # -------------------------------------------------------------------------
     decompose-plan:
       description: "Декомпозировать план на тикеты"
-      agent: claude-sonnet
-      fallback_agent: qwen-code
+      agents: [claude-sonnet, qwen-code]
       skill: decompose-plan
       instructions: "Декомпозируй план .workflow/$context.plan_file на тикеты. ID тикетов бери ТОЛЬКО из JSON-карты id_ranges_json=$context.id_ranges_json — это стартовые номера по префиксам в формате {\"PREFIX\":N_start,...}, уже выделенные стадией allocate-ticket-ids. Распарси JSON, используй значения как есть. НЕ вызывай get-next-id.js и НЕ изобретай номера самостоятельно. Подробности: см. шаг 9.0 в workflows/decompose.md. При наличии $context.atomicity_failures — учти их при декомпозиции: исправь неатомарные тикеты."
       goto:
@@ -462,21 +451,25 @@ pipeline:
           params:
             ticket_id: "$result.ticket_id"
             task_type: "$result.type"
+            required_capabilities: "$result.required_capabilities"
             target: in-progress
         in_review:
           stage: verify-artifacts
           params:
             ticket_id: "$result.ticket_id"
+            required_capabilities: "$result.required_capabilities"
             attempt: "1"
         completed_in_progress:
           stage: move-to-review
           params:
             ticket_id: "$result.ticket_id"
+            required_capabilities: "$result.required_capabilities"
         in_progress:
           stage: check-relevance
           params:
             ticket_id: "$result.ticket_id"
             task_type: "$result.type"
+            required_capabilities: "$result.required_capabilities"
         empty: check-conditions
         error: create-report
 
@@ -567,26 +560,22 @@ pipeline:
     # -------------------------------------------------------------------------
     execute-task:
       description: "Выполнить выбранную задачу"
-      agent: qwen-code
-      fallback_agent: kilo-deepseek
       skill: execute-task
       counter: task_attempts
-      agent_by_type:
+      agents: [kilo-free, qwen-code, claude-sonnet, claude-opus, kilo-deepseek]
+      agents_by_type:
         coach:
-          agent: claude-coach
-          fallback_model: qwen-coach
-        qa: claude-qa
-        impl: kilo-free
-      # fix: claude-sonnet
-        arch: claude-opus
-      # review: qwen-code
-      # docs: qwen-code
-        admin: kilo-free
-      agent_by_attempt:
-        2: qwen-code
-        3: claude-sonnet
-        4: claude-opus
-        5: kilo-deepseek
+          agents: [claude-sonnet, qwen-code]
+          instructions: "Твоя роль: coach"
+        qa:
+          agents: [claude-sonnet, qwen-code, claude-opus]
+          instructions: "Твоя роль: manual-testing"
+        impl:
+          agents: [kilo-free, qwen-code, claude-sonnet, kilo-deepseek]
+        arch:
+          agents: [claude-opus, claude-sonnet]
+        admin:
+          agents: [kilo-free, qwen-code]
       goto:
         default:
           stage: move-to-review
@@ -659,8 +648,7 @@ pipeline:
     # -------------------------------------------------------------------------
     review-result:
       description: "Проверить результат выполнения на соответствие DoD тикета"
-      agent: claude-sonnet
-      fallback_agent: qwen-code
+      agents: [claude-sonnet, qwen-code, kilo-deepseek]
       skill: review-result
       counter: task_attempts
       goto:
@@ -719,8 +707,7 @@ pipeline:
     # -------------------------------------------------------------------------
     create-report:
       description: "Создать итоговый отчёт по выполненным задачам"
-      agent: claude-sonnet
-      fallback_agent: kilo-deepseek
+      agents: [claude-sonnet, qwen-code, kilo-deepseek]
       skill: create-report
       goto:
         default:
@@ -735,8 +722,7 @@ pipeline:
     # -------------------------------------------------------------------------
     analyze-report:
       description: "Проанализировать отчёт: план выполнен полностью?"
-      agent: claude-opus
-      fallback_agent: kilo-deepseek
+      agents: [claude-opus, claude-sonnet, kilo-deepseek]
       skill: analyze-report
       goto:
         completed: complete-plan
@@ -785,8 +771,7 @@ pipeline:
     # -------------------------------------------------------------------------
     decompose-gaps:
       description: "Декомпозировать недочёты из отчёта в новые тикеты"
-      agent: claude-sonnet
-      fallback_agent: kilo-deepseek
+      agents: [claude-sonnet, qwen-code, kilo-deepseek]
       skill: decompose-gaps
       goto:
         default: check-conditions
