@@ -455,7 +455,9 @@ class ResultParser {
   }
 
   /**
-   * Парсит блок результата в формате key: value
+   * Парсит блок результата в формате key: value с поддержкой многострочных YAML-значений.
+   * При обнаружении ключа без значения (key:) читает последующие индентированные строки
+   * как тело значения до следующего ключа верхнего уровня (строки без indent).
    * @param {string} block - Текстовый блок результата
    * @returns {{status: string, data: object}}
    */
@@ -463,20 +465,55 @@ class ResultParser {
     const lines = block.split('\n');
     const data = {};
     let status = 'default';
+    let currentKey = null;
+    let multilineValue = null;
 
-    for (const line of lines) {
-      const match = line.match(/^([^:]+):\s*(.*)$/);
-      if (match) {
-        const key = match[1].trim();
-        const value = match[2].trim();
-
-        if (key === 'status') {
-          status = value;
-        } else {
-          data[key] = value;
-        }
+    const flushMultiline = () => {
+      if (currentKey !== null && multilineValue !== null) {
+        // Убираем trailing newline, сохраняем сырой YAML-блок
+        data[currentKey] = multilineValue.replace(/\n$/, '');
+        currentKey = null;
+        multilineValue = null;
       }
+    };
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      // Проверяем: строка верхнего уровня (без indent) с ключом
+      const topLevelMatch = line.match(/^([^:\s][^:]*):\s*(.*)$/);
+
+      if (topLevelMatch) {
+        // Если копим многострочное значение — сбрасываем
+        flushMultiline();
+
+        const key = topLevelMatch[1].trim();
+        const value = topLevelMatch[2].trim();
+
+        if (value !== '') {
+          // Однострочное key: value — как прежде
+          if (key === 'status') {
+            status = value;
+          } else {
+            data[key] = value;
+          }
+        } else {
+          // Ключ без значения — потенциальное многострочное YAML-значение
+          currentKey = key;
+          multilineValue = '';
+        }
+      } else if (currentKey !== null && (line.startsWith(' ') || line.startsWith('\t') || line === '')) {
+        // Индентированная строка (или пустая) — накапливаем как тело multiline-значения
+        multilineValue += line + '\n';
+      } else if (currentKey !== null) {
+        // Строка без indent и не key: value — конец multiline-блока
+        flushMultiline();
+      }
+      // Игнорируем строки без ключа верхнего уровня если не в multiline-режиме
     }
+
+    // Сбрасываем последнее multiline-значение
+    flushMultiline();
 
     return { status, data };
   }
