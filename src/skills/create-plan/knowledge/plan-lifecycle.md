@@ -12,7 +12,7 @@ draft → approved → active → completed → archived
 |--------|----------|-------------------|
 | `draft` | Черновик. План создан, но ещё не утверждён стейкхолдером | Скил `create-plan` при создании |
 | `approved` | Утверждён стейкхолдером. Готов к декомпозиции на тикеты | Стейкхолдер после ревью плана |
-| `active` | В работе. Тикеты созданы и выполняются | Pipeline после декомпозиции |
+| `active` | В работе. Тикеты созданы и прошли машинную проверку атомарности | Pipeline: стадия `verify-atomicity` при `status: passed` (не декомпозитор) |
 | `completed` | Все тикеты плана завершены | Pipeline после завершения всех тикетов |
 | `archived` | Архивирован. Перемещён в `plans/archive/` | Команда `workflow.archivePlan` |
 
@@ -27,5 +27,7 @@ draft → approved → active → completed → archived
 Скрипт `check-plan-decomposed.js` сканирует планы в `plans/current/` и декомпозирует **только** планы со статусом `approved`. Планы в `draft` пропускаются.
 
 Это значит: пока стейкхолдер не утвердит план (`status: approved`), pipeline **не будет** его декомпозировать.
+
+**Переход `approved → active`** выполняется стадией `verify-atomicity` пайплайна (`src/skills/decompose-plan/scripts/verify-atomicity.js`), **не** декомпозитором и **не** скилом `create-plan`. Условие перехода: все тикеты плана прошли машинную проверку атомарности (`status: passed`). Если атомарность упала и счётчик попыток `atomicity_check_attempts` достиг `max: 3` — план остаётся в `approved`, в работу не уходит; стадия `increment-atomicity-counter` передаёт управление в `check-conditions` без активации плана.
 
 <!-- РАСШИРЕНИЕ: добавляй новые статусы и правила ниже -->
