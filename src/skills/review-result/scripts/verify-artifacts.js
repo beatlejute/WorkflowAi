@@ -198,19 +198,85 @@ function formatVerdict(result) {
   //   - dod_completion_pct == 0 (ни один пункт DoD не отмечен)
   //   - есть отсутствующие файлы из "Изменённые файлы"
   const failReasons = [];
+  const humanIssues = [];
   if (!result.result_filled) {
     failReasons.push('result_filled=false');
+    humanIssues.push(result.result_exists
+      ? 'секция Результата пуста (Summary не заполнен)'
+      : 'секция Результата отсутствует');
   }
   if (result.dod_completion_pct === 0) {
     failReasons.push('dod_completion_pct=0');
+    humanIssues.push(`ни один пункт DoD не отмечен (0/${result.dod_checked || 0})`);
   }
   if (missingFiles.length > 0) {
     failReasons.push(`missing_files=${missingFiles.join(',')}`);
+    humanIssues.push(`не найдены заявленные файлы: ${missingFiles.join(', ')}`);
   }
 
   const status = failReasons.length === 0 ? 'passed' : 'failed';
 
-  return { status, missingFiles, failReasons };
+  return { status, missingFiles, failReasons, humanIssues };
+}
+
+function buildReviewRow(humanIssues) {
+  const date = new Date().toISOString().slice(0, 10);
+  const summary = `verify-artifacts: ${humanIssues.join('; ')}`;
+  return `| ${date} | ❌ failed | ${summary} |`;
+}
+
+function appendReviewNote(ticketPath, humanIssues) {
+  const content = fs.readFileSync(ticketPath, 'utf8');
+  const newRow = buildReviewRow(humanIssues);
+
+  const reviewHeaderRegex = /^##\s*(Ревью|Review)\s*$/m;
+  const headerMatch = reviewHeaderRegex.exec(content);
+
+  if (headerMatch) {
+    // Секция существует — добавить строку в конец таблицы.
+    const startIdx = headerMatch.index + headerMatch[0].length;
+    const nextH2 = content.indexOf('\n## ', startIdx);
+    const sectionEnd = nextH2 === -1 ? content.length : nextH2;
+    const sectionContent = content.substring(startIdx, sectionEnd);
+
+    // Идемпотентность: не дублировать, если последняя непустая строка
+    // таблицы уже совпадает с новой по самари (дата игнорируется).
+    const lines = sectionContent.split('\n').map((l) => l.trimEnd()).filter(Boolean);
+    const lastRow = [...lines].reverse().find((l) => l.startsWith('|'));
+    if (lastRow) {
+      const lastSummary = lastRow.split('|').slice(3, -1).join('|').trim();
+      const newSummary = newRow.split('|').slice(3, -1).join('|').trim();
+      if (lastSummary === newSummary) return false;
+    }
+
+    const trimmedSection = sectionContent.replace(/\s+$/, '');
+    const hasTable = /\|\s*Дата\s*\|/i.test(trimmedSection);
+    const tableHeader = hasTable
+      ? ''
+      : '\n\n| Дата | Статус | Самари |\n|------|--------|--------|';
+    const updatedSection = `${trimmedSection}${tableHeader}\n${newRow}\n`;
+    const suffix = nextH2 === -1 ? '' : content.substring(sectionEnd);
+    const updated = content.substring(0, startIdx) + updatedSection + (suffix.startsWith('\n') ? suffix : `\n${suffix}`);
+    fs.writeFileSync(ticketPath, updated, 'utf8');
+    return true;
+  }
+
+  // Секции нет — создать перед "## Результат выполнения" / "## Result".
+  const resultHeaderRegex = /^##\s*(Результат выполнения|Результат|Result)\s*$/m;
+  const resultMatch = resultHeaderRegex.exec(content);
+
+  const newSection = `## Ревью\n\n| Дата | Статус | Самари |\n|------|--------|--------|\n${newRow}\n\n`;
+
+  let updated;
+  if (resultMatch) {
+    updated = content.substring(0, resultMatch.index) + newSection + content.substring(resultMatch.index);
+  } else {
+    // Fallback: в конец файла.
+    const sep = content.endsWith('\n') ? '' : '\n';
+    updated = `${content}${sep}\n${newSection}`;
+  }
+  fs.writeFileSync(ticketPath, updated, 'utf8');
+  return true;
 }
 
 function main() {
@@ -247,6 +313,11 @@ function main() {
     const result = verifyTicket(ticketPath);
     const verdict = formatVerdict(result);
 
+    let reviewNoteWritten = false;
+    if (verdict.status === 'failed' && verdict.humanIssues.length > 0) {
+      reviewNoteWritten = appendReviewNote(ticketPath, verdict.humanIssues);
+    }
+
     console.log('---RESULT---');
     console.log(`status: ${verdict.status}`);
     console.log(`ticket_id: ${result.ticket_id || ''}`);
@@ -257,6 +328,8 @@ function main() {
     console.log(`missing_files: ${verdict.missingFiles.join(',')}`);
     if (verdict.failReasons.length > 0) {
       console.log(`fail_reasons: ${verdict.failReasons.join('; ')}`);
+      console.log(`issues: ${verdict.humanIssues.join('; ')}`);
+      console.log(`review_note_written: ${reviewNoteWritten}`);
     }
     console.log('---RESULT---');
   } catch (err) {
