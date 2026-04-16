@@ -48,6 +48,13 @@ pipeline:
       capabilities: [text, multimodal]
       description: "Claude Opus — мощная модель, поддержка изображений"
 
+    claude-haiku:
+      command: "claude"
+      args: ["--model", "claude-haiku-4-5", "--permission-mode", "bypassPermissions", "-p"]
+      workdir: "."
+      capabilities: [text, multimodal]
+      description: "Claude Haiku — лёгкая быстрая модель, поддержка изображений"
+
     qwen-code:
       command: "qwen"
       args: ["-y", "-p"]
@@ -176,7 +183,7 @@ pipeline:
 
 
   # Дефолтный список агентов для стейджа, если у него не задан свой agents / agents_by_type.
-  default_agents: [claude-sonnet, qwen-code]
+  default_agents: [claude-sonnet, kilo-deepseek]
 
   # ===========================================================================
   # Этапы (stages)
@@ -337,7 +344,7 @@ pipeline:
     # -------------------------------------------------------------------------
     decompose-plan:
       description: "Декомпозировать план на тикеты"
-      agents: [claude-sonnet, qwen-code]
+      agents: [claude-sonnet, kilo-deepseek]
       skill: decompose-plan
       instructions: "Декомпозируй план .workflow/$context.plan_file на тикеты. ID тикетов бери ТОЛЬКО из JSON-карты id_ranges_json=$context.id_ranges_json — это стартовые номера по префиксам в формате {\"PREFIX\":N_start,...}, уже выделенные стадией allocate-ticket-ids. Распарси JSON, используй значения как есть. НЕ вызывай get-next-id.js и НЕ изобретай номера самостоятельно. Подробности: см. шаг 9.0 в workflows/decompose.md. При наличии $context.atomicity_failures — учти их при декомпозиции: исправь неатомарные тикеты."
       goto:
@@ -565,7 +572,7 @@ pipeline:
       agents: [kilo-free, qwen-code, claude-sonnet, claude-opus, kilo-deepseek]
       agents_by_type:
         coach:
-          agents: [claude-sonnet, qwen-code]
+          agents: [claude-sonnet, kilo-deepseek]
           instructions: "Твоя роль: coach"
         qa:
           agents: [qwen-code, claude-sonnet, claude-opus]
@@ -648,7 +655,7 @@ pipeline:
     # -------------------------------------------------------------------------
     review-result:
       description: "Проверить результат выполнения на соответствие DoD тикета"
-      agents: [qwen-code, claude-sonnet, kilo-deepseek]
+      agents: [claude-haiku, claude-sonnet, kilo-deepseek]
       skill: review-result
       counter: task_attempts
       goto:
