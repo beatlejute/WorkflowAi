@@ -85,7 +85,7 @@ pipeline:
 
     kilo-minimax:
       command: "kilo"
-      args: ["-m", "kilo/minimax/minimax-m2.5:free", "--agent", "code", "run"]
+      args: ["-m", "kilo/minimax/minimax-m2.7", "--agent", "code", "run"]
       workdir: "."
       capabilities: [text]
       description: "Kilo minimax"
@@ -571,17 +571,17 @@ pipeline:
       agents: [kilo-free, claude-haiku, claude-sonnet, claude-opus, kilo-deepseek]
       agents_by_type:
         coach:
-          agents: [claude-sonnet, kilo-deepseek]
+          agents: [claude-sonnet, kilo-deepseek, kilo-minimax]
           instructions: "Твоя роль: coach"
         qa:
-          agents: [claude-haiku, claude-sonnet, claude-opus]
+          agents: [claude-haiku, kilo-minimax, claude-sonnet, claude-opus]
           instructions: "Твоя роль: manual-testing"
         impl:
-          agents: [kilo-free, claude-haiku, claude-sonnet, kilo-deepseek]
+          agents: [kilo-free, claude-haiku, claude-sonnet, kilo-minimax, kilo-deepseek]
         arch:
-          agents: [claude-opus, claude-sonnet, kilo-deepseek]
+          agents: [claude-opus, claude-sonnet, kilo-deepseek, kilo-minimax]
         admin:
-          agents: [kilo-free, claude-haiku]
+          agents: [kilo-free, claude-haiku, kilo-minimax]
       goto:
         default:
           stage: move-to-review
@@ -716,7 +716,7 @@ pipeline:
     # -------------------------------------------------------------------------
     create-report:
       description: "Создать итоговый отчёт по выполненным задачам"
-      agents: [claude-sonnet, claude-opus, kilo-deepseek]
+      agents: [claude-sonnet, claude-opus, kilo-minimax, kilo-deepseek]
       skill: create-report
       counter: create_report_attempts
       goto:
@@ -744,7 +744,7 @@ pipeline:
     # -------------------------------------------------------------------------
     analyze-report:
       description: "Проанализировать отчёт: план выполнен полностью?"
-      agents: [claude-opus, claude-sonnet, kilo-deepseek]
+      agents: [claude-opus, claude-sonnet, kilo-deepseek, kilo-minimax]
       skill: analyze-report
       counter: analyze_report_attempts
       goto:
@@ -806,7 +806,7 @@ pipeline:
     # -------------------------------------------------------------------------
     decompose-gaps:
       description: "Декомпозировать недочёты из отчёта в новые тикеты"
-      agents: [claude-sonnet, kilo-deepseek]
+      agents: [claude-sonnet, kilo-minimax, kilo-deepseek]
       skill: decompose-gaps
       goto:
         default: check-conditions
