@@ -429,10 +429,19 @@ class ResultParser {
   parse(output, stageId) {
     const marker = '---RESULT---';
 
-    // Ищем ПОСЛЕДНЮЮ пару маркеров: printResult всегда печатается в конце скрипта,
-    // а маркер может случайно встретиться в логах до него (напр. в заголовке тикета).
-    const endIdx = output.lastIndexOf(marker);
-    const startIdx = endIdx !== -1 ? output.lastIndexOf(marker, endIdx - 1) : -1;
+    // Ищем маркеры ТОЛЬКО на отдельных строках (printResult выводит их на своих строках).
+    // Берём последнюю пару: маркер может случайно встретиться в логах/заголовках тикетов
+    // до финального блока (напр. "title: ... ---RESULT--- ..."). Regex ^---RESULT---$
+    // с multi-line флагом отсеивает такие вхождения.
+    const lineMarkerRegex = /^---RESULT---\s*$/gm;
+    const markerPositions = [];
+    let m;
+    while ((m = lineMarkerRegex.exec(output)) !== null) {
+      markerPositions.push(m.index);
+    }
+
+    const endIdx = markerPositions.length >= 2 ? markerPositions[markerPositions.length - 1] : -1;
+    const startIdx = markerPositions.length >= 2 ? markerPositions[markerPositions.length - 2] : -1;
 
     if (startIdx !== -1 && endIdx !== -1 && startIdx !== endIdx) {
       // Найдены маркеры — парсим структурированный блок
