@@ -34,6 +34,13 @@ pipeline:
   # Скрипт-агенты (script-*) — детерминированы, capabilities к ним не применяются.
   # ===========================================================================
   agents:
+    claude-haiku:
+      command: "claude"
+      args: ["--model", "claude-haiku-4-5", "--permission-mode", "bypassPermissions", "-p"]
+      workdir: "."
+      capabilities: [text, multimodal]
+      description: "Claude Haiku — лёгкая быстрая модель, поддержка изображений"
+
     claude-sonnet:
       command: "claude"
       args: ["--model", "claude-sonnet-4-6", "--permission-mode", "bypassPermissions", "-p"]
@@ -47,13 +54,6 @@ pipeline:
       workdir: "."
       capabilities: [text, multimodal]
       description: "Claude Opus — мощная модель, поддержка изображений"
-
-    claude-haiku:
-      command: "claude"
-      args: ["--model", "claude-haiku-4-5", "--permission-mode", "bypassPermissions", "-p"]
-      workdir: "."
-      capabilities: [text, multimodal]
-      description: "Claude Haiku — лёгкая быстрая модель, поддержка изображений"
 
     qwen-code:
       command: "qwen"
@@ -316,7 +316,6 @@ pipeline:
     # ДО запуска декомпозиции. Результат (id_ranges) передаётся в context и
     # далее в decompose-plan через instructions. Это устраняет класс ошибок
     # с коллизиями ID, когда агент-декомпозитор начинает нумерацию с 001
-    # (инцидент 2026-04-08, PLAN-008: fallback qwen после падения Sonnet с 529).
     # Архитектурный принцип: решения про ID принимает инфраструктура, а не агент.
     # -------------------------------------------------------------------------
     allocate-ticket-ids:
@@ -569,20 +568,20 @@ pipeline:
       description: "Выполнить выбранную задачу"
       skill: execute-task
       counter: task_attempts
-      agents: [kilo-free, qwen-code, claude-sonnet, claude-opus, kilo-deepseek]
+      agents: [kilo-free, claude-haiku, claude-sonnet, claude-opus, kilo-deepseek]
       agents_by_type:
         coach:
           agents: [claude-sonnet, kilo-deepseek]
           instructions: "Твоя роль: coach"
         qa:
-          agents: [qwen-code, claude-sonnet, claude-opus]
+          agents: [claude-haiku, claude-sonnet, claude-opus]
           instructions: "Твоя роль: manual-testing"
         impl:
-          agents: [kilo-free, qwen-code, claude-sonnet, kilo-deepseek]
+          agents: [kilo-free, claude-haiku, claude-sonnet, kilo-deepseek]
         arch:
           agents: [claude-opus, claude-sonnet, kilo-deepseek]
         admin:
-          agents: [kilo-free, qwen-code]
+          agents: [kilo-free, claude-haiku]
       goto:
         default:
           stage: move-to-review
@@ -650,7 +649,6 @@ pipeline:
     # -------------------------------------------------------------------------
     # 4. review-result
     # Проверяет результат выполнения на соответствие DoD тикета.
-    # Использует независимый агент (qwen-code) для объективной оценки.
     # При failed — переходит на increment-task-attempts для учёта попытки.
     # -------------------------------------------------------------------------
     review-result:
@@ -718,7 +716,7 @@ pipeline:
     # -------------------------------------------------------------------------
     create-report:
       description: "Создать итоговый отчёт по выполненным задачам"
-      agents: [claude-sonnet, qwen-code, kilo-deepseek]
+      agents: [claude-sonnet, claude-opus, kilo-deepseek]
       skill: create-report
       counter: create_report_attempts
       goto:
@@ -808,7 +806,7 @@ pipeline:
     # -------------------------------------------------------------------------
     decompose-gaps:
       description: "Декомпозировать недочёты из отчёта в новые тикеты"
-      agents: [claude-sonnet, qwen-code, kilo-deepseek]
+      agents: [claude-sonnet, kilo-deepseek]
       skill: decompose-gaps
       goto:
         default: check-conditions
