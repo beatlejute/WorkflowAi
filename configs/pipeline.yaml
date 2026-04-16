@@ -477,6 +477,7 @@ pipeline:
             task_type: "$result.type"
             required_capabilities: "$result.required_capabilities"
         empty: check-conditions
+        default: check-conditions
         error: create-report
 
     # -------------------------------------------------------------------------
