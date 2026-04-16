@@ -429,11 +429,12 @@ class ResultParser {
   parse(output, stageId) {
     const marker = '---RESULT---';
 
-    // Попытка найти парные маркеры
-    const startIdx = output.indexOf(marker);
-    const endIdx = startIdx !== -1 ? output.indexOf(marker, startIdx + marker.length) : -1;
+    // Ищем ПОСЛЕДНЮЮ пару маркеров: printResult всегда печатается в конце скрипта,
+    // а маркер может случайно встретиться в логах до него (напр. в заголовке тикета).
+    const endIdx = output.lastIndexOf(marker);
+    const startIdx = endIdx !== -1 ? output.lastIndexOf(marker, endIdx - 1) : -1;
 
-    if (startIdx !== -1 && endIdx !== -1) {
+    if (startIdx !== -1 && endIdx !== -1 && startIdx !== endIdx) {
       // Найдены маркеры — парсим структурированный блок
       const resultBlock = output.substring(startIdx + marker.length, endIdx).trim();
       const data = this.parseResultBlock(resultBlock);
