@@ -1,0 +1,11 @@
+Аудит 2026-04-16: остаточных упоминаний applied_changes[] не найдено.
+
+Проверены файлы (исключая backlog-management.md):
+- common-antipatterns.md — чисто
+- prompt-engineering.md — чисто
+- shared-knowledge-guide.md — чисто
+- skill-anatomy.md — чисто
+- test-authorship.md — чисто
+
+Паттерны поиска: applied_changes, change_id, CHG-, «бэклог изменений», «ledger правок».
+Тикет: COACH-31.

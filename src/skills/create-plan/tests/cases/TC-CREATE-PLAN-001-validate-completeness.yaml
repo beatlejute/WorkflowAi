@@ -1,0 +1,32 @@
+id: TC-CREATE-PLAN-001
+title: "Планировщик валидирует полноту через validate-completeness.js"
+origin:
+  chg: [CHG-023, CHG-024]
+  incidents:
+    - "workflowAi: CHG-023 — добавлен шаг автоматической валидации"
+    - "workflowAi: CHG-024 — валидация перед сохранением, не после"
+  principle: "Автоматическая валидация полноты"
+  backlog_sources:
+    - ".workflow/coach-backlog.yaml"
+tags: [validation, completeness, script-usage]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Создай план для задачи: «Добавить тёмную тему в приложение».
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Self-check"
+      reason: "Self-check перед завершением должен быть в SKILL.md."
+
+  deterministic:
+    - kind: output_contains_all
+      values: ["validate-completeness"]
+      reason: "Скрипт валидации должен быть вызван."
+
+execution:
+  timeout_s: 180

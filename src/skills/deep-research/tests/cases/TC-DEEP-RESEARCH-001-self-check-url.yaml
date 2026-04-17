@@ -1,0 +1,34 @@
+id: TC-DEEP-RESEARCH-001
+title: "Ресёрчер проходит self-check с URL для каждого факта"
+origin:
+  chg: [CHG-008]
+  incidents:
+    - "documentaions: CHG-008 — RSH-003 failed на ревью (пустой Result)"
+  principle: "Self-check + URL verification"
+  backlog_sources:
+    - "d:/Dev/documentaions/.workflow/coach-backlog.yaml"
+tags: [self-check, url-verification]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Проведи исследование: «Какие форматы файлов поддерживает Chrome Extension Manifest V3?»
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "⛔"
+      reason: "Запреты должны быть явно отмечены."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Self-check"
+      reason: "Self-check перед завершением обязателен."
+
+  deterministic:
+    - kind: output_contains_all
+      values: ["---RESULT---"]
+
+execution:
+  timeout_s: 180

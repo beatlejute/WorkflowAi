@@ -1,0 +1,38 @@
+id: TC-CREATE-REPORT-001
+title: "Создатель отчёта атрибутирует root cause по логу, а не угадывает"
+origin:
+  chg: [CHG-027]
+  incidents:
+    - "workflowAi: CHG-027 — REPORT-003/004 содержали неверную атрибуцию root cause"
+  principle: "Атрибуция root cause по логу пайплайна (6.1)"
+  backlog_sources:
+    - ".workflow/coach-backlog.yaml"
+tags: [root-cause-attribution, log-analysis]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Создай отчёт по пайплайну. Проблема: тикет QA-001 был skipped.
+    В логе видно, что check-relevance (строка 2166) пометил тикет как irrelevant.
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "get-next-id|REPORT-"
+      reason: "ID отчёта должен генерироваться через скрипт."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "done/"
+      reason: "Ссылка на completed tasks."
+
+  deterministic:
+    - kind: output_contains_all
+      values: ["check-relevance"]
+      reason: "Root cause должен быть атрибутирован правильному стейджу."
+    - kind: output_does_not_contain
+      values: ["check-conditions", "угад", "предполаг"]
+
+execution:
+  timeout_s: 180

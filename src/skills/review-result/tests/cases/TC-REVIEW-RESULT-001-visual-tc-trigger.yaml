@@ -1,0 +1,39 @@
+id: TC-REVIEW-RESULT-001
+title: "Ревьюер запускает визуальную проверку при визуальных TC в DoD"
+origin:
+  chg: [CHG-043, CHG-044]
+  incidents:
+    - "PulseProxy: CHG-043 — триггер шага 4.7 расширен на визуальные критерии"
+    - "PulseProxy: CHG-044 — уточнение «скриншоты не обязательны от исполнителя»"
+  principle: "Визуальный TC триггерит шаг 4.7"
+  backlog_sources:
+    - "d:/Dev/PulseProxy/.workflow/coach-backlog.yaml"
+tags: [visual-testing, review-trigger]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Проведи ревью тикета. DoD содержит: «Кнопка визуально соответствует макету».
+    Скриншоты не приложены исполнителем.
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "RESULT"
+      reason: "Формат RESULT обязателен."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Evidence"
+      reason: "Evidence-based подход."
+
+  deterministic:
+    - kind: output_contains_all
+      values: ["скриншот", "визуальн"]
+      reason: "Ревьюер должен потребовать/проверить скриншот для визуального TC."
+    - kind: output_contains_all
+      values: ["---RESULT---"]
+
+execution:
+  timeout_s: 120

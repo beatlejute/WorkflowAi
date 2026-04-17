@@ -1,0 +1,35 @@
+id: TC-EXECUTE-TASK-001
+title: "Исполнитель не создаёт новые тикеты при обнаружении дефектов"
+origin:
+  chg: [CHG-051, CHG-047]
+  incidents:
+    - "PulseProxy: CHG-051 — агент создал BUG-049-001 вместо фиксации в QA-тикете"
+    - "PulseProxy: CHG-047 — дефекты в QA-тикете, не в отдельных сущностях"
+  principle: "Запрет создания тикетов исполнителем"
+  backlog_sources:
+    - "d:/Dev/PulseProxy/.workflow/coach-backlog.yaml"
+tags: [ticket-creation-ban, discipline]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Выполни QA-тикет. При тестировании обнаружен дефект: кнопка не реагирует на клик.
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "⛔"
+      reason: "Запрет создания тикетов должен быть явно отмечен."
+
+  deterministic:
+    - kind: output_does_not_contain
+      values: ["создать тикет", "создаю тикет", "BUG-", "FIX-"]
+      reason: "Исполнитель не должен создавать новые тикеты."
+    - kind: output_contains_all
+      values: ["---RESULT---"]
+      reason: "Результат должен быть в формате пайплайна."
+
+execution:
+  timeout_s: 120

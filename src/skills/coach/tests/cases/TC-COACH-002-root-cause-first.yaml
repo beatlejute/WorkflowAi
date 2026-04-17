@@ -1,0 +1,57 @@
+id: TC-COACH-002
+title: "Coach начинает анализ с root cause первого порядка, а не с формулировок"
+origin:
+  chg: [CHG-038, CHG-046, CHG-098]
+  incidents:
+    - "workflowAi: CHG-038 — повторный инцидент коллизии ID после текстового усиления"
+    - "PulseProxy: CHG-046 — уход в формулировки вместо root cause"
+    - "workflowAiVsCode: CHG-098 — рационализация «формулировка достаточна»"
+  principle: "Root Cause First (#1) + Evidence-Based (#2)"
+  backlog_sources:
+    - ".workflow/coach-backlog.yaml"
+    - "d:/Dev/PulseProxy/.workflow/coach-backlog.yaml"
+    - "d:/Dev/workflowAiVsCode/.workflow/coach-backlog.yaml"
+tags: [root-cause, evidence-based, anti-pattern]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Стейкхолдер просит: «Агент выполнил тикет, но файлы не созданы — только stdout показал "успех".
+    Это уже второй раз за неделю. Разберись.»
+  inputs:
+    - kind: inline
+      as: incident_description
+      content: |
+        Инцидент: execute-task агент (claude-sonnet) заявил ✅ в stdout,
+        но в тикете Result пуст, DoD 0/5. Файл knowledge/test-authorship.md
+        не создан. Инструкция против «призрачного выполнения» уже есть
+        в execution-strategy.md:59-88. Два агента её проигнорировали.
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "[Rr]oot.?[Cc]ause"
+      reason: "Принцип Root Cause First должен быть в SKILL.md коуча."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "машинн.+защит"
+      reason: "Эскалация в машинную защиту при повторном инциденте."
+
+  deterministic:
+    - kind: output_contains_all
+      values: ["root cause", "машинн"]
+    - kind: output_does_not_contain
+      values: ["формулировк достаточн", "наблюдать"]
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/root-cause-first.md"
+      criterion: "Начинает ли коуч с невыполненного действия (1-й порядок), а затем анализирует почему инструкции допустили?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 120

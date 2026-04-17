@@ -1,0 +1,28 @@
+version: 1
+skill: decompose-plan
+generated_at: "2026-04-17"
+
+execution:
+  target_agents:
+    - claude-sonnet
+    - qwen-code
+  judge_agent: claude-opus
+  default_timeout_s: 180
+  baseline_ref: origin/main
+
+cases:
+  - id: TC-DECOMPOSE-PLAN-001
+    file: cases/TC-DECOMPOSE-PLAN-001-atomicity-no-1to1.yaml
+    origin_chg: [CHG-053, CHG-054, CHG-037, CHG-103, CHG-104]
+    tags: [atomicity, decomposition, anti-pattern]
+    severity: high
+  - id: TC-DECOMPOSE-PLAN-002
+    file: cases/TC-DECOMPOSE-PLAN-002-get-next-id-mandatory.yaml
+    origin_chg: [CHG-029, CHG-036]
+    tags: [id-generation, script-usage]
+    severity: high
+  - id: TC-DECOMPOSE-PLAN-003
+    file: cases/TC-DECOMPOSE-PLAN-003-verbatim-dod-transfer.yaml
+    origin_chg: [CHG-040]
+    tags: [dod-transfer, verbatim]
+    severity: high

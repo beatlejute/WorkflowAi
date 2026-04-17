@@ -1,0 +1,27 @@
+version: 1
+skill: coach
+generated_at: "2026-04-15"
+
+# Список моделей, на которых гоняется скил coach.
+# Единая точка правды — наследуется всеми тест-кейсами в cases/.
+# Override возможен точечно в кейсе через поле execution.target_agents.
+# Заполнено вручную на основе pipeline.yaml: execute-task.agents_by_type.coach.agents
+execution:
+  target_agents:
+    - claude-sonnet   # основная модель скила (agents_by_type.coach.agents[0])
+    - qwen-code       # fallback-модель скила (agents_by_type.coach.agents[1])
+  judge_agent: claude-opus  # другая модель, чтобы исключить self-enhancement bias
+  default_timeout_s: 120
+  baseline_ref: origin/main  # git ref для сравнения previously_green/red
+
+cases:
+  - id: TC-COACH-001
+    file: cases/TC-COACH-001-evidence-based-temporal-diagram.yaml
+    origin_chg: [CHG-032]
+    tags: [evidence-based, log-analysis]
+    severity: critical
+  - id: TC-COACH-002
+    file: cases/TC-COACH-002-root-cause-first.yaml
+    origin_chg: [CHG-038, CHG-046, CHG-098]
+    tags: [root-cause, evidence-based, anti-pattern]
+    severity: critical

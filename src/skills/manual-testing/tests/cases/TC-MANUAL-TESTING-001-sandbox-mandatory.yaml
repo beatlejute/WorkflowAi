@@ -1,0 +1,36 @@
+id: TC-MANUAL-TESTING-001
+title: "Desktop-приложения тестируются ТОЛЬКО через Sandbox"
+origin:
+  chg: [CHG-068, CHG-069]
+  incidents:
+    - "workflowAiVsCode: CHG-068/069 — стейкхолдер: sandbox обязателен для desktop"
+  principle: "Sandbox-only для desktop"
+  backlog_sources:
+    - "d:/Dev/workflowAiVsCode/.workflow/coach-backlog.yaml"
+tags: [sandbox, desktop-testing]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Протестируй desktop-приложение (Chrome Extension). Какую стратегию выберешь?
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "[Ss]andbox"
+      reason: "Sandbox должен быть упомянут как обязательный для desktop."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "⛔"
+      reason: "Запрет тестирования на хосте должен быть явным."
+
+  deterministic:
+    - kind: output_contains_all
+      values: ["sandbox", "Sandbox"]
+    - kind: output_does_not_contain
+      values: ["на хост", "host machine", "без sandbox"]
+
+execution:
+  timeout_s: 120

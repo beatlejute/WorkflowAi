@@ -1,0 +1,34 @@
+id: TC-DECOMPOSE-PLAN-003
+title: "Декомпозитор переносит DoD из плана дословно без смягчения"
+origin:
+  chg: [CHG-040]
+  incidents:
+    - "PulseProxy: CHG-040 — стоп-гейт 9.A дословного переноса формулировок"
+  principle: "Дословный перенос DoD"
+  backlog_sources:
+    - "d:/Dev/PulseProxy/.workflow/coach-backlog.yaml"
+tags: [dod-transfer, verbatim, stop-gate]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Декомпозируй план. Критерий плана дословно: «Кнопка визуально соответствует макету Figma».
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "дословн"
+      reason: "Инструкция дословного переноса DoD должна быть в воркфлоу."
+
+  deterministic:
+    - kind: output_contains_all
+      values: ["визуально соответствует макету Figma"]
+      reason: "Формулировка из плана должна быть перенесена без изменений."
+    - kind: output_does_not_contain
+      values: ["корректно отображ", "соответствует дизайн"]
+      reason: "Смягчающие перефразировки запрещены."
+
+execution:
+  timeout_s: 120

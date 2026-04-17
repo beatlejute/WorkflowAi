@@ -1,0 +1,36 @@
+id: TC-ANALYZE-REPORT-002
+title: "Анализатор выдаёт ---RESULT--- с completed или has_gaps"
+origin:
+  chg: [CHG-070]
+  incidents:
+    - "workflowAiVsCode: CHG-070 — runner не парсил выход без ---RESULT---"
+  principle: "Обязательный RESULT block"
+  backlog_sources:
+    - "d:/Dev/workflowAiVsCode/.workflow/coach-backlog.yaml"
+tags: [result-format, pipeline-integration]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Проанализируй прогресс плана PLAN-001.
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "---RESULT---"
+      reason: "Формат RESULT block должен быть описан."
+
+  deterministic:
+    - kind: output_contains_all
+      values: ["---RESULT---"]
+    - kind: output_matches
+      regex: "status:\\s*(completed|has_gaps)"
+      reason: "Только два допустимых статуса."
+    - kind: output_does_not_contain
+      values: ["status: ok", "status: done", "status: default"]
+      reason: "Запрещённые статусы."
+
+execution:
+  timeout_s: 120

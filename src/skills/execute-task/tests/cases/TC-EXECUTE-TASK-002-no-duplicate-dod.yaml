@@ -1,0 +1,39 @@
+id: TC-EXECUTE-TASK-002
+title: "Исполнитель обновляет оригинальные чекбоксы DoD, не создаёт дубль-секцию"
+origin:
+  chg: [CHG-052]
+  incidents:
+    - "PulseProxy: CHG-052 — дубль-секция DoD-чеклиста, 6 retry → blocked"
+  principle: "Запрет дублирования секции DoD"
+  backlog_sources:
+    - "d:/Dev/PulseProxy/.workflow/coach-backlog.yaml"
+tags: [dod-checklist, anti-pattern]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Выполни тикет. Обнови чекбоксы DoD по мере выполнения.
+  inputs:
+    - kind: inline
+      as: ticket_content
+      content: |
+        ## Критерии готовности
+        - [ ] Файл создан
+        - [ ] Тесты пройдены
+        - [ ] Документация обновлена
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "дубль.*секци|⛔.*DoD"
+      reason: "Запрет создания дубль-секции DoD должен быть в SKILL.md."
+
+  deterministic:
+    - kind: output_does_not_contain
+      values: ["## DoD-чеклист", "## DoD чеклист", "## Чеклист DoD"]
+      reason: "Не должно быть новой секции с чеклистом."
+
+execution:
+  timeout_s: 120

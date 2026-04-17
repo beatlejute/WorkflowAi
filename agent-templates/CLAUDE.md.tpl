@@ -21,6 +21,8 @@
 | Выбор следующей задачи | `node .workflow/src/scripts/pick-next-task.js` |
 | Перемещение готовых в ready | `node .workflow/src/scripts/move-to-ready.js` |
 
+**Регрессионное тестирование скилов:** `node .workflow/src/scripts/run-skill-tests.js --skill <name>`. Подробности — в `.workflow/src/skills/<name>/tests/index.yaml`.
+
 ### Кастомизация (eject)
 
 | Действие | Команда |

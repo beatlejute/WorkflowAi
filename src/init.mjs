@@ -357,7 +357,7 @@ export function initProject(targetPath = process.cwd(), options = {}) {
     errors: []
   };
   
-  // Step 1: Create .workflow/ structure (15 directories)
+  // Step 1: Create .workflow/ structure (16 directories)
   const directories = [
     'tickets/backlog',
     'tickets/ready',
@@ -370,13 +370,14 @@ export function initProject(targetPath = process.cwd(), options = {}) {
     'reports',
     'logs',
     'templates',
-    'src/skills'
+    'src/skills',
+    'tests/skills'
   ];
-  
+
   for (const dir of directories) {
     ensureDir(join(workflowRoot, dir));
   }
-  result.steps.push('Created .workflow/ directory structure (15 directories)');
+  result.steps.push('Created .workflow/ directory structure (16 directories)');
 
   // Step 2: Ensure global dir and create skill junctions
   const globalDir = getGlobalDir();

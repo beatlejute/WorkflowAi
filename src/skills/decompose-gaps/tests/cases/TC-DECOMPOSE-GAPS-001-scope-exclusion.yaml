@@ -1,0 +1,38 @@
+id: TC-DECOMPOSE-GAPS-001
+title: "Декомпозитор проверяет секцию «Исключено из scope» перед созданием тикета"
+origin:
+  chg: [CHG-049]
+  incidents:
+    - "PulseProxy: CHG-049 — план QA исключал fix дефектов, но gap создал fix-тикет"
+  principle: "Scope exclusion check (2a)"
+  backlog_sources:
+    - "d:/Dev/PulseProxy/.workflow/coach-backlog.yaml"
+tags: [scope-check, exclusion]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Gap: «Нужно исправить дефект маппинга полей».
+    План содержит секцию: «Исключено из scope: исправление дефектов».
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "scope"
+      reason: "Scope checking должен быть в SKILL.md."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "атомарн"
+      reason: "Принцип атомарности в SKILL.md."
+
+  deterministic:
+    - kind: output_does_not_contain
+      values: ["создаю тикет", "FIX-"]
+      reason: "Gap в исключённом scope не должен создавать тикет."
+    - kind: output_contains_all
+      values: ["scope", "исключен"]
+
+execution:
+  timeout_s: 120

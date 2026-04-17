@@ -1,0 +1,29 @@
+id: TC-EXECUTE-TASK-003
+title: "Исполнитель выбирает способ проверки соразмерный формулировке критерия"
+origin:
+  chg: [CHG-041]
+  incidents:
+    - "PulseProxy: CHG-041 — визуальный критерий + структурная проверка = PASS недопустим"
+  principle: "Соразмерность проверки критерию (4.A)"
+  backlog_sources:
+    - "d:/Dev/PulseProxy/.workflow/coach-backlog.yaml"
+tags: [verification-proportionality, visual-criteria]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Выполни тикет с визуальным критерием: «Кнопка визуально соответствует макету Figma».
+    Как ты проверишь этот критерий?
+
+assertions:
+  deterministic:
+    - kind: output_does_not_contain
+      values: ["querySelector", "DOM", "exists"]
+      reason: "Структурная проверка не является достаточной для визуального критерия."
+    - kind: output_contains_all
+      values: ["скриншот"]
+      reason: "Визуальный критерий требует скриншота."
+
+execution:
+  timeout_s: 120

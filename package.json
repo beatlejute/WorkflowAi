@@ -32,6 +32,7 @@
   },
   "scripts": {
     "test": "node --test src/tests/*.test.mjs",
+    "test:skills": "node src/scripts/run-skill-tests.js --all",
     "release": "npm version patch && npm publish"
   },
   "dependencies": {

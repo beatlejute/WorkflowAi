@@ -1,0 +1,1 @@
+const key = "sk-abc123def456"
