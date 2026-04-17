@@ -1,0 +1,48 @@
+id: TC-DECOMPOSE-PLAN-001
+title: "Декомпозитор применяет чеклист атомарности и не маппит 1:1"
+origin:
+  chg: [CHG-053, CHG-054, CHG-037, CHG-103, CHG-104]
+  incidents:
+    - "workflowAi: CHG-053 — маппинг 1 задача = 1 тикет без чеклиста"
+    - "workflowAiVsCode: CHG-103/104 — неатомарные тикеты после текстового усиления"
+  principle: "Атомарность тикетов + запрет 1:1"
+  backlog_sources:
+    - ".workflow/coach-backlog.yaml"
+    - "d:/Dev/PulseProxy/.workflow/coach-backlog.yaml"
+    - "d:/Dev/workflowAiVsCode/.workflow/coach-backlog.yaml"
+tags: [atomicity, decomposition, anti-pattern]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Декомпозируй следующий план в тикеты.
+  inputs:
+    - kind: inline
+      as: plan_content
+      content: |
+        Задача 1: Исправить дефект А (неверный маппинг полей) + дефект Б (отсутствие валидации) + smoke-тест
+          DoD: дефект А исправлен, дефект Б исправлен, smoke 6 TC пройден
+        Задача 2: Обновить конфигурацию CI
+          DoD: pipeline зелёный
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "атомарн"
+      reason: "Принцип атомарности должен быть в SKILL.md."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "⛔"
+      reason: "Явные запреты (включая 1:1 маппинг) должны быть отмечены."
+
+  deterministic:
+    - kind: output_does_not_contain
+      values: ["1 задача = 1 тикет", "1:1"]
+    - kind: output_matches
+      regex: "(PASS|FAIL).*(Проверка|Check)"
+      reason: "Должна быть таблица результатов чеклиста атомарности."
+
+execution:
+  timeout_s: 180

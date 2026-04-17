@@ -1,0 +1,28 @@
+version: 1
+skill: execute-task
+generated_at: "2026-04-17"
+
+execution:
+  target_agents:
+    - claude-sonnet
+    - qwen-code
+  judge_agent: claude-opus
+  default_timeout_s: 120
+  baseline_ref: origin/main
+
+cases:
+  - id: TC-EXECUTE-TASK-001
+    file: cases/TC-EXECUTE-TASK-001-no-ticket-creation.yaml
+    origin_chg: [CHG-051, CHG-047]
+    tags: [ticket-creation-ban, discipline]
+    severity: critical
+  - id: TC-EXECUTE-TASK-002
+    file: cases/TC-EXECUTE-TASK-002-no-duplicate-dod.yaml
+    origin_chg: [CHG-052]
+    tags: [dod-checklist, anti-pattern]
+    severity: high
+  - id: TC-EXECUTE-TASK-003
+    file: cases/TC-EXECUTE-TASK-003-verification-proportionality.yaml
+    origin_chg: [CHG-041]
+    tags: [verification-proportionality, visual-criteria]
+    severity: high

@@ -1,0 +1,23 @@
+version: 1
+skill: check-relevance
+generated_at: "2026-04-17"
+
+execution:
+  target_agents:
+    - claude-sonnet
+    - qwen-code
+  judge_agent: claude-opus
+  default_timeout_s: 90
+  baseline_ref: origin/main
+
+cases:
+  - id: TC-CHECK-RELEVANCE-001
+    file: cases/TC-CHECK-RELEVANCE-001-done-is-active.yaml
+    origin_chg: [CHG-026]
+    tags: [dependency-states, done-folder]
+    severity: critical
+  - id: TC-CHECK-RELEVANCE-002
+    file: cases/TC-CHECK-RELEVANCE-002-result-format.yaml
+    origin_chg: [CHG-071, CHG-072, CHG-073]
+    tags: [result-format, status-clarity]
+    severity: high

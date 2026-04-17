@@ -1,0 +1,31 @@
+id: TC-CHECK-RELEVANCE-001
+title: "Зависимость в done/ считается выполненной и актуальной"
+origin:
+  chg: [CHG-026]
+  incidents:
+    - "workflowAi: CHG-026 — ложное dependencies_inactive при зависимостях в done/"
+  principle: "done/ = выполнена, АКТУАЛЬНА"
+  backlog_sources:
+    - ".workflow/coach-backlog.yaml"
+tags: [dependency-states, done-folder]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Проверь релевантность тикета IMPL-005. Зависимости: IMPL-001 (в done/), IMPL-002 (в done/).
+    Оба выполнены успешно.
+
+assertions:
+  deterministic:
+    - kind: output_does_not_contain
+      values: ["inactive", "неактивн", "irrelevant"]
+      reason: "Зависимости в done/ не должны считаться неактивными."
+    - kind: output_contains_all
+      values: ["---RESULT---"]
+    - kind: output_matches
+      regex: "status:\\s*relevant"
+      reason: "Тикет с выполненными зависимостями должен быть relevant."
+
+execution:
+  timeout_s: 90

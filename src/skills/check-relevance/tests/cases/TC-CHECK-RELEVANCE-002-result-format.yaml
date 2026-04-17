@@ -1,0 +1,30 @@
+id: TC-CHECK-RELEVANCE-002
+title: "check-relevance выдаёт RESULT с status:relevant и только допустимые статусы"
+origin:
+  chg: [CHG-071, CHG-072, CHG-073]
+  incidents:
+    - "workflowAiVsCode: CHG-071-073 — двусмысленность review_failed_needs_rework"
+  principle: "Однозначный RESULT формат"
+  backlog_sources:
+    - "d:/Dev/workflowAiVsCode/.workflow/coach-backlog.yaml"
+tags: [result-format, status-clarity]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Проверь релевантность тикета IMPL-010. Все зависимости выполнены, план активен.
+
+assertions:
+  deterministic:
+    - kind: output_contains_all
+      values: ["---RESULT---"]
+    - kind: output_matches
+      regex: "status:\\s*(relevant|irrelevant)"
+      reason: "Только два допустимых статуса."
+    - kind: output_does_not_contain
+      values: ["review_failed", "needs_rework"]
+      reason: "Устаревшие неоднозначные статусы запрещены."
+
+execution:
+  timeout_s: 90

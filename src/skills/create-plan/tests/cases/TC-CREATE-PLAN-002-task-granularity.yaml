@@ -1,0 +1,25 @@
+id: TC-CREATE-PLAN-002
+title: "Планировщик формулирует задачи с одним глаголом действия"
+origin:
+  chg: [CHG-107]
+  incidents:
+    - "workflowAiVsCode: CHG-107 — принцип Task Granularity: одно действие на задачу"
+  principle: "Task Granularity (#8)"
+  backlog_sources:
+    - "d:/Dev/workflowAiVsCode/.workflow/coach-backlog.yaml"
+tags: [granularity, plan-quality]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Создай план для задачи: «Исправить баги маппинга и добавить новые поля в API».
+
+assertions:
+  deterministic:
+    - kind: output_does_not_contain
+      values: ["и добавить", "и обновить", "и исправить"]
+      reason: "Задачи плана не должны содержать два глагола через «и»."
+
+execution:
+  timeout_s: 180

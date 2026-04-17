@@ -1,0 +1,23 @@
+version: 1
+skill: decompose-gaps
+generated_at: "2026-04-17"
+
+execution:
+  target_agents:
+    - claude-sonnet
+    - qwen-code
+  judge_agent: claude-opus
+  default_timeout_s: 120
+  baseline_ref: origin/main
+
+cases:
+  - id: TC-DECOMPOSE-GAPS-001
+    file: cases/TC-DECOMPOSE-GAPS-001-scope-exclusion.yaml
+    origin_chg: [CHG-049]
+    tags: [scope-check, exclusion]
+    severity: medium
+  - id: TC-DECOMPOSE-GAPS-002
+    file: cases/TC-DECOMPOSE-GAPS-002-glob-before-write.yaml
+    origin_chg: [CHG-050]
+    tags: [glob-check, overwrite-prevention]
+    severity: medium

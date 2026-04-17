@@ -1,0 +1,23 @@
+version: 1
+skill: manual-testing
+generated_at: "2026-04-17"
+
+execution:
+  target_agents:
+    - claude-sonnet
+    - qwen-code
+  judge_agent: claude-opus
+  default_timeout_s: 120
+  baseline_ref: origin/main
+
+cases:
+  - id: TC-MANUAL-TESTING-001
+    file: cases/TC-MANUAL-TESTING-001-sandbox-mandatory.yaml
+    origin_chg: [CHG-068, CHG-069]
+    tags: [sandbox, desktop-testing]
+    severity: high
+  - id: TC-MANUAL-TESTING-002
+    file: cases/TC-MANUAL-TESTING-002-visual-tc-screenshot.yaml
+    origin_chg: [CHG-045]
+    tags: [visual-testing, screenshot]
+    severity: high

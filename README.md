@@ -121,6 +121,67 @@ Skills are stored globally in `~/.workflow/skills/` and linked into projects via
 
 Use `workflow eject <skill>` to copy a skill into the project for customization.
 
+## Skill regression tests
+
+Трёхуровневая система тестирования скилов для проверки качества AI-агентов.
+
+### Три слоя тестирования
+
+| Level | Name | Description |
+|-------|------|-------------|
+| L0 | Static | Базовая проверка синтаксиса и структуры: YAML-валидация, проверка обязательных полей, линтер |
+| L1 | Deterministic | Детерминированные тесты: эталонные входные данные → ожидаемый результат (strict match) |
+| L2 | Rubric | Гибкая оценка по критериям: scorer выставляет баллы на основе качества результата |
+
+### Структура директорий
+
+```
+src/skills/<name>/tests/
+├── index.yaml      # Метаданные тестов, список test cases
+├── cases/          # Входные данные для тестов
+│   └── <case-id>/
+│       └── input.yaml
+├── fixtures/       # Ожидаемые выходные данные (для L1)
+│   └── <case-id>/
+│       └── expected.yaml
+└── rubrics/        # Критерии оценки (для L2)
+    └── <case-id>/
+        └── rubric.yaml
+```
+
+### Запуск тестов
+
+```bash
+npm run test:skills
+```
+
+### CLI-флаги
+
+| Flag | Description |
+|------|-------------|
+| `--skill <name>` | Запустить тесты только для указанного скила |
+| `--relevant` | Запустить только тесты, соответствующие изменённым файлам |
+| `--establish-baseline` | Запустить тесты и сохранить результаты как baseline |
+| `--baseline-ref <ref>` | Использовать конкретный baseline (коммит, тег) |
+| `--yes` | Автоматически подтверждать все действия |
+
+### Verdict-режимы
+
+| Mode | Description |
+|------|-------------|
+| `no-baseline` | Первый запуск — результаты сохраняются как baseline без сравнения |
+| `no-regression` | Сравнение с baseline — тест считается пройденным, если результат не хуже baseline |
+
+### Принцип git write
+
+Runner и коуч **не выполняют git write-операций**. Все изменения в кодовой базе делает исключительно пользователь. Runner только анализирует и рекомендует, но не коммитит.
+
+### First run on a new project
+
+1. Запустить тесты с флагом `--establish-baseline`
+2. Проверить результаты: красные тесты — ожидаемы для нового проекта
+3. Зафиксировать baseline: `git commit current/` как baseline-коммит
+
 ## Scripts
 
 Scripts are stored globally in `~/.workflow/scripts/` and linked as a single junction into `.workflow/src/scripts/`.

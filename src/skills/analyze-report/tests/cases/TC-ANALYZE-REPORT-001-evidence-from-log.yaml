@@ -1,0 +1,38 @@
+id: TC-ANALYZE-REPORT-001
+title: "Анализатор верифицирует каждый finding по логу пайплайна"
+origin:
+  chg: [CHG-028, CHG-048]
+  incidents:
+    - "workflowAi: CHG-028 — повторил неверную атрибуцию из отчёта без проверки лога"
+  principle: "Evidence verification из лога"
+  backlog_sources:
+    - ".workflow/coach-backlog.yaml"
+tags: [evidence, log-verification]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Проанализируй прогресс плана. В отчёте указано: «Root cause: check-conditions.js».
+    Но в логе стейдж check-relevance принял решение (строка 2166).
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Evidence"
+      reason: "Принцип Evidence должен быть в SKILL.md."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "RESULT"
+      reason: "Формат ---RESULT--- обязателен."
+
+  deterministic:
+    - kind: output_contains_all
+      values: ["---RESULT---"]
+    - kind: output_does_not_contain
+      values: ["check-conditions"]
+      reason: "Не должен копировать неверную атрибуцию."
+
+execution:
+  timeout_s: 120

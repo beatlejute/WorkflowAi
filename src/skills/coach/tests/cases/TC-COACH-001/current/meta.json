@@ -1,0 +1,32 @@
+{
+  "date": "2026-04-16T10:28:23.166Z",
+  "skill_sha": "9f505f2",
+  "status": "failed",
+  "duration_ms": 27858,
+  "per_model": {
+    "claude-sonnet": {
+      "passed": false,
+      "pass_count": 0,
+      "total": 1,
+      "threshold": 1
+    },
+    "qwen-code": {
+      "passed": false,
+      "pass_count": 0,
+      "total": 1,
+      "threshold": 1
+    }
+  },
+  "rubric_scores": [
+    {
+      "agentId": "claude-sonnet",
+      "trial": 1,
+      "score": 1
+    },
+    {
+      "agentId": "qwen-code",
+      "trial": 1,
+      "score": 1
+    }
+  ]
+}

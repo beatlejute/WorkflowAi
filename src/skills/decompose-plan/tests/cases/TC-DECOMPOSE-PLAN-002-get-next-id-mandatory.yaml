@@ -1,0 +1,36 @@
+id: TC-DECOMPOSE-PLAN-002
+title: "Декомпозитор использует get-next-id.js вместо ручного поиска ID"
+origin:
+  chg: [CHG-029, CHG-036]
+  incidents:
+    - "workflowAi: CHG-029 — коллизия IMPL-001/002/003 из-за ручного ID"
+  principle: "Машинная генерация ID"
+  backlog_sources:
+    - ".workflow/coach-backlog.yaml"
+tags: [id-generation, script-usage, collision-prevention]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Создай тикеты для плана. В tickets/ уже есть тикеты IMPL-001..IMPL-005 в archive/.
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "get-next-id"
+      reason: "Воркфлоу должен вызывать скрипт get-next-id.js."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "⛔.*ручн"
+      reason: "Ручной поиск ID должен быть запрещён."
+
+  deterministic:
+    - kind: output_contains_all
+      values: ["get-next-id"]
+    - kind: output_does_not_contain
+      values: ["максимальн", "вручную найд"]
+
+execution:
+  timeout_s: 120

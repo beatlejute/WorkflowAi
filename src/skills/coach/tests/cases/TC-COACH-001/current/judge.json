@@ -1,0 +1,39 @@
+{
+  "per_model": {
+    "claude-sonnet": {
+      "pass_count": 0,
+      "total": 1,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 1,
+          "passed": false
+        }
+      ]
+    },
+    "qwen-code": {
+      "pass_count": 0,
+      "total": 1,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 1,
+          "passed": false
+        }
+      ]
+    }
+  },
+  "rubric_scores": [
+    {
+      "agentId": "claude-sonnet",
+      "trial": 1,
+      "score": 1
+    },
+    {
+      "agentId": "qwen-code",
+      "trial": 1,
+      "score": 1
+    }
+  ],
+  "timestamp": "2026-04-16T10:28:23.164Z"
+}

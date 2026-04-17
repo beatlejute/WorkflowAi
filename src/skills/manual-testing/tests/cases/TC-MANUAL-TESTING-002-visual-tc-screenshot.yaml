@@ -1,0 +1,35 @@
+id: TC-MANUAL-TESTING-002
+title: "Визуальный TC требует скриншот + Read + описание перед PASS"
+origin:
+  chg: [CHG-045]
+  incidents:
+    - "PulseProxy: CHG-045 — принцип Visual TC = Screenshot + Self-Review"
+  principle: "Visual TC = Screenshot + Self-Review (#8)"
+  backlog_sources:
+    - "d:/Dev/PulseProxy/.workflow/coach-backlog.yaml"
+tags: [visual-testing, screenshot]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    TC-001: «Кнопка отображается корректно с иконкой и текстом».
+    Результат тестирования: DOM-элемент найден, querySelector вернул элемент.
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "скриншот|screenshot"
+      reason: "Требование скриншота для визуальных TC."
+
+  deterministic:
+    - kind: output_contains_all
+      values: ["скриншот"]
+      reason: "Скриншот обязателен для визуального TC."
+    - kind: output_does_not_contain
+      values: ["PASS"]
+      reason: "Без скриншота нельзя ставить PASS на визуальный TC."
+
+execution:
+  timeout_s: 120

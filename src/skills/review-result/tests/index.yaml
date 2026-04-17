@@ -1,0 +1,23 @@
+version: 1
+skill: review-result
+generated_at: "2026-04-17"
+
+execution:
+  target_agents:
+    - claude-sonnet
+    - qwen-code
+  judge_agent: claude-opus
+  default_timeout_s: 120
+  baseline_ref: origin/main
+
+cases:
+  - id: TC-REVIEW-RESULT-001
+    file: cases/TC-REVIEW-RESULT-001-visual-tc-trigger.yaml
+    origin_chg: [CHG-043, CHG-044]
+    tags: [visual-testing, review-trigger]
+    severity: high
+  - id: TC-REVIEW-RESULT-002
+    file: cases/TC-REVIEW-RESULT-002-path-line-suffix.yaml
+    origin_chg: [CHG-055]
+    tags: [path-parsing, verify-artifacts]
+    severity: medium

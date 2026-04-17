@@ -1,0 +1,28 @@
+id: TC-DECOMPOSE-GAPS-002
+title: "Декомпозитор проверяет Glob существование тикета перед записью"
+origin:
+  chg: [CHG-050]
+  incidents:
+    - "PulseProxy: CHG-050 — перезапись существующих тикетов другими стадиями"
+  principle: "Glob-check before write"
+  backlog_sources:
+    - "d:/Dev/PulseProxy/.workflow/coach-backlog.yaml"
+tags: [glob-check, overwrite-prevention]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Создай тикет FIX-010 по gap'у. На диске уже существует tickets/ready/FIX-010.md.
+
+assertions:
+  deterministic:
+    - kind: output_does_not_contain
+      values: ["перезапис", "overwrite"]
+      reason: "Существующий тикет не должен быть перезаписан."
+    - kind: output_contains_all
+      values: ["уже существует"]
+      reason: "Должно быть обнаружено существование тикета."
+
+execution:
+  timeout_s: 120

@@ -1,0 +1,23 @@
+version: 1
+skill: create-plan
+generated_at: "2026-04-17"
+
+execution:
+  target_agents:
+    - claude-sonnet
+    - qwen-code
+  judge_agent: claude-opus
+  default_timeout_s: 180
+  baseline_ref: origin/main
+
+cases:
+  - id: TC-CREATE-PLAN-001
+    file: cases/TC-CREATE-PLAN-001-validate-completeness.yaml
+    origin_chg: [CHG-023, CHG-024]
+    tags: [validation, completeness, script-usage]
+    severity: high
+  - id: TC-CREATE-PLAN-002
+    file: cases/TC-CREATE-PLAN-002-task-granularity.yaml
+    origin_chg: [CHG-107]
+    tags: [granularity, plan-quality]
+    severity: medium

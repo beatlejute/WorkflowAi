@@ -1,0 +1,14 @@
+version: 2
+last_updated: ""
+
+# Защита от повторного анализа тикетов/логов, не приведших к правке скила.
+# (Те, что привели к правке, имеют тест-кейс в src/skills/*/tests/cases/ — туда и смотрим.)
+analyzed_tickets: []
+
+# Snapshot scores скилов на момент аудита (trajectory во времени).
+audited_skills: []
+
+# История правок скилов — в git, не в этом файле:
+# git log -- src/skills/<name>/                    # все правки скила
+# git log -- src/skills/<name>/tests/cases/        # тест-кейсы
+# git log --follow -- src/skills/<name>/SKILL.md   # история файла

@@ -1,0 +1,51 @@
+# Test Pipeline — используется только в unit-тестах (src/tests/)
+# Содержит mock-агенты для L2 тестирования без реальных LLM вызовов
+#
+# Агенты:
+#   agent-pass   — всегда возвращает MOCK_HIGH_SCORE (judge вернёт score: 5 → pass)
+#   agent-fail   — всегда возвращает MOCK_LOW_SCORE  (judge вернёт score: 2 → fail)
+#   mock-judge   — детерминированный judge на основе маркеров в промпте
+#   agent-a      — алиас agent-pass (для совместимости)
+#   agent-b      — алиас agent-fail (для тестов AND-логики где одна модель падает)
+
+pipeline:
+  name: "test-pipeline"
+  version: "1.0"
+
+  agents:
+    agent-pass:
+      command: "node"
+      args: ["src/tests/fixtures/mock-agent-pass.js"]
+      workdir: "."
+      capabilities: [text]
+      description: "Mock agent — всегда pass (MOCK_HIGH_SCORE)"
+
+    agent-fail:
+      command: "node"
+      args: ["src/tests/fixtures/mock-agent-fail.js"]
+      workdir: "."
+      capabilities: [text]
+      description: "Mock agent — всегда fail (MOCK_LOW_SCORE)"
+
+    agent-a:
+      command: "node"
+      args: ["src/tests/fixtures/mock-agent-pass.js"]
+      workdir: "."
+      capabilities: [text]
+      description: "Mock agent-a — pass (alias for agent-pass)"
+
+    agent-b:
+      command: "node"
+      args: ["src/tests/fixtures/mock-agent-fail.js"]
+      workdir: "."
+      capabilities: [text]
+      description: "Mock agent-b — fail (alias for agent-fail, для AND-тестов)"
+
+    mock-judge:
+      command: "node"
+      args: ["src/tests/fixtures/mock-judge.js"]
+      workdir: "."
+      capabilities: [text]
+      description: "Mock judge — детерминированный по маркерам в промпте"
+
+  default_agents: [agent-a]

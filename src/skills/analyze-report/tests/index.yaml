@@ -1,0 +1,23 @@
+version: 1
+skill: analyze-report
+generated_at: "2026-04-17"
+
+execution:
+  target_agents:
+    - claude-sonnet
+    - qwen-code
+  judge_agent: claude-opus
+  default_timeout_s: 120
+  baseline_ref: origin/main
+
+cases:
+  - id: TC-ANALYZE-REPORT-001
+    file: cases/TC-ANALYZE-REPORT-001-evidence-from-log.yaml
+    origin_chg: [CHG-028, CHG-048]
+    tags: [evidence, log-verification]
+    severity: high
+  - id: TC-ANALYZE-REPORT-002
+    file: cases/TC-ANALYZE-REPORT-002-result-block-format.yaml
+    origin_chg: [CHG-070]
+    tags: [result-format, pipeline-integration]
+    severity: high

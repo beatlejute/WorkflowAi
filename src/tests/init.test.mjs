@@ -25,7 +25,7 @@ afterEach(() => {
   rmSync(testGlobalDir, { recursive: true, force: true });
 });
 
-test('initProject creates 15 directories', () => {
+test('initProject creates 16 directories', () => {
   const tmpDir = join(tmpdir(), `workflow-init-test-${Date.now()}`);
 
   try {
@@ -49,7 +49,8 @@ test('initProject creates 15 directories', () => {
       'logs',
       'templates',
       'config',
-      'src/skills'
+      'src/skills',
+      'tests/skills'
     ];
 
     for (const dir of expectedDirs) {
@@ -238,4 +239,60 @@ test('initProject cleans up tmp directory after test', () => {
 
   rmSync(tmpDir, { recursive: true, force: true });
   assert.ok(!existsSync(tmpDir), 'tmp dir should not exist after cleanup');
+});
+
+test('initProject creates .workflow/tests/skills/.gitkeep', () => {
+  const tmpDir = join(tmpdir(), `workflow-init-gitkeep-test-${Date.now()}`);
+
+  try {
+    initProject(tmpDir, { force: true });
+
+    const gitkeepPath = join(tmpDir, '.workflow', 'tests', 'skills', '.gitkeep');
+    assert.ok(existsSync(gitkeepPath), '.workflow/tests/skills/.gitkeep should exist');
+
+    const stats = statSync(gitkeepPath);
+    assert.ok(stats.isFile(), '.gitkeep should be a file');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('initProject does NOT create .workflow/metrics/skill-tests/', () => {
+  const tmpDir = join(tmpdir(), `workflow-init-no-metrics-test-${Date.now()}`);
+
+  try {
+    initProject(tmpDir, { force: true });
+
+    const metricsDir = join(tmpDir, '.workflow', 'metrics', 'skill-tests');
+    assert.ok(!existsSync(metricsDir), '.workflow/metrics/skill-tests/ should NOT exist');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('initProject is idempotent (second run does not break initialized project)', () => {
+  const tmpDir = join(tmpdir(), `workflow-init-idempotent-test-${Date.now()}`);
+
+  try {
+    // First run
+    const result1 = initProject(tmpDir, { force: true });
+    assert.strictEqual(result1.errors.length, 0, `First run should have no errors: ${result1.errors.join(', ')}`);
+
+    // Verify .workflow/tests/skills/.gitkeep exists after first run
+    const gitkeepPath = join(tmpDir, '.workflow', 'tests', 'skills', '.gitkeep');
+    const gitkeepExistsAfterFirst = existsSync(gitkeepPath);
+
+    // Second run (idempotency check)
+    const result2 = initProject(tmpDir, { force: true });
+    assert.strictEqual(result2.errors.length, 0, `Second run should have no errors: ${result2.errors.join(', ')}`);
+
+    // Verify .workflow/tests/skills/.gitkeep still exists after second run
+    assert.ok(existsSync(gitkeepPath), '.gitkeep should still exist after second run');
+
+    // Verify directory still exists
+    const testsSkillsDir = join(tmpDir, '.workflow', 'tests', 'skills');
+    assert.ok(existsSync(testsSkillsDir), 'tests/skills directory should still exist');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
 });

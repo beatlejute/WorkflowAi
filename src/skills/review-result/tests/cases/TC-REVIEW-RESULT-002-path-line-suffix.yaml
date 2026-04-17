@@ -1,0 +1,27 @@
+id: TC-REVIEW-RESULT-002
+title: "Ревьюер корректно обрабатывает пути с :line суффиксом"
+origin:
+  chg: [CHG-055]
+  incidents:
+    - "PulseProxy: CHG-055 — verify-artifacts падал на path:line нотации"
+  principle: "Поддержка отраслевой нотации path:line"
+  backlog_sources:
+    - "d:/Dev/PulseProxy/.workflow/coach-backlog.yaml"
+tags: [path-parsing, verify-artifacts]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Проведи ревью тикета. В «Изменённые файлы» указано: src/background/index.ts:204-211
+
+assertions:
+  deterministic:
+    - kind: output_does_not_contain
+      values: ["missing_files", "не найден"]
+      reason: "Путь с :line суффиксом не должен вызывать ошибку missing_files."
+    - kind: output_contains_all
+      values: ["---RESULT---"]
+
+execution:
+  timeout_s: 120
