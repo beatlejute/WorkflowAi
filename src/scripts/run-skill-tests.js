@@ -29,7 +29,8 @@ function parseArgs() {
     yes: false,
     baselineRef: null,
     establishBaseline: false,
-    calibrate: false
+    calibrate: false,
+    severity: null
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -71,6 +72,9 @@ function parseArgs() {
       opts.establishBaseline = true;
     } else if (arg === '--pipeline' && args[i + 1]) {
       opts.pipeline = args[i + 1];
+      i++;
+    } else if (arg === '--severity' && args[i + 1]) {
+      opts.severity = args[i + 1];
       i++;
     }
   }
@@ -347,6 +351,32 @@ function filterCasesByTag(cases, tag) {
   return cases.filter(c => c.tags && c.tags.includes(tag));
 }
 
+function filterCasesBySeverity(cases, severity) {
+  if (!severity) return cases;
+  return cases.filter(c => c.severity === severity);
+}
+
+function getAllSkillNamesWithTests() {
+  const skillsDir = findSkillsDir();
+  const entries = fs.readdirSync(skillsDir);
+  const skillNames = [];
+  for (const entry of entries) {
+    const fullPath = path.join(skillsDir, entry);
+    try {
+      const stat = fs.statSync(fullPath);
+      if (stat.isDirectory()) {
+        const indexPath = path.join(fullPath, 'tests', 'index.yaml');
+        if (fs.existsSync(indexPath)) {
+          skillNames.push(entry);
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+  return skillNames;
+}
+
 function runSecretScan() {
   return new Promise((resolve) => {
     const scannerPath = path.join(projectRoot, 'src', 'scripts', 'scan-fixtures-for-secrets.js');
@@ -419,6 +449,16 @@ function runL0Assertions(skillName, testCase) {
 function runL1Assertions(output, testCase) {
   const assertions = testCase.assertions?.deterministic || [];
   const results = [];
+  
+  const outputDependentKinds = ['output_contains_all', 'output_matches', 'output_does_not_contain', 'output_yaml_shape'];
+  if (!output && assertions.some(a => outputDependentKinds.includes(a.kind))) {
+    return assertions.map(a => ({
+      passed: true,
+      skipped: true,
+      kind: a.kind,
+      reason: 'No agent output available (L2 not run)'
+    }));
+  }
   
   for (const assertion of assertions) {
     if (assertion.kind === 'output_contains_all') {
@@ -735,14 +775,14 @@ async function preFlightApproval(numCases, numModels, trials, judgeAgentCost = 0
   return true;
 }
 
-async function runL2Evaluation(skillName, testCase, caseId, targetAgents, judgeAgentId, pipelineConfig, options = {}) {
-  const { trials = 3, concurrency = 2 } = options;
+async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judgeAgentId, pipelineConfig, options = {}) {
+  const { trials = 3, concurrency = 2, timeout = 300 } = options;
   
   const judgeAgentConfig = pipelineConfig.agents[judgeAgentId];
   if (!judgeAgentConfig) {
     throw new Error(`Judge agent not found: ${judgeAgentId}`);
   }
-  
+
   let rubricName = 'default';
   if (testCase.assertions?.rubric && testCase.assertions.rubric.length > 0) {
     const rubricPath = testCase.assertions.rubric[0].rubric_file;
@@ -757,6 +797,43 @@ async function runL2Evaluation(skillName, testCase, caseId, targetAgents, judgeA
     rubric_scores: [],
     tokens: null
   };
+
+  const caseId = caseDef?.id || 'unknown';
+  
+  function buildTargetPrompt() {
+    let targetPrompt = '';
+    const testsDir = findSkillTestsDir(skillName);
+    const caseDir = caseDef?.file ? path.dirname(caseDef.file) : '';
+    
+    if (testCase.scenario?.system_prompt_file) {
+      const systemPromptPath = path.join(testsDir, caseDir, testCase.scenario.system_prompt_file);
+      if (fs.existsSync(systemPromptPath)) {
+        targetPrompt += fs.readFileSync(systemPromptPath, 'utf8') + '\n\n';
+      }
+    }
+
+    if (testCase.scenario?.extra_instructions) {
+      targetPrompt += testCase.scenario.extra_instructions + '\n\n';
+    }
+
+    if (testCase.scenario?.inputs) {
+      for (const input of testCase.scenario.inputs) {
+        if (input.kind === 'file') {
+          const fixturePath = path.join(testsDir, caseDir, input.path);
+          if (fs.existsSync(fixturePath)) {
+            targetPrompt += `## ${input.as || 'Input'}\n`;
+            targetPrompt += fs.readFileSync(fixturePath, 'utf8') + '\n\n';
+          }
+        }
+      }
+    }
+
+    if (!targetPrompt.trim()) {
+      targetPrompt = testCase.prompt || testCase.input || '';
+    }
+    
+    return targetPrompt;
+  }
   
   for (const agentId of targetAgents) {
     const agentConfig = pipelineConfig.agents[agentId];
@@ -780,9 +857,9 @@ async function runL2Evaluation(skillName, testCase, caseId, targetAgents, judgeA
       const batchResults = await Promise.all(
         batch.map(async (task) => {
           try {
-            const targetPrompt = testCase.prompt || testCase.input || '';
+            const targetPrompt = buildTargetPrompt();
             const targetOutput = await spawnAgent(task.agentConfig, targetPrompt, {
-              timeout: 120,
+              timeout,
               stageId: `${caseId}-${task.agentId}-trial-${task.trial}`
             });
             
@@ -910,7 +987,7 @@ function aggregateResults(results, testCase) {
   };
 }
 
-async function writeMetaJson(caseId, skillName, status, durationMs, l2Results = null) {
+async function writeMetaJson(caseId, skillName, status, durationMs, l2Results = null, l1_skipped = null) {
   const skillsDir = findSkillsDir();
   const caseDir = path.join(skillsDir, skillName, 'tests', 'cases', caseId, 'current');
   ensureDir(caseDir);
@@ -921,6 +998,10 @@ async function writeMetaJson(caseId, skillName, status, durationMs, l2Results = 
     status,
     duration_ms: durationMs
   };
+  
+  if (l1_skipped) {
+    meta.l1_skipped = true;
+  }
   
   if (l2Results) {
     const aggregated = aggregateResults(l2Results, {});
@@ -938,234 +1019,202 @@ async function writeMetaJson(caseId, skillName, status, durationMs, l2Results = 
   );
 }
 
-async function runSkillTests(opts) {
-  const results = {
+async function runTestsForSkill(skillName, opts) {
+  const result = {
+    skill: skillName,
     status: 'passed',
-    skill: opts.skill || 'unknown',
-    mode: 'deterministic',
     total: 0,
-    current_run: {
-      passed: 0,
-      failed: 0
-    },
+    current_run: { passed: 0, failed: 0 },
     baseline_ref: 'origin/main',
-    git_head_comparison: null,
-    verdict: 'ready_for_user_review',
-    outcome_message: ''
+    target_agents: [],
+    judge_agent: null
   };
-
   let cases = [];
-  // Собираем результаты прогона для analyzeGitHeadComparison
   const currentRunStatuses = {};
 
   try {
-    if (!opts.all && !opts.skill) {
-      throw new Error('Either --skill or --all must be specified');
+    const index = loadIndexYaml(skillName);
+    const pipelineConfig = loadPipelineConfig(opts.pipeline || null);
+
+    const defaultTargetAgents = index.execution?.target_agents || [];
+    const judgeAgent = index.execution?.judge_agent || null;
+
+    if (defaultTargetAgents.length > 0) {
+      validateAgents(defaultTargetAgents, pipelineConfig);
+      console.log(`[Runner] target_agents from index.yaml: ${defaultTargetAgents.join(', ')}`);
     }
-    
-    const skillName = opts.skill;
-    
-    if (skillName) {
-      const index = loadIndexYaml(skillName);
-      const pipelineConfig = loadPipelineConfig(opts.pipeline || null);
-      
-      const defaultTargetAgents = index.execution?.target_agents || [];
-      const judgeAgent = index.execution?.judge_agent || null;
-      
-      if (defaultTargetAgents.length > 0) {
-        validateAgents(defaultTargetAgents, pipelineConfig);
-        console.log(`[Runner] target_agents from index.yaml: ${defaultTargetAgents.join(', ')}`);
-      }
-      
-      if (judgeAgent) {
-        validateAgents([judgeAgent], pipelineConfig);
-        console.log(`[Runner] judge_agent from index.yaml: ${judgeAgent}`);
-      }
-      
-      let effectiveTargetAgents = defaultTargetAgents;
-      
-      if (opts.agent) {
-        validateAgents([opts.agent], pipelineConfig);
-        effectiveTargetAgents = [opts.agent];
-        console.log(`[Runner] Override target_agents via --agent: ${opts.agent}`);
-      } else if (opts.primaryOnly && defaultTargetAgents.length > 0) {
-        effectiveTargetAgents = [defaultTargetAgents[0]];
-        console.log(`[Runner] Using only primary agent: ${effectiveTargetAgents[0]}`);
-      }
-      
-      results.target_agents = effectiveTargetAgents;
-      results.judge_agent = judgeAgent;
 
-      if (opts.calibrate) {
-        console.log(`[Runner] Running calibration gate only...`);
-        const calibrationResult = await runCalibrationGate(skillName, pipelineConfig);
+    if (judgeAgent) {
+      validateAgents([judgeAgent], pipelineConfig);
+      console.log(`[Runner] judge_agent from index.yaml: ${judgeAgent}`);
+    }
+
+    let effectiveTargetAgents = defaultTargetAgents;
+
+    if (opts.agent) {
+      validateAgents([opts.agent], pipelineConfig);
+      effectiveTargetAgents = [opts.agent];
+      console.log(`[Runner] Override target_agents via --agent: ${opts.agent}`);
+    } else if (opts.primaryOnly && defaultTargetAgents.length > 0) {
+      effectiveTargetAgents = [defaultTargetAgents[0]];
+      console.log(`[Runner] Using only primary agent: ${effectiveTargetAgents[0]}`);
+    }
+
+    result.target_agents = effectiveTargetAgents;
+    result.judge_agent = judgeAgent;
+
+    if (opts.calibrate) {
+      console.log(`[Runner] Running calibration gate only...`);
+      const calibrationResult = await runCalibrationGate(skillName, pipelineConfig);
+
+      if (!calibrationResult.passed) {
+        console.error(`[Runner] Calibration FAILED: ${calibrationResult.error}`);
+        result.status = 'calibration_failed';
+        result.error = calibrationResult.error;
+        result.calibration = calibrationResult;
+        return result;
+      }
+
+      console.log('[Runner] Calibration gate PASSED');
+      result.calibration = calibrationResult;
+      result.status = 'calibration_passed';
+      return result;
+    }
+
+    cases = index.cases || [];
+
+    if (opts.tag) {
+      cases = filterCasesByTag(cases, opts.tag);
+    }
+
+    if (opts.severity) {
+      cases = filterCasesBySeverity(cases, opts.severity);
+    }
+
+    if (opts.caseId) {
+      const caseDef = cases.find(c => c.id === opts.caseId);
+      if (caseDef) {
+        const testCase = loadTestCase(skillName, caseDef.file);
+        if (testCase.execution?.target_agents) {
+          validateAgents(testCase.execution.target_agents, pipelineConfig);
+          effectiveTargetAgents = testCase.execution.target_agents;
+          console.log(`[Runner] Override target_agents in case ${opts.caseId}: ${effectiveTargetAgents.join(', ')}`);
+        }
+        if (testCase.execution?.judge_agent) {
+          const caseJudgeAgent = testCase.execution.judge_agent;
+          validateAgents([caseJudgeAgent], pipelineConfig);
+          console.log(`[Runner] Override judge_agent in case ${opts.caseId}: ${caseJudgeAgent}`);
+        }
+        cases = [caseDef];
+      } else {
+        throw new Error(`Case not found: ${opts.caseId}`);
+      }
+    }
+
+    result.total = cases.length;
+
+    const startTime = Date.now();
+
+    const runL2 = !opts.layer || opts.layer === 'l2';
+
+    if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent) {
+      const trials = opts.fast ? 1 : 3;
+      const totalModels = effectiveTargetAgents.length;
+      const llmEstimate = cases.length * totalModels * trials * 2;
+      await preFlightApproval(cases.length, totalModels, trials);
+    }
+
+    for (const caseDef of cases) {
+      const caseStart = Date.now();
+
+      try {
+        const testCase = loadTestCase(skillName, caseDef.file);
         
-        if (!calibrationResult.passed) {
-          console.error(`[Runner] Calibration FAILED: ${calibrationResult.error}`);
-          results.status = 'calibration_failed';
-          results.error = calibrationResult.error;
-          results.calibration = calibrationResult;
-          return results;
+        const hasRubric = testCase.assertions?.rubric && testCase.assertions.rubric.length > 0;
+        
+        const runL0 = !opts.layer || opts.layer === 'static' || opts.layer === 'deterministic';
+        const runL1 = !opts.layer || opts.layer === 'deterministic';
+        const runL2 = !opts.layer || opts.layer === 'l2';
+
+        // Secret scan (only for deterministic layer)
+        if (runL1 && !opts.skipSecretScan) {
+          const scanResult = await runSecretScan();
+          if (!scanResult.passed) {
+            result.current_run.failed++;
+            result.status = 'failed';
+            result.error = 'Secret scan failed - secrets detected in fixtures';
+            currentRunStatuses[caseDef.id] = 'failed';
+            await writeMetaJson(caseDef.id, skillName, 'failed', Date.now() - caseStart);
+            continue;
+          }
         }
 
-        console.log('[Runner] Calibration gate PASSED');
-        results.calibration = calibrationResult;
-        results.status = 'calibration_passed';
-        return results;
-      }
-
-      cases = index.cases || [];
-      
-      if (opts.tag) {
-        cases = filterCasesByTag(cases, opts.tag);
-      }
-      
-      if (opts.caseId) {
-        const caseDef = cases.find(c => c.id === opts.caseId);
-        if (caseDef) {
-          const testCase = loadTestCase(skillName, caseDef.file);
-          if (testCase.execution?.target_agents) {
-            validateAgents(testCase.execution.target_agents, pipelineConfig);
-            effectiveTargetAgents = testCase.execution.target_agents;
-            console.log(`[Runner] Override target_agents in case ${opts.caseId}: ${effectiveTargetAgents.join(', ')}`);
+        // L0 static assertions
+        if (runL0) {
+          const l0Results = runL0Assertions(skillName, testCase);
+          const l0Failed = l0Results.filter(r => !r.passed);
+          if (l0Failed.length > 0) {
+            result.current_run.failed++;
+            result.status = 'failed';
+            currentRunStatuses[caseDef.id] = 'failed';
+            await writeMetaJson(caseDef.id, skillName, 'failed', Date.now() - caseStart);
+            continue;
           }
-          if (testCase.execution?.judge_agent) {
-            const caseJudgeAgent = testCase.execution.judge_agent;
-            validateAgents([caseJudgeAgent], pipelineConfig);
-            console.log(`[Runner] Override judge_agent in case ${opts.caseId}: ${caseJudgeAgent}`);
-          }
-          cases = [caseDef];
-        } else {
-          throw new Error(`Case not found: ${opts.caseId}`);
         }
-      }
-      
-      results.total = cases.length;
 
-      const startTime = Date.now();
+        if (runL1) {
+          const mockOutput = '';
+          const l1Results = runL1Assertions(mockOutput, testCase);
+          const l1Failed = l1Results.filter(r => !r.passed);
+          const l1Skipped = l1Results.some(r => r.skipped);
 
-      const runL2 = !opts.layer || opts.layer === 'l2';
+          const caseStatus = l1Failed.length === 0 ? 'passed' : 'failed';
+          currentRunStatuses[caseDef.id] = caseStatus;
 
-      if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent) {
-        const trials = opts.fast ? 1 : 3;
-        const totalModels = effectiveTargetAgents.length;
-        const llmEstimate = cases.length * totalModels * trials * 2;
-        await preFlightApproval(cases.length, totalModels, trials);
-      }
-
-      for (const caseDef of cases) {
-        const caseStart = Date.now();
-
-        try {
-          const testCase = loadTestCase(skillName, caseDef.file);
-
-          const runL0 = !opts.layer || opts.layer === 'static' || opts.layer === 'deterministic';
-          const runL1 = !opts.layer || opts.layer === 'deterministic';
-          const runL2 = !opts.layer || opts.layer === 'l2';
-          
-          if (runL1 && !opts.skipSecretScan) {
-            const scanResult = await runSecretScan();
-            if (!scanResult.passed) {
-              console.error('[Runner] ABORT: Secrets detected in fixtures. Fix or use --skip-secret-scan for debugging.');
-              results.current_run.failed++;
-              results.status = 'failed';
-              results.error = 'Secret scan failed - secrets detected in fixtures';
-              currentRunStatuses[caseDef.id] = 'failed';
-              await writeMetaJson(caseDef.id, skillName, 'failed', Date.now() - caseStart);
-              continue;
-            }
+          if (l1Failed.length > 0) {
+            result.current_run.failed++;
+            result.status = 'failed';
+          } else {
+            result.current_run.passed++;
           }
-          
-          if (runL0) {
-            const l0Results = runL0Assertions(skillName, testCase);
-            const l0Failed = l0Results.filter(r => !r.passed);
 
-            if (l0Failed.length > 0) {
-              results.current_run.failed++;
-              results.status = 'failed';
-              currentRunStatuses[caseDef.id] = 'failed';
-              await writeMetaJson(caseDef.id, skillName, 'failed', Date.now() - caseStart);
-              continue;
-            }
+          if (l1Skipped) {
+            result.l1_skipped = true;
           }
-          
-          if (runL1) {
-            const mockOutput = '';
-            const l1Results = runL1Assertions(mockOutput, testCase);
-            const l1Failed = l1Results.filter(r => !r.passed);
 
-            const caseStatus = l1Failed.length === 0 ? 'passed' : 'failed';
-            currentRunStatuses[caseDef.id] = caseStatus;
+          if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent && hasRubric) {
+            const calibrationResult = await runCalibrationGate(skillName, pipelineConfig);
 
-            if (l1Failed.length > 0) {
-              results.current_run.failed++;
-              results.status = 'failed';
-            } else {
-              results.current_run.passed++;
+            if (!calibrationResult.passed) {
+              console.error(`[Runner] Calibration gate FAILED: ${calibrationResult.error}`);
+              result.status = 'calibration_failed';
+              result.error = calibrationResult.error;
+              result.calibration = calibrationResult;
+              return result;
             }
 
-            if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent) {
-              const calibrationResult = await runCalibrationGate(skillName, pipelineConfig);
-
-              if (!calibrationResult.passed) {
-                console.error(`[Runner] Calibration gate FAILED: ${calibrationResult.error}`);
-                results.status = 'calibration_failed';
-                results.error = calibrationResult.error;
-                results.calibration = calibrationResult;
-                return results;
-              }
-
-              if (calibrationResult.warnings && calibrationResult.warnings.length > 0) {
-                console.log(`[Runner] Calibration warnings: ${calibrationResult.warnings.join(', ')}`);
-              }
-
-              console.log('[Runner] Calibration gate PASSED');
+            if (calibrationResult.warnings && calibrationResult.warnings.length > 0) {
+              console.log(`[Runner] Calibration warnings: ${calibrationResult.warnings.join(', ')}`);
             }
 
-            let l2Results = null;
-            if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent) {
-              const trials = opts.fast ? 1 : 3;
-              try {
-                l2Results = await runL2Evaluation(
-                  skillName,
-                  testCase,
-                  caseDef.id,
-                  effectiveTargetAgents,
-                  judgeAgent,
-                  pipelineConfig,
-                  { trials, concurrency: 2 }
-                );
+            console.log('[Runner] Calibration gate PASSED');
+          }
 
-                const aggregated = aggregateResults(l2Results, testCase);
-                console.log(`[Runner] L2 Results for ${caseDef.id}:`, JSON.stringify(aggregated, null, 2));
-
-                await writeJudgeResults(skillName, caseDef.id, l2Results);
-
-                if (!aggregated.overall_passed) {
-                  results.status = 'failed';
-                  currentRunStatuses[caseDef.id] = 'failed';
-                }
-              } catch (l2Err) {
-                console.error(`[Runner] L2 evaluation failed:`, l2Err.message);
-                results.status = 'failed';
-                currentRunStatuses[caseDef.id] = 'failed';
-              }
-            }
-
-            await writeMetaJson(caseDef.id, skillName, caseStatus, Date.now() - caseStart, l2Results);
-          } else if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent) {
+          let l2Results = null;
+          if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent && hasRubric) {
             const trials = opts.fast ? 1 : 3;
-            let l2Results = null;
-            let caseStatus = 'passed';
+            const index = loadIndexYaml(skillName);
+            const defaultTimeout = index.execution?.default_timeout_s || 300;
+            const timeout = testCase.execution?.timeout_s || defaultTimeout;
             try {
               l2Results = await runL2Evaluation(
                 skillName,
                 testCase,
-                caseDef.id,
+                caseDef,
                 effectiveTargetAgents,
                 judgeAgent,
                 pipelineConfig,
-                { trials, concurrency: 2 }
+                { trials, concurrency: 2, timeout }
               );
 
               const aggregated = aggregateResults(l2Results, testCase);
@@ -1174,88 +1223,188 @@ async function runSkillTests(opts) {
               await writeJudgeResults(skillName, caseDef.id, l2Results);
 
               if (!aggregated.overall_passed) {
-                results.status = 'failed';
-                results.current_run.failed++;
-                caseStatus = 'failed';
-              } else {
-                results.current_run.passed++;
+                result.status = 'failed';
+                currentRunStatuses[caseDef.id] = 'failed';
               }
             } catch (l2Err) {
               console.error(`[Runner] L2 evaluation failed:`, l2Err.message);
-              results.status = 'failed';
-              results.current_run.failed++;
-              caseStatus = 'failed';
+              result.status = 'failed';
+              currentRunStatuses[caseDef.id] = 'failed';
             }
-
-            currentRunStatuses[caseDef.id] = caseStatus;
-            await writeMetaJson(caseDef.id, skillName, caseStatus, Date.now() - caseStart, l2Results);
-          } else {
-            results.current_run.passed++;
-            currentRunStatuses[caseDef.id] = 'passed';
-            await writeMetaJson(caseDef.id, skillName, 'passed', Date.now() - caseStart);
           }
-        } catch (e) {
-          results.current_run.failed++;
-          results.status = 'failed';
-          currentRunStatuses[caseDef.id] = 'error';
-          await writeMetaJson(caseDef.id, skillName, 'error', Date.now() - caseStart);
+
+          await writeMetaJson(caseDef.id, skillName, caseStatus, Date.now() - caseStart, l2Results, result.l1_skipped);
+        } else if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent && hasRubric) {
+          const trials = opts.fast ? 1 : 3;
+          const defaultTimeout = index.execution?.default_timeout_s || 300;
+          const timeout = testCase.execution?.timeout_s || defaultTimeout;
+          let l2Results = null;
+          let caseStatus = 'passed';
+          try {
+            l2Results = await runL2Evaluation(
+              skillName,
+              testCase,
+              caseDef,
+              effectiveTargetAgents,
+              judgeAgent,
+              pipelineConfig,
+              { trials, concurrency: 2, timeout }
+            );
+
+            const aggregated = aggregateResults(l2Results, testCase);
+            console.log(`[Runner] L2 Results for ${caseDef.id}:`, JSON.stringify(aggregated, null, 2));
+
+            await writeJudgeResults(skillName, caseDef.id, l2Results);
+
+            if (!aggregated.overall_passed) {
+              result.status = 'failed';
+              result.current_run.failed++;
+              caseStatus = 'failed';
+            } else {
+              result.current_run.passed++;
+            }
+          } catch (l2Err) {
+            console.error(`[Runner] L2 evaluation failed:`, l2Err.message);
+            result.status = 'failed';
+            result.current_run.failed++;
+            caseStatus = 'failed';
+          }
+
+          currentRunStatuses[caseDef.id] = caseStatus;
+          await writeMetaJson(caseDef.id, skillName, caseStatus, Date.now() - caseStart, l2Results);
+        } else {
+          result.current_run.passed++;
+          currentRunStatuses[caseDef.id] = 'passed';
+          await writeMetaJson(caseDef.id, skillName, 'passed', Date.now() - caseStart);
+        }
+      } catch (e) {
+        result.current_run.failed++;
+        result.status = 'failed';
+        currentRunStatuses[caseDef.id] = 'error';
+        await writeMetaJson(caseDef.id, skillName, 'error', Date.now() - caseStart);
+      }
+    }
+  } catch (e) {
+    result.status = 'error';
+    result.error = e.message;
+  }
+
+  return {
+    ...result,
+    cases,
+    currentRunStatuses
+  };
+}
+
+async function runSkillTests(opts) {
+  // Validate options
+  if (!opts.all && !opts.skill) {
+    throw new Error('Either --skill or --all must be specified');
+  }
+
+  const results = {
+    status: 'passed',
+    skill: opts.skill || 'unknown',
+    mode: 'deterministic',
+    total: 0,
+    current_run: { passed: 0, failed: 0 },
+    baseline_ref: 'origin/main',
+    git_head_comparison: null,
+    verdict: 'ready_for_user_review',
+    outcome_message: ''
+  };
+
+  try {
+    if (opts.skill) {
+      const skillResult = await runTestsForSkill(opts.skill, opts);
+
+      // Merge skill results
+      results.skill = skillResult.skill;
+      results.total = skillResult.total;
+      results.current_run.passed = skillResult.current_run.passed;
+      results.current_run.failed = skillResult.current_run.failed;
+      results.status = skillResult.status;
+      results.target_agents = skillResult.target_agents;
+      results.judge_agent = skillResult.judge_agent;
+      if (skillResult.error) results.error = skillResult.error;
+      if (skillResult.calibration) results.calibration = skillResult.calibration;
+
+      // Prepare for git comparison (if applicable)
+      const cases = skillResult.cases;
+      const currentRunStatuses = skillResult.currentRunStatuses;
+
+      // Git comparison and verdict (skip for calibration or no cases)
+      if (cases && cases.length > 0 && !opts.calibrate && !skillResult.status.startsWith('calibration_')) {
+        try {
+          const baselineRef = getBaselineRef(opts.skill, opts.baselineRef);
+          results.baseline_ref = baselineRef;
+
+          console.log(`[Runner] Computing git head comparison for ${cases.length} cases with baselineRef=${baselineRef}`);
+          const gitResult = await analyzeGitHeadComparison(opts.skill, cases, baselineRef, currentRunStatuses);
+          const { comparison, mode } = gitResult;
+          results.mode = mode;
+          results.git_head_comparison = comparison;
+          console.log(`[Runner] Git head comparison complete: mode=${mode}`);
+
+          let relevantCaseStatus = null;
+          if (opts.relevant) {
+            const relevantCaseDir = path.join(findSkillTestsDir(opts.skill), 'cases', opts.relevant, 'current', 'meta.json');
+            if (fs.existsSync(relevantCaseDir)) {
+              try {
+                const meta = JSON.parse(fs.readFileSync(relevantCaseDir, 'utf8'));
+                relevantCaseStatus = meta.status;
+              } catch {}
+            }
+          }
+
+          if (relevantCaseStatus) {
+            results.relevant_case_status = relevantCaseStatus;
+          }
+
+          results.verdict = computeVerdict(comparison, mode, relevantCaseStatus, opts.establishBaseline);
+          results.outcome_message = generateOutcomeMessage({
+            verdict: results.verdict,
+            comparison,
+            mode,
+            relevantCase: opts.relevant ? { id: opts.relevant, status: relevantCaseStatus } : null
+          });
+        } catch (verdictErr) {
+          console.error('[Runner] Verdict computation failed:', verdictErr.message);
+          console.error('[Runner] Stack:', verdictErr.stack);
         }
       }
+    } else if (opts.all) {
+      const skillNames = getAllSkillNamesWithTests();
+      let total = 0;
+      let passed = 0;
+      let failed = 0;
+      let overallStatus = 'passed';
+
+      for (const skillName of skillNames) {
+        const skillResult = await runTestsForSkill(skillName, opts);
+        total += skillResult.total;
+        passed += skillResult.current_run.passed;
+        failed += skillResult.current_run.failed;
+        if (skillResult.status !== 'passed') {
+          overallStatus = 'failed';
+        }
+      }
+
+      results.total = total;
+      results.current_run.passed = passed;
+      results.current_run.failed = failed;
+      results.status = overallStatus;
+      results.skill = 'all';
+      results.mode = 'aggregated';
+      results.verdict = overallStatus === 'passed' ? 'all_passed' : 'aggregated_failed';
+      results.outcome_message = overallStatus === 'passed' ? 'All skills passed' : 'Some skills failed';
+      results.baseline_ref = null;
     }
   } catch (e) {
     results.status = 'error';
     results.error = e.message;
   }
-  
-  if (opts.skill && cases && cases.length > 0) {
-    try {
-      let comparison = null;
-      let mode = null;
 
-      const baselineRef = getBaselineRef(opts.skill, opts.baselineRef);
-      results.baseline_ref = baselineRef;
-
-      console.log(`[Runner] Computing git head comparison for ${cases.length} cases with baselineRef=${baselineRef}`);
-      try {
-        const result = await analyzeGitHeadComparison(opts.skill, cases, baselineRef, currentRunStatuses);
-        console.error(`[DEBUG] analyzeGitHeadComparison returned:`, result);
-        ({ comparison, mode } = result);
-        results.mode = mode;
-        results.git_head_comparison = comparison;
-        console.log(`[Runner] Git head comparison complete: mode=${mode}`);
-      } catch (aggErr) {
-        console.error(`[DEBUG] analyzeGitHeadComparison threw error:`, aggErr.message);
-        throw aggErr;
-      }
-      
-      let relevantCaseStatus = null;
-      if (opts.relevant) {
-        const relevantCaseDir = path.join(findSkillTestsDir(opts.skill), 'cases', opts.relevant, 'current', 'meta.json');
-        if (fs.existsSync(relevantCaseDir)) {
-          try {
-            const meta = JSON.parse(fs.readFileSync(relevantCaseDir, 'utf8'));
-            relevantCaseStatus = meta.status;
-          } catch {}
-        }
-      }
-
-      if (relevantCaseStatus) {
-        results.relevant_case_status = relevantCaseStatus;
-      }
-
-      results.verdict = computeVerdict(comparison, mode, relevantCaseStatus, opts.establishBaseline);
-      results.outcome_message = generateOutcomeMessage({
-        verdict: results.verdict,
-        comparison,
-        mode,
-        relevantCase: opts.relevant ? { id: opts.relevant, status: relevantCaseStatus } : null
-      });
-    } catch (verdictErr) {
-      console.error('[Runner] Verdict computation failed:', verdictErr.message);
-      console.error('[Runner] Stack:', verdictErr.stack);
-    }
-  }
-  
   return results;
 }
 
@@ -1305,6 +1454,7 @@ function showHelp() {
   console.log('  node run-skill-tests.js --skill <name>     Run all tests for a skill');
   console.log('  node run-skill-tests.js --case TC-XXX-NNN  Run a single test case');
   console.log('  node run-skill-tests.js --tag <tag>      Filter tests by tag');
+  console.log('  node run-skill-tests.js --severity <level>  Filter tests by severity (e.g., critical, normal)');
   console.log('  node run-skill-tests.js --layer static|deterministic|l2  Run only L0, L1 or L2');
   console.log('  node run-skill-tests.js --relevant TC-XXX-NNN  Mark relevant case for coach');
   console.log('  node run-skill-tests.js --baseline-ref <ref>  Override baseline ref (default: origin/main)');

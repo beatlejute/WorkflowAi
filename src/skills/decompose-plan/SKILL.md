@@ -81,3 +81,7 @@ ticket_prefix: null
 - **Декомпозиция пробелов (gaps)** → скил декомпозиции пробелов
 - **Анализ результатов** → скил анализа отчётов
 - **Управление доской** → пайплайн и его скрипты
+
+---
+
+**Регрессионные тесты:** `tests/index.yaml`. Прогон: `node .workflow/src/scripts/run-skill-tests.js --skill decompose-plan`

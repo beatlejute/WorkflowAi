@@ -9,9 +9,9 @@ generated_at: "2026-04-15"
 execution:
   target_agents:
     - claude-sonnet   # основная модель скила (agents_by_type.coach.agents[0])
-    - qwen-code       # fallback-модель скила (agents_by_type.coach.agents[1])
+    - kilo-deepseek   # fallback-модель скила (agents_by_type.coach.agents[1])
   judge_agent: claude-opus  # другая модель, чтобы исключить self-enhancement bias
-  default_timeout_s: 120
+  default_timeout_s: 1200
   baseline_ref: origin/main  # git ref для сравнения previously_green/red
 
 cases:

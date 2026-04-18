@@ -1,6 +1,27 @@
 {
   "per_model": {
     "claude-sonnet": {
+      "pass_count": 3,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 2,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 3,
+          "score": 5,
+          "passed": true
+        }
+      ]
+    },
+    "kilo-deepseek": {
       "pass_count": 2,
       "total": 3,
       "trials": [
@@ -16,28 +37,7 @@
         },
         {
           "trial": 3,
-          "score": 2,
-          "passed": false
-        }
-      ]
-    },
-    "kilo-deepseek": {
-      "pass_count": 1,
-      "total": 3,
-      "trials": [
-        {
-          "trial": 1,
-          "score": 4,
-          "passed": true
-        },
-        {
-          "trial": 2,
-          "score": 1,
-          "passed": false
-        },
-        {
-          "trial": 3,
-          "score": 2,
+          "score": 3,
           "passed": false
         }
       ]
@@ -57,23 +57,23 @@
     {
       "agentId": "claude-sonnet",
       "trial": 3,
-      "score": 2
+      "score": 5
     },
     {
       "agentId": "kilo-deepseek",
       "trial": 1,
-      "score": 4
+      "score": 5
     },
     {
       "agentId": "kilo-deepseek",
       "trial": 2,
-      "score": 1
+      "score": 5
     },
     {
       "agentId": "kilo-deepseek",
       "trial": 3,
-      "score": 2
+      "score": 3
     }
   ],
-  "timestamp": "2026-04-18T15:09:20.859Z"
+  "timestamp": "2026-04-18T15:37:32.469Z"
 }

@@ -5,7 +5,7 @@ generated_at: "2026-04-17"
 execution:
   target_agents:
     - claude-sonnet
-    - qwen-code
+    - kilo-deepseek
   judge_agent: claude-opus
   default_timeout_s: 120
   baseline_ref: origin/main

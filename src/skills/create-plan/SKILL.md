@@ -98,3 +98,7 @@ HUMAN назначается только когда агент **подтвер
 - Рисками и митигацией
 - Критериями успеха
 
+
+---
+
+**Регрессионные тесты:** `tests/index.yaml`. Прогон: `node .workflow/src/scripts/run-skill-tests.js --skill create-plan`
