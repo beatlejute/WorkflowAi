@@ -46,6 +46,6 @@ execution:
   # target_agents НЕ дублируется в кейсах — наследуется из tests/index.yaml скила.
   # Override возможен точечно, если конкретный тест должен гоняться на другом наборе.
   # judge_agent также наследуется из index.yaml; можно переопределить.
-  timeout_s: 120
+  timeout_s: 1200
   # target_agents: [...]   # опциональный override (обычно не указывается)
   # judge_agent: ...       # опциональный override

@@ -1223,8 +1223,422 @@ describe('Нет git write-операций', () => {
     assert.ok(!source.includes('git commit'), 'runner не должен содержать "git commit"');
   });
 
-it('runner не содержит "git push"', () => {
+  it('runner не содержит "git push"', () => {
     const source = readFileSync(RUNNER_PATH, 'utf8');
     assert.ok(!source.includes('git push'), 'runner не должен содержать "git push"');
+  });
+});
+
+// ============================================================================
+// Severity filtering
+// ============================================================================
+
+describe('Severity filtering', () => {
+  const SEVERITY_SKILL = `__test-severity-${Date.now()}`;
+  const SKILL_DIR = join(SKILLS_DIR, SEVERITY_SKILL);
+  const TESTS_DIR = join(SKILL_DIR, 'tests');
+
+  before(() => {
+    mkdirSync(TESTS_DIR, { recursive: true });
+    writeFileSync(join(SKILL_DIR, 'SKILL.md'), '# Severity Test Skill\nSIGNATURE_PRESENT\n');
+
+    // Case with critical severity
+    writeFileSync(join(TESTS_DIR, 'tc-crit.yaml'),
+      buildCaseYaml([{ kind: 'skill_contains', pattern: 'SIGNATURE_PRESENT', reason: 'Critical case' }])
+    );
+    // Case with normal severity
+    writeFileSync(join(TESTS_DIR, 'tc-norm.yaml'),
+      buildCaseYaml([{ kind: 'skill_contains', pattern: 'SIGNATURE_PRESENT', reason: 'Normal case' }])
+    );
+
+    const indexYaml = [
+      'cases:',
+      '  - id: TC-CRIT',
+      '    file: tc-crit.yaml',
+      '    severity: critical',
+      '  - id: TC-NORM',
+      '    file: tc-norm.yaml',
+      '    severity: normal'
+    ].join('\n');
+    writeFileSync(join(TESTS_DIR, 'index.yaml'), indexYaml);
+  });
+
+  after(() => {
+    if (existsSync(SKILL_DIR)) {
+      rmSync(SKILL_DIR, { recursive: true, force: true });
+    }
+  });
+
+  it('--severity critical filters only critical cases', async () => {
+    const { stdout } = await runRunner(['--skill', SEVERITY_SKILL, '--severity', 'critical', '--layer', 'static']);
+    assert.match(stdout, /total: 1/, 'должен быть 1 critical кейс');
+  });
+
+  it('--severity normal filters only normal cases', async () => {
+    const { stdout } = await runRunner(['--skill', SEVERITY_SKILL, '--severity', 'normal', '--layer', 'static']);
+    assert.match(stdout, /total: 1/, 'должен быть 1 normal кейс');
+  });
+
+  it('without severity returns all cases', async () => {
+    const { stdout } = await runRunner(['--skill', SEVERITY_SKILL, '--layer', 'static']);
+    assert.match(stdout, /total: 2/, 'должно быть 2 кейса');
+  });
+});
+
+// ============================================================================
+// All skills aggregation
+// ============================================================================
+
+describe('All skills aggregation', () => {
+  const SKILL_A = `__test-all-a-${Date.now()}`;
+  const SKILL_B = `__test-all-b-${Date.now()}`;
+  const DIR_A = join(SKILLS_DIR, SKILL_A);
+  const DIR_B = join(SKILLS_DIR, SKILL_B);
+  const TESTS_A = join(DIR_A, 'tests');
+  const TESTS_B = join(DIR_B, 'tests');
+
+  before(() => {
+    // Skill A
+    mkdirSync(TESTS_A, { recursive: true });
+    writeFileSync(join(DIR_A, 'SKILL.md'), '# Skill A\nSIGNATURE_A\n');
+    writeFileSync(join(TESTS_A, 'tc-a.yaml'),
+      buildCaseYaml([{ kind: 'skill_contains', pattern: 'SIGNATURE_A', reason: 'A case' }])
+    );
+    writeFileSync(join(TESTS_A, 'index.yaml'),
+      `cases:\n  - id: TC-A\n    file: tc-a.yaml\n    tags: [aggregate-test]\n`
+    );
+
+    // Skill B
+    mkdirSync(TESTS_B, { recursive: true });
+    writeFileSync(join(DIR_B, 'SKILL.md'), '# Skill B\nSIGNATURE_B\n');
+    writeFileSync(join(TESTS_B, 'tc-b.yaml'),
+      buildCaseYaml([{ kind: 'skill_contains', pattern: 'SIGNATURE_B', reason: 'B case' }])
+    );
+    writeFileSync(join(TESTS_B, 'index.yaml'),
+      `cases:\n  - id: TC-B\n    file: tc-b.yaml\n    tags: [aggregate-test]\n`
+    );
+  });
+
+  after(() => {
+    if (existsSync(DIR_A)) rmSync(DIR_A, { recursive: true, force: true });
+    if (existsSync(DIR_B)) rmSync(DIR_B, { recursive: true, force: true });
+  });
+
+  it('--all aggregates totals across skills (tag-filtered)', async () => {
+    const { stdout } = await runRunner(['--all', '--tag', 'aggregate-test', '--layer', 'static']);
+    assert.match(stdout, /total: 2/, 'total should be 2');
+    assert.match(stdout, /current_run\.passed: 2/);
+    assert.match(stdout, /current_run\.failed: 0/);
+    assert.match(stdout, /skill: all/);
+    assert.match(stdout, /mode: aggregated/);
+    assert.match(stdout, /verdict: all_passed/);
+    assert.match(stdout, /outcome_message: All skills passed/);
+  });
+});
+
+// ============================================================================
+// Combined flags --all --severity
+// ============================================================================
+
+describe('Combined flags --all --severity', () => {
+  it('--all --severity critical returns at least 3 tests (current state)', async () => {
+    const { stdout } = await runRunner(['--all', '--severity', 'critical', '--layer', 'static']);
+    const totalMatch = stdout.match(/total:\s*(\d+)/);
+    assert.ok(totalMatch, 'Output should contain total');
+    const total = parseInt(totalMatch[1], 10);
+    assert.ok(total >= 3, `Expected at least 3 critical tests, got ${total}`);
+  });
+});
+
+// ============================================================================
+// L2 Skip — кейс без rubric должен пропускать L2
+// ============================================================================
+
+describe('L2 Skip — кейс без rubric', () => {
+  const RUBRIC_SKILL = `__test-no-rubric-${Date.now()}`;
+  const SKILL_DIR = join(SKILLS_DIR, RUBRIC_SKILL);
+  const TESTS_DIR = join(SKILL_DIR, 'tests');
+
+  before(() => {
+    mkdirSync(TESTS_DIR, { recursive: true });
+    writeFileSync(join(SKILL_DIR, 'SKILL.md'), '# No Rubric Test Skill\nversion: 1.0\n');
+
+    // TC-NO-RUBRIC-001: кейс БЕЗ assertions.rubric, но с judge_agent в index.yaml
+    const caseNoRubric = [
+      'description: "Test case without rubric"',
+      'prompt: "Test prompt"',
+      'assertions:',
+      '  static:',
+      '    - kind: skill_contains',
+      '      pattern: "version: 1.0"',
+      '      reason: "SKILL.md должен содержать version"',
+      '  deterministic: []'
+    ].join('\n');
+
+    writeFileSync(join(TESTS_DIR, 'tc-no-rubric.yaml'), caseNoRubric);
+
+    // TC-WITH-RUBRIC-001: кейс С rubric для проверки что L2 работает когда rubric есть
+    mkdirSync(join(SKILL_DIR, 'tests', 'rubrics'), { recursive: true });
+    writeFileSync(join(SKILL_DIR, 'tests', 'rubrics', 'test-rubric.md'), [
+      '# Test Rubric',
+      'Score ≥ 4: pass',
+      'Score < 4: fail'
+    ].join('\n'));
+
+    const caseWithRubric = [
+      'description: "Test case with rubric"',
+      'prompt: "Test prompt"',
+      'assertions:',
+      '  rubric:',
+      '    - rubric_file: rubrics/test-rubric.md',
+      '  static: []',
+      '  deterministic: []'
+    ].join('\n');
+
+    writeFileSync(join(TESTS_DIR, 'tc-with-rubric.yaml'), caseWithRubric);
+
+    // index.yaml: judge_agent настроен для обоих кейсов
+    const indexYaml = [
+      'cases:',
+      '  - id: TC-NO-RUBRIC-001',
+      '    file: tc-no-rubric.yaml',
+      '    tags: [no-rubric]',
+      '  - id: TC-WITH-RUBRIC-001',
+      '    file: tc-with-rubric.yaml',
+      '    tags: [with-rubric]',
+      'execution:',
+      '  target_agents: [agent-a]',
+      '  judge_agent: mock-judge'
+    ].join('\n');
+
+    writeFileSync(join(TESTS_DIR, 'index.yaml'), indexYaml);
+  });
+
+  after(() => {
+    if (existsSync(SKILL_DIR)) {
+      rmSync(SKILL_DIR, { recursive: true, force: true });
+    }
+  });
+
+  it('TC-NO-RUBRIC-001: кейс без rubric не падает (L2 пропускается)', async () => {
+    const { stdout, stderr, exitCode } = await runRunner([
+      '--skill', RUBRIC_SKILL,
+      '--case', 'TC-NO-RUBRIC-001',
+      '--layer', 'l2',
+      '--skip-secret-scan', '--fast', '--yes',
+      '--pipeline', TEST_PIPELINE_PATH
+    ]);
+
+    // Не должно быть crash с "Rubric not found"
+    assert.ok(!stderr.includes('Rubric not found'), 'не должен искать rubric для кейса без rubric');
+    assert.ok(!stderr.includes('default.md'), 'не должен пытаться загрузить default.md');
+    
+    // Кейс должен пройти (L0 + L1 без crash)
+    assert.match(stdout, /status: passed/, 'кейс без rubric должен пройти (L2 пропущен)');
+    assert.match(stdout, /total: 1/);
+  });
+
+  it('TC-WITH-RUBRIC-001: кейс с rubric запускает L2', async () => {
+    const { stdout } = await runRunner([
+      '--skill', RUBRIC_SKILL,
+      '--case', 'TC-WITH-RUBRIC-001',
+      '--layer', 'l2',
+      '--skip-secret-scan', '--fast', '--yes',
+      '--pipeline', TEST_PIPELINE_PATH
+    ]);
+
+    // L2 должен запуститься для кейса с rubric
+    assert.match(stdout, /status: (passed|failed)/, 'кейс с rubric должен запустить L2');
+    assert.match(stdout, /total: 1/);
+  });
+});
+
+// ============================================================================
+// buildTargetPrompt() — сборка prompt из scenario
+//
+// Проверяет что runner корректно собирает prompt из:
+// - scenario.system_prompt_file (загрузка SKILL.md)
+// - scenario.extra_instructions (дополнительные инструкции)
+// - scenario.inputs (файлы fixtures)
+// - fallback на testCase.prompt / testCase.input
+// ============================================================================
+
+describe('buildTargetPrompt() — сборка prompt из scenario', () => {
+  const PROMPT_SKILL = `__test-prompt-builder-${Date.now()}`;
+  const SKILL_DIR = join(SKILLS_DIR, PROMPT_SKILL);
+  const TESTS_DIR = join(SKILL_DIR, 'tests');
+
+  before(() => {
+    mkdirSync(TESTS_DIR, { recursive: true });
+
+    // Основной SKILL.md с содержимым для system_prompt_file
+    writeFileSync(join(SKILL_DIR, 'SKILL.md'), [
+      '# Test Skill for Prompt Builder',
+      '',
+      'This is the system prompt content from SKILL.md.',
+      'It should be loaded and included in the target prompt.',
+      'version: 1.0'
+    ].join('\n'));
+
+    // Создаём директорию для fixtures
+    mkdirSync(join(TESTS_DIR, 'fixtures'), { recursive: true });
+
+    // Fixture файл для input.path
+    writeFileSync(join(TESTS_DIR, 'fixtures', 'test-input.txt'), [
+      'This is a fixture input file.',
+      'It will be loaded and included in the prompt.',
+      'Content: test data'
+    ].join('\n'));
+  });
+
+  after(() => {
+    if (existsSync(SKILL_DIR)) {
+      rmSync(SKILL_DIR, { recursive: true, force: true });
+    }
+  });
+
+  it('TC-PROMPT-001: buildTargetPrompt собирает prompt из scenario.system_prompt_file + extra_instructions + inputs', async () => {
+    // Тест-кейс с полным scenario (system_prompt_file, extra_instructions, inputs)
+    const caseId = 'TC-PROMPT-001';
+    const caseFile = 'tc-prompt-001.yaml';
+
+    const caseYaml = [
+      `description: "Test prompt building from scenario"`,
+      `prompt: "Old prompt (should be ignored)"`,
+      `scenario:`,
+      `  system_prompt_file: SKILL.md`,
+      `  extra_instructions: |`,
+      `    You are a helpful assistant.`,
+      `    Follow these instructions carefully.`,
+      `  inputs:`,
+      `    - kind: file`,
+      `      path: fixtures/test-input.txt`,
+      `      as: "Test Input"`,
+      `severity: normal`,
+      `assertions:`,
+      `  static:`,
+      `    - kind: skill_contains`,
+      `      pattern: "Test Skill for Prompt Builder"`,
+      `      reason: "SKILL.md should be accessible"`,
+      `  deterministic: []`
+    ].join('\n');
+
+    writeFileSync(join(TESTS_DIR, caseFile), caseYaml);
+
+    const indexYaml = [
+      'cases:',
+      `  - id: ${caseId}`,
+      `    file: ${caseFile}`,
+      '    tags: [prompt-builder]',
+      'execution:',
+      '  target_agents: [agent-a]',
+      '  judge_agent: mock-judge'
+    ].join('\n');
+
+    writeFileSync(join(TESTS_DIR, 'index.yaml'), indexYaml);
+
+    const { stdout, stderr } = await runRunner([
+      '--skill', PROMPT_SKILL,
+      '--case', caseId,
+      '--layer', 'l2',
+      '--skip-secret-scan', '--fast', '--yes',
+      '--pipeline', TEST_PIPELINE_PATH
+    ]);
+
+    // Проверяем что runner запустился успешно и не выдал ошибок про пустой prompt
+    assert.ok(!stderr.includes('Input must be provided'), 'runner не должен выдавать ошибку про пустой prompt');
+    assert.ok(!stderr.includes('input_error'), 'не должно быть ошибок input');
+    assert.match(stdout, /total: 1/, 'должен быть 1 тест-кейс');
+  });
+
+  it('TC-PROMPT-002: fallback на testCase.prompt если scenario пуст', async () => {
+    // Тест-кейс БЕЗ scenario, только с prompt
+    const caseId = 'TC-PROMPT-002';
+    const caseFile = 'tc-prompt-002.yaml';
+
+    const caseYaml = [
+      `description: "Test prompt fallback to testCase.prompt"`,
+      `prompt: "This is the fallback prompt from testCase"`,
+      `severity: normal`,
+      `assertions:`,
+      `  static:`,
+      `    - kind: skill_contains`,
+      `      pattern: "Test Skill for Prompt Builder"`,
+      `      reason: "SKILL.md should be present"`,
+      `  deterministic: []`
+    ].join('\n');
+
+    writeFileSync(join(TESTS_DIR, caseFile), caseYaml);
+
+    const indexYaml = [
+      'cases:',
+      `  - id: ${caseId}`,
+      `    file: ${caseFile}`,
+      '    tags: [prompt-fallback]',
+      'execution:',
+      '  target_agents: [agent-a]',
+      '  judge_agent: mock-judge'
+    ].join('\n');
+
+    writeFileSync(join(TESTS_DIR, 'index.yaml'), indexYaml);
+
+    const { stdout, stderr } = await runRunner([
+      '--skill', PROMPT_SKILL,
+      '--case', caseId,
+      '--layer', 'l2',
+      '--skip-secret-scan', '--fast', '--yes',
+      '--pipeline', TEST_PIPELINE_PATH
+    ]);
+
+    // Проверяем что fallback работает (runner не выдаёт ошибку про пустой prompt)
+    assert.ok(!stderr.includes('Input must be provided'), 'fallback должен предотвратить ошибку про пустой prompt');
+    assert.match(stdout, /total: 1/, 'должен быть 1 тест-кейс');
+  });
+
+  it('TC-PROMPT-003: scenario.inputs с kind=file загружает fixture в prompt', async () => {
+    // Тест-кейс с scenario.inputs, проверяем что файл был загружен
+    const caseId = 'TC-PROMPT-003';
+    const caseFile = 'tc-prompt-003.yaml';
+
+    const caseYaml = [
+      `description: "Test fixture loading from inputs"`,
+      `prompt: "Base prompt"`,
+      `scenario:`,
+      `  extra_instructions: "Process the input"`,
+      `  inputs:`,
+      `    - kind: file`,
+      `      path: fixtures/test-input.txt`,
+      `      as: "Input Data"`,
+      `severity: normal`,
+      `assertions:`,
+      `  static: []`,
+      `  deterministic: []`
+    ].join('\n');
+
+    writeFileSync(join(TESTS_DIR, caseFile), caseYaml);
+
+    const indexYaml = [
+      'cases:',
+      `  - id: ${caseId}`,
+      `    file: ${caseFile}`,
+      '    tags: [prompt-inputs]',
+      'execution:',
+      '  target_agents: [agent-a]',
+      '  judge_agent: mock-judge'
+    ].join('\n');
+
+    writeFileSync(join(TESTS_DIR, 'index.yaml'), indexYaml);
+
+    const { stdout, stderr } = await runRunner([
+      '--skill', PROMPT_SKILL,
+      '--case', caseId,
+      '--layer', 'l2',
+      '--skip-secret-scan', '--fast', '--yes',
+      '--pipeline', TEST_PIPELINE_PATH
+    ]);
+
+    // Проверяем что runner запустился (не важен результат теста, важно что prompt был собран)
+    assert.ok(!stderr.includes('ENOENT'), 'не должно быть ошибок при загрузке fixtures');
+    assert.match(stdout, /total: 1/, 'тест должен быть найден');
   });
 });

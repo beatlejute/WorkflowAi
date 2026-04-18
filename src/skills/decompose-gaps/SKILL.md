@@ -72,3 +72,7 @@ ticket_prefix: null
 - **Декомпозиция всего плана** → скил декомпозиции планов
 - **Выполнение доработок** → соответствующий скил проекта
 - **Управление workflow** → пайплайн и его скрипты
+
+---
+
+**Регрессионные тесты:** `tests/index.yaml`. Прогон: `node .workflow/src/scripts/run-skill-tests.js --skill decompose-gaps`
