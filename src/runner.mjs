@@ -931,16 +931,8 @@ class StageExecutor {
       };
     }
 
-    // Курсор = (attempt - 1), clamped
-    const cursor = attempt - 1;
-    if (cursor >= compatible.length) {
-      return {
-        blocked: 'attempts_exhausted',
-        reason: `Attempt ${attempt} exceeds compatible agents list length (${compatible.length})`,
-        attempt,
-        triedAgents: compatible
-      };
-    }
+    // Курсор = (attempt - 1) % length — ротация по кругу
+    const cursor = (attempt - 1) % compatible.length;
 
     const agentId = compatible[cursor];
     // Клонируем stage с подменой instructions (для agents_by_type override)
