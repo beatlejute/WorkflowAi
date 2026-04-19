@@ -1,0 +1,77 @@
+[2026-04-06 16:36:02] [INFO] [PipelineRunner] FileGuard enabled: 2 pattern(s)
+[2026-04-06 16:36:02] [INFO] [PipelineRunner] Plan ID: PLAN-003
+[2026-04-06 16:36:02] [INFO] [PipelineRunner] === Pipeline Runner Started ===
+[2026-04-06 16:36:02] [INFO] [PipelineRunner] Entry stage: pick-first-task
+[2026-04-06 16:36:02] [INFO] [PipelineRunner] Max steps: 1500
+[2026-04-06 16:36:02] [INFO] [PipelineRunner] Context: {"plan_id":"PLAN-003"}
+[2026-04-06 16:36:02] [INFO] [PipelineRunner] Step 1
+[2026-04-06 16:36:02] [INFO] [PipelineRunner] Current stage: pick-first-task
+[2026-04-06 16:36:02] [INFO] [pick-first-task] START stage="pick-first-task" agent="script-pick" skill="undefined"
+[2026-04-06 16:36:02] [INFO] [pick-first-task] RUN node .workflow/src/scripts/pick-next-task.js 
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   Context:
+[2026-04-06 16:36:02] [INFO] [pick-first-task]     plan_id: PLAN-003
+[2026-04-06 16:36:02] [INFO] [CLI] CLI command="node" args=".workflow/src/scripts/pick-next-task.js pick-first-task
+                                   
+                                   
+                                   Context:
+                                     plan_id: PLAN-003" exitCode=0
+[2026-04-06 16:36:02] [INFO] [pick-first-task] OUTPUT ↓
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] Filtering by plan_id: PLAN-003[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] Loaded ticket movement rules from config[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] Running auto-correction...[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] [ARCHIVE] COACH-010: done → archive (plan PLAN-002 is archived)[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] [ARCHIVE] COACH-011: done → archive (plan PLAN-002 is archived)[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] [ARCHIVE] COACH-012: done → archive (plan PLAN-002 is archived)[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] [ARCHIVE] COACH-013: done → archive (plan PLAN-002 is archived)[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] [ARCHIVE] COACH-014: done → archive (plan PLAN-002 is archived)[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] [ARCHIVE] COACH-015: done → archive (plan PLAN-002 is archived)[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] [ARCHIVE] IMPL-002: done → archive (plan PLAN-002 is archived)[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] [ARCHIVE] IMPL-003: done → archive (plan PLAN-002 is archived)[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] [ARCHIVE] IMPL-004: done → archive (plan PLAN-002 is archived)[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] [ARCHIVE] IMPL-005: done → archive (plan PLAN-002 is archived)[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] [ARCHIVE] IMPL-006: done → archive (plan PLAN-002 is archived)[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] [ARCHIVE] IMPL-007: done → archive (plan PLAN-002 is archived)[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] [ARCHIVE] IMPL-008: done → archive (plan PLAN-002 is archived)[0m
+[2026-04-06 16:36:02] [INFO] [pick-first-task]   [36m[2026-04-06 16:36:02] [INFO] Archived 13 ticket(s) from archived plans: COACH-010, COACH-011, COACH-012, COACH-013, COACH-014, COACH-015, IMPL-002, IMPL-003, IMPL-004, IMPL-005, IMPL-006, IMPL-007, IMPL-008[0m
+[2026-04-06 16:36:12] [INFO] [PipelineRunner] Context updated: {"plan_id":"PLAN-003","plan_file":"plans/current/PLAN-003.md"}
+[2026-04-06 16:36:12] [INFO] [check-plan-decomposition] GOTO check-plan-decomposition → decompose-plan status="needs_decomposition" params={"plan_file":"$result.plan_file"}
+[2026-04-06 16:36:12] [INFO] [PipelineRunner] Waiting 5s before next stage...
+[2026-04-06 16:36:18] [INFO] [PipelineRunner] Step 4
+[2026-04-06 16:36:18] [INFO] [PipelineRunner] Current stage: decompose-plan
+[2026-04-06 16:36:18] [INFO] [decompose-plan] START stage="decompose-plan" agent="claude-sonnet" skill="decompose-plan"
+[2026-04-06 16:36:18] [INFO] [decompose-plan] RUN claude --model claude-sonnet-4-6 --permission-mode bypassPermissions decompose-plan
+[2026-04-06 16:36:18] [INFO] [decompose-plan]   Context:
+[2026-04-06 16:36:18] [INFO] [decompose-plan]     plan_id: PLAN-003
+[2026-04-06 16:36:18] [INFO] [decompose-plan]     plan_file: plans/current/PLAN-003.md
+[2026-04-06 16:36:18] [INFO] [decompose-plan]   Instructions:
+[2026-04-06 16:36:18] [INFO] [decompose-plan]   Декомпозируй план .workflow/plans/current/PLAN-003.md на тикеты.
+[2026-04-06 16:40:31] [INFO] [CLI] CLI command="claude" args="--model claude-sonnet-4-6 --permission-mode bypassPermissions -p" exitCode=0
+[2026-04-06 16:40:31] [INFO] [decompose-plan] OUTPUT ↓
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   ---RESULT---
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   status: default
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   ---RESULT---
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   Декомпозиция завершена. Создано 5 тикетов в `.workflow/tickets/backlog/`:
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   | Тикет | Приоритет | Зависимости |
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   |-------|-----------|-------------|
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   | **IMPL-001** — FileGuard: режим protect_structure | 1 (critical) | — |
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   | **IMPL-003** — Дедупликация в pick-next-task | 1 (critical) | — |
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   | **IMPL-002** — Конфиг tickets/**: protected_files + trusted_stages | 2 (high) | IMPL-001 |
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   | **QA-001** — Тесты FileGuard protect_structure и trusted_stages | 2 (high) | IMPL-001, IMPL-002 |
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   | **QA-002** — Тесты дедупликации pick-next-task | 2 (high) | IMPL-003 |
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   **Граф зависимостей:**
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   ```
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   IMPL-001 ──► IMPL-002 ──► QA-001
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   IMPL-003 ──────────────► QA-002
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   ```
+[2026-04-06 16:40:31] [INFO] [decompose-plan]   IMPL-001 и IMPL-003 можно выполнять параллельно (нет зависимостей друг от друга).
+[2026-04-06 16:40:31] [INFO] [decompose-plan] OUTPUT ↑
+[2026-04-06 16:40:31] [INFO] [decompose-plan] COMPLETE stage="decompose-plan" status="default" exitCode=0
+[2026-04-06 16:40:31] [INFO] [PipelineRunner] Stage decompose-plan completed with status: default
+[2026-04-06 16:40:31] [INFO] [decompose-plan] GOTO decompose-plan → check-conditions status="default"
+[2026-04-06 16:40:31] [INFO] [PipelineRunner] Waiting 5s before next stage...
+[2026-04-06 16:40:36] [INFO] [PipelineRunner] Step 5
+[2026-04-06 16:40:36] [INFO] [PipelineRunner] Current stage: check-conditions
+[2026-04-06 16:40:36] [INFO] [check-conditions] START stage="check-conditions" agent="script-check-conditions" skill="undefined"
+[2026-04-06 16:40:36] [INFO] [check-conditions] RUN node .workflow/src/scripts/check-conditions.js 
+[2026-04-06 16:40:36] [INFO] [check-conditions]   Context:
+[2026-04-06 16:40:36] [INFO] [check-conditions]     plan_id: PLAN-003

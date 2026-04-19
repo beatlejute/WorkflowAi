@@ -5,6 +5,7 @@ node_modules/
 logs
 *.log
 npm-debug.log*
+!src/skills/*/tests/fixtures/*.log
 
 # Runtime data
 pids
