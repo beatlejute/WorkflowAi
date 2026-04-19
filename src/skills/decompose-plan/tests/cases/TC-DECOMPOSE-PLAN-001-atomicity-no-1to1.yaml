@@ -45,4 +45,4 @@ assertions:
       reason: "Должна быть таблица результатов чеклиста атомарности."
 
 execution:
-  timeout_s: 180
+  timeout_s: 1200

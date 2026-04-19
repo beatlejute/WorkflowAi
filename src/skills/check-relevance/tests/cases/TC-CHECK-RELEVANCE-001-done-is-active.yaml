@@ -28,4 +28,4 @@ assertions:
       reason: "Тикет с выполненными зависимостями должен быть relevant."
 
 execution:
-  timeout_s: 90
+  timeout_s: 1200

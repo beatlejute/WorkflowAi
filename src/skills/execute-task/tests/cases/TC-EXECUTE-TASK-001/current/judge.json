@@ -1,0 +1,125 @@
+{
+  "per_model": {
+    "claude-haiku": {
+      "pass_count": 1,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 3,
+          "passed": false
+        },
+        {
+          "trial": 2,
+          "score": 3,
+          "passed": false
+        },
+        {
+          "trial": 3,
+          "score": 4,
+          "passed": true
+        }
+      ]
+    },
+    "kilo-free": {
+      "pass_count": 2,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 4,
+          "passed": true
+        },
+        {
+          "trial": 2,
+          "score": 3,
+          "passed": false
+        },
+        {
+          "trial": 3,
+          "score": 4,
+          "passed": true
+        }
+      ]
+    },
+    "kilo-glm-air": {
+      "pass_count": 2,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 4,
+          "passed": true
+        },
+        {
+          "trial": 2,
+          "score": null,
+          "passed": false
+        },
+        {
+          "trial": 3,
+          "score": 4,
+          "passed": true
+        }
+      ]
+    }
+  },
+  "rubric_scores": [
+    {
+      "agentId": "claude-haiku",
+      "trial": 1,
+      "score": 3,
+      "errored": false
+    },
+    {
+      "agentId": "claude-haiku",
+      "trial": 2,
+      "score": 3,
+      "errored": false
+    },
+    {
+      "agentId": "claude-haiku",
+      "trial": 3,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 1,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 2,
+      "score": 3,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 3,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-glm-air",
+      "trial": 1,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-glm-air",
+      "trial": 2,
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-EXECUTE-TASK-001-kilo-glm-air-trial-2\" timed out after 1200s"
+    },
+    {
+      "agentId": "kilo-glm-air",
+      "trial": 3,
+      "score": 4,
+      "errored": false
+    }
+  ],
+  "timestamp": "2026-04-19T15:48:35.978Z"
+}

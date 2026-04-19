@@ -27,4 +27,4 @@ assertions:
       reason: "Устаревшие неоднозначные статусы запрещены."
 
 execution:
-  timeout_s: 90
+  timeout_s: 1200

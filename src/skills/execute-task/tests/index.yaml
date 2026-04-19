@@ -6,8 +6,9 @@ execution:
   target_agents:
     - claude-haiku
     - kilo-free
+    - kilo-glm-air
   judge_agent: claude-opus
-  default_timeout_s: 120
+  default_timeout_s: 1200
   baseline_ref: origin/main
 
 cases:
@@ -31,3 +32,8 @@ cases:
     origin_chg: []
     tags: [foreign-ticket-ban, discipline]
     severity: high
+  - id: TC-EXECUTE-TASK-005
+    file: cases/TC-EXECUTE-TASK-005-ticket-fields-updated.yaml
+    origin_chg: []
+    tags: [dod-fill, ticket-update, ghost-execution]
+    severity: critical

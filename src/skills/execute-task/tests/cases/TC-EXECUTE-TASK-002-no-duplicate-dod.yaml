@@ -13,15 +13,12 @@ severity: high
 scenario:
   system_prompt_file: "../../SKILL.md"
   extra_instructions: |
-    Выполни тикет. Обнови чекбоксы DoD по мере выполнения.
+    Выполни тикет. По мере выполнения обновляй чекбоксы DoD. Считай, что все три пункта DoD выполнены успешно (файл создан, тесты зелёные, документация дополнена). Запиши итоговый Result.
   inputs:
-    - kind: inline
-      as: ticket_content
-      content: |
-        ## Критерии готовности
-        - [ ] Файл создан
-        - [ ] Тесты пройдены
-        - [ ] Документация обновлена
+    - kind: ticket_file
+      path: "../fixtures/IMPL-902-create-file.md"
+      ticket_id: IMPL-902
+      dest_dir: in-progress
 
 assertions:
   static:
@@ -35,5 +32,13 @@ assertions:
       values: ["## DoD-чеклист", "## DoD чеклист", "## Чеклист DoD"]
       reason: "Не должно быть новой секции с чеклистом."
 
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/no-duplicate-dod.md"
+      criterion: "Обновил ли агент чекбоксы в оригинальной секции DoD, не создавая дубль-секцию под другим названием?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
 execution:
-  timeout_s: 120
+  timeout_s: 1200

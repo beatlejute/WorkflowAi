@@ -1,7 +1,89 @@
 {
-  "date": "2026-04-19T07:30:59.025Z",
-  "skill_sha": "f6cf9c8",
-  "status": "passed",
-  "duration_ms": 101,
-  "l1_skipped": true
+  "date": "2026-04-19T15:30:27.407Z",
+  "skill_sha": "e666e58",
+  "status": "failed",
+  "duration_ms": 111322,
+  "l1_skipped": true,
+  "per_model": {
+    "claude-haiku": {
+      "passed": false,
+      "errored": false,
+      "pass_count": 1,
+      "error_count": 0,
+      "total": 3,
+      "threshold": 2
+    },
+    "kilo-free": {
+      "passed": false,
+      "errored": false,
+      "pass_count": 1,
+      "error_count": 0,
+      "total": 3,
+      "threshold": 2
+    },
+    "kilo-glm-air": {
+      "passed": true,
+      "errored": false,
+      "pass_count": 2,
+      "error_count": 0,
+      "total": 3,
+      "threshold": 2
+    }
+  },
+  "rubric_scores": [
+    {
+      "agentId": "claude-haiku",
+      "trial": 1,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "claude-haiku",
+      "trial": 2,
+      "score": 2,
+      "errored": false
+    },
+    {
+      "agentId": "claude-haiku",
+      "trial": 3,
+      "score": 2,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 1,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 2,
+      "score": 1,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 3,
+      "score": 1,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-glm-air",
+      "trial": 1,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-glm-air",
+      "trial": 2,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-glm-air",
+      "trial": 3,
+      "score": 2,
+      "errored": false
+    }
+  ]
 }

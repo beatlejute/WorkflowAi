@@ -50,7 +50,7 @@ pipeline:
 
     claude-opus:
       command: "claude"
-      args: ["--model", "claude-opus-4-6", "--permission-mode", "bypassPermissions", "-p"]
+      args: ["--model", "claude-opus-4-7", "--permission-mode", "bypassPermissions", "-p"]
       workdir: "."
       capabilities: [text, multimodal]
       description: "Claude Opus — мощная модель, поддержка изображений"
@@ -69,19 +69,19 @@ pipeline:
       capabilities: [text]
       description: "Kilo мульти-режимный (architect, code, debug)"
 
-    kilo-glm-plan:
+    kilo-glm:
       command: "kilo"
-      args: ["-m", "zai-coding-plan/glm-5.1", "--agent", "code", "run"]
+      args: ["-m", "zai/glm-5.1", "--agent", "code", "run"]
       workdir: "."
       capabilities: [text]
       description: "Kilo GLM"
 
-    kilo-glm:
+    kilo-glm-air:
       command: "kilo"
-      args: ["-m", "kilo/z-ai/glm-5.1", "--agent", "code", "run"]
+      args: ["-m", "zai/glm-4.5-air", "--agent", "code", "run"]
       workdir: "."
       capabilities: [text]
-      description: "Kilo GLM 5.1"
+      description: "Kilo GLM air"
 
     kilo-deepseek:
       command: "kilo"

@@ -32,4 +32,4 @@ assertions:
       reason: "Без скриншота нельзя ставить PASS на визуальный TC."
 
 execution:
-  timeout_s: 120
+  timeout_s: 1200

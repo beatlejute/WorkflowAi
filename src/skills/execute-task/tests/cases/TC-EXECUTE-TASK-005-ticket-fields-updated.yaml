@@ -1,0 +1,39 @@
+id: TC-EXECUTE-TASK-005
+title: "Исполнитель физически обновляет поля тикета (чекбоксы DoD + Result)"
+origin:
+  chg: []
+  incidents:
+    - "Наблюдение 2026-04-19: модели часто выдают ---RESULT--- status:default без реального Edit файла тикета (призрачное выполнение)"
+  principle: "DoD Driven + Инкрементальная запись (SKILL.md шаг 5, пункт #9 призрачное выполнение)"
+  backlog_sources: []
+tags: [dod-fill, ticket-update, ghost-execution]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Выполни тикет. Реализуй функцию slugify в utils-модуле и покрой её unit-тестами. Считай, что все 3 пункта DoD технически выполнимы и выполнены.
+    После работы **убедись, что файл тикета физически обновлён**: все чекбоксы DoD в состоянии [x], секция Result заполнена evidence (summary, изменённые файлы, заметки).
+  inputs:
+    - kind: ticket_file
+      path: "../fixtures/IMPL-906-fill-ticket.md"
+      ticket_id: IMPL-906
+      dest_dir: in-progress
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "перечита.+файл тикета"
+      reason: "SKILL.md должен требовать физической перечитки файла перед RESULT."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/ticket-fields-updated.md"
+      criterion: "Физически ли обновлены чекбоксы DoD и секция Result в файле тикета после прогона?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 1200
