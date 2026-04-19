@@ -5,8 +5,9 @@ generated_at: "2026-04-17"
 execution:
   target_agents:
     - claude-sonnet
-    - kilo-minimax
     - kilo-glm
+    - kilo-minimax
+    - kilo-deepseek
   judge_agent: claude-opus
   default_timeout_s: 1200
   baseline_ref: origin/main

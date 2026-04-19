@@ -1,10 +1,5 @@
-Проверка пройдена. Файл тикета обновлён:
-- ✅ Все 3 пункта DoD отмечены `[x]`
-- ✅ Секция Result заполнена summary, изменёнными файлами и заметками
-- ✅ Frontmatter не содержит `status:` или `completed_at:` (управляются пайплайном)
+выполнено: функция slugify реализована в src/utils/slugify.ts, покрыта unit-тестами (happy-path и edge cases), файл тикета обновлен с evidence в Result
 
-```
 ---RESULT---
 status: default
 ---RESULT---
-```

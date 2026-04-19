@@ -5,6 +5,8 @@ generated_at: "2026-04-17"
 execution:
   target_agents:
     - kilo-free
+    - claude-haiku
+    - kilo-glm-air
   judge_agent: claude-opus
   default_timeout_s: 1200
   baseline_ref: origin/main

@@ -1,14 +1,14 @@
 {
-  "date": "2026-04-19T15:48:35.979Z",
-  "skill_sha": "e666e58",
-  "status": "failed",
-  "duration_ms": 1205001,
+  "date": "2026-04-19T18:01:41.819Z",
+  "skill_sha": "4ef92dc",
+  "status": "passed",
+  "duration_ms": 116198,
   "l1_skipped": true,
   "per_model": {
     "claude-haiku": {
-      "passed": false,
+      "passed": true,
       "errored": false,
-      "pass_count": 1,
+      "pass_count": 3,
       "error_count": 0,
       "total": 3,
       "threshold": 2
@@ -16,7 +16,7 @@
     "kilo-free": {
       "passed": true,
       "errored": false,
-      "pass_count": 2,
+      "pass_count": 3,
       "error_count": 0,
       "total": 3,
       "threshold": 2
@@ -24,8 +24,8 @@
     "kilo-glm-air": {
       "passed": true,
       "errored": false,
-      "pass_count": 2,
-      "error_count": 1,
+      "pass_count": 3,
+      "error_count": 0,
       "total": 3,
       "threshold": 2
     }
@@ -34,13 +34,13 @@
     {
       "agentId": "claude-haiku",
       "trial": 1,
-      "score": 3,
+      "score": 4,
       "errored": false
     },
     {
       "agentId": "claude-haiku",
       "trial": 2,
-      "score": 3,
+      "score": 4,
       "errored": false
     },
     {
@@ -58,7 +58,7 @@
     {
       "agentId": "kilo-free",
       "trial": 2,
-      "score": 3,
+      "score": 4,
       "errored": false
     },
     {
@@ -76,9 +76,8 @@
     {
       "agentId": "kilo-glm-air",
       "trial": 2,
-      "score": null,
-      "errored": true,
-      "error": "Stage \"TC-EXECUTE-TASK-001-kilo-glm-air-trial-2\" timed out after 1200s"
+      "score": 4,
+      "errored": false
     },
     {
       "agentId": "kilo-glm-air",

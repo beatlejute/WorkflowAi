@@ -1,7 +1,7 @@
 {
   "per_model": {
     "claude-haiku": {
-      "pass_count": 1,
+      "pass_count": 3,
       "total": 3,
       "trials": [
         {
@@ -11,18 +11,18 @@
         },
         {
           "trial": 2,
-          "score": 2,
-          "passed": false
+          "score": 4,
+          "passed": true
         },
         {
           "trial": 3,
-          "score": 2,
-          "passed": false
+          "score": 4,
+          "passed": true
         }
       ]
     },
     "kilo-free": {
-      "pass_count": 1,
+      "pass_count": 3,
       "total": 3,
       "trials": [
         {
@@ -32,18 +32,18 @@
         },
         {
           "trial": 2,
-          "score": 1,
-          "passed": false
+          "score": 4,
+          "passed": true
         },
         {
           "trial": 3,
-          "score": 1,
-          "passed": false
+          "score": 4,
+          "passed": true
         }
       ]
     },
     "kilo-glm-air": {
-      "pass_count": 2,
+      "pass_count": 3,
       "total": 3,
       "trials": [
         {
@@ -58,8 +58,8 @@
         },
         {
           "trial": 3,
-          "score": 2,
-          "passed": false
+          "score": 4,
+          "passed": true
         }
       ]
     }
@@ -74,13 +74,13 @@
     {
       "agentId": "claude-haiku",
       "trial": 2,
-      "score": 2,
+      "score": 4,
       "errored": false
     },
     {
       "agentId": "claude-haiku",
       "trial": 3,
-      "score": 2,
+      "score": 4,
       "errored": false
     },
     {
@@ -92,13 +92,13 @@
     {
       "agentId": "kilo-free",
       "trial": 2,
-      "score": 1,
+      "score": 4,
       "errored": false
     },
     {
       "agentId": "kilo-free",
       "trial": 3,
-      "score": 1,
+      "score": 4,
       "errored": false
     },
     {
@@ -116,9 +116,9 @@
     {
       "agentId": "kilo-glm-air",
       "trial": 3,
-      "score": 2,
+      "score": 4,
       "errored": false
     }
   ],
-  "timestamp": "2026-04-19T15:30:27.406Z"
+  "timestamp": "2026-04-19T18:01:28.707Z"
 }

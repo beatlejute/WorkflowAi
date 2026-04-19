@@ -1,13 +1,13 @@
 {
   "per_model": {
     "claude-haiku": {
-      "pass_count": 2,
+      "pass_count": 3,
       "total": 3,
       "trials": [
         {
           "trial": 1,
-          "score": 3,
-          "passed": false
+          "score": 5,
+          "passed": true
         },
         {
           "trial": 2,
@@ -16,95 +16,17 @@
         },
         {
           "trial": 3,
-          "score": 4,
+          "score": 5,
           "passed": true
-        }
-      ]
-    },
-    "kilo-free": {
-      "pass_count": 0,
-      "total": 3,
-      "trials": [
-        {
-          "trial": 1,
-          "score": 1,
-          "passed": false
-        },
-        {
-          "trial": 2,
-          "score": 1,
-          "passed": false
-        },
-        {
-          "trial": 3,
-          "score": 1,
-          "passed": false
-        }
-      ]
-    },
-    "kilo-glm-air": {
-      "pass_count": 0,
-      "total": 3,
-      "trials": [
-        {
-          "trial": 1,
-          "score": 1,
-          "passed": false
-        },
-        {
-          "trial": 2,
-          "score": 1,
-          "passed": false
-        },
-        {
-          "trial": 3,
-          "score": 1,
-          "passed": false
         }
       ]
     }
   },
   "rubric_scores": [
     {
-      "agentId": "kilo-free",
-      "trial": 1,
-      "score": 1,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-free",
-      "trial": 2,
-      "score": 1,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-free",
-      "trial": 3,
-      "score": 1,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-glm-air",
-      "trial": 1,
-      "score": 1,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-glm-air",
-      "trial": 2,
-      "score": 1,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-glm-air",
-      "trial": 3,
-      "score": 1,
-      "errored": false
-    },
-    {
       "agentId": "claude-haiku",
       "trial": 1,
-      "score": 3,
+      "score": 5,
       "errored": false
     },
     {
@@ -116,9 +38,9 @@
     {
       "agentId": "claude-haiku",
       "trial": 3,
-      "score": 4,
+      "score": 5,
       "errored": false
     }
   ],
-  "timestamp": "2026-04-19T15:30:02.801Z"
+  "timestamp": "2026-04-19T18:34:00.068Z"
 }

@@ -37,7 +37,7 @@
         },
         {
           "trial": 3,
-          "score": 5,
+          "score": 4,
           "passed": true
         }
       ]
@@ -98,7 +98,7 @@
     {
       "agentId": "kilo-free",
       "trial": 3,
-      "score": 5,
+      "score": 4,
       "errored": false
     },
     {
@@ -120,5 +120,5 @@
       "errored": false
     }
   ],
-  "timestamp": "2026-04-19T15:48:43.916Z"
+  "timestamp": "2026-04-19T18:02:13.054Z"
 }
