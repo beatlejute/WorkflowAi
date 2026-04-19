@@ -1,8 +1,8 @@
 {
-  "date": "2026-04-18T15:37:32.470Z",
-  "skill_sha": "9f505f2",
+  "date": "2026-04-19T10:47:10.882Z",
+  "skill_sha": "8ed9281",
   "status": "passed",
-  "duration_ms": 1691607,
+  "duration_ms": 394082,
   "l1_skipped": true,
   "per_model": {
     "claude-sonnet": {
@@ -14,6 +14,18 @@
     "kilo-deepseek": {
       "passed": true,
       "pass_count": 2,
+      "total": 3,
+      "threshold": 2
+    },
+    "kilo-minimax": {
+      "passed": true,
+      "pass_count": 3,
+      "total": 3,
+      "threshold": 2
+    },
+    "kilo-glm": {
+      "passed": true,
+      "pass_count": 3,
       "total": 3,
       "threshold": 2
     }
@@ -37,7 +49,7 @@
     {
       "agentId": "kilo-deepseek",
       "trial": 1,
-      "score": 5
+      "score": 1
     },
     {
       "agentId": "kilo-deepseek",
@@ -47,7 +59,37 @@
     {
       "agentId": "kilo-deepseek",
       "trial": 3,
-      "score": 3
+      "score": 5
+    },
+    {
+      "agentId": "kilo-minimax",
+      "trial": 1,
+      "score": 5
+    },
+    {
+      "agentId": "kilo-minimax",
+      "trial": 2,
+      "score": 5
+    },
+    {
+      "agentId": "kilo-minimax",
+      "trial": 3,
+      "score": 5
+    },
+    {
+      "agentId": "kilo-glm",
+      "trial": 1,
+      "score": 5
+    },
+    {
+      "agentId": "kilo-glm",
+      "trial": 2,
+      "score": 5
+    },
+    {
+      "agentId": "kilo-glm",
+      "trial": 3,
+      "score": 5
     }
   ]
 }

@@ -1,89 +1,58 @@
----
+Тест пройден. Relevant case TC-DECOMPOSE-PLAN-004: **passed**.
 
-## Анализ пайплайна `pipeline_2026-04-06_16-36-02.log`
-
-### Предварительная проверка
-
-Бэклог содержит две предыдущие записи по этому логу: **2026-04-07** (6 findings) и **2026-04-18** (3 findings, в т.ч. правка deduplication.md). Текущий анализ проводится по явному запросу стейкхолдера — выполняю, обновление бэклога не требуется (запись уже есть за сегодня).
+**Verdict: `no_baseline_failures`** (режим no-baseline — история отсутствует, это первый прогон). Все 4 статических assertion прошли.
 
 ---
 
-### Временная диаграмма ключевых событий
-
-```
-T=16:36:02  [pick-first-task]
-              ├─ ARCHIVE IMPL-002 → archive/  (принадлежал PLAN-002)  ◄─ ключ
-              ├─ ARCHIVE IMPL-003 → archive/  (принадлежал PLAN-002)  ◄─ ключ
-              ├─ ... (+11 тикетов PLAN-002)
-              └─ RESULT: status=empty, auto_corrected=0
-
-T=16:36:18  [decompose-plan] START  ←  план: PLAN-003
-
-T=16:40:31  [decompose-plan] COMPLETE
-              ├─ CREATE IMPL-001  ✓
-              ├─ CREATE IMPL-002  ✗  КОЛЛИЗИЯ — ID занят архивным тикетом PLAN-002
-              ├─ CREATE IMPL-003  ✗  КОЛЛИЗИЯ — ID занят архивным тикетом PLAN-002
-              ├─ CREATE QA-001   ✓
-              └─ CREATE QA-002   ✓
-```
-
-Интервал между событиями: **4 минуты 29 секунд**. Один ID — два разных тикета из разных планов в разных папках (archive/ и backlog/).
-
----
+## Итог анализа пайплайна PLAN-003
 
 ### Findings
 
-#### F1 — CRITICAL: Коллизия ID IMPL-002 / IMPL-003
+| # | Приоритет | Проблема | Статус |
+|---|-----------|---------|--------|
+| 1 | CRITICAL | ID-коллизия IMPL-002/IMPL-003: заархивированы из PLAN-002, пересозданы для PLAN-003 | ✅ Fix в пайплайне (`allocate-ticket-ids`) |
+| 2 | CRITICAL | STOP-GATE 9.B нарушен: декомпозитор назначил ID «из головы» при отсутствии `id_ranges_json` | ✅ STOP-GATE уже добавлен в `decompose.md` |
+| 3 | HIGH | `ids_allocated_from` отсутствует в RESULT | ✅ Требование зафиксировано в `decompose.md` |
+| 4 | MEDIUM | STOP-GATE не определял явный формат вывода ошибки — пайплайн не мог отличить infra-ошибку от нормального завершения | **CHG-2026-04-19-001: добавлен `status: infra_error`** |
 
-**Что случилось:** IMPL-002 и IMPL-003 заархивированы из PLAN-002 в `T=16:36:02`. В `T=16:40:31` decompose-plan создал новые тикеты с теми же ID для PLAN-003. Файловая система содержит два артефакта с идентичными ID, ссылающихся на разный контент.
+### Ключевой паттерн коллизии
 
-**Root cause (физический автор — decompose-plan):** алгоритм `algorithms/deduplication.md` на момент лога не сканировал `tickets/archive/` в Шаге 1. ID из архива считались свободными → выделялись повторно.
-
-**Цепочка провала:**
 ```
-decompose-plan вызывает deduplication.md (Шаг 1)
-  → Шаг 1 сканировал: backlog/ ready/ in-progress/ blocked/ review/ done/
-  → tickets/archive/ НЕ сканировался
-  → IMPL-002, IMPL-003 не обнаружены как занятые
-  → ID выделены заново → КОЛЛИЗИЯ
+16:36:02  auto-correction: IMPL-002 (PLAN-002) → archive/
+16:36:02  auto-correction: IMPL-003 (PLAN-002) → archive/
+          [check-plan-decomposition → decompose-plan БЕЗ allocate-ticket-ids]
+16:40:31  decompose-plan создаёт IMPL-002 для PLAN-003 → backlog/
+16:40:31  decompose-plan создаёт IMPL-003 для PLAN-003 → backlog/
+          ↑ tasks_completed в pick-next-task.js находит старый IMPL-002 в archive/
+            и ошибочно считает зависимость QA-001 выполненной
 ```
 
-**Статус:** ✅ **ИСПРАВЛЕНО** — текущий `algorithms/deduplication.md` включает `tickets/archive/` в Шаге 1 (строка 32), строку `archive` в таблице решений Шага 4 (строка 67) и граничный случай (строка 84).
+### Правка скила (CHG-2026-04-19-001)
 
----
+**Файл:** `skills/decompose-plan/workflows/decompose.md`, шаг 9.B пункт 3
 
-#### F2 — HIGH: `auto_corrected: 0` при 13 реальных операциях архивирования
+**Добавлен явный формат вывода при срабатывании STOP-GATE:**
+```
+---RESULT---
+status: infra_error
+error: <описание: что отсутствует или некорректно в id_ranges_json>
+---RESULT---
+```
 
-**Что случилось:** pick-first-task заархивировал 13 тикетов (`[ARCHIVE]` в логе строки 7-21), однако в блоке `---RESULT---` выдал `auto_corrected: 0`.
+**Тест:** `TC-DECOMPOSE-PLAN-004` — verdict `no_baseline_failures`, relevant case passed.
 
-**Гипотезы:**
-- (A) `auto_corrected` считает только тикеты, **перемещённые в ready/**, а не archive-операции → поведение ожидаемое, но семантика поля вводит в заблуждение
-- (B) Баг в отчётности: счётчик не инкрементируется при archive-перемещениях
+### Рекомендуемый тикет (вне scope коуча)
 
-**Root cause:** не устанавливается без чтения `pick-next-task.js`. По принципу Evidence-Based — гипотеза без кода не является основанием для правки.
+Добавить в `pipeline.yaml` обработчик `infra_error` для стадии `decompose-plan`:
+```yaml
+decompose-plan:
+  goto:
+    default: check-atomicity-limit
+    infra_error: check-conditions  # ← добавить
+```
 
-**Рекомендация:** прочитать код и уточнить семантику `auto_corrected`. Если (A) — переименовать поле в `auto_moved_to_ready` для устранения двусмысленности. Если (B) — фикс скрипта.
-
-**Статус:** ⚠️ Открыто (вне компетенции коуча — инфраструктурный скрипт).
-
----
-
-#### F3 — MEDIUM: RESULT decompose-plan не содержит `ids_allocated_from`
-
-**Что случилось:** блок `---RESULT---` decompose-plan содержит только `status: default` и текстовую таблицу тикетов. Отсутствует машиночитаемое поле `ids_allocated_from`, которое позволяло бы пайплайну верифицировать источник выделения ID.
-
-**Контекст:** лог датирован 2026-04-06 — до введения STOP-gate 9.B и `allocate-ticket-ids`. Исторически ожидаемо.
-
-**Статус:** ✅ Не требует правок — текущая версия скила покрывает через STOP-gate.
-
----
-
-### Итог
-
-| Finding | Severity | Root cause | Статус |
-|---------|----------|------------|--------|
-| F1: коллизия IMPL-002/003 | CRITICAL | `deduplication.md` не сканировал `archive/` | ✅ исправлено |
-| F2: `auto_corrected: 0` | HIGH | семантика/баг в скрипте pick-next-task.js | ⚠️ OOS |
-| F3: нет `ids_allocated_from` в RESULT | MEDIUM | лог до STOP-gate | ✅ не актуально |
-
-**Правки скила при этом анализе:** нет (F1 уже закрыт правкой deduplication.md; F2 — инфраструктура; F3 — устарело). Бэклог обновления не требует — запись за сегодня (2026-04-18) уже существует.
+**Затронутые файлы:**
+- `D:/Dev/workflowAi/src/skills/decompose-plan/workflows/decompose.md`
+- `D:/Dev/workflowAi/src/skills/decompose-plan/tests/cases/TC-DECOMPOSE-PLAN-004-stopgate-infra-error-format.yaml` (новый)
+- `D:/Dev/workflowAi/src/skills/decompose-plan/tests/index.yaml`
+- `.workflow/coach-backlog.yaml`
