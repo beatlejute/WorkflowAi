@@ -34,12 +34,14 @@ function createTestWorkdir(skillName) {
   const configDir = path.join(workflowDir, 'config');
   const realConfigs = path.join(projectRoot, 'configs');
 
+  // Skills are COPIED (not junctioned) so that agents cannot write to real source files.
+  fs.cpSync(realSkills, linkSkills, { recursive: true, dereference: true });
+
+  // Scripts and configs are junctioned — read-only for agents in practice.
   if (process.platform === 'win32') {
-    try { execSync(`mklink /J "${linkSkills}" "${realSkills}"`, { stdio: 'pipe', shell: true }); } catch {}
     try { execSync(`mklink /J "${linkScripts}" "${realScripts}"`, { stdio: 'pipe', shell: true }); } catch {}
     try { execSync(`mklink /J "${configDir}" "${realConfigs}"`, { stdio: 'pipe', shell: true }); } catch {}
   } else {
-    try { fs.symlinkSync(realSkills, linkSkills, 'dir'); } catch {}
     try { fs.symlinkSync(realScripts, linkScripts, 'dir'); } catch {}
     try { fs.symlinkSync(realConfigs, configDir, 'dir'); } catch {}
   }
@@ -49,8 +51,9 @@ function createTestWorkdir(skillName) {
 
 function cleanupTestWorkdir(tmpRoot) {
   if (!tmpRoot || !fs.existsSync(tmpRoot)) return;
+  // Remove junctions first so that their targets are not touched by rmSync.
   if (process.platform === 'win32') {
-    for (const link of ['src/skills', 'src/scripts', 'config']) {
+    for (const link of ['src/scripts', 'config']) {
       const p = path.join(tmpRoot, '.workflow', link);
       try { execSync(`rmdir "${p}"`, { stdio: 'pipe', shell: true }); } catch {}
     }
