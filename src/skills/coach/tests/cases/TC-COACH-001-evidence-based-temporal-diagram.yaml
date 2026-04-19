@@ -14,6 +14,8 @@ scenario:
   system_prompt_file: "../../SKILL.md"
   extra_instructions: |
     Стейкхолдер просит: «Проанализируй этот пайплайн и выдай findings.»
+    Обрати особое внимание на ID артефактов (тикетов, планов), которые упоминаются в логе несколько раз.
+    Для каждого такого ID построй временну́ю диаграмму событий и проверь, нет ли коллизий или противоречий.
   inputs:
     - kind: file
       path: "../fixtures/pipeline-2026-04-06_id-collision.log"
@@ -30,7 +32,7 @@ assertions:
     - kind: output_contains_all
       values: ["IMPL-001", "IMPL-002", "IMPL-003", "collision"]
     - kind: output_matches
-      regex: "line\\s*(22|35|119|123)"
+      regex: "line\\s*(28|29|35|56|57|58)"
     - kind: output_does_not_contain
       values: ["угад", "предполаг"]
 

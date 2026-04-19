@@ -10,6 +10,8 @@ execution:
   target_agents:
     - claude-sonnet   # основная модель скила (agents_by_type.coach.agents[0])
     - kilo-deepseek   # fallback-модель скила (agents_by_type.coach.agents[1])
+    - kilo-minimax    # дополнительная модель для сравнения
+    - kilo-glm        # дополнительная модель для сравнения
   judge_agent: claude-opus  # другая модель, чтобы исключить self-enhancement bias
   default_timeout_s: 1200
   baseline_ref: origin/main  # git ref для сравнения previously_green/red
@@ -24,4 +26,9 @@ cases:
     file: cases/TC-COACH-002-root-cause-first.yaml
     origin_chg: [CHG-038, CHG-046, CHG-098]
     tags: [root-cause, evidence-based, anti-pattern]
+    severity: critical
+  - id: TC-COACH-003
+    file: cases/TC-COACH-003-escalation-status-check.yaml
+    origin_chg: []
+    tags: [escalation-tracking, repeat-incident, root-cause]
     severity: critical

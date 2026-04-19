@@ -13,6 +13,51 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = findProjectRoot(process.cwd());
 
+import os from 'os';
+import { execSync } from 'child_process';
+
+function createTestWorkdir(skillName) {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), `wf-test-${skillName}-`));
+  const workflowDir = path.join(tmpRoot, '.workflow');
+  fs.mkdirSync(workflowDir, { recursive: true });
+  for (const sub of ['tickets/backlog', 'tickets/ready', 'tickets/in-progress', 'tickets/review', 'tickets/done', 'tickets/archive', 'plans/current', 'plans/archive', 'reports', 'logs']) {
+    fs.mkdirSync(path.join(workflowDir, sub), { recursive: true });
+  }
+  fs.writeFileSync(path.join(workflowDir, 'coach-backlog.yaml'), 'version: 1\nanalyzed_tickets: []\naudited_skills: {}\n', 'utf8');
+
+  const srcDir = path.join(workflowDir, 'src');
+  fs.mkdirSync(srcDir, { recursive: true });
+  const realSkills = path.join(projectRoot, 'src', 'skills');
+  const realScripts = path.join(projectRoot, 'src', 'scripts');
+  const linkSkills = path.join(srcDir, 'skills');
+  const linkScripts = path.join(srcDir, 'scripts');
+  const configDir = path.join(workflowDir, 'config');
+  const realConfigs = path.join(projectRoot, 'configs');
+
+  if (process.platform === 'win32') {
+    try { execSync(`mklink /J "${linkSkills}" "${realSkills}"`, { stdio: 'pipe', shell: true }); } catch {}
+    try { execSync(`mklink /J "${linkScripts}" "${realScripts}"`, { stdio: 'pipe', shell: true }); } catch {}
+    try { execSync(`mklink /J "${configDir}" "${realConfigs}"`, { stdio: 'pipe', shell: true }); } catch {}
+  } else {
+    try { fs.symlinkSync(realSkills, linkSkills, 'dir'); } catch {}
+    try { fs.symlinkSync(realScripts, linkScripts, 'dir'); } catch {}
+    try { fs.symlinkSync(realConfigs, configDir, 'dir'); } catch {}
+  }
+
+  return tmpRoot;
+}
+
+function cleanupTestWorkdir(tmpRoot) {
+  if (!tmpRoot || !fs.existsSync(tmpRoot)) return;
+  if (process.platform === 'win32') {
+    for (const link of ['src/skills', 'src/scripts', 'config']) {
+      const p = path.join(tmpRoot, '.workflow', link);
+      try { execSync(`rmdir "${p}"`, { stdio: 'pipe', shell: true }); } catch {}
+    }
+  }
+  try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+}
+
 function parseArgs() {
   const args = process.argv.slice(2);
   const opts = {
@@ -784,7 +829,7 @@ async function preFlightApproval(numCases, numModels, trials, judgeAgentCost = 0
 }
 
 async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judgeAgentId, pipelineConfig, options = {}) {
-  const { trials = 3, concurrency = 2, timeout = 300 } = options;
+  const { trials = 3, concurrency = 2, timeout = 300, testWorkdir = null } = options;
   
   const judgeAgentConfig = pipelineConfig.agents[judgeAgentId];
   if (!judgeAgentConfig) {
@@ -843,35 +888,33 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
     return targetPrompt;
   }
   
+  const allTasks = [];
   for (const agentId of targetAgents) {
     const agentConfig = pipelineConfig.agents[agentId];
     if (!agentConfig) {
       throw new Error(`Target agent not found: ${agentId}`);
     }
-    
     results.per_model[agentId] = {
       trials: [],
       pass_count: 0,
       total: trials
     };
-    
-    const tasks = [];
     for (let trial = 1; trial <= trials; trial++) {
-      tasks.push({ agentId, trial, agentConfig, judgeAgentConfig, rubric, testCase });
+      allTasks.push({ agentId, trial, agentConfig, judgeAgentConfig, rubric, testCase });
     }
-    
-    for (let i = 0; i < tasks.length; i += concurrency) {
-      const batch = tasks.slice(i, i + concurrency);
-      const batchResults = await Promise.all(
-        batch.map(async (task) => {
-          try {
-            const targetPrompt = buildTargetPrompt();
-            const targetOutput = await spawnAgent(task.agentConfig, targetPrompt, {
-              timeout,
-              stageId: `${caseId}-${task.agentId}-trial-${task.trial}`
-            });
-            
-            const judgePrompt = `You are a judge evaluating the output of an AI agent.
+  }
+
+  const allResults = await Promise.all(
+    allTasks.map(async (task) => {
+      try {
+        const targetPrompt = buildTargetPrompt();
+        const targetOutput = await spawnAgent(task.agentConfig, targetPrompt, {
+          timeout,
+          stageId: `${caseId}-${task.agentId}-trial-${task.trial}`,
+          projectRoot: testWorkdir || undefined
+        });
+
+        const judgePrompt = `You are a judge evaluating the output of an AI agent.
 
 ## Rubric
 ${rubric}
@@ -889,54 +932,58 @@ score: <number 1-5>
 reason: <brief explanation>
 ---RESULT---`;
 
-            const judgeResult = await spawnAgent(task.judgeAgentConfig, judgePrompt, {
-              timeout: 60,
-              stageId: `${caseId}-judge-${task.agentId}-trial-${task.trial}`
-            });
-            
-            let score = 3;
-            const parsed = parseJudgeResult(judgeResult.output);
-            if (parsed && parsed.score) {
-              score = parsed.score;
-            }
-            
-            await writeTrialOutput(skillName, caseId, task.agentId, task.trial, targetOutput.output || '');
-            
-            return {
-              trial: task.trial,
-              agentId: task.agentId,
-              score,
-              output: targetOutput.output || '',
-              judge_output: judgeResult.output || '',
-              passed: score >= 4
-            };
-          } catch (err) {
-            console.error(`[Runner] Trial failed: ${task.agentId} trial ${task.trial}`, err.message);
-            return {
-              trial: task.trial,
-              agentId: task.agentId,
-              score: 1,
-              error: err.message,
-              passed: false
-            };
-          }
-        })
-      );
-      
-      for (const result of batchResults) {
-        results.per_model[result.agentId].trials.push(result);
-        if (result.passed) {
-          results.per_model[result.agentId].pass_count++;
-        }
-        results.rubric_scores.push({
-          agentId: result.agentId,
-          trial: result.trial,
-          score: result.score
+        const judgeResult = await spawnAgent(task.judgeAgentConfig, judgePrompt, {
+          timeout: 60,
+          stageId: `${caseId}-judge-${task.agentId}-trial-${task.trial}`
         });
+
+        let score = 3;
+        const parsed = parseJudgeResult(judgeResult.output);
+        if (parsed && parsed.score) {
+          score = parsed.score;
+        }
+
+        await writeTrialOutput(skillName, caseId, task.agentId, task.trial, targetOutput.output || '');
+
+        return {
+          trial: task.trial,
+          agentId: task.agentId,
+          score,
+          output: targetOutput.output || '',
+          judge_output: judgeResult.output || '',
+          passed: score >= 4
+        };
+      } catch (err) {
+        console.error(`[Runner] Trial failed: ${task.agentId} trial ${task.trial}`, err.message);
+        return {
+          trial: task.trial,
+          agentId: task.agentId,
+          score: 1,
+          error: err.message,
+          passed: false
+        };
       }
+    })
+  );
+
+  for (const result of allResults) {
+    results.per_model[result.agentId].trials.push(result);
+    if (result.passed) {
+      results.per_model[result.agentId].pass_count++;
     }
+    results.rubric_scores.push({
+      agentId: result.agentId,
+      trial: result.trial,
+      score: result.score
+    });
   }
-  
+  for (const agentId of Object.keys(results.per_model)) {
+    results.per_model[agentId].trials.sort((a, b) => a.trial - b.trial);
+  }
+  results.rubric_scores.sort((a, b) =>
+    a.agentId === b.agentId ? a.trial - b.trial : a.agentId.localeCompare(b.agentId)
+  );
+
   return results;
 }
 
@@ -1053,6 +1100,8 @@ async function writeMetaJson(caseId, skillName, status, durationMs, l2Results = 
 }
 
 async function runTestsForSkill(skillName, opts) {
+  const testWorkdir = createTestWorkdir(skillName);
+  console.log(`[Runner] Isolated test workdir: ${testWorkdir}`);
   const result = {
     skill: skillName,
     status: 'passed',
@@ -1157,7 +1206,43 @@ async function runTestsForSkill(skillName, opts) {
       await preFlightApproval(cases.length, totalModels, trials);
     }
 
-    for (const caseDef of cases) {
+    let secretScanFailed = false;
+    let calibrationFailedResult = null;
+
+    const anyRunL1 = !opts.layer || opts.layer === 'deterministic';
+    const anyRunL2 = !opts.layer || opts.layer === 'l2';
+    const anyHasRubric = cases.some(cd => {
+      try {
+        const tc = loadTestCase(skillName, cd.file);
+        return tc.assertions?.rubric && tc.assertions.rubric.length > 0;
+      } catch { return false; }
+    });
+
+    if (anyRunL1 && !opts.skipSecretScan) {
+      const scanResult = await runSecretScan();
+      if (!scanResult.passed) {
+        secretScanFailed = true;
+        result.error = 'Secret scan failed - secrets detected in fixtures';
+      }
+    }
+
+    if (anyRunL2 && effectiveTargetAgents.length > 0 && judgeAgent && anyHasRubric && !secretScanFailed) {
+      const calibrationResult = await runCalibrationGate(skillName, pipelineConfig);
+      if (!calibrationResult.passed) {
+        console.error(`[Runner] Calibration gate FAILED: ${calibrationResult.error}`);
+        calibrationFailedResult = calibrationResult;
+        result.status = 'calibration_failed';
+        result.error = calibrationResult.error;
+        result.calibration = calibrationResult;
+        return { ...result, cases, currentRunStatuses };
+      }
+      if (calibrationResult.warnings && calibrationResult.warnings.length > 0) {
+        console.log(`[Runner] Calibration warnings: ${calibrationResult.warnings.join(', ')}`);
+      }
+      console.log('[Runner] Calibration gate PASSED');
+    }
+
+    await Promise.all(cases.map(async (caseDef) => {
       const caseStart = Date.now();
 
       try {
@@ -1169,17 +1254,13 @@ async function runTestsForSkill(skillName, opts) {
         const runL1 = !opts.layer || opts.layer === 'deterministic';
         const runL2 = !opts.layer || opts.layer === 'l2';
 
-        // Secret scan (only for deterministic layer)
-        if (runL1 && !opts.skipSecretScan) {
-          const scanResult = await runSecretScan();
-          if (!scanResult.passed) {
-            result.current_run.failed++;
-            result.status = 'failed';
-            result.error = 'Secret scan failed - secrets detected in fixtures';
-            currentRunStatuses[caseDef.id] = 'failed';
-            await writeMetaJson(caseDef.id, skillName, 'failed', Date.now() - caseStart);
-            continue;
-          }
+        // Secret scan result propagated from pre-loop
+        if (runL1 && !opts.skipSecretScan && secretScanFailed) {
+          result.current_run.failed++;
+          result.status = 'failed';
+          currentRunStatuses[caseDef.id] = 'failed';
+          await writeMetaJson(caseDef.id, skillName, 'failed', Date.now() - caseStart);
+          return;
         }
 
         // L0 static assertions
@@ -1191,7 +1272,7 @@ async function runTestsForSkill(skillName, opts) {
             result.status = 'failed';
             currentRunStatuses[caseDef.id] = 'failed';
             await writeMetaJson(caseDef.id, skillName, 'failed', Date.now() - caseStart);
-            continue;
+            return;
           }
         }
 
@@ -1215,24 +1296,6 @@ async function runTestsForSkill(skillName, opts) {
             result.l1_skipped = true;
           }
 
-          if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent && hasRubric) {
-            const calibrationResult = await runCalibrationGate(skillName, pipelineConfig);
-
-            if (!calibrationResult.passed) {
-              console.error(`[Runner] Calibration gate FAILED: ${calibrationResult.error}`);
-              result.status = 'calibration_failed';
-              result.error = calibrationResult.error;
-              result.calibration = calibrationResult;
-              return result;
-            }
-
-            if (calibrationResult.warnings && calibrationResult.warnings.length > 0) {
-              console.log(`[Runner] Calibration warnings: ${calibrationResult.warnings.join(', ')}`);
-            }
-
-            console.log('[Runner] Calibration gate PASSED');
-          }
-
           let l2Results = null;
           if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent && hasRubric) {
             const trials = opts.fast ? 1 : 3;
@@ -1247,7 +1310,7 @@ async function runTestsForSkill(skillName, opts) {
                 effectiveTargetAgents,
                 judgeAgent,
                 pipelineConfig,
-                { trials, concurrency: 2, timeout }
+                { trials, concurrency: 2, timeout, testWorkdir }
               );
 
               const aggregated = aggregateResults(l2Results, testCase);
@@ -1316,10 +1379,12 @@ async function runTestsForSkill(skillName, opts) {
         currentRunStatuses[caseDef.id] = 'error';
         await writeMetaJson(caseDef.id, skillName, 'error', Date.now() - caseStart);
       }
-    }
+    }));
   } catch (e) {
     result.status = 'error';
     result.error = e.message;
+  } finally {
+    cleanupTestWorkdir(testWorkdir);
   }
 
   return {
