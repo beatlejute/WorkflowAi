@@ -720,13 +720,23 @@ async function writeJudgeResults(skillName, caseId, results) {
   const skillsDir = findSkillsDir();
   const caseDir = path.join(skillsDir, skillName, 'tests', 'cases', caseId, 'current');
   ensureDir(caseDir);
-  
-  const judgeData = {
-    per_model: {},
-    rubric_scores: results.rubric_scores || [],
-    timestamp: new Date().toISOString()
-  };
-  
+
+  const judgePath = path.join(caseDir, 'judge.json');
+  let judgeData = { per_model: {}, rubric_scores: [], timestamp: new Date().toISOString() };
+  if (fs.existsSync(judgePath)) {
+    try {
+      const existing = JSON.parse(fs.readFileSync(judgePath, 'utf8'));
+      judgeData.per_model = existing.per_model || {};
+      judgeData.rubric_scores = existing.rubric_scores || [];
+    } catch {}
+  }
+
+  const newAgentIds = new Set(Object.keys(results.per_model || {}));
+  judgeData.rubric_scores = judgeData.rubric_scores.filter(r => !newAgentIds.has(r.agentId));
+  for (const r of (results.rubric_scores || [])) {
+    judgeData.rubric_scores.push(r);
+  }
+
   for (const [agentId, modelData] of Object.entries(results.per_model || {})) {
     judgeData.per_model[agentId] = {
       pass_count: modelData.pass_count,
@@ -738,12 +748,10 @@ async function writeJudgeResults(skillName, caseId, results) {
       }))
     };
   }
-  
-  fs.writeFileSync(
-    path.join(caseDir, 'judge.json'),
-    JSON.stringify(judgeData, null, 2),
-    'utf8'
-  );
+
+  judgeData.timestamp = new Date().toISOString();
+
+  fs.writeFileSync(judgePath, JSON.stringify(judgeData, null, 2), 'utf8');
 }
 
 async function preFlightApproval(numCases, numModels, trials, judgeAgentCost = 0.02, targetAgentCost = 0.01) {
@@ -991,32 +999,57 @@ async function writeMetaJson(caseId, skillName, status, durationMs, l2Results = 
   const skillsDir = findSkillsDir();
   const caseDir = path.join(skillsDir, skillName, 'tests', 'cases', caseId, 'current');
   ensureDir(caseDir);
-  
+
+  const metaPath = path.join(caseDir, 'meta.json');
+  let existing = null;
+  if (fs.existsSync(metaPath)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    } catch {}
+  }
+
   const meta = {
     date: new Date().toISOString(),
     skill_sha: getSkillSha(skillName),
     status,
     duration_ms: durationMs
   };
-  
+
   if (l1_skipped) {
     meta.l1_skipped = true;
   }
-  
+
+  const mergedPerModel = (existing && existing.per_model) ? { ...existing.per_model } : {};
+  let mergedRubricScores = (existing && existing.rubric_scores) ? [...existing.rubric_scores] : [];
+
   if (l2Results) {
     const aggregated = aggregateResults(l2Results, {});
-    meta.per_model = aggregated.per_model;
-    meta.rubric_scores = l2Results.rubric_scores;
+    const newAgentIds = new Set(Object.keys(aggregated.per_model || {}));
+    for (const [agentId, data] of Object.entries(aggregated.per_model || {})) {
+      mergedPerModel[agentId] = data;
+    }
+    mergedRubricScores = mergedRubricScores.filter(r => !newAgentIds.has(r.agentId));
+    for (const r of (l2Results.rubric_scores || [])) {
+      mergedRubricScores.push(r);
+    }
     if (l2Results.tokens) {
       meta.tokens = l2Results.tokens;
     }
   }
-  
-  fs.writeFileSync(
-    path.join(caseDir, 'meta.json'),
-    JSON.stringify(meta, null, 2),
-    'utf8'
-  );
+
+  if (Object.keys(mergedPerModel).length > 0) {
+    meta.per_model = mergedPerModel;
+  }
+  if (mergedRubricScores.length > 0) {
+    meta.rubric_scores = mergedRubricScores;
+  }
+
+  const allPassed = Object.values(mergedPerModel).every(m => m.passed);
+  if (Object.keys(mergedPerModel).length > 0) {
+    meta.status = allPassed ? 'passed' : 'failed';
+  }
+
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
 }
 
 async function runTestsForSkill(skillName, opts) {

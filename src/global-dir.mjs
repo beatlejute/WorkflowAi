@@ -1,6 +1,27 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, cpSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, cpSync, rmSync, lstatSync } from 'node:fs';
+import { execSync } from 'node:child_process';
+
+const isWindows = process.platform === 'win32';
+
+function isJunctionOrSymlink(path) {
+  if (!existsSync(path)) {
+    return false;
+  }
+  try {
+    if (lstatSync(path).isSymbolicLink()) {
+      return true;
+    }
+  } catch {}
+  if (isWindows) {
+    try {
+      const output = execSync(`fsutil reparsepoint query "${path}"`, { encoding: 'utf-8', stdio: 'pipe' });
+      return output.includes('Symbolic Link') || output.includes('Mount Point');
+    } catch {}
+  }
+  return false;
+}
 
 export function getGlobalDir() {
   if (process.env.WORKFLOW_HOME) {
@@ -29,6 +50,9 @@ function getGlobalVersion() {
 
 function copyDirectory(src, dest) {
   if (!existsSync(src)) {
+    return;
+  }
+  if (isJunctionOrSymlink(dest)) {
     return;
   }
   rmSync(dest, { recursive: true, force: true });

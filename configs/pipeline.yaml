@@ -69,12 +69,19 @@ pipeline:
       capabilities: [text]
       description: "Kilo мульти-режимный (architect, code, debug)"
 
-    kilo-glm:
+    kilo-glm-plan:
       command: "kilo"
-      args: ["-m", "zai-coding-plan/glm-4.7", "--agent", "orchestrator", "run"]
+      args: ["-m", "zai-coding-plan/glm-5.1", "--agent", "code", "run"]
       workdir: "."
       capabilities: [text]
       description: "Kilo GLM"
+
+    kilo-glm:
+      command: "kilo"
+      args: ["-m", "kilo/z-ai/glm-5.1", "--agent", "code", "run"]
+      workdir: "."
+      capabilities: [text]
+      description: "Kilo GLM 5.1"
 
     kilo-deepseek:
       command: "kilo"
