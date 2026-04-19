@@ -27,8 +27,3 @@ cases:
     origin_chg: [CHG-038, CHG-046, CHG-098]
     tags: [root-cause, evidence-based, anti-pattern]
     severity: critical
-  - id: TC-COACH-003
-    file: cases/TC-COACH-003-escalation-status-check.yaml
-    origin_chg: []
-    tags: [escalation-tracking, repeat-incident, root-cause]
-    severity: critical
