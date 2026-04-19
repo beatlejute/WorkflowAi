@@ -1,6 +1,27 @@
 {
   "per_model": {
     "claude-sonnet": {
+      "pass_count": 3,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 2,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 3,
+          "score": 5,
+          "passed": true
+        }
+      ]
+    },
+    "kilo-deepseek": {
       "pass_count": 2,
       "total": 3,
       "trials": [
@@ -11,34 +32,55 @@
         },
         {
           "trial": 2,
-          "score": 5,
-          "passed": true
-        },
-        {
-          "trial": 3,
-          "score": 2,
-          "passed": false
-        }
-      ]
-    },
-    "kilo-deepseek": {
-      "pass_count": 1,
-      "total": 3,
-      "trials": [
-        {
-          "trial": 1,
-          "score": 4,
-          "passed": true
-        },
-        {
-          "trial": 2,
           "score": 1,
           "passed": false
         },
         {
           "trial": 3,
-          "score": 2,
+          "score": 5,
+          "passed": true
+        }
+      ]
+    },
+    "kilo-minimax": {
+      "pass_count": 2,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 3,
           "passed": false
+        },
+        {
+          "trial": 2,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 3,
+          "score": 5,
+          "passed": true
+        }
+      ]
+    },
+    "kilo-glm": {
+      "pass_count": 3,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 2,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 3,
+          "score": 5,
+          "passed": true
         }
       ]
     }
@@ -57,12 +99,12 @@
     {
       "agentId": "claude-sonnet",
       "trial": 3,
-      "score": 2
+      "score": 5
     },
     {
       "agentId": "kilo-deepseek",
       "trial": 1,
-      "score": 4
+      "score": 5
     },
     {
       "agentId": "kilo-deepseek",
@@ -72,8 +114,38 @@
     {
       "agentId": "kilo-deepseek",
       "trial": 3,
-      "score": 2
+      "score": 5
+    },
+    {
+      "agentId": "kilo-glm",
+      "trial": 1,
+      "score": 5
+    },
+    {
+      "agentId": "kilo-glm",
+      "trial": 2,
+      "score": 5
+    },
+    {
+      "agentId": "kilo-glm",
+      "trial": 3,
+      "score": 5
+    },
+    {
+      "agentId": "kilo-minimax",
+      "trial": 1,
+      "score": 3
+    },
+    {
+      "agentId": "kilo-minimax",
+      "trial": 2,
+      "score": 5
+    },
+    {
+      "agentId": "kilo-minimax",
+      "trial": 3,
+      "score": 5
     }
   ],
-  "timestamp": "2026-04-18T15:09:20.859Z"
+  "timestamp": "2026-04-19T12:18:41.555Z"
 }

@@ -1,23 +1,58 @@
-Бэклог обновлён корректно: дублирующие `last_action` удалены, запись добавлена в `analyzed_tickets` по новой схеме `source: ad_hoc`.
+Тест прошёл. Финальный вывод:
 
 ---
 
-## Итоговый отчёт
+## Результат анализа
+
+### Временны́е диаграммы — ID с коллизиями
+
+**IMPL-002:**
+| 16:36:02 | done → archive (PLAN-002 archived) | pick-next-task auto-correction |
+| 16:40:31 | **CREATED NEW** для PLAN-003 | decompose-plan |
+→ **Коллизия**: два разных тикета с одним ID в разных планах.
+
+**IMPL-003:**
+| 16:36:02 | done → archive (PLAN-002 archived) | pick-next-task auto-correction |
+| 16:40:31 | **CREATED NEW** для PLAN-003 | decompose-plan |
+→ **Коллизия**.
+
+**Ключевое доказательство из лога:** контекст, переданный в `decompose-plan` на шаге 4, содержал только `plan_id` и `plan_file`. `id_ranges_json` — отсутствует. Стадии `allocate-ticket-ids` в пайплайне на тот момент не было.
+
+---
 
 ### Findings
 
-| # | Приоритет | Описание | Статус |
-|---|-----------|----------|--------|
-| F1 | **CRITICAL** | Коллизия IMPL-002/IMPL-003: pick-first-task архивирует → decompose-plan пересоздаёт в том же запуске. Root cause: `algorithms/deduplication.md` не сканировал `archive/`, стадия `allocate-ticket-ids` отсутствовала | ✅ ИСПРАВЛЕНО |
-| F2 | **HIGH** | `ids_allocated_from` отсутствует в RESULT декомпозиции — СТОП-гейт 9.B не был внедрён на 2026-04-06 | ✅ ИСПРАВЛЕНО |
-| F3 | **MEDIUM** | Пайплайн не валидирует наличие `ids_allocated_from` в RESULT механически — агент может пропустить СТОП-гейт без остановки пайплайна | ❌ НЕ ИСПРАВЛЕНО |
-| F4 | **LOW** | `coach-backlog.yaml` содержал дублирующий non-schema ключ `last_action` — запись предыдущего анализа этого лога была молча перекрыта | ✅ ИСПРАВЛЕНО |
+| # | Severity | Описание | Статус |
+|---|----------|---------|--------|
+| F1 | CRITICAL | Стадия `allocate-ticket-ids` отсутствовала → `decompose-plan` не получил `id_ranges_json` → нумерация с 001 → коллизия с архивными IMPL-002, IMPL-003 | **Уже исправлено** (pipeline.yaml + шаг 9.B decompose.md) |
+| F2 | CRITICAL | Агент не остановился при отсутствии `id_ranges_json` (нарушение шаг 9.B) + output без `ids_allocated_from` | **Уже исправлено** (стоп-гейт 9.B, инцидент 2026-04-08/PLAN-008) |
+| F3 | HIGH | **TC-DECOMPOSE-PLAN-002 инвертирован:** assertion `output_contains_all:["get-next-id"]` проваливал правильно работающего агента | **ИСПРАВЛЕНО CHG-079** |
+| F4 | MEDIUM | `verify-atomicity.js` не проверяет наличие `ids_allocated_from` в выводе декомпозитора — нет машинного гейта | Зафиксировано, инфраструктура |
 
-### Что сделано
+---
 
-- **`knowledge/backlog-management.md`** — добавлена секция «Ad-hoc анализы» с форматом `source: ad_hoc` для `analyzed_tickets` и антипаттерн «Non-schema поля»
-- **`coach-backlog.yaml`** — удалены дублирующие `last_action`, добавлена корректная запись ad-hoc анализа в `analyzed_tickets`
+### CHG-079: правка TC-DECOMPOSE-PLAN-002
 
-### Рекомендация по F3
+**Проблема:** тест тестировал старый контракт (агент *должен* вызывать `get-next-id.js`), тогда как с момента введения `allocate-ticket-ids` стадии контракт противоположен (агент *не должен* вызывать скрипт — получает готовые диапазоны через `id_ranges_json`).
 
-Создать IMPL-тикет: добавить в раннер пайплайна post-check для стадии `decompose-plan` — если `---RESULT---` не содержит секцию `ids_allocated_from:` → статус стадии FAILED, декомпозиция откатывается. Это машинная защита, не зависящая от дисциплины агента.
+**Изменения:**
+- Заменён `output_contains_all: ["get-next-id"]` → `output_contains_all: ["ids_allocated_from"]`
+- Заменены static assertions: проверяют `id_ranges_json`, `не вызывает.*get-next-id`, `ids_allocated_from`
+- Добавлен `output_does_not_contain` на прямой вызов скрипта
+- Обновлён сценарий: теперь предоставляет `id_ranges_json` на входе + минимальный план
+
+---
+
+### Verdict теста
+
+```
+status: passed
+skill: decompose-plan
+total: 1
+current_run.passed: 1
+verdict: no_baseline_failures
+```
+
+**Затронутые файлы:**
+- `src/skills/decompose-plan/tests/cases/TC-DECOMPOSE-PLAN-002-get-next-id-mandatory.yaml`
+- `src/skills/decompose-plan/tests/cases/TC-DECOMPOSE-PLAN-002/current/meta.json`
