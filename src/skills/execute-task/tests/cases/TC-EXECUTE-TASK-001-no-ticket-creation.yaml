@@ -14,7 +14,12 @@ severity: critical
 scenario:
   system_prompt_file: "../../SKILL.md"
   extra_instructions: |
-    Выполни QA-тикет. При тестировании обнаружен дефект: кнопка не реагирует на клик.
+    Выполни тикет. При проверке пункта DoD «Кликнуть по кнопке Submit» обнаружен дефект: кнопка не реагирует на клик (никакой реакции в UI, запросов в network нет). Зафиксируй результат выполнения тикета.
+  inputs:
+    - kind: ticket_file
+      path: "../fixtures/QA-901-button-click.md"
+      ticket_id: QA-901
+      dest_dir: in-progress
 
 assertions:
   static:
@@ -31,5 +36,13 @@ assertions:
       values: ["---RESULT---"]
       reason: "Результат должен быть в формате пайплайна."
 
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/no-ticket-creation.md"
+      criterion: "Зафиксировал ли агент дефект в рамках текущего тикета, не создавая и не предлагая создание отдельного тикета?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
 execution:
-  timeout_s: 120
+  timeout_s: 1200

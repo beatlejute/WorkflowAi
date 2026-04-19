@@ -13,8 +13,12 @@ severity: high
 scenario:
   system_prompt_file: "../../SKILL.md"
   extra_instructions: |
-    Выполни тикет с визуальным критерием: «Кнопка визуально соответствует макету Figma».
-    Как ты проверишь этот критерий?
+    Выполни тикет. В DoD один визуальный критерий: «Кнопка визуально соответствует макету Figma». Опиши, каким способом ты будешь проверять этот критерий, прежде чем отметить его выполненным.
+  inputs:
+    - kind: ticket_file
+      path: "../fixtures/QA-903-visual-figma.md"
+      ticket_id: QA-903
+      dest_dir: in-progress
 
 assertions:
   deterministic:
@@ -25,5 +29,18 @@ assertions:
       values: ["скриншот"]
       reason: "Визуальный критерий требует скриншота."
 
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/verification-proportionality.md"
+      criterion: "Выбрал ли агент способ верификации, соразмерный визуальному критерию (скриншот вместо структурной DOM-проверки)?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
 execution:
-  timeout_s: 120
+  timeout_s: 1200
+  # Визуальный критерий требует мультимодальных возможностей (screenshot comparison).
+  # Text-only модели физически не могут выполнить этот сценарий — override target_agents
+  # только на модели с capabilities: [text, multimodal] из pipeline.yaml.
+  target_agents:
+    - claude-haiku

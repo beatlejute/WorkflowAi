@@ -16,8 +16,9 @@ const projectRoot = findProjectRoot(process.cwd());
 import os from 'os';
 import { execSync } from 'child_process';
 
-function createTestWorkdir(skillName) {
-  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), `wf-test-${skillName}-`));
+function createTestWorkdir(skillName, suffix = '') {
+  const prefix = suffix ? `wf-test-${skillName}-${suffix}-` : `wf-test-${skillName}-`;
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const workflowDir = path.join(tmpRoot, '.workflow');
   fs.mkdirSync(workflowDir, { recursive: true });
   for (const sub of ['tickets/backlog', 'tickets/ready', 'tickets/in-progress', 'tickets/review', 'tickets/done', 'tickets/archive', 'plans/current', 'plans/archive', 'reports', 'logs']) {
@@ -832,7 +833,7 @@ async function preFlightApproval(numCases, numModels, trials, judgeAgentCost = 0
 }
 
 async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judgeAgentId, pipelineConfig, options = {}) {
-  const { trials = 3, concurrency = 2, timeout = 300, testWorkdir = null } = options;
+  const { trials = 3, timeout = 300 } = options;
   
   const judgeAgentConfig = pipelineConfig.agents[judgeAgentId];
   if (!judgeAgentConfig) {
@@ -855,12 +856,12 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
   };
 
   const caseId = caseDef?.id || 'unknown';
-  
-  function buildTargetPrompt() {
+
+  function buildTargetPrompt(taskWorkdir) {
     let targetPrompt = '';
     const testsDir = findSkillTestsDir(skillName);
     const caseDir = caseDef?.file ? path.dirname(caseDef.file) : '';
-    
+
     if (testCase.scenario?.system_prompt_file) {
       const systemPromptPath = path.join(testsDir, caseDir, testCase.scenario.system_prompt_file);
       if (fs.existsSync(systemPromptPath)) {
@@ -880,6 +881,28 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
             targetPrompt += `## ${input.as || 'Input'}\n`;
             targetPrompt += fs.readFileSync(fixturePath, 'utf8') + '\n\n';
           }
+        } else if (input.kind === 'inline') {
+          if (input.content) {
+            targetPrompt += `## ${input.as || 'Input'}\n`;
+            targetPrompt += input.content + '\n\n';
+          }
+        } else if (input.kind === 'ticket_file') {
+          const fixturePath = path.join(testsDir, caseDir, input.path);
+          const destDir = input.dest_dir || 'in-progress';
+          const ticketId = input.ticket_id;
+          if (!ticketId) {
+            throw new Error(`ticket_file input requires ticket_id (case ${caseId})`);
+          }
+          if (!taskWorkdir) {
+            throw new Error(`ticket_file input requires task workdir (case ${caseId})`);
+          }
+          if (!fs.existsSync(fixturePath)) {
+            throw new Error(`ticket_file fixture not found: ${fixturePath}`);
+          }
+          const destPath = path.join(taskWorkdir, '.workflow', 'tickets', destDir, `${ticketId}.md`);
+          fs.mkdirSync(path.dirname(destPath), { recursive: true });
+          fs.copyFileSync(fixturePath, destPath);
+          targetPrompt += `## Context\nticket_id: ${ticketId}\n\n`;
         }
       }
     }
@@ -887,7 +910,7 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
     if (!targetPrompt.trim()) {
       targetPrompt = testCase.prompt || testCase.input || '';
     }
-    
+
     return targetPrompt;
   }
   
@@ -909,13 +932,34 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
 
   const allResults = await Promise.all(
     allTasks.map(async (task) => {
+      const taskSuffix = `${caseId}-${task.agentId}-t${task.trial}`;
+      let taskWorkdir = null;
       try {
-        const targetPrompt = buildTargetPrompt();
+        taskWorkdir = createTestWorkdir(skillName, taskSuffix);
+        const targetPrompt = buildTargetPrompt(taskWorkdir);
         const targetOutput = await spawnAgent(task.agentConfig, targetPrompt, {
           timeout,
           stageId: `${caseId}-${task.agentId}-trial-${task.trial}`,
-          projectRoot: testWorkdir || undefined
+          projectRoot: taskWorkdir
         });
+
+        // Snapshot ticket files after target-run (for judge to inspect actual file state).
+        let ticketFilesSection = '';
+        const ticketInputs = (testCase.scenario?.inputs || []).filter(i => i.kind === 'ticket_file');
+        for (const input of ticketInputs) {
+          const ticketPath = path.join(
+            taskWorkdir,
+            '.workflow', 'tickets',
+            input.dest_dir || 'in-progress',
+            `${input.ticket_id}.md`
+          );
+          if (fs.existsSync(ticketPath)) {
+            const content = fs.readFileSync(ticketPath, 'utf8');
+            ticketFilesSection += `\n## Ticket File After Execution — ${input.ticket_id} (${input.dest_dir || 'in-progress'}/)\n\n\`\`\`markdown\n${content}\n\`\`\`\n`;
+          } else {
+            ticketFilesSection += `\n## Ticket File After Execution — ${input.ticket_id}\n\n(file missing at ${input.dest_dir || 'in-progress'}/${input.ticket_id}.md)\n`;
+          }
+        }
 
         const judgePrompt = `You are a judge evaluating the output of an AI agent.
 
@@ -924,7 +968,7 @@ ${rubric}
 
 ## Target Agent Output
 ${targetOutput.output || targetOutput.status || 'No output'}
-
+${ticketFilesSection}
 ## Task
 ${testCase.description || testCase.name || 'Evaluate the response'}
 
@@ -954,30 +998,49 @@ reason: <brief explanation>
           score,
           output: targetOutput.output || '',
           judge_output: judgeResult.output || '',
-          passed: score >= 4
+          passed: score >= 4,
+          errored: false
         };
       } catch (err) {
-        console.error(`[Runner] Trial failed: ${task.agentId} trial ${task.trial}`, err.message);
+        console.error(`[Runner] Trial errored: ${task.agentId} trial ${task.trial} — ${err.message}`);
+        try {
+          await writeTrialOutput(
+            skillName,
+            caseId,
+            task.agentId,
+            task.trial,
+            `# TRIAL ERRORED\n\nagent: ${task.agentId}\ntrial: ${task.trial}\nerror: ${err.message}\n`
+          );
+        } catch {}
         return {
           trial: task.trial,
           agentId: task.agentId,
-          score: 1,
+          score: null,
           error: err.message,
-          passed: false
+          passed: false,
+          errored: true
         };
+      } finally {
+        if (taskWorkdir) {
+          cleanupTestWorkdir(taskWorkdir);
+        }
       }
     })
   );
 
   for (const result of allResults) {
     results.per_model[result.agentId].trials.push(result);
-    if (result.passed) {
+    if (result.errored) {
+      results.per_model[result.agentId].error_count = (results.per_model[result.agentId].error_count || 0) + 1;
+    } else if (result.passed) {
       results.per_model[result.agentId].pass_count++;
     }
     results.rubric_scores.push({
       agentId: result.agentId,
       trial: result.trial,
-      score: result.score
+      score: result.score,
+      errored: !!result.errored,
+      error: result.error || undefined
     });
   }
   for (const agentId of Object.keys(results.per_model)) {
@@ -1019,19 +1082,27 @@ function aggregateResults(results, testCase) {
   
   for (const [agentId, modelData] of Object.entries(results.per_model)) {
     const passCount = modelData.pass_count;
+    const errorCount = modelData.error_count || 0;
     const total = modelData.total;
+    const effective = total - errorCount;
     const threshold = Math.ceil(total / 2);
-    
+
     let passed;
-    if (useAll) {
+    let errored = false;
+    if (effective === 0) {
+      passed = false;
+      errored = true;
+    } else if (useAll) {
       passed = passCount === total;
     } else {
       passed = passCount >= threshold;
     }
-    
+
     perModelResults[agentId] = {
       passed,
+      errored,
       pass_count: passCount,
+      error_count: errorCount,
       total,
       threshold: useAll ? total : threshold
     };
@@ -1103,13 +1174,12 @@ async function writeMetaJson(caseId, skillName, status, durationMs, l2Results = 
 }
 
 async function runTestsForSkill(skillName, opts) {
-  const testWorkdir = createTestWorkdir(skillName);
-  console.log(`[Runner] Isolated test workdir: ${testWorkdir}`);
+  console.log(`[Runner] Per-task isolated workdirs will be created for each (case × agent × trial)`);
   const result = {
     skill: skillName,
     status: 'passed',
     total: 0,
-    current_run: { passed: 0, failed: 0 },
+    current_run: { passed: 0, failed: 0, no_coverage: 0 },
     baseline_ref: 'origin/main',
     target_agents: [],
     judge_agent: null
@@ -1202,11 +1272,23 @@ async function runTestsForSkill(skillName, opts) {
 
     const runL2 = !opts.layer || opts.layer === 'l2';
 
-    if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent) {
+    const casesWithRubric = cases.filter(cd => {
+      try {
+        const tc = loadTestCase(skillName, cd.file);
+        return tc.assertions?.rubric && tc.assertions.rubric.length > 0;
+      } catch { return false; }
+    });
+    const anyHasRubric = casesWithRubric.length > 0;
+
+    if (casesWithRubric.length < cases.length) {
+      const missing = cases.length - casesWithRubric.length;
+      console.log(`[Runner] ${missing}/${cases.length} cases have no rubric — L2 will be skipped for them`);
+    }
+
+    if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent && anyHasRubric) {
       const trials = opts.fast ? 1 : 3;
       const totalModels = effectiveTargetAgents.length;
-      const llmEstimate = cases.length * totalModels * trials * 2;
-      await preFlightApproval(cases.length, totalModels, trials);
+      await preFlightApproval(casesWithRubric.length, totalModels, trials);
     }
 
     let secretScanFailed = false;
@@ -1214,12 +1296,6 @@ async function runTestsForSkill(skillName, opts) {
 
     const anyRunL1 = !opts.layer || opts.layer === 'deterministic';
     const anyRunL2 = !opts.layer || opts.layer === 'l2';
-    const anyHasRubric = cases.some(cd => {
-      try {
-        const tc = loadTestCase(skillName, cd.file);
-        return tc.assertions?.rubric && tc.assertions.rubric.length > 0;
-      } catch { return false; }
-    });
 
     if (anyRunL1 && !opts.skipSecretScan) {
       const scanResult = await runSecretScan();
@@ -1284,13 +1360,28 @@ async function runTestsForSkill(skillName, opts) {
           const l1Results = runL1Assertions(mockOutput, testCase);
           const l1Failed = l1Results.filter(r => !r.passed);
           const l1Skipped = l1Results.some(r => r.skipped);
+          const l1Declared = (testCase.assertions?.deterministic || []).length;
+          const l1Executed = l1Results.filter(r => !r.skipped).length;
 
-          const caseStatus = l1Failed.length === 0 ? 'passed' : 'failed';
+          const willRunL2 = runL2 && effectiveTargetAgents.length > 0 && judgeAgent && hasRubric;
+          const noCoverage = l1Declared > 0 && l1Executed === 0 && !willRunL2;
+
+          let caseStatus;
+          if (l1Failed.length > 0) {
+            caseStatus = 'failed';
+          } else if (noCoverage) {
+            caseStatus = 'no_coverage';
+          } else {
+            caseStatus = 'passed';
+          }
           currentRunStatuses[caseDef.id] = caseStatus;
 
-          if (l1Failed.length > 0) {
+          if (caseStatus === 'failed') {
             result.current_run.failed++;
             result.status = 'failed';
+          } else if (caseStatus === 'no_coverage') {
+            result.current_run.no_coverage = (result.current_run.no_coverage || 0) + 1;
+            console.log(`[Runner] ${caseDef.id}: no_coverage — L1 assertions require agent output but L2 is not configured (no rubric or no agents)`);
           } else {
             result.current_run.passed++;
           }
@@ -1300,20 +1391,27 @@ async function runTestsForSkill(skillName, opts) {
           }
 
           let l2Results = null;
-          if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent && hasRubric) {
+          if (willRunL2) {
             const trials = opts.fast ? 1 : 3;
             const index = loadIndexYaml(skillName);
             const defaultTimeout = index.execution?.default_timeout_s || 300;
             const timeout = testCase.execution?.timeout_s || defaultTimeout;
+            const caseTargetAgents = testCase.execution?.target_agents;
+            const perCaseAgents = caseTargetAgents && caseTargetAgents.length > 0
+              ? (validateAgents(caseTargetAgents, pipelineConfig), caseTargetAgents)
+              : effectiveTargetAgents;
+            if (caseTargetAgents && caseTargetAgents.length > 0) {
+              console.log(`[Runner] ${caseDef.id}: per-case target_agents override → ${perCaseAgents.join(', ')}`);
+            }
             try {
               l2Results = await runL2Evaluation(
                 skillName,
                 testCase,
                 caseDef,
-                effectiveTargetAgents,
+                perCaseAgents,
                 judgeAgent,
                 pipelineConfig,
-                { trials, concurrency: 2, timeout, testWorkdir }
+                { trials, concurrency: 2, timeout }
               );
 
               const aggregated = aggregateResults(l2Results, testCase);
@@ -1337,6 +1435,13 @@ async function runTestsForSkill(skillName, opts) {
           const trials = opts.fast ? 1 : 3;
           const defaultTimeout = index.execution?.default_timeout_s || 300;
           const timeout = testCase.execution?.timeout_s || defaultTimeout;
+          const caseTargetAgents = testCase.execution?.target_agents;
+          const perCaseAgents = caseTargetAgents && caseTargetAgents.length > 0
+            ? (validateAgents(caseTargetAgents, pipelineConfig), caseTargetAgents)
+            : effectiveTargetAgents;
+          if (caseTargetAgents && caseTargetAgents.length > 0) {
+            console.log(`[Runner] ${caseDef.id}: per-case target_agents override → ${perCaseAgents.join(', ')}`);
+          }
           let l2Results = null;
           let caseStatus = 'passed';
           try {
@@ -1344,7 +1449,7 @@ async function runTestsForSkill(skillName, opts) {
               skillName,
               testCase,
               caseDef,
-              effectiveTargetAgents,
+              perCaseAgents,
               judgeAgent,
               pipelineConfig,
               { trials, concurrency: 2, timeout }
@@ -1383,11 +1488,13 @@ async function runTestsForSkill(skillName, opts) {
         await writeMetaJson(caseDef.id, skillName, 'error', Date.now() - caseStart);
       }
     }));
+
+    if (result.status === 'passed' && result.current_run.no_coverage > 0 && result.current_run.passed === 0) {
+      result.status = 'no_coverage';
+    }
   } catch (e) {
     result.status = 'error';
     result.error = e.message;
-  } finally {
-    cleanupTestWorkdir(testWorkdir);
   }
 
   return {
@@ -1408,7 +1515,7 @@ async function runSkillTests(opts) {
     skill: opts.skill || 'unknown',
     mode: 'deterministic',
     total: 0,
-    current_run: { passed: 0, failed: 0 },
+    current_run: { passed: 0, failed: 0, no_coverage: 0 },
     baseline_ref: 'origin/main',
     git_head_comparison: null,
     verdict: 'ready_for_user_review',
@@ -1424,6 +1531,7 @@ async function runSkillTests(opts) {
       results.total = skillResult.total;
       results.current_run.passed = skillResult.current_run.passed;
       results.current_run.failed = skillResult.current_run.failed;
+      results.current_run.no_coverage = skillResult.current_run.no_coverage || 0;
       results.status = skillResult.status;
       results.target_agents = skillResult.target_agents;
       results.judge_agent = skillResult.judge_agent;
@@ -1517,6 +1625,9 @@ function printResult(result) {
   console.log(`total: ${result.total}`);
   console.log(`current_run.passed: ${result.current_run.passed}`);
   console.log(`current_run.failed: ${result.current_run.failed}`);
+  if (result.current_run.no_coverage) {
+    console.log(`current_run.no_coverage: ${result.current_run.no_coverage}`);
+  }
 
   if (result.baseline_ref) {
     console.log(`baseline_ref: ${result.baseline_ref}`);

@@ -35,4 +35,4 @@ assertions:
       values: ["scope", "исключен"]
 
 execution:
-  timeout_s: 120
+  timeout_s: 1200

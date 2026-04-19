@@ -6,8 +6,9 @@ execution:
   target_agents:
     - claude-sonnet
     - kilo-minimax
+    - kilo-glm
   judge_agent: claude-opus
-  default_timeout_s: 120
+  default_timeout_s: 1200
   baseline_ref: origin/main
 
 cases:

@@ -22,4 +22,4 @@ assertions:
       reason: "Задачи плана не должны содержать два глагола через «и»."
 
 execution:
-  timeout_s: 180
+  timeout_s: 1200

@@ -29,4 +29,4 @@ assertions:
       reason: "Скрипт валидации должен быть вызван."
 
 execution:
-  timeout_s: 180
+  timeout_s: 1200

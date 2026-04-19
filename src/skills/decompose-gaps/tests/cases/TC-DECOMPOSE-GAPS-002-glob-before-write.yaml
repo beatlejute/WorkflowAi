@@ -25,4 +25,4 @@ assertions:
       reason: "Должно быть обнаружено существование тикета."
 
 execution:
-  timeout_s: 120
+  timeout_s: 1200

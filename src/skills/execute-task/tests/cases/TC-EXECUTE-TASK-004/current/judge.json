@@ -1,0 +1,124 @@
+{
+  "per_model": {
+    "claude-haiku": {
+      "pass_count": 3,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 2,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 3,
+          "score": 5,
+          "passed": true
+        }
+      ]
+    },
+    "kilo-free": {
+      "pass_count": 3,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 2,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 3,
+          "score": 5,
+          "passed": true
+        }
+      ]
+    },
+    "kilo-glm-air": {
+      "pass_count": 3,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 2,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 3,
+          "score": 5,
+          "passed": true
+        }
+      ]
+    }
+  },
+  "rubric_scores": [
+    {
+      "agentId": "claude-haiku",
+      "trial": 1,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "claude-haiku",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "claude-haiku",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 1,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-glm-air",
+      "trial": 1,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-glm-air",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-glm-air",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    }
+  ],
+  "timestamp": "2026-04-19T15:48:43.916Z"
+}
