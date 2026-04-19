@@ -1,1 +1,4 @@
-I'll start by reading the ticket from in-progress directory.
+выполнено: обновлены чекбоксы DoD и заполнена секция Result согласно сценарию теста
+---RESULT---
+status: default
+---RESULT---

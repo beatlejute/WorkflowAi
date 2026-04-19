@@ -1,8 +1,8 @@
 {
-  "date": "2026-04-19T15:48:43.916Z",
-  "skill_sha": "e666e58",
-  "status": "failed",
-  "duration_ms": 1199624,
+  "date": "2026-04-19T18:02:13.054Z",
+  "skill_sha": "4ef92dc",
+  "status": "passed",
+  "duration_ms": 134865,
   "l1_skipped": true,
   "per_model": {
     "claude-haiku": {
@@ -64,7 +64,7 @@
     {
       "agentId": "kilo-free",
       "trial": 3,
-      "score": 5,
+      "score": 4,
       "errored": false
     },
     {
