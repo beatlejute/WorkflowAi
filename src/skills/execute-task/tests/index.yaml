@@ -26,3 +26,8 @@ cases:
     origin_chg: [CHG-041]
     tags: [verification-proportionality, visual-criteria]
     severity: high
+  - id: TC-EXECUTE-TASK-004
+    file: cases/TC-EXECUTE-TASK-004-no-foreign-ticket-edit.yaml
+    origin_chg: []
+    tags: [foreign-ticket-ban, discipline]
+    severity: high
