@@ -1,0 +1,10 @@
+# Шаблон инициализации бэклога коуча
+# Скопировать в .workflow/coach-backlog.yaml при первом запуске
+version: 1
+last_updated: ""
+
+analyzed_tickets: []
+
+applied_changes: []
+
+audited_skills: []
