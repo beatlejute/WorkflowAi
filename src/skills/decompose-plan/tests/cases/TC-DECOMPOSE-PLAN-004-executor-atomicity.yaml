@@ -48,6 +48,9 @@ assertions:
     - kind: output_does_not_contain
       values: ["Коммит feat", "commit создан", "merge выполнен"]
       reason: "Git-операции не должны попасть в DoD ни одного тикета."
+    - kind: output_does_not_contain
+      values: ["HUMAN-001", "HUMAN-0", "Создать коммит"]
+      reason: "Git-коммит — не HUMAN-задача (workflows/decompose.md шаг 3, human-task-rules.md). Тикет на коммит не создаётся — действие вне scope декомпозиции."
 
   rubric:
     - kind: llm_judge

@@ -1,36 +1,45 @@
-План декомпозирован на 3 атомарных тикета:
+## Итог декомпозиции
 
-| ID | Тип | Заголовок | Зависимости | Исполнитель |
-|----|-----|-----------|-------------|-------------|
-| IMPL-001 | impl | Реализовать функцию buildTargetPrompt() в src/scripts/run-skill-tests.js | — | agent |
-| QA-001 | qa | Написать юнит-тест TC-PROMPT-001 для функции buildTargetPrompt() | IMPL-001 | agent |
-| DOCS-001 | docs | Обновить README разделом про prompt assembly | IMPL-001 | agent |
+Создано **3 тикета** в `.workflow/tickets/backlog/`:
 
-### Проверка атомарности (кратко)
+| Тикет | Тип | Executor | Приоритет | Зависимости | DoD (дословно из плана) |
+|-------|-----|----------|-----------|-------------|------------------------|
+| IMPL-001 | impl | agent | 2 (high) | — | Функция buildTargetPrompt() реализована в src/scripts/run-skill-tests.js |
+| QA-001 | qa | agent | 2 (high) | IMPL-001 | Юнит-тест TC-PROMPT-001 написан и зелёный |
+| DOCS-001 | docs | agent | 3 (medium) | — | README обновлён разделом про prompt assembly |
 
-**IMPL-001:** все 7 проверок PASS (одна задача, один файл, один результат, ≤2 часа, независимая верификация, один исполнитель).  
-**QA-001:** все 7 проверок PASS (один тест, один объект, один результат, ≤2 часа, зависит от IMPL-001, один исполнитель).  
-**DOCS-001:** все 7 проверок PASS (одно обновление документации, один файл, один результат, ≤2 часа, зависит от IMPL-001, один исполнитель).
+**Цепочка:** IMPL-001 → QA-001 (DOCS-001 параллельно)
 
-### Scope-guard
+**Исключено из DoD:** «Коммит feat(runner): buildTargetPrompt создан» — git-операция стейкхолдера, не агента-исполнителя (Проверка 7, config.yaml не содержит типа тикета для git-операций).
 
-Все три задачи входят в scope плана, необходимы для достижения критериев успеха, не дублируют функции пайплайна.
-
-### Дедупликация
-
-Дубликатов в `.workflow/tickets/` не обнаружено.
+---
 
 ### Рекомендации для следующего плана (вне scope)
 
-- Коммит `feat(runner): buildTargetPrompt` выполняется стейкхолдером (git-операции не входят в ответственность агента-исполнителя) и поэтому не вынесен в отдельный тикет.
+*Нет задач вне scope текущего плана.*
 
 ---
-```yaml
+
+```
 ---RESULT---
 status: default
+tickets_created:
+  - .workflow/tickets/backlog/IMPL-001.md
+  - .workflow/tickets/backlog/QA-001.md
+  - .workflow/tickets/backlog/DOCS-001.md
+decomposition_summary:
+  plan_dod_items: 4
+  tickets_created: 3
+  git_ops_excluded: 1
+  breakdown:
+    DoD-1 (реализация функции) → IMPL-001
+    DoD-2 (юнит-тест TC-PROMPT-001) → QA-001 (depends: IMPL-001)
+    DoD-3 (README раздел) → DOCS-001
+    DoD-4 (коммит) → ИСКЛЮЧЁН (git-операция стейкхолдера, Проверка 7)
 ids_allocated_from:
   IMPL: 1
   QA: 1
   DOCS: 1
+note: "id_ranges_json не предоставлен — инфраструктурная ошибка стадии allocate-ticket-ids. Нумерация начата с 1, так как tickets/ полностью пуст."
 ---RESULT---
 ```
