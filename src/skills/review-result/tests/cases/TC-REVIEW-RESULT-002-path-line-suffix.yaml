@@ -13,15 +13,27 @@ severity: medium
 scenario:
   system_prompt_file: "../../SKILL.md"
   extra_instructions: |
-    Проведи ревью тикета. В «Изменённые файлы» указано: src/background/index.ts:204-211
+    Проведи ревью тикета IMPL-902, который лежит в .workflow/tickets/review/IMPL-902.md.
+    В разделе «Изменённые файлы» указан путь с суффиксом строк: src/background/index.ts:204-211.
+  inputs:
+    - kind: ticket_file
+      path: "../fixtures/IMPL-902-path-with-line.md"
+      ticket_id: IMPL-902
+      dest_dir: review
 
 assertions:
   deterministic:
-    - kind: output_does_not_contain
-      values: ["missing_files", "не найден"]
-      reason: "Путь с :line суффиксом не должен вызывать ошибку missing_files."
     - kind: output_contains_all
       values: ["---RESULT---"]
+      reason: "Результат должен быть в формате пайплайна."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/path-line-suffix.md"
+      criterion: "Корректно ли ревьюер обработал путь с :line-суффиксом, не пометив его как missing_files исключительно из-за нотации?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
 
 execution:
   timeout_s: 1200

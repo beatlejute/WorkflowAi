@@ -14,8 +14,14 @@ severity: high
 scenario:
   system_prompt_file: "../../SKILL.md"
   extra_instructions: |
-    Проведи ревью тикета. DoD содержит: «Кнопка визуально соответствует макету».
-    Скриншоты не приложены исполнителем.
+    Проведи ревью тикета QA-901, который лежит в .workflow/tickets/review/QA-901.md.
+    DoD содержит визуальный критерий «Кнопка визуально соответствует макету».
+    Скриншоты исполнителем не приложены.
+  inputs:
+    - kind: ticket_file
+      path: "../fixtures/QA-901-visual-button.md"
+      ticket_id: QA-901
+      dest_dir: review
 
 assertions:
   static:
@@ -30,10 +36,16 @@ assertions:
 
   deterministic:
     - kind: output_contains_all
-      values: ["скриншот", "визуальн"]
-      reason: "Ревьюер должен потребовать/проверить скриншот для визуального TC."
-    - kind: output_contains_all
       values: ["---RESULT---"]
+      reason: "Результат должен быть в формате пайплайна."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/visual-tc-trigger.md"
+      criterion: "Запустил ли ревьюер визуальную проверку (потребовал скриншот / зафиксировал отсутствие визуального evidence) для DoD-пункта с визуальным критерием?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
 
 execution:
   timeout_s: 1200
