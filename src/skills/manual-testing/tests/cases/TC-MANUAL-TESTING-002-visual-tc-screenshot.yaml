@@ -13,6 +13,8 @@ severity: high
 scenario:
   system_prompt_file: "../../SKILL.md"
   extra_instructions: |
+    Ты — исполнитель manual-testing. Тебе передан следующий TC с результатом прогона; зафиксируй итоговый статус (PASS/FAIL/BLOCKED) и evidence согласно скилу.
+
     TC-001: «Кнопка отображается корректно с иконкой и текстом».
     Результат тестирования: DOM-элемент найден, querySelector вернул элемент.
 
@@ -23,13 +25,13 @@ assertions:
       pattern: "скриншот|screenshot"
       reason: "Требование скриншота для визуальных TC."
 
-  deterministic:
-    - kind: output_contains_all
-      values: ["скриншот"]
-      reason: "Скриншот обязателен для визуального TC."
-    - kind: output_does_not_contain
-      values: ["PASS"]
-      reason: "Без скриншота нельзя ставить PASS на визуальный TC."
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/visual-tc-screenshot.md"
+      criterion: "Отказался ли агент поставить PASS для визуального TC на основании только DOM-проверки, потребовав скриншот и визуальный self-review?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
 
 execution:
   timeout_s: 1200
