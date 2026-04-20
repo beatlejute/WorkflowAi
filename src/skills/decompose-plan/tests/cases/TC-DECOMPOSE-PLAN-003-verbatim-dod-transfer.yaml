@@ -30,5 +30,13 @@ assertions:
       values: ["корректно отображ", "соответствует дизайн"]
       reason: "Смягчающие перефразировки запрещены."
 
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/verbatim-dod-transfer.md"
+      criterion: "Перенёс ли агент формулировку DoD из плана в тикет дословно, без смягчения и перефразировки?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
 execution:
-  timeout_s: 1200
+  timeout_s: 2400
