@@ -33,3 +33,8 @@ cases:
     origin_chg: []
     tags: [atomicity, executor]
     severity: high
+  - id: TC-DECOMPOSE-PLAN-005
+    file: cases/TC-DECOMPOSE-PLAN-005-capabilities-registry.yaml
+    origin_chg: [CHG-076]
+    tags: [capabilities, pipeline-contract, anti-pattern]
+    severity: critical
