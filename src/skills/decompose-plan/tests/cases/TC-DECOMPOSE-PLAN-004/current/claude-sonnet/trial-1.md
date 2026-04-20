@@ -1,49 +1,55 @@
-По одному совпадению для каждого тикета — коллизий нет.
-
 ---
 
-## Итог декомпозиции
+## Декомпозиция выполнена
 
-Создано **3 тикета** в `.workflow/tickets/backlog/`:
+### Анализ плана
 
-| Тикет | Тип | Executor | Приоритет | Зависимости | DoD (дословно из плана) |
-|-------|-----|----------|-----------|-------------|------------------------|
-| IMPL-1 | impl | agent | 2 (high) | — | Функция buildTargetPrompt() реализована в src/scripts/run-skill-tests.js |
-| QA-1 | qa | agent | 2 (high) | IMPL-1 | Юнит-тест TC-PROMPT-001 написан и зелёный |
-| DOCS-1 | docs | agent | 3 (medium) | — | README обновлён разделом про prompt assembly |
+DoD плана содержит 4 пункта. Проверка 7 (executor-атомарность) против `config.yaml → task_types`:
 
-**Цепочка:** IMPL-1 → QA-1 (DOCS-1 параллельно)
+| DoD-пункт | Тип исполнителя | Решение |
+|-----------|----------------|---------|
+| `buildTargetPrompt()` реализована | IMPL | → тикет IMPL-043 |
+| Юнит-тест TC-PROMPT-001 написан и зелёный | QA (отдельный тип) | → тикет QA-090 |
+| README обновлён разделом про prompt assembly | DOCS (отдельный тип) | → тикет DOCS-006 |
+| Коммит `feat(runner): buildTargetPrompt создан` | git-операция стейкхолдера | ❌ тикет не создаётся |
 
-**Исключено из DoD:** «Коммит feat(runner): buildTargetPrompt создан» — git-операция стейкхолдера, не агента-исполнителя (Проверка 7, config.yaml не содержит типа тикета для git-операций).
+### Созданные тикеты
 
----
+| ID | Тип | Название | Зависимости |
+|----|-----|----------|-------------|
+| IMPL-043 | impl | Реализовать функцию buildTargetPrompt() в run-skill-tests.js | — |
+| QA-090 | qa | Написать юнит-тест TC-PROMPT-001 для buildTargetPrompt() | IMPL-043 |
+| DOCS-006 | docs | Обновить README разделом про prompt assembly | — |
 
 ### Рекомендации для следующего плана (вне scope)
 
-- Создать `../shared/README.md` с реестром observable-инвариантов — причина: отсутствие реестра делает невозможным применение Условий Б и В (парные тикеты ручной проверки по observable-зоне) при декомпозиции будущих планов.
+- Создание git-коммита `feat(runner): buildTargetPrompt` — причина: git-операции выполняет стейкхолдер, а не агент-исполнитель. Коммит создаётся стейкхолдером после прохождения QA-090 и DOCS-006.
 
 ---
 
 ```
 ---RESULT---
-status: default
+status: success
 tickets_created:
-  - .workflow/tickets/backlog/IMPL-1.md
-  - .workflow/tickets/backlog/QA-1.md
-  - .workflow/tickets/backlog/DOCS-1.md
-decomposition_summary:
-  plan_dod_items: 4
-  tickets_created: 3
-  git_ops_excluded: 1
-  breakdown:
-    DoD-1 (реализация функции) → IMPL-1
-    DoD-2 (юнит-тест TC-PROMPT-001) → QA-1 (depends: IMPL-1)
-    DoD-3 (README раздел) → DOCS-1
-    DoD-4 (коммит) → ИСКЛЮЧЁН (git-операция стейкхолдера, Проверка 7)
-ids_allocated_from:
-  IMPL: 1
-  QA: 1
-  DOCS: 1
-note: "id_ranges_json не был передан — инфраструктурная ошибка стадии allocate-ticket-ids. Нумерация начата с 1, так как tickets/ полностью пуст."
+  - id: IMPL-043
+    path: .workflow/tickets/backlog/IMPL-043.md
+    type: impl
+    title: "Реализовать функцию buildTargetPrompt() в run-skill-tests.js"
+    dependencies: []
+  - id: QA-090
+    path: .workflow/tickets/backlog/QA-090.md
+    type: qa
+    title: "Написать юнит-тест TC-PROMPT-001 для buildTargetPrompt()"
+    dependencies: [IMPL-043]
+  - id: DOCS-006
+    path: .workflow/tickets/backlog/DOCS-006.md
+    type: docs
+    title: "Обновить README разделом про prompt assembly"
+    dependencies: []
+tickets_skipped:
+  - reason: "git-операция (коммит) — выполняет стейкхолдер, не агент"
+    source: "DoD: Коммит feat(runner): buildTargetPrompt создан"
+out_of_scope:
+  - "Создание git-коммита feat(runner): buildTargetPrompt — git-операции выполняет стейкхолдер"
 ---RESULT---
 ```
