@@ -32,5 +32,13 @@ assertions:
     - kind: output_does_not_contain
       values: ["максимальн", "вручную найд"]
 
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/get-next-id-mandatory.md"
+      criterion: "Получил ли агент ID тикетов через машинную аллокацию вместо ручного сканирования?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
 execution:
-  timeout_s: 1200
+  timeout_s: 2400

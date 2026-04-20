@@ -44,5 +44,13 @@ assertions:
       regex: "(PASS|FAIL).*(Проверка|Check)"
       reason: "Должна быть таблица результатов чеклиста атомарности."
 
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/atomicity-no-1to1.md"
+      criterion: "Разбил ли агент составную задачу плана на несколько атомарных тикетов и явно отказался от маппинга 1:1?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
 execution:
-  timeout_s: 1200
+  timeout_s: 2400
