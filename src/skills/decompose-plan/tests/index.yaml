@@ -28,3 +28,8 @@ cases:
     origin_chg: [CHG-040]
     tags: [dod-transfer, verbatim]
     severity: high
+  - id: TC-DECOMPOSE-PLAN-004
+    file: cases/TC-DECOMPOSE-PLAN-004-executor-atomicity.yaml
+    origin_chg: []
+    tags: [atomicity, executor]
+    severity: high

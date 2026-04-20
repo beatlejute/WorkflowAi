@@ -1,0 +1,61 @@
+id: TC-DECOMPOSE-PLAN-004
+title: "Декомпозитор применяет executor-атомарность (Проверка 7) — разбивает DoD по типу исполнителя"
+origin:
+  chg: []
+  incidents:
+    - "workflowAi PLAN-006: FIX-5 (unit-тест в feat-тикете), IMPL-25 (commit как DoD), FIX-7 (интеграция другого тикета в DoD) — 7 из 23 multi-iteration tickets плана"
+  principle: "Executor-атомарность: один тип исполнителя на тикет"
+  backlog_sources:
+    - ".workflow/coach-backlog.yaml"
+    - ".workflow/metrics/review-metrics.json"
+tags: [atomicity, executor, decomposition]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Декомпозируй следующую задачу плана. В проектном `config.yaml → task_types`
+    определены типы: IMPL (реализация кода), QA (написание автотестов),
+    DOCS (обновление документации), ADMIN (инфраструктурные операции).
+    Git-операции (commit, merge, push) в этом проекте выполняет стейкхолдер,
+    не агент-исполнитель.
+  inputs:
+    - kind: inline
+      as: plan_content
+      content: |
+        Задача: Реализовать функцию buildTargetPrompt() в runner'е
+          DoD:
+            - Функция buildTargetPrompt() реализована в src/scripts/run-skill-tests.js
+            - Юнит-тест TC-PROMPT-001 написан и зелёный
+            - README обновлён разделом про prompt assembly
+            - Коммит feat(runner): buildTargetPrompt создан
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "knowledge/atomicity-checklist.md"
+      pattern: "Проверка 7"
+      reason: "Проверка 7 executor-атомарности должна быть в чеклисте."
+    - kind: skill_contains
+      file: "knowledge/atomicity-checklist.md"
+      pattern: "executor"
+      reason: "Явное упоминание executor-атомарности."
+
+  deterministic:
+    - kind: output_matches
+      regex: "7\\. Один исполнитель"
+      reason: "В inline-таблице чеклиста должна быть Проверка 7."
+    - kind: output_does_not_contain
+      values: ["Коммит feat", "commit создан", "merge выполнен"]
+      reason: "Git-операции не должны попасть в DoD ни одного тикета."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/executor-atomicity.md"
+      criterion: "Разбил ли агент задачу на отдельные тикеты по типу исполнителя (IMPL + QA + DOCS) и удалил ли git-операции из DoD?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 2400
