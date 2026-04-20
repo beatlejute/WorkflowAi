@@ -34,5 +34,13 @@ assertions:
     - kind: output_contains_all
       values: ["scope", "исключен"]
 
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/scope-exclusion.md"
+      criterion: "Применил ли агент scope-проверку и отклонил ли gap, попадающий в раздел «Исключено из scope»?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
 execution:
-  timeout_s: 1200
+  timeout_s: 2400

@@ -24,5 +24,13 @@ assertions:
       values: ["уже существует"]
       reason: "Должно быть обнаружено существование тикета."
 
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/glob-before-write.md"
+      criterion: "Проверил ли агент существование тикета до записи и отказался ли от перезаписи?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
 execution:
-  timeout_s: 1200
+  timeout_s: 2400
