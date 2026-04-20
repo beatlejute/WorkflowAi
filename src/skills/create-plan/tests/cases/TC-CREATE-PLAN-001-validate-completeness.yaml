@@ -14,7 +14,8 @@ severity: high
 scenario:
   system_prompt_file: "../../SKILL.md"
   extra_instructions: |
-    Создай план для задачи: «Добавить тёмную тему в приложение».
+    Создай короткий план (не более 3 задач) для задачи: «Добавить переключатель тёмной темы в настройки приложения».
+    Сфокусируйся на демонстрации валидации полноты — полное ТЗ не требуется.
 
 assertions:
   static:
@@ -28,5 +29,13 @@ assertions:
       values: ["validate-completeness"]
       reason: "Скрипт валидации должен быть вызван."
 
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/validate-completeness.md"
+      criterion: "Выполнил ли агент обязательную валидацию полноты плана по чеклисту перед сохранением и отработал ли найденные пробелы?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
 execution:
-  timeout_s: 1200
+  timeout_s: 1800
