@@ -32,5 +32,13 @@ assertions:
       values: ["status: ok", "status: done", "status: default"]
       reason: "Запрещённые статусы."
 
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/result-block-format.md"
+      criterion: "Завершил ли агент анализ блоком ---RESULT--- со статусом строго completed или has_gaps в формате, пригодном для парсинга пайплайном?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
 execution:
   timeout_s: 1200
