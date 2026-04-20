@@ -71,13 +71,25 @@ function stripLineSuffix(filePath) {
   return match ? match[1] : filePath;
 }
 
-function checkFilesExist(filePaths) {
+function checkFilesExist(filePaths, workStartTime) {
+  const ticketWorkStart = workStartTime ? new Date(workStartTime) : null;
   return filePaths.map(filePath => {
     const fullPath = path.isAbsolute(filePath) ? filePath : path.join(PROJECT_DIR, filePath);
-    return {
-      path: filePath,
-      exists: fs.existsSync(fullPath)
-    };
+    const exists = fs.existsSync(fullPath);
+
+    if (!exists) {
+      return { path: filePath, exists: false, unchanged: false };
+    }
+
+    if (!ticketWorkStart) {
+      return { path: filePath, exists: true, unchanged: false };
+    }
+
+    const stats = fs.statSync(fullPath);
+    const fileMtime = new Date(stats.mtime);
+    const unchanged = fileMtime < ticketWorkStart;
+
+    return { path: filePath, exists: true, unchanged };
   });
 }
 
@@ -149,19 +161,22 @@ function verifyTicket(ticketPath) {
   if (!fs.existsSync(ticketPath)) {
     throw new Error(`Ticket file not found: ${ticketPath}`);
   }
-  
+
   const content = fs.readFileSync(ticketPath, 'utf8');
   const { frontmatter, body } = parseFrontmatter(content);
-  
+
   const filePaths = parseChangedFiles(body);
-  const filesExist = checkFilesExist(filePaths);
-  
+  // Используем updated_at как точку отсчёта для проверки mtime:
+  // если файл не был изменён ПОСЛЕ того как агент начал работу, он считается неизменённым.
+  const filesExist = checkFilesExist(filePaths, frontmatter.updated_at || frontmatter.created_at);
+
   const dodStats = parseDoDCompletion(body);
-  
+
   const resultStats = checkResultSection(body);
-  
+
   return {
     ticket_id: frontmatter.id,
+    created_at: frontmatter.created_at,
     files_exist: filesExist,
     dod_completion_pct: dodStats.percentage,
     dod_checked: dodStats.checked,
@@ -202,10 +217,15 @@ function formatVerdict(result) {
     .filter((f) => !f.exists)
     .map((f) => f.path);
 
+  const unchangedFiles = result.files_exist
+    .filter((f) => f.exists && f.unchanged)
+    .map((f) => f.path);
+
   // Критерии failed:
   //   - result_filled == false (секция Result пуста)
   //   - dod_completion_pct == 0 (ни один пункт DoD не отмечен)
   //   - есть отсутствующие файлы из "Изменённые файлы"
+  //   - есть неизменённые файлы (file_unchanged)
   const failReasons = [];
   const humanIssues = [];
   if (!result.result_filled) {
@@ -222,10 +242,16 @@ function formatVerdict(result) {
     failReasons.push(`missing_files=${missingFiles.join(',')}`);
     humanIssues.push(`не найдены заявленные файлы: ${missingFiles.join(', ')}`);
   }
+  if (unchangedFiles.length > 0) {
+    failReasons.push(`file_unchanged=${unchangedFiles.join(',')}`);
+    humanIssues.push(
+      `файлы не были изменены после начала выполнения тикета: ${unchangedFiles.join(', ')}`
+    );
+  }
 
   const status = failReasons.length === 0 ? 'passed' : 'failed';
 
-  return { status, missingFiles, failReasons, humanIssues };
+  return { status, missingFiles, unchangedFiles, failReasons, humanIssues };
 }
 
 function buildReviewRow(humanIssues) {
@@ -335,6 +361,7 @@ function main() {
     console.log(`dod_completed: ${result.dod_completed}`);
     console.log(`result_filled: ${result.result_filled}`);
     console.log(`missing_files: ${verdict.missingFiles.join(',')}`);
+    console.log(`unchanged_files: ${verdict.unchangedFiles.join(',')}`);
     if (verdict.failReasons.length > 0) {
       console.log(`fail_reasons: ${verdict.failReasons.join('; ')}`);
       console.log(`issues: ${verdict.humanIssues.join('; ')}`);

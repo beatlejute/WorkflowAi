@@ -350,7 +350,7 @@ pipeline:
     # -------------------------------------------------------------------------
     decompose-plan:
       description: "Декомпозировать план на тикеты"
-      agents: [claude-sonnet, kilo-glm, kilo-deepseek]
+      agents: [claude-sonnet, kilo-glm]
       skill: decompose-plan
       instructions: "Декомпозируй план .workflow/$context.plan_file на тикеты. ID тикетов бери ТОЛЬКО из JSON-карты id_ranges_json=$context.id_ranges_json — это стартовые номера по префиксам в формате {\"PREFIX\":N_start,...}, уже выделенные стадией allocate-ticket-ids. Распарси JSON, используй значения как есть. НЕ вызывай get-next-id.js и НЕ изобретай номера самостоятельно. Подробности: см. шаг 9.0 в workflows/decompose.md. При наличии $context.atomicity_failures — учти их при декомпозиции: исправь неатомарные тикеты."
       goto:
