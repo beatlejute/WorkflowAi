@@ -9,7 +9,7 @@ execution:
     - kilo-minimax
     - kilo-deepseek
   judge_agent: claude-opus
-  default_timeout_s: 1200
+  default_timeout_s: 1800
   baseline_ref: origin/main
 
 cases:

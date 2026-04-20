@@ -16,10 +16,24 @@ scenario:
     Создай план для задачи: «Исправить баги маппинга и добавить новые поля в API».
 
 assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Гранулярность задач"
+      reason: "Принцип Task Granularity должен быть в SKILL.md."
+
   deterministic:
     - kind: output_does_not_contain
       values: ["и добавить", "и обновить", "и исправить"]
       reason: "Задачи плана не должны содержать два глагола через «и»."
 
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/task-granularity.md"
+      criterion: "Сформулировал ли агент каждую задачу плана как одно действие над одним объектом и разбил ли составные постановки?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
 execution:
-  timeout_s: 1200
+  timeout_s: 1800
