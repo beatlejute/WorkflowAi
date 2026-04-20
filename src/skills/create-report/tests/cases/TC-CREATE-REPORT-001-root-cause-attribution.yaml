@@ -13,8 +13,18 @@ severity: high
 scenario:
   system_prompt_file: "../../SKILL.md"
   extra_instructions: |
-    Создай отчёт по пайплайну. Проблема: тикет QA-001 был skipped.
-    В логе видно, что check-relevance (строка 2166) пометил тикет как irrelevant.
+    Ты — исполнитель create-report. Сформируй фрагмент секции «Проблемы» отчёта
+    по одной ситуации: тикет QA-001 был ⏭ skipped в текущей итерации.
+
+    В логе пайплайна (файл `.workflow/logs/pipeline_2026-04-06_12-00-00.log`)
+    строка 2166 содержит решение:
+      `[check-relevance] COMPLETE stage="check-relevance" ticket_id="QA-001" status="irrelevant" reason="dependencies_inactive"`
+
+    Также в предыдущем отчёте REPORT-002 эта же проблема была ошибочно
+    атрибутирована стейджу `check-conditions`.
+
+    Задача: дай точную атрибуцию root cause для QA-001 по текущему логу,
+    в формате, который требует скил.
 
 assertions:
   static:
@@ -30,9 +40,18 @@ assertions:
   deterministic:
     - kind: output_contains_all
       values: ["check-relevance"]
-      reason: "Root cause должен быть атрибутирован правильному стейджу."
+      reason: "Root cause должен быть атрибутирован правильному стейджу из лога."
     - kind: output_does_not_contain
-      values: ["check-conditions", "угад", "предполаг"]
+      values: ["check-conditions"]
+      reason: "Не должен повторять ошибочную атрибуцию предыдущего отчёта."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/root-cause-attribution.md"
+      criterion: "Определил ли агент источник проблемы (root cause) по явной ссылке на лог пайплайна, а не на основании догадки о «знакомом» компоненте?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
 
 execution:
   timeout_s: 1200
