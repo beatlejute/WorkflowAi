@@ -350,7 +350,7 @@ pipeline:
     # -------------------------------------------------------------------------
     decompose-plan:
       description: "Декомпозировать план на тикеты"
-      agents: [claude-sonnet, kilo-deepseek]
+      agents: [claude-sonnet, kilo-glm, kilo-deepseek]
       skill: decompose-plan
       instructions: "Декомпозируй план .workflow/$context.plan_file на тикеты. ID тикетов бери ТОЛЬКО из JSON-карты id_ranges_json=$context.id_ranges_json — это стартовые номера по префиксам в формате {\"PREFIX\":N_start,...}, уже выделенные стадией allocate-ticket-ids. Распарси JSON, используй значения как есть. НЕ вызывай get-next-id.js и НЕ изобретай номера самостоятельно. Подробности: см. шаг 9.0 в workflows/decompose.md. При наличии $context.atomicity_failures — учти их при декомпозиции: исправь неатомарные тикеты."
       goto:
@@ -576,20 +576,16 @@ pipeline:
       description: "Выполнить выбранную задачу"
       skill: execute-task
       counter: task_attempts
-      agents: [kilo-free, claude-haiku, claude-sonnet, claude-opus, kilo-deepseek]
+      agents: [kilo-free, kilo-glm-air, claude-haiku, claude-sonnet, claude-opus, kilo-minimax, kilo-deepseek]
       agents_by_type:
         coach:
-          agents: [claude-sonnet, kilo-deepseek, kilo-minimax]
+          agents: [kilo-glm, claude-sonnet, kilo-minimax, kilo-deepseek]
           instructions: "Твоя роль: coach"
         qa:
-          agents: [claude-haiku, kilo-minimax, claude-sonnet, claude-opus]
+          agents: [claude-haiku, kilo-glm, claude-sonnet, claude-opus, kilo-minimax]
           instructions: "Твоя роль: manual-testing"
-        impl:
-          agents: [kilo-free, claude-haiku, claude-sonnet, kilo-minimax, kilo-deepseek]
         arch:
-          agents: [claude-opus, claude-sonnet, kilo-deepseek, kilo-minimax]
-        admin:
-          agents: [kilo-free, claude-haiku, kilo-minimax]
+          agents: [claude-opus, kilo-glm]
       goto:
         default:
           stage: move-to-review
@@ -661,7 +657,7 @@ pipeline:
     # -------------------------------------------------------------------------
     review-result:
       description: "Проверить результат выполнения на соответствие DoD тикета"
-      agents: [claude-haiku, claude-sonnet, kilo-deepseek]
+      agents: [claude-haiku, kilo-glm, claude-sonnet, kilo-minimax]
       skill: review-result
       counter: task_attempts
       goto:
@@ -724,7 +720,7 @@ pipeline:
     # -------------------------------------------------------------------------
     create-report:
       description: "Создать итоговый отчёт по выполненным задачам"
-      agents: [claude-sonnet, claude-opus, kilo-minimax, kilo-deepseek]
+      agents: [kilo-glm, claude-sonnet, kilo-minimax, kilo-deepseek]
       skill: create-report
       counter: create_report_attempts
       goto:
@@ -752,7 +748,7 @@ pipeline:
     # -------------------------------------------------------------------------
     analyze-report:
       description: "Проанализировать отчёт: план выполнен полностью?"
-      agents: [claude-opus, claude-sonnet, kilo-deepseek, kilo-minimax]
+      agents: [kilo-glm, claude-sonnet, kilo-minimax, kilo-deepseek]
       skill: analyze-report
       counter: analyze_report_attempts
       goto:
@@ -814,7 +810,7 @@ pipeline:
     # -------------------------------------------------------------------------
     decompose-gaps:
       description: "Декомпозировать недочёты из отчёта в новые тикеты"
-      agents: [claude-sonnet, kilo-minimax, kilo-deepseek]
+      agents: [claude-sonnet, kilo-minimax, kilo-deepseek, kilo-glm]
       skill: decompose-gaps
       goto:
         default: check-conditions
