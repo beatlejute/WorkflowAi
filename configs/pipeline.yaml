@@ -593,6 +593,17 @@ pipeline:
             ticket_id: "$context.ticket_id"
             attempt: "$counter.task_attempts"
             target: review
+        # Runner возвращает status=blocked при no_capable_agent / attempts_exhausted
+        # (resolveAgent в runner.mjs, строка ~926). Направляем тикет сразу в blocked/,
+        # минуя move-to-review → verify-artifacts → increment-task-attempts: иначе
+        # тикет крутится 6 итераций вхолостую (execute-task не может его взять,
+        # verify-artifacts фейлится с пустым result, счётчик достигает max → blocked
+        # всё равно). Прямой маршрут экономит ~6 пустых итераций на тикет.
+        blocked:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: blocked
         error:
           stage: move-to-review
           params:
@@ -728,6 +739,10 @@ pipeline:
           stage: analyze-report
           params:
             report_id: "$result.report_id"
+        # blocked означает, что required_capabilities из контекста (от предыдущего
+        # тикета) не покрыты ни одним агентом create-report. Это не фатально —
+        # завершаем пайплайн, отчёт не создан, но данные не теряются.
+        blocked: end
         error:
           stage: increment-create-report-attempts
 
@@ -758,6 +773,8 @@ pipeline:
           params:
             gaps: "$result.gaps"
             report_id: "$context.report_id"
+        # blocked по тем же причинам, что и в create-report — завершаем пайплайн.
+        blocked: end
         error:
           stage: increment-analyze-report-attempts
 

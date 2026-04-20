@@ -1,0 +1,78 @@
+id: TC-DECOMPOSE-PLAN-005
+title: "Декомпозитор сверяет required_capabilities с реестром pipeline-конфига — не изобретает ключи предметной области"
+origin:
+  chg: [CHG-076]
+  incidents:
+    - "PulseProxy PLAN-014 (2026-04-20): claude-sonnet назначил required_capabilities=[typescript, browser-extension] / [typescript, i18n] — ключей нет в реестре (реально только text, multimodal). Каскад no_capable_agent → 12 безрезультатных execute-task, 2 тикета ушли в blocked, план застопорен."
+    - "workflowAi PLAN-003 (2026-04-19, CHG-076): QA-002 создана с required_capabilities=[code_editing] — ключ не в реестре, привёл к misrouting → manual-testing → escalation → IMPL-009."
+  principle: "required_capabilities — замкнутый словарь из agents.*.capabilities pipeline-конфига, не описание предметной области"
+  backlog_sources:
+    - ".workflow/coach-backlog.yaml"
+tags: [capabilities, decomposition, pipeline-contract, anti-pattern]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Декомпозируй следующую задачу плана на тикеты.
+
+    ⚠️ Контекст проекта:
+    - В проектном `.workflow/config/pipeline.yaml` в секции `agents.*.capabilities`
+      декларированы **только** два ключа (union всех агентов): `text`, `multimodal`.
+      Других capability-ключей в конфиге нет.
+    - Задача предметной области TypeScript / browser-extension / i18n — это
+      описание задачи, а не способность агента.
+
+    Перед созданием тикетов выпиши `capabilities_registry` явным списком в
+    рассуждении. Для каждого создаваемого тикета назначь `required_capabilities`
+    строго из этого списка (или оставь пустым). Не изобретай ключи, описывающие
+    язык, платформу или подсистему.
+
+  inputs:
+    - kind: inline
+      as: plan_content
+      content: |
+        Задача: Реализовать модалку «Выбор прокси по умолчанию»
+          DoD:
+            - Компонент src/popup/select-default-proxy-modal.ts создан
+              (TypeScript, browser extension UI)
+            - Ключ i18n selectDefaultProxyTitle добавлен в locale-файлы
+            - Юнит-тесты для модалки зелёные
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "knowledge/capabilities.md"
+      pattern: "Обязательная процедура"
+      reason: "В knowledge должна быть описана обязательная процедура выписки реестра."
+    - kind: skill_contains
+      file: "knowledge/capabilities.md"
+      pattern: "изобрет"
+      reason: "Явное упоминание запрета на изобретённые ключи."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "9.C"
+      reason: "В воркфлоу должен быть стоп-гейт выписки capabilities_registry."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "capabilities_registry"
+      reason: "Явное именование словаря, который агент обязан выписать."
+
+  deterministic:
+    - kind: output_contains_all
+      values: ["capabilities_registry"]
+      reason: "Агент обязан выписать словарь в рассуждении до создания тикетов."
+    - kind: output_does_not_contain
+      values: ["required_capabilities:\n  - typescript", "required_capabilities: [typescript", "required_capabilities:\n  - browser-extension", "required_capabilities: [browser-extension", "required_capabilities:\n  - i18n", "required_capabilities: [i18n"]
+      reason: "Изобретённые ключи предметной области (typescript/browser-extension/i18n) не должны появляться в required_capabilities тикетов — их нет в реестре проекта."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/capabilities-registry.md"
+      criterion: "Выписал ли агент capabilities_registry из pipeline-конфига и назначил ли required_capabilities строго из реестра, без изобретённых ключей предметной области?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 2400
