@@ -1,41 +1,88 @@
 {
-  "date": "2026-04-20T08:29:58.868Z",
-  "skill_sha": "dd09c34",
-  "status": "failed",
-  "duration_ms": 174577,
-  "l1_skipped": true,
   "per_model": {
     "kilo-free": {
-      "passed": false,
-      "errored": false,
       "pass_count": 1,
-      "error_count": 0,
       "total": 3,
-      "threshold": 2
+      "trials": [
+        {
+          "trial": 1,
+          "score": 4,
+          "passed": true
+        },
+        {
+          "trial": 2,
+          "score": 3,
+          "passed": false
+        },
+        {
+          "trial": 3,
+          "score": 3,
+          "passed": false
+        }
+      ]
     },
     "claude-haiku": {
-      "passed": true,
-      "errored": false,
       "pass_count": 2,
-      "error_count": 0,
       "total": 3,
-      "threshold": 2
+      "trials": [
+        {
+          "trial": 1,
+          "score": 4,
+          "passed": true
+        },
+        {
+          "trial": 2,
+          "score": 3,
+          "passed": false
+        },
+        {
+          "trial": 3,
+          "score": 4,
+          "passed": true
+        }
+      ]
     },
     "kilo-glm-air": {
-      "passed": false,
-      "errored": false,
       "pass_count": 0,
-      "error_count": 0,
       "total": 3,
-      "threshold": 2
+      "trials": [
+        {
+          "trial": 1,
+          "score": 1,
+          "passed": false
+        },
+        {
+          "trial": 2,
+          "score": 1,
+          "passed": false
+        },
+        {
+          "trial": 3,
+          "score": 1,
+          "passed": false
+        }
+      ]
     },
     "kilo-glm": {
-      "passed": true,
-      "errored": false,
       "pass_count": 3,
-      "error_count": 0,
       "total": 3,
-      "threshold": 2
+      "trials": [
+        {
+          "trial": 1,
+          "score": 4,
+          "passed": true
+        },
+        {
+          "trial": 2,
+          "score": 4,
+          "passed": true
+        },
+        {
+          "trial": 3,
+          "score": 5,
+          "passed": true
+        }
+      ]
     }
   },
   "rubric_scores": [
@@ -111,5 +158,6 @@
       "score": 5,
       "errored": false
     }
-  ]
+  ],
+  "timestamp": "2026-04-20T08:29:58.867Z"
 }
