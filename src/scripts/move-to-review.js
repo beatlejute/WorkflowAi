@@ -16,8 +16,6 @@ import fs from "fs";
 import path from "path";
 import { findProjectRoot } from "workflow-ai/lib/find-root.mjs";
 import {
-  parseFrontmatter,
-  serializeFrontmatter,
   printResult,
   getLastReviewStatus,
 } from "workflow-ai/lib/utils.mjs";
@@ -98,18 +96,18 @@ function moveToReview(ticketId) {
   }
 
   const content = fs.readFileSync(sourcePath, "utf8");
-  const { frontmatter, body } = parseFrontmatter(content);
 
-  frontmatter.updated_at = new Date().toISOString();
-
-  const newContent = serializeFrontmatter(frontmatter) + body;
+  // updated_at не обновляем: verify-artifacts сравнивает mtime файлов с updated_at,
+  // чтобы убедиться, что они были изменены агентом. updated_at должен сохранять момент
+  // перемещения тикета в in-progress (до начала работы агента) — иначе любой
+  // легитимно изменённый файл будет ложно отклонён (mtime_edit < updated_at_review).
 
   if (!fs.existsSync(REVIEW_DIR)) {
     fs.mkdirSync(REVIEW_DIR, { recursive: true });
   }
 
   fs.renameSync(sourcePath, targetPath);
-  fs.writeFileSync(targetPath, newContent, "utf8");
+  fs.writeFileSync(targetPath, content, "utf8");
 
   return {
     status: "moved",
