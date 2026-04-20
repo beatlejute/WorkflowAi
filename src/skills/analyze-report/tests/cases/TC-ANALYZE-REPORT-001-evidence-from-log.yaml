@@ -13,8 +13,22 @@ severity: high
 scenario:
   system_prompt_file: "../../SKILL.md"
   extra_instructions: |
-    Проанализируй прогресс плана. В отчёте указано: «Root cause: check-conditions.js».
-    Но в логе стейдж check-relevance принял решение (строка 2166).
+    Стейкхолдер просит: «Проанализируй прогресс плана PLAN-001 по текущей итерации.
+    Входные данные в рабочей директории: REPORT-002-incorrect-attribution.md
+    (предыдущий отчёт с атрибуцией root cause) и pipeline-2026-04-06_qa-001-skip.log
+    (лог пайплайна итерации).»
+
+    В отчёте root cause для QA-001 атрибутирован `check-conditions.js`. В логе
+    итоговое решение о skip приняла запись стейджа `check-relevance` (строка 29:
+    decision=irrelevant, reason=dependencies_inactive). Верифицируй каждый finding
+    по логу и выдай корректную атрибуцию.
+  inputs:
+    - kind: file
+      path: "../fixtures/REPORT-002-incorrect-attribution.md"
+      as: previous_report
+    - kind: file
+      path: "../fixtures/pipeline-2026-04-06_qa-001-skip.log"
+      as: pipeline_log
 
 assertions:
   static:
@@ -33,6 +47,14 @@ assertions:
     - kind: output_does_not_contain
       values: ["check-conditions"]
       reason: "Не должен копировать неверную атрибуцию."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/evidence-from-log.md"
+      criterion: "Верифицировал ли агент finding по явной ссылке на лог пайплайна вместо принятия атрибуции отчёта на веру?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
 
 execution:
   timeout_s: 1200

@@ -1,6 +1,115 @@
 {
-  "date": "2026-04-18T11:43:49.156Z",
-  "skill_sha": "2429ed2",
+  "date": "2026-04-20T12:21:11.683Z",
+  "skill_sha": "7d62ab4",
   "status": "passed",
-  "duration_ms": 1
+  "duration_ms": 471969,
+  "l1_skipped": true,
+  "per_model": {
+    "claude-sonnet": {
+      "passed": true,
+      "errored": false,
+      "pass_count": 3,
+      "error_count": 0,
+      "total": 3,
+      "threshold": 2
+    },
+    "kilo-glm": {
+      "passed": true,
+      "errored": false,
+      "pass_count": 3,
+      "error_count": 0,
+      "total": 3,
+      "threshold": 2
+    },
+    "kilo-minimax": {
+      "passed": true,
+      "errored": false,
+      "pass_count": 3,
+      "error_count": 0,
+      "total": 3,
+      "threshold": 2
+    },
+    "kilo-deepseek": {
+      "passed": true,
+      "errored": false,
+      "pass_count": 2,
+      "error_count": 0,
+      "total": 3,
+      "threshold": 2
+    }
+  },
+  "rubric_scores": [
+    {
+      "agentId": "claude-sonnet",
+      "trial": 1,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-deepseek",
+      "trial": 1,
+      "score": 1,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-deepseek",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-deepseek",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-glm",
+      "trial": 1,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-glm",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-glm",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-minimax",
+      "trial": 1,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-minimax",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-minimax",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    }
+  ]
 }

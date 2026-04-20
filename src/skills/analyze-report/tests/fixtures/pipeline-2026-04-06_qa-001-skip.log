@@ -1,0 +1,32 @@
+[2026-04-06 12:00:00] [INFO] [PipelineRunner] Step 312
+[2026-04-06 12:00:00] [INFO] [PipelineRunner] Current stage: pick-next-task
+[2026-04-06 12:00:00] [INFO] [pick-next-task] START stage="pick-next-task" agent="script-pick" skill="undefined"
+[2026-04-06 12:00:00] [INFO] [pick-next-task] OUTPUT ↓
+[2026-04-06 12:00:00] [INFO] [pick-next-task]   Selected ticket: QA-001 (plan PLAN-001, status=ready)
+[2026-04-06 12:00:00] [INFO] [pick-next-task] COMPLETE stage="pick-next-task" ticket_id="QA-001" status="picked"
+[2026-04-06 12:00:00] [INFO] [PipelineRunner] Step 313
+[2026-04-06 12:00:00] [INFO] [PipelineRunner] Current stage: check-conditions
+[2026-04-06 12:00:00] [INFO] [check-conditions] START stage="check-conditions" agent="script-check" ticket_id="QA-001"
+[2026-04-06 12:00:00] [INFO] [check-conditions] RUN node .workflow/src/scripts/check-conditions.js QA-001
+[2026-04-06 12:00:00] [INFO] [check-conditions] OUTPUT ↓
+[2026-04-06 12:00:00] [INFO] [check-conditions]   Conditions evaluation for QA-001:
+[2026-04-06 12:00:00] [INFO] [check-conditions]   - dependencies.resolved: true
+[2026-04-06 12:00:00] [INFO] [check-conditions]   - prerequisites.met: true
+[2026-04-06 12:00:00] [INFO] [check-conditions]   - blocking_tickets: []
+[2026-04-06 12:00:00] [INFO] [check-conditions]   Result: conditions_ok
+[2026-04-06 12:00:00] [INFO] [check-conditions] COMPLETE stage="check-conditions" ticket_id="QA-001" status="conditions_ok"
+[2026-04-06 12:00:00] [INFO] [PipelineRunner] Step 314
+[2026-04-06 12:00:00] [INFO] [PipelineRunner] Current stage: check-relevance
+[2026-04-06 12:00:00] [INFO] [check-relevance] START stage="check-relevance" agent="script-relevance" ticket_id="QA-001"
+[2026-04-06 12:00:00] [INFO] [check-relevance] RUN node .workflow/src/scripts/check-relevance.js QA-001
+[2026-04-06 12:00:00] [INFO] [check-relevance] OUTPUT ↓
+[2026-04-06 12:00:00] [INFO] [check-relevance]   Relevance evaluation for QA-001:
+[2026-04-06 12:00:00] [INFO] [check-relevance]   - dependencies.status: inactive
+[2026-04-06 12:00:00] [INFO] [check-relevance]   - decision: irrelevant (dependencies inactive)
+[2026-04-06 12:00:00] [INFO] [check-relevance] COMPLETE stage="check-relevance" ticket_id="QA-001" status="irrelevant" reason="dependencies_inactive"
+[2026-04-06 12:00:00] [INFO] [PipelineRunner] Step 315
+[2026-04-06 12:00:00] [INFO] [PipelineRunner] Current stage: skip-ticket
+[2026-04-06 12:00:00] [INFO] [skip-ticket] START stage="skip-ticket" agent="script-skip" ticket_id="QA-001"
+[2026-04-06 12:00:00] [INFO] [skip-ticket] OUTPUT ↓
+[2026-04-06 12:00:00] [INFO] [skip-ticket]   Moving QA-001 → skipped/ (reason from check-relevance: dependencies_inactive)
+[2026-04-06 12:00:00] [INFO] [skip-ticket] COMPLETE stage="skip-ticket" ticket_id="QA-001" status="skipped"
