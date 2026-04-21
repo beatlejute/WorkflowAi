@@ -22,7 +22,7 @@
       ]
     },
     "kilo-glm": {
-      "pass_count": 2,
+      "pass_count": 3,
       "total": 3,
       "trials": [
         {
@@ -32,8 +32,8 @@
         },
         {
           "trial": 2,
-          "score": null,
-          "passed": false
+          "score": 5,
+          "passed": true
         },
         {
           "trial": 3,
@@ -64,13 +64,13 @@
       ]
     },
     "kilo-deepseek": {
-      "pass_count": 3,
+      "pass_count": 1,
       "total": 3,
       "trials": [
         {
           "trial": 1,
-          "score": 5,
-          "passed": true
+          "score": null,
+          "passed": false
         },
         {
           "trial": 2,
@@ -79,8 +79,8 @@
         },
         {
           "trial": 3,
-          "score": 5,
-          "passed": true
+          "score": null,
+          "passed": false
         }
       ]
     }
@@ -107,8 +107,9 @@
     {
       "agentId": "kilo-deepseek",
       "trial": 1,
-      "score": 5,
-      "errored": false
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-DECOMPOSE-GAPS-003-kilo-deepseek-trial-1\" timed out after 2400s"
     },
     {
       "agentId": "kilo-deepseek",
@@ -119,8 +120,9 @@
     {
       "agentId": "kilo-deepseek",
       "trial": 3,
-      "score": 5,
-      "errored": false
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-DECOMPOSE-GAPS-003-kilo-deepseek-trial-3\" timed out after 2400s"
     },
     {
       "agentId": "kilo-glm",
@@ -131,9 +133,8 @@
     {
       "agentId": "kilo-glm",
       "trial": 2,
-      "score": null,
-      "errored": true,
-      "error": "Stage \"TC-DECOMPOSE-GAPS-001-kilo-glm-trial-2\" timed out after 2400s"
+      "score": 5,
+      "errored": false
     },
     {
       "agentId": "kilo-glm",
@@ -160,5 +161,5 @@
       "errored": false
     }
   ],
-  "timestamp": "2026-04-21T08:51:13.394Z"
+  "timestamp": "2026-04-21T08:51:57.614Z"
 }

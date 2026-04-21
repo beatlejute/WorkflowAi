@@ -1,8 +1,8 @@
 {
-  "date": "2026-04-21T08:51:13.396Z",
+  "date": "2026-04-21T08:51:57.614Z",
   "skill_sha": "3cc51dd",
-  "status": "passed",
-  "duration_ms": 2405055,
+  "status": "failed",
+  "duration_ms": 2419976,
   "l1_skipped": true,
   "per_model": {
     "claude-sonnet": {
@@ -16,8 +16,8 @@
     "kilo-glm": {
       "passed": true,
       "errored": false,
-      "pass_count": 2,
-      "error_count": 1,
+      "pass_count": 3,
+      "error_count": 0,
       "total": 3,
       "threshold": 2
     },
@@ -30,10 +30,10 @@
       "threshold": 2
     },
     "kilo-deepseek": {
-      "passed": true,
+      "passed": false,
       "errored": false,
-      "pass_count": 3,
-      "error_count": 0,
+      "pass_count": 1,
+      "error_count": 2,
       "total": 3,
       "threshold": 2
     }
@@ -60,8 +60,9 @@
     {
       "agentId": "kilo-deepseek",
       "trial": 1,
-      "score": 5,
-      "errored": false
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-DECOMPOSE-GAPS-003-kilo-deepseek-trial-1\" timed out after 2400s"
     },
     {
       "agentId": "kilo-deepseek",
@@ -72,8 +73,9 @@
     {
       "agentId": "kilo-deepseek",
       "trial": 3,
-      "score": 5,
-      "errored": false
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-DECOMPOSE-GAPS-003-kilo-deepseek-trial-3\" timed out after 2400s"
     },
     {
       "agentId": "kilo-glm",
@@ -84,9 +86,8 @@
     {
       "agentId": "kilo-glm",
       "trial": 2,
-      "score": null,
-      "errored": true,
-      "error": "Stage \"TC-DECOMPOSE-GAPS-001-kilo-glm-trial-2\" timed out after 2400s"
+      "score": 5,
+      "errored": false
     },
     {
       "agentId": "kilo-glm",
