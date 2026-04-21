@@ -1,0 +1,50 @@
+id: TC-REVIEW-RESULT-003
+title: "Ревьюер ловит нарушение изоляции тестов"
+origin:
+  chg: [CHG-test-hygiene-2026-04-21]
+  incidents:
+    - "workflowAi: тест error-classifier.test.mjs писал в реальный .workflow/config/agent-health-rules.yaml, полагаясь на cleanup в теле функции; при прерывании оставлял артефакты в рабочем репо и ложно срабатывали механические проверки"
+  principle: "Проверка изоляции теста ортогональна результату прогона: зелёный тест, пишущий в рабочий репозиторий — токсичный"
+  backlog_sources:
+    - "d:/Dev/workflowAi/.workflow/coach-backlog.yaml"
+tags: [test-hygiene, isolation, knowledge-test-hygiene]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Проведи ревью тикета QA-904, который лежит в .workflow/tickets/review/QA-904.md.
+    DoD тикета явно требует изоляции теста (tmp-корень, не запись в рабочий
+    репозиторий). Содержимое файла теста, на который ссылается секция
+    «Изменённые файлы», приведено ниже (блок "## Test file content") —
+    используй его для оценки изоляции. Тест формально проходит
+    (`node --test` success), но проверка изоляции ортогональна результату
+    прогона.
+  inputs:
+    - kind: ticket_file
+      path: "../fixtures/QA-904-test-isolation-violation/QA-904.md"
+      ticket_id: QA-904
+      dest_dir: review
+    - kind: file
+      path: "../fixtures/QA-904-test-isolation-violation/example-test.mjs"
+      as: "Test file content (src/skills/review-result/tests/fixtures/QA-904-test-isolation-violation/example-test.mjs)"
+
+assertions:
+  deterministic:
+    - kind: output_contains_all
+      values: ["---RESULT---"]
+      reason: "Результат должен быть в формате пайплайна."
+    - kind: output_contains_all
+      values: ["failed"]
+      reason: "Вердикт — failed по нарушению изоляции."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/test-isolation.md"
+      criterion: "Поймал ли ревьюер нарушение изоляции теста и оформил failed с конкретным issue, процитировав проблемные строки теста?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 1200
