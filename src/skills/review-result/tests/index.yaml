@@ -23,3 +23,8 @@ cases:
     origin_chg: [CHG-055]
     tags: [path-parsing, verify-artifacts]
     severity: medium
+  - id: TC-REVIEW-RESULT-003
+    file: cases/TC-REVIEW-RESULT-003-test-isolation.yaml
+    origin_chg: [CHG-test-hygiene-2026-04-21]
+    tags: [test-hygiene, isolation, knowledge-test-hygiene]
+    severity: high

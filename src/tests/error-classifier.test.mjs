@@ -1,9 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, rmSync } from 'fs';
+import { writeFileSync, mkdirSync, rmSync, mkdtempSync } from 'fs';
 import { join } from 'path';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
+import os from 'os';
 import {
   loadRules,
   classify,
@@ -12,22 +11,24 @@ import {
   InvalidRulesConfigError,
 } from '../lib/error-classifier.mjs';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const testProjectRoot = join(__dirname, '..', '..');
-const testConfigPath = join(testProjectRoot, '.workflow', 'config', 'agent-health-rules.yaml');
+// Изолированные пути создаются заново на каждом createTestConfig().
+// Глобальные let-переменные сохранены (а не константы), чтобы
+// не переписывать все 27 вызовов loadRules(testProjectRoot, testConfigPath).
+let testProjectRoot = mkdtempSync(join(os.tmpdir(), 'error-classifier-'));
+let testConfigPath = join(testProjectRoot, '.workflow', 'config', 'agent-health-rules.yaml');
 
-// Helper to create test config file
 function createTestConfig(rules) {
-  const configDir = join(testProjectRoot, '.workflow', 'config');
-  mkdirSync(configDir, { recursive: true });
+  // Свежая tmp-директория на каждый прогон — гарантирует отсутствие утечек
+  // между тестами при отложенной/пропущенной очистке.
+  testProjectRoot = mkdtempSync(join(os.tmpdir(), 'error-classifier-'));
+  testConfigPath = join(testProjectRoot, '.workflow', 'config', 'agent-health-rules.yaml');
+  mkdirSync(join(testProjectRoot, '.workflow', 'config'), { recursive: true });
   writeFileSync(testConfigPath, rules, 'utf-8');
 }
 
-// Helper to clean up test config
 function cleanupTestConfig() {
   try {
-    rmSync(testConfigPath);
+    rmSync(testProjectRoot, { recursive: true, force: true });
   } catch (e) {
     // ignore
   }
