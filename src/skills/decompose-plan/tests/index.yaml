@@ -38,3 +38,8 @@ cases:
     origin_chg: [CHG-076]
     tags: [capabilities, pipeline-contract, anti-pattern]
     severity: critical
+  - id: TC-DECOMPOSE-PLAN-006
+    file: cases/TC-DECOMPOSE-PLAN-006-dod-threshold.yaml
+    origin_chg: []
+    tags: [atomicity, dod, threshold]
+    severity: high
