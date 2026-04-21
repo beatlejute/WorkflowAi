@@ -6,7 +6,9 @@ import { spawn, execSync } from 'child_process';
 import crypto from 'crypto';
 import yaml from './lib/js-yaml.mjs';
 import { findProjectRoot } from './lib/find-root.mjs';
-import { loadRules, scanStderrForFatalRule } from './lib/error-classifier.mjs';
+import { loadRules, scanStderrForFatalRule, classify } from './lib/error-classifier.mjs';
+import { snapshot, diff, isEmpty } from './lib/artifact-snapshot.mjs';
+import { markUnhealthy } from './lib/agent-health-registry.mjs';
 
 // ============================================================================
 // Logger — система логирования с уровнями DEBUG/INFO/WARN/ERROR
@@ -848,6 +850,9 @@ class StageExecutor {
     // Текущий дочерний процесс агента (для kill при shutdown)
     this.currentChild = null;
 
+    // Правила health-классификатора (инициализируются один раз в конструкторе)
+    this.rules = loadRules(projectRoot);
+
     // Лениво загружаемые правила health-классификатора для онлайн-сканирования stderr
     this._healthRules = null;
   }
@@ -893,7 +898,8 @@ class StageExecutor {
    *   4. Скрипт-агенты (stage.agent: script-*) обрабатываются в отдельной ветке
    *      execute() — сюда не попадают.
    */
-  resolveAgent(stage, stageId) {
+  resolveAgent(stage, stageId, options = {}) {
+    const excludeAgents = options.excludeAgents || [];
     // Семантика: counter = число УЖЕ ИСЧЕРПАННЫХ попыток (0 на старте, инкрементируется
     // стадией `increment-*-attempts` ПОСЛЕ каждой неудачи). attempt — номер текущей
     // (1-based). Читаем counter через ?? 0, чтобы отличать «ещё не запускались»
@@ -943,9 +949,21 @@ class StageExecutor {
       const caps = Array.isArray(agent.capabilities) ? agent.capabilities : [];
       return required.every(r => caps.includes(r));
     };
-    const compatible = agentIds.filter(covers);
+    const afterCapabilities = agentIds.filter(covers);
 
-    if (compatible.length === 0) {
+    // Фильтр по excludeAgents (для fallback)
+    const afterExclude = excludeAgents.length > 0
+      ? afterCapabilities.filter(id => !excludeAgents.includes(id))
+      : afterCapabilities;
+
+    if (afterExclude.length === 0) {
+      if (excludeAgents.length > 0 && afterCapabilities.length === 0) {
+        return {
+          blocked: 'all_unhealthy',
+          reason: `All agents tried in fallback`,
+          attempt
+        };
+      }
       return {
         blocked: 'no_capable_agent',
         reason: `No agent in [${agentIds.join(', ')}] covers required_capabilities [${required.join(', ')}]`,
@@ -954,12 +972,106 @@ class StageExecutor {
     }
 
     // Курсор = (attempt - 1) % length — ротация по кругу
-    const cursor = (attempt - 1) % compatible.length;
+    const cursor = (attempt - 1) % afterExclude.length;
 
-    const agentId = compatible[cursor];
+    const agentId = afterExclude[cursor];
     // Клонируем stage с подменой instructions (для agents_by_type override)
     const effectiveStage = { ...stage, instructions };
-    return { agentId, effectiveStage, attempt, compatible };
+    return { agentId, effectiveStage, attempt, compatible: afterExclude };
+  }
+
+  /**
+   * Выполняет stage с fallback-логикой: при пустом artifact diff делает retry с другим агентом.
+   * @param {string} stageId - ID stage из конфигурации
+   * @returns {Promise<{status: string, output: string, result?: object}>}
+   */
+  async executeWithFallback(stageId) {
+    const stage = this.pipeline.stages[stageId];
+    if (!stage) {
+      throw new Error(`Stage not found: ${stageId}`);
+    }
+
+    const triedInThisAttempt = [];
+    let lastErr = null;
+
+    const snapshotEnabled = this.pipeline.execution?.artifact_snapshot_enabled !== false;
+    const snapshotOpts = {
+      includePaths: this.pipeline.execution?.snapshot_paths ?? ['src', 'configs'],
+      snapshotMaxFileSize: this.pipeline.execution?.snapshot_max_file_size ?? 524288,
+    };
+
+    while (true) {
+      const resolved = this.resolveAgent(stage, stageId, { excludeAgents: triedInThisAttempt });
+
+      if (resolved.blocked) {
+        if (resolved.blocked === 'all_unhealthy' && lastErr) {
+          throw lastErr;
+        }
+        return { status: 'blocked', reason: resolved.reason };
+      }
+
+      const { agentId, effectiveStage } = resolved;
+      const agent = this.pipeline.agents[agentId];
+      const prompt = this.promptBuilder.build(effectiveStage, stageId);
+
+      const before = snapshotEnabled ? await snapshot(this.projectRoot, snapshotOpts) : null;
+
+      try {
+        if (this.logger) {
+          this.logger.info(
+            `Agent selected: ${agentId} (attempt ${resolved.attempt}, compatible=[${resolved.compatible.join(', ')}])`,
+            stageId
+          );
+          this.logger.stageStart(stageId, agentId, effectiveStage.skill);
+        }
+
+        const result = await this.callAgent(agent, prompt, stageId, effectiveStage.skill, agentId);
+
+        if (this.logger) this.logger.stageComplete(stageId, result.status, result.exitCode);
+        return result;
+      } catch (err) {
+        if (!err.exitCode && !err.code) throw err;
+
+        const exitCode = err.exitCode ?? err.code;
+        const stderr = err.stderr || '';
+
+        const after = snapshotEnabled ? await snapshot(this.projectRoot, snapshotOpts) : null;
+        const diffResult = snapshotEnabled ? diff(before, after) : null;
+        const diffEmpty = snapshotEnabled && isEmpty(diffResult);
+
+        const classification = await classify(this.rules, agentId, { exitCode, stderr });
+        if (classification) {
+          markUnhealthy(this.projectRoot, agentId, classification);
+          if (this.logger) {
+            this.logger.info(
+              `agent ${agentId} marked unhealthy: class=${classification.class}, excluded (fallback triggered)`,
+              stageId
+            );
+          }
+        }
+
+        if (!diffEmpty) {
+          const changedPaths = diffResult ? Object.keys(diffResult).join(', ') : 'unknown';
+          if (this.logger) {
+            this.logger.warn(
+              `agent ${agentId} exited ${exitCode}, artifacts modified [${changedPaths}] — fallback blocked`,
+              stageId
+            );
+          }
+          throw err;
+        }
+
+        if (this.logger) {
+          this.logger.info(
+            `agent ${agentId} exited ${exitCode}, artifact diff empty — falling back in-stage (class=${classification?.class ?? 'unmatched'})`,
+            stageId
+          );
+        }
+
+        triedInThisAttempt.push(agentId);
+        lastErr = err;
+      }
+    }
   }
 
   /**
@@ -993,48 +1105,8 @@ class StageExecutor {
       return result;
     }
 
-    // Новая ветка: список кандидатов с фильтром по capabilities
-    const resolved = this.resolveAgent(stage, stageId);
-    if (resolved.blocked) {
-      if (this.logger) {
-        this.logger.error(
-          `Stage "${stageId}" blocked: ${resolved.blocked} — ${resolved.reason}`,
-          stageId
-        );
-      }
-      return {
-        status: 'blocked',
-        blocked_reason: resolved.blocked,
-        output: resolved.reason,
-        result: { blocked: resolved.blocked, reason: resolved.reason },
-        exitCode: 0,
-        parsed: false
-      };
-    }
-
-    const { agentId, effectiveStage } = resolved;
-    const agent = this.pipeline.agents[agentId];
-    const prompt = this.promptBuilder.build(effectiveStage, stageId);
-
-    if (this.logger) {
-      this.logger.info(
-        `Agent selected: ${agentId} (attempt ${resolved.attempt}, compatible=[${resolved.compatible.join(', ')}])`,
-        stageId
-      );
-      this.logger.stageStart(stageId, agentId, effectiveStage.skill);
-    }
-
-    const skipGuard = this.fileGuard && this.fileGuard.isTrusted(agentId, stageId);
-    if (this.fileGuard && !skipGuard) this.fileGuard.takeSnapshot();
-
-    const result = await this.callAgent(agent, prompt, stageId, effectiveStage.skill, agentId);
-
-    if (this.logger) this.logger.stageComplete(stageId, result.status, result.exitCode);
-    if (this.fileGuard && !skipGuard) {
-      const violations = this.fileGuard.checkAndRollback();
-      if (violations.length > 0) result.violations = violations;
-    }
-    return result;
+    // Новая ветка: список кандидатов с фильтром по capabilities → executeWithFallback
+    return this.executeWithFallback(stageId);
   }
 
   /**
