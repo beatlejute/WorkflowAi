@@ -1,0 +1,72 @@
+id: TC-DECOMPOSE-PLAN-006
+title: "Декомпозитор соблюдает порог DoD ≤ 7 пунктов (Проверка 5) — разбивает тикет с толстым DoD"
+origin:
+  chg: []
+  incidents:
+    - "PulseProxy PLAN-014 (2026-04-20): decompose-plan на первой попытке создал IMPL-043 (8 пунктов DoD) и IMPL-045 (9 пунктов DoD). verify-atomicity.js FAIL → вторая декомпозиция (+8:36 мин). Root cause: Проверка 5 в atomicity-checklist.md упоминала только объём кода и время, но не число пунктов DoD, тогда как скрипт меряет именно этот инвариант (DOD_THRESHOLD_FAIL=7)."
+  principle: "Синхронизация инвариантов между чеклистом атомарности и verify-atomicity.js"
+  backlog_sources:
+    - ".workflow/coach-backlog.yaml"
+tags: [atomicity, dod, threshold, anti-pattern]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Декомпозируй следующую задачу плана на тикеты. Типы тикетов в проекте (из
+    `config.yaml → task_types`): IMPL (реализация), QA (автотесты), DOCS
+    (документация), ADMIN (инфраструктурные операции).
+
+    Перед созданием каждого тикета применяй чеклист атомарности (7 проверок).
+    Особое внимание — Проверке 5 «Оценка размера»: hard-порог verify-atomicity.js
+    по числу пунктов DoD = 7 (FAIL при >7). Если для задачи естественно выходит
+    больше 7 критериев готовности — это сигнал на разбиение, а не на сжатие
+    пунктов.
+  inputs:
+    - kind: inline
+      as: plan_content
+      content: |
+        Задача: Реализовать компонент выбора прокси по умолчанию (select-default-proxy-modal)
+          DoD:
+            - Файл src/popup/select-default-proxy-modal.ts создан по образцу public-proxies-modal.ts через ModalHelper
+            - Функция showSelectDefaultProxyModal(proxies) экспортируется и резолвит id выбранного прокси
+            - Закрытие крестиком или Esc резолвит null
+            - Edge case: при пустом списке прокси модалка не рендерит DOM и резолвит null сразу
+            - Заголовок модалки берётся из I18n.getMessage('selectDefaultProxyTitle')
+            - Модалка НЕ вызывает Storage.setDefaultProxy() внутри — запись в storage снаружи
+            - Модалка НЕ читает прокси из storage — принимает готовый список
+            - Каждый элемент списка отображает имя, host:port и флаг страны (если есть)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "knowledge/atomicity-checklist.md"
+      pattern: "Число пунктов DoD"
+      reason: "В Проверке 5 должен быть явный пункт про число пунктов DoD."
+    - kind: skill_contains
+      file: "knowledge/atomicity-checklist.md"
+      pattern: "verify-atomicity.js"
+      reason: "Явная ссылка на скрипт, чтобы связь порогов была видна."
+    - kind: skill_contains
+      file: "knowledge/atomicity-checklist.md"
+      pattern: "7"
+      reason: "Числовое значение порога должно присутствовать в чеклисте."
+
+  deterministic:
+    - kind: output_matches
+      regex: "(5\\. )?Размер[\\s\\S]{0,400}(DoD|пункт)"
+      reason: "Проверка 5 должна явно упомянуть DoD-пункты в inline-таблице чеклиста."
+    - kind: output_does_not_contain
+      values: ["DoD содержит 8 пунктов", "DoD содержит 9 пунктов", "DoD содержит 10 пунктов"]
+      reason: "Ни один из созданных тикетов не должен декларировать DoD > 7 пунктов — это регрессия, verify-atomicity.js даст FAIL."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/dod-threshold.md"
+      criterion: "Разбил ли агент задачу с 8+ пунктами DoD на тикеты с ≤ 7 пунктами каждый, и зафиксировал ли цифру числа пунктов DoD в evidence Проверки 5?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 2400
