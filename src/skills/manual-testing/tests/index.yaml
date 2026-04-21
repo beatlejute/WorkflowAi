@@ -23,3 +23,8 @@ cases:
     origin_chg: [CHG-045]
     tags: [visual-testing, screenshot]
     severity: high
+  - id: TC-MANUAL-TESTING-003
+    file: cases/TC-MANUAL-TESTING-003-qa-non-ui-assertion.yaml
+    origin_chg: [CHG-081]
+    tags: [qa-routing, non-ui-invariant, fs-assertion]
+    severity: high

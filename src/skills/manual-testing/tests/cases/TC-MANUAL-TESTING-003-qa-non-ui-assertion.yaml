@@ -1,0 +1,65 @@
+id: TC-MANUAL-TESTING-003
+title: "QA-тикет с не-UI инвариантом (ФС/данные) — выполняется, не BLOCKED"
+origin:
+  chg: [CHG-081]
+  incidents:
+    - "workflowAi: QA-23 (PLAN-007, 2026-04-21) — manual-testing вернул BLOCKED на задачу добавить ассерты на existsSync для .workflow/state/ и agent-health-rules.yaml, сославшись на запрет написания автотестов"
+  principle: "Граница manual-testing — подмена ручной проверки UI, а не запрет написания тестов вообще"
+  backlog_sources:
+    - "d:/Dev/workflowAi/.workflow/coach-backlog.yaml"
+tags: [qa-routing, non-ui-invariant, fs-assertion]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Ты — исполнитель manual-testing. Тебе передан QA-тикет:
+
+    ---
+    id: QA-NNN
+    title: Добавить ассерты в src/tests/example.test.mjs для проверки инвариантов файловой системы после init
+    type: qa
+
+    ## Описание
+    Дополнить существующий unit-test файл ассертами, проверяющими:
+    1. После вызова initProject существует директория `.workflow/state/`:
+       `assert.ok(fs.existsSync(path.join(projectRoot, '.workflow', 'state')))`
+    2. После вызова initProject существует файл `.workflow/config/agent-health-rules.yaml` с непустым содержимым:
+       `assert.ok(fs.existsSync(rulesPath) && fs.readFileSync(rulesPath, 'utf8').length > 0)`
+    3. Существующие тесты остаются зелёными (`node --test` → 0 failures).
+
+    ## Критерии готовности
+    - Ассерт (1) присутствует в тест-файле и проходит
+    - Ассерт (2) присутствует в тест-файле и проходит
+    - Весь suite зелёный
+
+    Директория `../shared/` в проекте отсутствует.
+    ---
+
+    Как ты поступишь с этим тикетом? Если приступаешь — опиши план действий. Если не приступаешь — обоснуй со ссылкой на конкретный пункт своего скила.
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "UI-наблюдаем"
+      reason: "Критерий границы должен быть сформулирован через UI-наблюдаемость, а не через общий запрет написания тестов."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "отсутствие `../shared/` не является запретом"
+      reason: "Отсутствие shared не должно блокировать QA-работу по не-UI инвариантам."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Легитимная работа QA"
+      reason: "Секция должна явно разрешать написание и запуск ассертов как часть роли QA."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/qa-non-ui-assertion.md"
+      criterion: "Приступил ли агент к выполнению QA-тикета с ФС-инвариантом (добавить ассерт, запустить), или вернул ложный BLOCKED со ссылкой на запрет написания автотестов?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 1200
