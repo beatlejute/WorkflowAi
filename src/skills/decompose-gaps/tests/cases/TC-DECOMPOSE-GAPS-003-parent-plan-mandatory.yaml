@@ -1,0 +1,41 @@
+id: TC-DECOMPOSE-GAPS-003
+title: "Декомпозитор обязательно привязывает каждый тикет к исходному плану через parent_plan"
+origin:
+  chg: []
+  incidents:
+    - "workflowAi: 2026-04-21 — стейкхолдер: «декомпоузгап создавая тикеты должен привязывать их к плану из которого выпекают гапы»"
+    - "workflowAi: 2026-04-19 (CHG-077) — первый инцидент: parent_plan был условный, после правки регрессионный тест не создан, впоследствии в файле вернулась условная формулировка"
+  principle: "parent_plan mandatory для каждого созданного тикета"
+  backlog_sources:
+    - ".workflow/coach-backlog.yaml"
+tags: [parent-plan, mandatory-field, plan-linking]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    На вход воркфлоу дан plan_id=PLAN-042 и report_id=REPORT-042.
+    Gap: «задача DoD-пункт 3 из плана не реализована — добавить валидацию payload».
+    Дополнительно гипотетический системный gap: «в проекте отсутствует общий логгер ошибок».
+    Создай тикет(ы) для этих gaps в соответствии с воркфлоу. Не перемещай ничего,
+    ограничься созданием файлов в .workflow/tickets/backlog/.
+
+assertions:
+  deterministic:
+    - kind: output_contains_all
+      values: ["parent_plan", "PLAN-042"]
+      reason: "В выводе должен быть упомянут parent_plan с ID исходного плана."
+    - kind: output_does_not_contain
+      values: ["parent_plan: \"\"", "parent_plan: ''", "parent_plan:\n"]
+      reason: "Недопустим тикет с пустым parent_plan."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/parent-plan-mandatory.md"
+      criterion: "Заполнил ли агент parent_plan во ВСЕХ созданных тикетах, или корректно отклонил 'системный' gap как out-of-scope (в Новые требования) вместо создания тикета без parent_plan?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 2400

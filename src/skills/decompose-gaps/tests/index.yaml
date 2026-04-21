@@ -23,3 +23,8 @@ cases:
     origin_chg: [CHG-050]
     tags: [glob-check, overwrite-prevention]
     severity: medium
+  - id: TC-DECOMPOSE-GAPS-003
+    file: cases/TC-DECOMPOSE-GAPS-003-parent-plan-mandatory.yaml
+    origin_chg: []
+    tags: [parent-plan, mandatory-field, plan-linking]
+    severity: high

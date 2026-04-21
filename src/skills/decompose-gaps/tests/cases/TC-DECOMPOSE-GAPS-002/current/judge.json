@@ -22,27 +22,6 @@
       ]
     },
     "kilo-glm": {
-      "pass_count": 2,
-      "total": 3,
-      "trials": [
-        {
-          "trial": 1,
-          "score": null,
-          "passed": false
-        },
-        {
-          "trial": 2,
-          "score": 5,
-          "passed": true
-        },
-        {
-          "trial": 3,
-          "score": 5,
-          "passed": true
-        }
-      ]
-    },
-    "kilo-minimax": {
       "pass_count": 3,
       "total": 3,
       "trials": [
@@ -63,23 +42,44 @@
         }
       ]
     },
+    "kilo-minimax": {
+      "pass_count": 3,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 4,
+          "passed": true
+        },
+        {
+          "trial": 2,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 3,
+          "score": 5,
+          "passed": true
+        }
+      ]
+    },
     "kilo-deepseek": {
       "pass_count": 2,
       "total": 3,
       "trials": [
         {
           "trial": 1,
-          "score": 5,
-          "passed": true
-        },
-        {
-          "trial": 2,
           "score": 1,
           "passed": false
         },
         {
+          "trial": 2,
+          "score": 5,
+          "passed": true
+        },
+        {
           "trial": 3,
-          "score": 4,
+          "score": 5,
           "passed": true
         }
       ]
@@ -107,27 +107,26 @@
     {
       "agentId": "kilo-deepseek",
       "trial": 1,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-deepseek",
-      "trial": 2,
       "score": 1,
       "errored": false
     },
     {
       "agentId": "kilo-deepseek",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-deepseek",
       "trial": 3,
-      "score": 4,
+      "score": 5,
       "errored": false
     },
     {
       "agentId": "kilo-glm",
       "trial": 1,
-      "score": null,
-      "errored": true,
-      "error": "Stage \"TC-DECOMPOSE-GAPS-002-kilo-glm-trial-1\" timed out after 2400s"
+      "score": 5,
+      "errored": false
     },
     {
       "agentId": "kilo-glm",
@@ -144,7 +143,7 @@
     {
       "agentId": "kilo-minimax",
       "trial": 1,
-      "score": 5,
+      "score": 4,
       "errored": false
     },
     {
@@ -160,5 +159,5 @@
       "errored": false
     }
   ],
-  "timestamp": "2026-04-20T11:07:15.944Z"
+  "timestamp": "2026-04-21T08:50:50.177Z"
 }
