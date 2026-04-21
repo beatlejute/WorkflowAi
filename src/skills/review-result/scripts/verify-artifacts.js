@@ -27,6 +27,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { parseFrontmatter } from 'workflow-ai/lib/utils.mjs';
 
@@ -157,6 +158,98 @@ function checkResultSection(body) {
   };
 }
 
+/**
+ * E2E assertion против ghost-execution: парсит секцию `### Implementation assertions`
+ * в теле тикета и возвращает список проверок вида
+ *   { module, export, method?, type? }
+ *
+ * Формат каждой строки-bullet'а (значения в backticks, ключи через запятую):
+ *   - module: `path/to/file.mjs`, export: `ClassName`, method: `methodName`
+ *   - module: `path/to/file.mjs`, export: `namedExport`
+ *   - module: `path/to/file.mjs`, export: `helper`, type: `function`
+ *
+ * Секция необязательна. Если её нет — возвращаем пустой массив
+ * (тикеты без исполняемых артефактов — например, DOCS/HUMAN — проходят без гейта).
+ */
+function parseImplementationAssertions(body) {
+  const headerRegex = /^###\s*(?:Implementation assertions|E2E assertions)\s*$/m;
+  const match = headerRegex.exec(body);
+  if (!match) return [];
+
+  const startIdx = match.index + match[0].length;
+  const nextH3 = body.indexOf('\n### ', startIdx);
+  const nextH2 = body.indexOf('\n## ', startIdx);
+  const candidates = [nextH3, nextH2].filter(i => i !== -1);
+  const sectionEnd = candidates.length > 0 ? Math.min(...candidates) : body.length;
+  const sectionContent = body.substring(startIdx, sectionEnd);
+
+  const assertions = [];
+  const bulletRegex = /^[-*]\s+(.+)$/gm;
+  let bulletMatch;
+  while ((bulletMatch = bulletRegex.exec(sectionContent)) !== null) {
+    const line = bulletMatch[1];
+    const kv = {};
+    const pairRegex = /(\w+)\s*:\s*`([^`]+)`/g;
+    let pair;
+    while ((pair = pairRegex.exec(line)) !== null) {
+      kv[pair[1]] = pair[2];
+    }
+    if (kv.module && kv.export) {
+      assertions.push({
+        module: kv.module,
+        export: kv.export,
+        method: kv.method || null,
+        type: kv.type || 'function',
+      });
+    }
+  }
+  return assertions;
+}
+
+/**
+ * Выполняет список implementation assertions против живого кода.
+ * Для каждой: dynamic import модуля → достаём export → проверяем method/type.
+ * Возвращает массив { ...assertion, ok, reason? }.
+ */
+async function runImplementationAssertions(assertions) {
+  const results = [];
+  for (const a of assertions) {
+    const absPath = path.isAbsolute(a.module) ? a.module : path.join(PROJECT_DIR, a.module);
+    if (!fs.existsSync(absPath)) {
+      results.push({ ...a, ok: false, reason: `module_not_found: ${a.module}` });
+      continue;
+    }
+    let mod;
+    try {
+      mod = await import(pathToFileURL(absPath).href);
+    } catch (err) {
+      results.push({ ...a, ok: false, reason: `import_failed: ${err.message.replace(/\n/g, ' ')}` });
+      continue;
+    }
+    const exported = mod[a.export];
+    if (exported === undefined) {
+      results.push({ ...a, ok: false, reason: `export_not_found: ${a.export}` });
+      continue;
+    }
+    if (a.method) {
+      // Класс → метод на prototype; объект → метод как свойство
+      const target = typeof exported === 'function' ? exported.prototype : exported;
+      const fn = target ? target[a.method] : undefined;
+      if (typeof fn !== 'function') {
+        results.push({ ...a, ok: false, reason: `method_not_function: ${a.export}.${a.method}` });
+        continue;
+      }
+    } else {
+      if (typeof exported !== a.type) {
+        results.push({ ...a, ok: false, reason: `type_mismatch: expected ${a.type}, got ${typeof exported}` });
+        continue;
+      }
+    }
+    results.push({ ...a, ok: true });
+  }
+  return results;
+}
+
 function verifyTicket(ticketPath) {
   if (!fs.existsSync(ticketPath)) {
     throw new Error(`Ticket file not found: ${ticketPath}`);
@@ -177,6 +270,8 @@ function verifyTicket(ticketPath) {
 
   const resultStats = checkResultSection(body);
 
+  const assertions = parseImplementationAssertions(body);
+
   return {
     ticket_id: frontmatter.id,
     created_at: frontmatter.created_at,
@@ -185,7 +280,8 @@ function verifyTicket(ticketPath) {
     dod_checked: dodStats.checked,
     dod_completed: dodStats.completed,
     result_exists: resultStats.exists,
-    result_filled: resultStats.summaryFilled
+    result_filled: resultStats.summaryFilled,
+    assertions,
   };
 }
 
@@ -250,6 +346,16 @@ function formatVerdict(result) {
     humanIssues.push(
       `файлы не были изменены после начала выполнения тикета: ${unchangedFiles.join(', ')}`
     );
+  }
+
+  const assertionFailures = (result.assertionResults || []).filter(r => !r.ok);
+  if (assertionFailures.length > 0) {
+    const descriptions = assertionFailures.map(r => {
+      const target = r.method ? `${r.export}.${r.method}` : r.export;
+      return `${target} в ${r.module} (${r.reason})`;
+    });
+    failReasons.push(`assertion_failed=${descriptions.length}`);
+    humanIssues.push(`не прошли E2E-assertions (ghost execution): ${descriptions.join('; ')}`);
   }
 
   const status = failReasons.length === 0 ? 'passed' : 'failed';
@@ -317,7 +423,7 @@ function appendReviewNote(ticketPath, humanIssues) {
   return true;
 }
 
-function main() {
+async function main() {
   const args = process.argv.slice(2);
 
   if (args.length === 0) {
@@ -349,12 +455,17 @@ function main() {
 
   try {
     const result = verifyTicket(ticketPath);
+    result.assertionResults = await runImplementationAssertions(result.assertions || []);
+
     const verdict = formatVerdict(result);
 
     let reviewNoteWritten = false;
     if (verdict.status === 'failed' && verdict.humanIssues.length > 0) {
       reviewNoteWritten = appendReviewNote(ticketPath, verdict.humanIssues);
     }
+
+    const assertionsTotal = result.assertionResults.length;
+    const assertionsFailed = result.assertionResults.filter(r => !r.ok).length;
 
     console.log('---RESULT---');
     console.log(`status: ${verdict.status}`);
@@ -365,6 +476,8 @@ function main() {
     console.log(`result_filled: ${result.result_filled}`);
     console.log(`missing_files: ${verdict.missingFiles.join(',')}`);
     console.log(`unchanged_files: ${verdict.unchangedFiles.join(',')}`);
+    console.log(`assertions_total: ${assertionsTotal}`);
+    console.log(`assertions_failed: ${assertionsFailed}`);
     if (verdict.failReasons.length > 0) {
       console.log(`fail_reasons: ${verdict.failReasons.join('; ')}`);
       console.log(`issues: ${verdict.humanIssues.join('; ')}`);

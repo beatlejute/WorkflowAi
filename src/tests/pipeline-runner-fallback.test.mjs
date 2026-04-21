@@ -348,8 +348,9 @@ test('TC-007: decompose-plan: claude-sonnet fail без артефактов →
   try {
     createRulesFile(projectRoot);
     const config = makeConfig(['claude-sonnet', 'kilo-glm']);
-    // counters['decompose-attempt'] = 1 → attempt=1 → cursor=0 → claude-sonnet
-    const executor = makeExecutor(config, projectRoot, {}, { 'decompose-attempt': 1 });
+    // counters['decompose-attempt'] = 0 → attempt=1 → cursor=0 → claude-sonnet первым.
+    // Семантика counter: число УЖЕ ИСЧЕРПАННЫХ попыток, attempt = counter + 1.
+    const executor = makeExecutor(config, projectRoot, {}, { 'decompose-attempt': 0 });
     const stage = makeStage(['claude-sonnet', 'kilo-glm'], 'decompose-attempt');
 
     const callLog = [];
