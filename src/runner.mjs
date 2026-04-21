@@ -6,6 +6,7 @@ import { spawn, execSync } from 'child_process';
 import crypto from 'crypto';
 import yaml from './lib/js-yaml.mjs';
 import { findProjectRoot } from './lib/find-root.mjs';
+import { loadRules, scanStderrForFatalRule } from './lib/error-classifier.mjs';
 
 // ============================================================================
 // Logger — система логирования с уровнями DEBUG/INFO/WARN/ERROR
@@ -846,6 +847,23 @@ class StageExecutor {
 
     // Текущий дочерний процесс агента (для kill при shutdown)
     this.currentChild = null;
+
+    // Лениво загружаемые правила health-классификатора для онлайн-сканирования stderr
+    this._healthRules = null;
+  }
+
+  /** Возвращает правила health-классификатора, загружая их при первом обращении. */
+  _getHealthRules() {
+    if (this._healthRules !== null) return this._healthRules;
+    try {
+      this._healthRules = loadRules(this.projectRoot);
+    } catch (e) {
+      if (this.logger) {
+        this.logger.warn(`Failed to load agent-health-rules: ${e.message}`, 'CLI');
+      }
+      this._healthRules = { common: [], agents: new Map() };
+    }
+    return this._healthRules;
   }
 
   /**
@@ -876,7 +894,11 @@ class StageExecutor {
    *      execute() — сюда не попадают.
    */
   resolveAgent(stage, stageId) {
-    const attempt = (stage.counter && this.counters[stage.counter]) || 1;
+    // Семантика: counter = число УЖЕ ИСЧЕРПАННЫХ попыток (0 на старте, инкрементируется
+    // стадией `increment-*-attempts` ПОСЛЕ каждой неудачи). attempt — номер текущей
+    // (1-based). Читаем counter через ?? 0, чтобы отличать «ещё не запускались»
+    // от «была 1 попытка» — иначе оффсет-by-one и ротация застревает на первом агенте.
+    const attempt = (stage.counter ? (this.counters[stage.counter] ?? 0) : 0) + 1;
 
     // Task type: явно из context либо из префикса ticket_id
     const taskType = this.context.task_type
@@ -961,7 +983,7 @@ class StageExecutor {
       const skipGuard = this.fileGuard && this.fileGuard.isTrusted(stage.agent, stageId);
       if (this.fileGuard && !skipGuard) this.fileGuard.takeSnapshot();
 
-      const result = await this.callAgent(agent, prompt, stageId, stage.skill);
+      const result = await this.callAgent(agent, prompt, stageId, stage.skill, stage.agent);
 
       if (this.logger) this.logger.stageComplete(stageId, result.status, result.exitCode);
       if (this.fileGuard && !skipGuard) {
@@ -1005,7 +1027,7 @@ class StageExecutor {
     const skipGuard = this.fileGuard && this.fileGuard.isTrusted(agentId, stageId);
     if (this.fileGuard && !skipGuard) this.fileGuard.takeSnapshot();
 
-    const result = await this.callAgent(agent, prompt, stageId, effectiveStage.skill);
+    const result = await this.callAgent(agent, prompt, stageId, effectiveStage.skill, agentId);
 
     if (this.logger) this.logger.stageComplete(stageId, result.status, result.exitCode);
     if (this.fileGuard && !skipGuard) {
@@ -1018,9 +1040,13 @@ class StageExecutor {
   /**
    * Вызывает CLI-агента через child_process
    */
-  callAgent(agent, prompt, stageId, skillId) {
+  callAgent(agent, prompt, stageId, skillId, agentId = null) {
     return new Promise((resolve, reject) => {
       const timeout = this.pipeline.execution?.timeout_per_stage || 300;
+      const healthRules = agentId ? this._getHealthRules() : null;
+      const hasAgentRules = Boolean(
+        healthRules && agentId && healthRules.agents.get(agentId)?.length
+      );
       const args = [...agent.args];
       const finalPrompt = prompt;
 
@@ -1065,16 +1091,23 @@ class StageExecutor {
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      let earlyKilled = false;
+      let earlyKillRule = null;
+      let lastScanSize = 0;
+
+      const killChild = () => {
+        if (process.platform === 'win32' && child.pid) {
+          try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe' }); } catch {}
+        } else {
+          try { child.kill('SIGTERM'); } catch {}
+        }
+      };
 
       // Таймаут
       const timeoutId = setTimeout(() => {
         timedOut = true;
         // На Windows SIGTERM игнорируется — используем taskkill /T /F для убийства дерева
-        if (process.platform === 'win32' && child.pid) {
-          try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe' }); } catch {}
-        } else {
-          child.kill('SIGTERM');
-        }
+        killChild();
         if (this.logger) {
           this.logger.timeout(stageId, timeout);
         }
@@ -1120,6 +1153,36 @@ class StageExecutor {
       child.stderr.on('data', (data) => {
         stderr += data.toString();
         process.stderr.write(data);
+
+        // Online-детекция фатальных паттернов (quota/429/usage-limit и т.п.).
+        // Нужна чтобы не ждать timeout_per_stage (1800s), когда агентский CLI
+        // уходит в молчаливый retry-цикл после HTTP 429.
+        if (!hasAgentRules || earlyKilled || timedOut) return;
+        // Throttle: первый скан всегда, последующие — только после 200+ новых байт.
+        if (lastScanSize > 0 && stderr.length - lastScanSize < 200) return;
+        lastScanSize = stderr.length;
+        const match = scanStderrForFatalRule(healthRules, agentId, stderr);
+        if (!match) return;
+
+        earlyKilled = true;
+        earlyKillRule = match;
+        clearTimeout(timeoutId);
+        if (this.logger) {
+          this.logger.error(
+            `Fatal stderr pattern matched for ${agentId} (rule=${match.rule_id}, class=${match.class}). Killing process.`,
+            stageId
+          );
+        }
+        killChild();
+        const err = new Error(
+          `Agent "${agentId}" killed early: ${match.rule_id} (class=${match.class})`
+        );
+        err.code = 'EARLY_KILL';
+        err.exitCode = -1;
+        err.stderr = stderr;
+        err.earlyKill = true;
+        err.rule = match;
+        reject(err);
       });
 
       child.on('close', (code) => {
@@ -1139,6 +1202,16 @@ class StageExecutor {
         process.stdout.write('\n');
 
         if (timedOut) return;
+        if (earlyKilled) {
+          if (this.logger && stderr.trim()) {
+            this.logger.warn(`STDERR ↓`, stageId);
+            for (const line of stderr.trim().split('\n')) {
+              this.logger.warn(`  ${line}`, stageId);
+            }
+            this.logger.warn(`STDERR ↑`, stageId);
+          }
+          return;
+        }
 
         // Логгируем CLI вызов
         if (this.logger) {
@@ -1205,7 +1278,7 @@ class StageExecutor {
 
       child.on('error', (err) => {
         clearTimeout(timeoutId);
-        if (!timedOut) {
+        if (!timedOut && !earlyKilled) {
           if (this.logger) {
             this.logger.error(`CLI error: ${err.message}`, stageId);
           }

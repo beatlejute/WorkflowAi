@@ -82,20 +82,25 @@ workflow run
 
 1. **pick-first-task** — выбрать тикет из очереди ready
 2. **check-plan-templates** — проверить триггеры шаблонов планов, создать планы при срабатывании
-3. **check-plan-decomposition** — проверить, что план декомпозирован на тикеты
-4. **decompose-plan** — разбить план на тикеты (при необходимости)
-5. **check-conditions** — проверить условия готовности тикета
-6. **move-to-ready** — переместить тикеты из backlog в ready
-7. **pick-next-task** — выбрать следующий тикет для выполнения
-8. **move-to-in-progress** — начать выполнение
-9. **check-relevance** — проверить, что тикет всё ещё актуален (на скриптах, без LLM)
-10. **execute-task** — выполнить работу через AI-агента
-11. **move-to-review** — отправить на ревью
-12. **review-result** — проверить результаты по Definition of Done
-13. **increment-task-attempts** — учесть попытки повторов
-14. **move-ticket** — переместить в done/blocked по результатам ревью
-15. **create-report** — сгенерировать отчёт о выполнении
-16. **analyze-report / decompose-gaps** — проанализировать результаты и итерировать
+3. **check-plan-decomposition** — проверить состояние декомпозиции/активации планов
+4. **allocate-ticket-ids** — выделить стартовые ID для префиксов до декомпозиции
+5. **decompose-plan** — разбить план на тикеты (при необходимости)
+6. **check-atomicity-limit / verify-atomicity / increment-atomicity-counter** — проверить атомарность тикетов плана
+7. **check-conditions** — проверить условия готовности тикета
+8. **move-to-ready** — переместить тикеты из backlog в ready
+9. **pick-next-task** — выбрать следующий тикет для выполнения
+10. **move-to-in-progress** — начать выполнение
+11. **check-relevance** — проверить, что тикет всё ещё актуален (на скриптах, без LLM)
+12. **check-mcp** — проверить доступность MCP-зависимостей тикета
+13. **execute-task** — выполнить работу через AI-агента
+14. **move-to-review** — отправить на ревью
+15. **verify-artifacts** — детерминированная проверка артефактов тикета
+16. **review-result** — проверить результаты по Definition of Done
+17. **increment-task-attempts** — учесть попытки повторов
+18. **move-ticket** — переместить в done/blocked по результатам ревью
+19. **create-report** — сгенерировать отчёт о выполнении
+20. **analyze-report / decompose-gaps** — проанализировать результаты и итерировать
+21. **complete-plan / increment-plan-iterations** — закрыть план или запустить следующую итерацию
 
 ### Поддерживаемые агенты
 
@@ -122,6 +127,7 @@ workflow run
 | `decompose-plan` | Декомпозиция плана на тикеты |
 | `deep-research` | Глубокий ресерч |
 | `execute-task` | Выполнение задачи |
+| `manual-testing` | UI-observability: ручное тестирование сценариев |
 | `review-result` | Ревью результата по DoD |
 
 Скилы хранятся глобально в `~/.workflow/skills/` и подключаются в проекты через junctions.

@@ -2,6 +2,7 @@
 
 import { spawn, execSync } from 'child_process';
 import path from 'path';
+import { loadRules, scanStderrForFatalRule } from './error-classifier.mjs';
 
 const ResultParser = {
   STATUS_ALIASES: {
@@ -149,12 +150,20 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
     stageId = 'unknown',
     skillId = null,
     projectRoot = process.cwd(),
-    currentChildRef = null
+    currentChildRef = null,
+    agentId = null,
+    healthRules = null
   } = options;
 
   return new Promise((resolve, reject) => {
     const args = [...agentConfig.args];
     const finalPrompt = prompt;
+
+    // Для онлайн-детекции фатальных stderr-паттернов
+    const rules = agentId
+      ? (healthRules || (() => { try { return loadRules(projectRoot); } catch { return null; } })())
+      : null;
+    const hasAgentRules = Boolean(rules && agentId && rules.agents.get(agentId)?.length);
 
     const useShell = process.platform === 'win32' && agentConfig.command !== 'node';
     const useStdin = useShell && finalPrompt.includes('\n');
@@ -196,14 +205,20 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let earlyKilled = false;
+    let lastScanSize = 0;
 
-    const timeoutId = setTimeout(() => {
-      timedOut = true;
+    const killChild = () => {
       if (process.platform === 'win32' && child.pid) {
         try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe' }); } catch {}
       } else {
-        child.kill('SIGTERM');
+        try { child.kill('SIGTERM'); } catch {}
       }
+    };
+
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      killChild();
       if (logger) {
         logger.timeout(stageId, timeout);
       }
@@ -243,6 +258,32 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
     child.stderr.on('data', (data) => {
       stderr += data.toString();
       process.stderr.write(data);
+
+      if (!hasAgentRules || earlyKilled || timedOut) return;
+      // Throttle: первый скан всегда, последующие — только после 200+ новых байт.
+      if (lastScanSize > 0 && stderr.length - lastScanSize < 200) return;
+      lastScanSize = stderr.length;
+      const match = scanStderrForFatalRule(rules, agentId, stderr);
+      if (!match) return;
+
+      earlyKilled = true;
+      clearTimeout(timeoutId);
+      if (logger) {
+        logger.error?.(
+          `Fatal stderr pattern matched for ${agentId} (rule=${match.rule_id}, class=${match.class}). Killing process.`,
+          stageId
+        );
+      }
+      killChild();
+      const err = new Error(
+        `Agent "${agentId}" killed early: ${match.rule_id} (class=${match.class})`
+      );
+      err.code = 'EARLY_KILL';
+      err.exitCode = -1;
+      err.stderr = stderr;
+      err.earlyKill = true;
+      err.rule = match;
+      reject(err);
     });
 
     child.on('close', (code) => {
@@ -264,7 +305,7 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
       }
       process.stdout.write('\n');
 
-      if (timedOut) return;
+      if (timedOut || earlyKilled) return;
 
       if (logger) {
         logger.cliCall(agentConfig.command, args, code);
@@ -324,7 +365,7 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
 
     child.on('error', (err) => {
       clearTimeout(timeoutId);
-      if (!timedOut) {
+      if (!timedOut && !earlyKilled) {
         if (logger) {
           logger.error(`CLI error: ${err.message}`, stageId);
         }

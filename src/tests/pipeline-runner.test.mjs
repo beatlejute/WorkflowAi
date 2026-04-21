@@ -504,7 +504,7 @@ describe('PipelineRunner — Full Pipeline Cycle', () => {
       }
     };
     const context = { ticket_id: 'QA-1', task_type: 'qa', required_capabilities: '["multimodal"]' };
-    const counters = { task_attempts: 1 };
+    const counters = { task_attempts: 0 };
     const exec = new StageExecutor(config, context, counters);
 
     const stage = {
@@ -512,17 +512,22 @@ describe('PipelineRunner — Full Pipeline Cycle', () => {
       agents: ['qwen-code', 'claude-sonnet', 'claude-opus']
     };
 
+    // Семантика: counter = число УЖЕ исчерпанных попыток; attempt = counter+1.
+    // qwen-code отфильтрован (нет multimodal), compatible=[claude-sonnet, claude-opus].
+
+    // counter=0 → attempt=1 → cursor=0 → claude-sonnet
     const r1 = exec.resolveAgent(stage, 'execute-task');
-    // qwen-code отфильтрован (нет multimodal), остаётся [claude-sonnet, claude-opus]
-    assert.strictEqual(r1.agentId, 'claude-sonnet', 'Attempt 1 → первый совместимый');
+    assert.strictEqual(r1.agentId, 'claude-sonnet', 'counter=0 → первый совместимый');
 
-    counters.task_attempts = 2;
+    // counter=1 → attempt=2 → cursor=1 → claude-opus
+    counters.task_attempts = 1;
     const r2 = exec.resolveAgent(stage, 'execute-task');
-    assert.strictEqual(r2.agentId, 'claude-opus', 'Attempt 2 → второй совместимый');
+    assert.strictEqual(r2.agentId, 'claude-opus', 'counter=1 → второй совместимый');
 
-    counters.task_attempts = 3;
+    // counter=2 → attempt=3 → cursor=2%2=0 → claude-sonnet (ротация по кругу)
+    counters.task_attempts = 2;
     const r3 = exec.resolveAgent(stage, 'execute-task');
-    assert.strictEqual(r3.blocked, 'attempts_exhausted', 'Attempt > длины → blocked');
+    assert.strictEqual(r3.agentId, 'claude-sonnet', 'counter=2 → ротация по кругу к первому');
   });
 
   it('resolveAgent: blocked=no_capable_agent если ни один агент не покрывает capability', async () => {
