@@ -1,9 +1,8 @@
 {
-  "date": "2026-04-19T18:01:41.819Z",
-  "skill_sha": "4ef92dc",
+  "date": "2026-04-21T08:57:32.494Z",
+  "skill_sha": "1503ea1",
   "status": "passed",
-  "duration_ms": 116198,
-  "l1_skipped": true,
+  "duration_ms": 1,
   "per_model": {
     "claude-haiku": {
       "passed": true,

@@ -1,0 +1,902 @@
+# =============================================================================
+# Pipeline Configuration — формат конфигурации пайплайна
+# =============================================================================
+# Описывает цепочку этапов (stages), доступных агентов, goto-логику переходов,
+# retry-стратегии и настройки выполнения.
+#
+# Runner читает этот файл и автономно оркестрирует работу:
+#   node .workflow/src/runner.mjs --config .workflow/config/pipeline.yaml
+#
+# Переменные в goto.params:
+#   $result.*   — поля из результата текущего stage
+#   $context.*  — переменные из секции context (обновляются через params)
+#   $counter.*  — значения счётчиков (обновляются стейджами type: update-counter)
+# =============================================================================
+
+pipeline:
+  name: "default"
+  version: "1.0"
+
+  # ===========================================================================
+  # Агенты (agents)
+  # ===========================================================================
+  # Каждый агент — это CLI-инструмент, который runner вызывает через child_process.
+  # Формат:
+  #   <agent-id>:
+  #     command:      <string>   — исполняемый файл (должен быть в PATH)
+  #     args:         <string[]> — аргументы командной строки
+  #     workdir:      <string>   — рабочая директория (по умолчанию ".")
+  #     capabilities: <string[]> — возможности агента (text, multimodal, ...)
+  #     description:  <string>   — описание агента (опционально)
+  #
+  # Runner добавляет промпт последним аргументом автоматически.
+  # Роль (skill) передаётся через stage.instructions, а не через args.
+  # Скрипт-агенты (script-*) — детерминированы, capabilities к ним не применяются.
+  # ===========================================================================
+  agents:
+    claude-haiku:
+      command: "claude"
+      args: ["--model", "claude-haiku-4-5", "--permission-mode", "bypassPermissions", "-p"]
+      workdir: "."
+      capabilities: [text, multimodal]
+      description: "Claude Haiku — лёгкая быстрая модель, поддержка изображений"
+
+    claude-sonnet:
+      command: "claude"
+      args: ["--model", "claude-sonnet-4-6", "--permission-mode", "bypassPermissions", "-p"]
+      workdir: "."
+      capabilities: [text, multimodal]
+      description: "Claude Sonnet — быстрая модель, поддержка изображений"
+
+    claude-opus:
+      command: "claude"
+      args: ["--model", "claude-opus-4-7", "--permission-mode", "bypassPermissions", "-p"]
+      workdir: "."
+      capabilities: [text, multimodal]
+      description: "Claude Opus — мощная модель, поддержка изображений"
+
+    qwen-code:
+      command: "qwen"
+      args: ["-y", "-p"]
+      workdir: "."
+      capabilities: [text]
+      description: "Qwen Code — кодовый агент, только текст"
+
+    kilo-code:
+      command: "kilo"
+      args: ["-m", "kilo/kilo-auto/free", "--agent", "orchestrator", "run"]
+      workdir: "."
+      capabilities: [text]
+      description: "Kilo мульти-режимный (architect, code, debug)"
+
+    kilo-glm:
+      command: "kilo"
+      args: ["-m", "zai/glm-5.1", "--agent", "code", "run"]
+      workdir: "."
+      capabilities: [text]
+      description: "Kilo GLM"
+
+    kilo-glm-air:
+      command: "kilo"
+      args: ["-m", "zai/glm-4.5-air", "--agent", "code", "run"]
+      workdir: "."
+      capabilities: [text]
+      description: "Kilo GLM air"
+
+    kilo-deepseek:
+      command: "kilo"
+      args: ["-m", "deepseek/deepseek-reasoner", "--agent", "code", "run"]
+      workdir: "."
+      capabilities: [text]
+      description: "Kilo deepseek"
+
+    kilo-minimax:
+      command: "kilo"
+      args: ["-m", "kilo/minimax/minimax-m2.7", "--agent", "code", "run"]
+      workdir: "."
+      capabilities: [text]
+      description: "Kilo minimax"
+
+    kilo-free:
+      command: "kilo"
+      args: ["-m", "kilo/kilo-auto/free", "--agent", "code", "run"]
+      workdir: "."
+      capabilities: [text]
+      description: "Kilo free"
+
+    script-move:
+      command: "node"
+      args: [".workflow/src/scripts/move-ticket.js"]
+      workdir: "."
+      description: "Скрипт для перемещения тикетов между директориями"
+
+    script-pick:
+      command: "node"
+      args: [".workflow/src/scripts/pick-next-task.js"]
+      workdir: "."
+      description: "Скрипт для выбора следующего тикета из ready/"
+
+    script-move-ready:
+      command: "node"
+      args: [".workflow/src/scripts/move-to-ready.js"]
+      workdir: "."
+      description: "Скрипт для перемещения тикетов из backlog/ в ready/"
+
+    script-check-conditions:
+      command: "node"
+      args: [".workflow/src/scripts/check-conditions.js"]
+      workdir: "."
+      description: "Скрипт для проверки условий тикетов в backlog/"
+
+    script-check-plan-decomposed:
+      command: "node"
+      args: [".workflow/src/scripts/check-plan-decomposed.js"]
+      workdir: "."
+      description: "Скрипт для проверки, декомпозирован ли текущий план"
+
+    script-get-all-ids:
+      command: "node"
+      args: [".workflow/src/scripts/get-next-id.js", "--all-from-config"]
+      workdir: "."
+      description: "Выделяет стартовые номера для всех префиксов из config.yaml → task_types (используется стадией allocate-ticket-ids перед decompose-plan)"
+
+    script-check-relevance:
+      command: "node"
+      args: [".workflow/src/scripts/check-relevance.js"]
+      workdir: "."
+      description: "Скрипт проверки актуальности тикета (заменяет скил check-relevance)"
+
+    script-move-to-review:
+      command: "node"
+      args: [".workflow/src/scripts/move-to-review.js"]
+      workdir: "."
+      description: "Скрипт для перемещения завершённых тикетов из in-progress/ в review/"
+
+    script-check-templates:
+      command: "node"
+      args: [".workflow/src/scripts/check-plan-templates.js"]
+      workdir: "."
+      description: "Проверка и активация шаблонов планов по триггерам"
+
+    script-check-mcp:
+      command: "node"
+      args: [".workflow/src/scripts/check-mcp.js"]
+      workdir: "."
+      description: "Проверка доступности MCP-серверов"
+
+    script-verify-artifacts:
+      command: "node"
+      args: [".workflow/src/skills/review-result/scripts/verify-artifacts.js"]
+      workdir: "."
+      description: "Механическая предпроверка артефактов тикета перед AI-ревью (DoD %, result_filled, files_exist)"
+
+    script-complete-plan:
+      command: "node"
+      args: [".workflow/src/scripts/complete-plan.js"]
+      workdir: "."
+      description: "Завершает план (status: completed) и архивирует done-тикеты"
+
+    script-verify-atomicity:
+      command: "node"
+      args: [".workflow/src/skills/decompose-plan/scripts/verify-atomicity.js"]
+      workdir: "."
+      description: "Машинная проверка атомарности тикетов после декомпозиции"
+
+    script-check-atomicity-limit:
+      command: "node"
+      args: [".workflow/src/skills/decompose-plan/scripts/check-atomicity-limit.js"]
+      workdir: "."
+      description: "Проверка лимита попыток атомарности без инкремента счётчика"
+
+
+  # Дефолтный список агентов для стейджа, если у него не задан свой agents / agents_by_type.
+  default_agents: [claude-sonnet, kilo-deepseek]
+
+  # ===========================================================================
+  # Этапы (stages)
+  # ===========================================================================
+  # Каждый stage описывает один шаг пайплайна.
+  # Формат:
+  #   <stage-id>:
+  #     description:    <string>   — что делает этот этап
+  #     agents:         <id[]>     — упорядоченный список кандидатов (по приоритету)
+  #     skill:          <skill-id> — какой skill использовать (.workflow/src/skills/<skill>/SKILL.md)
+  #     instructions:   <string>   — доп. инструкции, передаваемые агенту в промпте
+  #     counter:        <string>   — имя счётчика попыток для этого stage
+  #     agents_by_type:            — маршрутизация списка агентов по типу задачи (task_type);
+  #                                   полностью перекрывает stage.agents / stage.instructions
+  #       <type>:
+  #         agents: <id[]>
+  #         instructions: <string>
+  #     goto:                      — логика переходов по результату
+  #       <status>:                — ключ = статус результата агента
+  #         stage:  <stage-id>     — следующий stage
+  #         params: <map>          — параметры, передаваемые в context следующего stage
+  #       default:                 — fallback если статус не совпал ни с одним ключом
+  #
+  # Логика выбора агента (единая для всех стейджей):
+  #   1. Взять список: agents_by_type[task_type].agents (если задан), иначе stage.agents,
+  #      иначе pipeline.default_agents.
+  #   2. Отфильтровать по required_capabilities тикета: агент должен покрывать ВСЕ.
+  #   3. Если список пуст → тикет/стейдж уходит в blocked со статусом "no_capable_agent".
+  #   4. Попытка N (1-based) берёт элемент N списка.
+  #   5. Если N > длины списка → blocked "attempts_exhausted".
+  #   6. Любая неудача (exit≠0 / review: failed) → cursor++, attempt++.
+  #
+  # Специальные значения stage:
+  #   "end" — завершение пайплайна
+  #
+  # Встроенный тип стейджа (type: update-counter):
+  #   Инкрементирует счётчик без вызова агента.
+  #   type:    update-counter  — встроенный обработчик runner'а
+  #   counter: <string>        — имя счётчика
+  #   max:     <int>           — при достижении max возвращает статус "max_reached"
+  #   goto:
+  #     default:    <stage>    — следующий стейдж (счётчик < max)
+  #     max_reached: <stage>   — стейдж при достижении max
+  # ===========================================================================
+  stages:
+
+    # -------------------------------------------------------------------------
+    # 0. pick-first-task
+    # Выбирает следующую задачу из ready/ по приоритету и зависимостям
+    # Если ready/ пуст — проверяет review/
+    # -------------------------------------------------------------------------
+    pick-first-task:
+      description: "Выбрать задачу задачу из ready по приоритету"
+      agent: script-pick
+      goto:
+        found:
+          stage: move-to-in-progress
+          params:
+            ticket_id: "$result.ticket_id"
+            task_type: "$result.type"
+            required_capabilities: "$result.required_capabilities"
+            target: in-progress
+        in_review:
+          stage: verify-artifacts
+          params:
+            ticket_id: "$result.ticket_id"
+            required_capabilities: "$result.required_capabilities"
+            attempt: "1"
+        completed_in_progress:
+          stage: move-to-review
+          params:
+            ticket_id: "$result.ticket_id"
+            required_capabilities: "$result.required_capabilities"
+        in_progress:
+          stage: check-relevance
+          params:
+            ticket_id: "$result.ticket_id"
+            task_type: "$result.type"
+            required_capabilities: "$result.required_capabilities"
+        empty: check-plan-templates
+        error: create-report
+
+    # -------------------------------------------------------------------------
+    # 0a. check-plan-templates
+    # Проверяет шаблоны планов в plans/templates/.
+    # Если триггер сработал — создаёт план в plans/current/ со статусом approved.
+    # Всегда переходит на check-plan-decomposition.
+    # -------------------------------------------------------------------------
+    check-plan-templates:
+      description: "Проверить шаблоны планов и создать планы по триггерам"
+      agent: script-check-templates
+      goto:
+        plan_created: check-plan-decomposition
+        no_triggers: check-plan-decomposition
+        default: check-plan-decomposition
+        error: check-plan-decomposition
+
+    # -------------------------------------------------------------------------
+    # 0b. check-plan-decomposition
+    # Проверяет состояние декомпозиции планов и статус активации.
+    # Результаты:
+    #   - needs_decomposition  — approved-план без тикетов → allocate-ticket-ids → decompose
+    #   - awaiting_atomicity   — approved-план с тикетами, но без активации → verify-atomicity
+    #                            (защита от сценария: decompose отработал, но verify-atomicity
+    #                            был пропущен/прерван — план не должен тихо уйти в check-conditions
+    #                            со статусом approved; атомарность обязана быть проверена до активации).
+    #   - decomposed           — active-план с тикетами → штатный check-conditions
+    #   - no_plan / default    — нет работы для pipeline → check-conditions
+    # -------------------------------------------------------------------------
+    check-plan-decomposition:
+      description: "Проверить состояние декомпозиции и активации планов"
+      agent: script-check-plan-decomposed
+      goto:
+        needs_decomposition:
+          stage: allocate-ticket-ids
+          params:
+            plan_file: "$result.plan_file"
+        awaiting_atomicity:
+          stage: check-atomicity-limit
+          params:
+            plan_file: "$result.plan_file"
+        decomposed: check-conditions
+        no_plan: check-conditions
+        default: check-conditions
+        error: check-conditions
+
+    # -------------------------------------------------------------------------
+    # 0c. allocate-ticket-ids
+    # Выделяет стартовые номера для всех префиксов из config.yaml → task_types
+    # ДО запуска декомпозиции. Результат (id_ranges) передаётся в context и
+    # далее в decompose-plan через instructions. Это устраняет класс ошибок
+    # с коллизиями ID, когда агент-декомпозитор начинает нумерацию с 001
+    # Архитектурный принцип: решения про ID принимает инфраструктура, а не агент.
+    # -------------------------------------------------------------------------
+    allocate-ticket-ids:
+      description: "Выделить стартовые номера ID для всех префиксов перед декомпозицией"
+      agent: script-get-all-ids
+      timeout: 60
+      goto:
+        default:
+          stage: decompose-plan
+          params:
+            plan_file: "$context.plan_file"
+            id_ranges_json: "$result.id_ranges_json"
+        error: check-conditions
+
+    # -------------------------------------------------------------------------
+    # 0d. decompose-plan
+    # Декомпозирует план на тикеты в backlog/
+    # На входе ОБЯЗАТЕЛЬНО: plan_file и id_ranges_json (выделенные стадией
+    # allocate-ticket-ids). id_ranges_json — это JSON-строка вида
+    # {"QA":26,"HUMAN":2,...}; декомпозитор парсит её сам (см. decompose.md,
+    # шаг 9.0). Передача именно строки, а не объекта, обусловлена тем, что
+    # runner workflow-ai при подстановке $context.* в instructions применяет
+    # неявный toString() — объекты превращаются в "[object Object]".
+    # Декомпозитор НЕ вызывает get-next-id.js самостоятельно.
+    # -------------------------------------------------------------------------
+    decompose-plan:
+      description: "Декомпозировать план на тикеты"
+      agents: [claude-sonnet, kilo-glm]
+      skill: decompose-plan
+      instructions: "Декомпозируй план .workflow/$context.plan_file на тикеты. ID тикетов бери ТОЛЬКО из JSON-карты id_ranges_json=$context.id_ranges_json — это стартовые номера по префиксам в формате {\"PREFIX\":N_start,...}, уже выделенные стадией allocate-ticket-ids. Распарси JSON, используй значения как есть. НЕ вызывай get-next-id.js и НЕ изобретай номера самостоятельно. Подробности: см. шаг 9.0 в workflows/decompose.md. При наличии $context.atomicity_failures — учти их при декомпозиции: исправь неатомарные тикеты."
+      goto:
+        default: check-atomicity-limit
+
+    # -------------------------------------------------------------------------
+    # 0e. check-atomicity-limit
+    # Проверяет counter atomicity_check_attempts без инкремента перед запуском verify-atomicity.
+    # Если counter >= max (3) — bypass на check-conditions (защита от бесконечного цикла).
+    # ВАЖНО: использует скрипт (НЕ update-counter), чтобы НЕ инкрементировать счётчик.
+    # Инкремент происходит только в increment-atomicity-counter при failed verify-atomicity.
+    # -------------------------------------------------------------------------
+    check-atomicity-limit:
+      description: "Проверить лимит попыток проверки атомарности (без инкремента)"
+      agent: script-check-atomicity-limit
+      timeout: 10
+      goto:
+        passed:
+          stage: verify-atomicity
+          params:
+            plan_file: "$context.plan_file"
+        failed:
+          stage: check-conditions
+        default:
+          stage: verify-atomicity
+          params:
+            plan_file: "$context.plan_file"
+        error:
+          stage: check-conditions
+
+    # -------------------------------------------------------------------------
+    # 0f. verify-atomicity
+    # Машинная проверка атомарности тикетов после декомпозиции.
+    # При passed → plan.status: approved → active (через activatePlan в скрипте) → check-conditions.
+    # При failed → increment-atomicity-counter → decompose-plan (feedback loop с atomicity_failures).
+    # plan_file берётся из $context (передан через decompose-plan.params или через
+    # check-plan-decomposition → check-atomicity-limit при awaiting_atomicity-сценарии).
+    # -------------------------------------------------------------------------
+    verify-atomicity:
+      description: "Машинная проверка атомарности тикетов и активация плана при passed"
+      agent: script-verify-atomicity
+      timeout: 60
+      goto:
+        passed:
+          stage: check-conditions
+        failed:
+          stage: increment-atomicity-counter
+          params:
+            atomicity_failures: "$result.atomicity_failures"
+        default:
+          stage: check-conditions
+        error:
+          stage: check-conditions
+
+    # -------------------------------------------------------------------------
+    # 0g. increment-atomicity-counter
+    # Инкрементирует counter при failed verify-atomicity.
+    # При max_reached — bypass на check-conditions. Иначе — возврат на decompose-plan.
+    # -------------------------------------------------------------------------
+    increment-atomicity-counter:
+      description: "Инкрементировать счётчик попыток проверки атомарности"
+      type: update-counter
+      counter: atomicity_check_attempts
+      max: 3
+      goto:
+        default:
+          stage: decompose-plan
+          params:
+            atomicity_failures: "$context.atomicity_failures"
+        max_reached:
+          stage: check-conditions
+
+    # -------------------------------------------------------------------------
+    # 1. check-conditions
+    # Проверяет условия тикетов в backlog/, выводит список готовых
+    # -------------------------------------------------------------------------
+    check-conditions:
+      description: "Проверить условия тикетов в backlog, вывести готовые"
+      agent: script-check-conditions
+      goto:
+        has_ready:
+          stage: move-to-ready
+          params:
+            ready_tickets: "$result.ready_tickets"
+        default: pick-next-task
+        empty: create-report
+        error: create-report
+
+    # -------------------------------------------------------------------------
+    # 1b. move-to-ready
+    # Перемещает тикеты из backlog/ в ready/ (по списку из check-conditions)
+    # -------------------------------------------------------------------------
+    move-to-ready:
+      description: "Переместить готовые тикеты из backlog в ready"
+      agent: script-move-ready
+      timeout: 120
+      goto:
+        default: pick-next-task
+
+    # -------------------------------------------------------------------------
+    # 2. pick-next-task
+    # Выбирает следующую задачу из ready/ по приоритету и зависимостям
+    # Если ready/ пуст — проверяет review/
+    # -------------------------------------------------------------------------
+    pick-next-task:
+      description: "Выбрать следующую задачу из ready по приоритету"
+      agent: script-pick
+      goto:
+        found:
+          stage: move-to-in-progress
+          params:
+            ticket_id: "$result.ticket_id"
+            task_type: "$result.type"
+            required_capabilities: "$result.required_capabilities"
+            target: in-progress
+        in_review:
+          stage: verify-artifacts
+          params:
+            ticket_id: "$result.ticket_id"
+            required_capabilities: "$result.required_capabilities"
+            attempt: "1"
+        completed_in_progress:
+          stage: move-to-review
+          params:
+            ticket_id: "$result.ticket_id"
+            required_capabilities: "$result.required_capabilities"
+        in_progress:
+          stage: check-relevance
+          params:
+            ticket_id: "$result.ticket_id"
+            task_type: "$result.type"
+            required_capabilities: "$result.required_capabilities"
+        empty: check-conditions
+        default: check-conditions
+        error: create-report
+
+    # -------------------------------------------------------------------------
+    # 2b. move-to-in-progress
+    # Перемещает тикет из ready/ в in-progress/ перед выполнением
+    # -------------------------------------------------------------------------
+    move-to-in-progress:
+      description: "Переместить тикет из ready в in-progress"
+      agent: script-move
+      timeout: 120
+      goto:
+        default:
+          stage: check-relevance
+          params:
+            ticket_id: "$context.ticket_id"
+        error:
+          stage: check-relevance
+          params:
+            ticket_id: "$context.ticket_id"
+
+    # -------------------------------------------------------------------------
+    # 2c. check-relevance
+    # Проверяет актуальность тикета перед выполнением (план активен, DoD не выполнен)
+    # Fail-safe: default fallback → execute-task (лучше выполнить лишний, чем пропустить)
+    # -------------------------------------------------------------------------
+    check-relevance:
+      description: "Проверить актуальность тикета перед выполнением (детерминированный скрипт)"
+      agent: script-check-relevance
+      timeout: 120
+      goto:
+        relevant:
+          stage: check-mcp
+          params:
+            ticket_id: "$context.ticket_id"
+        irrelevant:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: done
+        default:
+          stage: check-mcp
+          params:
+            ticket_id: "$context.ticket_id"
+
+    # -------------------------------------------------------------------------
+    # 2d. check-mcp
+    # Проверяет доступность MCP-серверов перед запуском задач, которым они нужны.
+    # Список типов тикетов задаётся в context.mcp_require_for (см. секцию context
+    # в конце файла). Это проектная настройка — менять там.
+    #
+    # Поведение:
+    #   - task_type входит в mcp_require_for + MCP доступны → status: ok      → execute-task
+    #   - task_type входит в mcp_require_for + MCP упали   → status: fail    → blocked
+    #   - task_type НЕ входит в mcp_require_for             → status: skipped → execute-task
+    # -------------------------------------------------------------------------
+    check-mcp:
+      description: "Проверить доступность MCP-серверов для типов тикетов из mcp_require_for"
+      agent: script-check-mcp
+      timeout: 60
+      # ВАЖНО: workflow-ai runner нормализует статусы через STATUS_ALIASES:
+      #   "ok"   → "passed"
+      #   "fail" → "failed"
+      # Поэтому в goto используются канонические passed/failed, а не ok/fail из вывода скрипта.
+      # "skipped" не входит в таблицу синонимов, остаётся как есть.
+      goto:
+        passed:
+          stage: execute-task
+          params:
+            ticket_id: "$context.ticket_id"
+        skipped:
+          stage: execute-task
+          params:
+            ticket_id: "$context.ticket_id"
+        failed:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: blocked
+        default:
+          stage: execute-task
+          params:
+            ticket_id: "$context.ticket_id"
+
+    # -------------------------------------------------------------------------
+    # 3. execute-task
+    # Выполняет выбранную задачу (код, документация, план и т.д.)
+    # -------------------------------------------------------------------------
+    execute-task:
+      description: "Выполнить выбранную задачу"
+      skill: execute-task
+      counter: task_attempts
+      agents: [qwen-code, claude-sonnet, claude-haiku, claude-opus, kilo-free, kilo-glm-air, kilo-minimax, kilo-deepseek]
+      agents_by_type:
+        coach:
+          agents: [kilo-glm, claude-sonnet, kilo-minimax, kilo-deepseek]
+          instructions: "Твоя роль: coach"
+        qa:
+          agents: [claude-haiku, kilo-glm, claude-sonnet, claude-opus, kilo-minimax]
+          instructions: "Твоя роль: manual-testing"
+        arch:
+          agents: [claude-opus, kilo-glm]
+      goto:
+        default:
+          stage: move-to-review
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+            target: review
+        # Runner возвращает status=blocked при no_capable_agent / attempts_exhausted
+        # (resolveAgent в runner.mjs, строка ~926). Направляем тикет сразу в blocked/,
+        # минуя move-to-review → verify-artifacts → increment-task-attempts: иначе
+        # тикет крутится 6 итераций вхолостую (execute-task не может его взять,
+        # verify-artifacts фейлится с пустым result, счётчик достигает max → blocked
+        # всё равно). Прямой маршрут экономит ~6 пустых итераций на тикет.
+        blocked:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: blocked
+        error:
+          stage: move-to-review
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+            target: review
+
+    # -------------------------------------------------------------------------
+    # 3b. move-to-review
+    # Перемещает тикет в review/ после выполнения задачи
+    # -------------------------------------------------------------------------
+    move-to-review:
+      description: "Переместить тикет в review после выполнения"
+      agent: script-move-to-review
+      timeout: 120
+      goto:
+        skipped:
+          stage: pick-next-task
+        default:
+          stage: verify-artifacts
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+
+    # -------------------------------------------------------------------------
+    # 3c. verify-artifacts
+    # Механическая предпроверка артефактов тикета перед AI-ревью.
+    # Блокирует AI-рационализацию: если DoD пустой или Result не заполнен —
+    # сразу failed → increment-task-attempts, без вызова дорогой модели.
+    # Критерии failed: result_filled==false | dod_completion_pct==0 | missing_files.
+    # Runner нормализует ok→passed, fail→failed через STATUS_ALIASES.
+    # -------------------------------------------------------------------------
+    verify-artifacts:
+      description: "Механическая предпроверка артефактов тикета перед AI-ревью"
+      agent: script-verify-artifacts
+      timeout: 60
+      goto:
+        passed:
+          stage: review-result
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+        failed:
+          stage: increment-task-attempts
+          params:
+            ticket_id: "$context.ticket_id"
+        default:
+          stage: review-result
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+        error:
+          stage: review-result
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+
+    # -------------------------------------------------------------------------
+    # 4. review-result
+    # Проверяет результат выполнения на соответствие DoD тикета.
+    # При failed — переходит на increment-task-attempts для учёта попытки.
+    # -------------------------------------------------------------------------
+    review-result:
+      description: "Проверить результат выполнения на соответствие DoD тикета"
+      agents: [claude-haiku, kilo-glm, claude-sonnet, kilo-minimax]
+      skill: review-result
+      counter: task_attempts
+      goto:
+        passed:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: done
+        failed:
+          stage: increment-task-attempts
+          params:
+            ticket_id: "$context.ticket_id"
+        default:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: backlog
+        error:
+          stage: increment-task-attempts
+          params:
+            ticket_id: "$context.ticket_id"
+
+    # -------------------------------------------------------------------------
+    # 4b. increment-task-attempts
+    # Отдельный стейдж обновления счётчика попыток выполнения тикета.
+    # При достижении max — блокирует тикет. Иначе — возвращает в очередь.
+    # -------------------------------------------------------------------------
+    increment-task-attempts:
+      description: "Обновить счётчик попыток выполнения тикета"
+      type: update-counter
+      counter: task_attempts
+      max: 6
+      goto:
+        default:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: ready
+        max_reached:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: blocked
+
+    # -------------------------------------------------------------------------
+    # 5. move-ticket
+    # Перемещает тикет в целевую директорию (done/ или blocked/)
+    # -------------------------------------------------------------------------
+    move-ticket:
+      description: "Переместить тикет (done / blocked)"
+      agent: script-move
+      timeout: 120
+      goto:
+        default: pick-next-task
+        error: pick-next-task
+
+    # -------------------------------------------------------------------------
+    # 6. create-report
+    # Создаёт итоговый отчёт по выполненным задачам текущего цикла
+    # -------------------------------------------------------------------------
+    create-report:
+      description: "Создать итоговый отчёт по выполненным задачам"
+      agents: [kilo-glm, claude-sonnet, kilo-minimax, kilo-deepseek]
+      skill: create-report
+      counter: create_report_attempts
+      goto:
+        default:
+          stage: analyze-report
+          params:
+            report_id: "$result.report_id"
+        # blocked означает, что required_capabilities из контекста (от предыдущего
+        # тикета) не покрыты ни одним агентом create-report. Это не фатально —
+        # завершаем пайплайн, отчёт не создан, но данные не теряются.
+        blocked: end
+        error:
+          stage: increment-create-report-attempts
+
+    # Счётчик попыток для create-report (ротация моделей при API-ошибках)
+    increment-create-report-attempts:
+      description: "Обновить счётчик попыток create-report"
+      type: update-counter
+      counter: create_report_attempts
+      max: 3
+      goto:
+        default: create-report
+        max_reached: end
+
+    # -------------------------------------------------------------------------
+    # 7. analyze-report
+    # Анализирует отчёт: план выполнен полностью или есть пробелы?
+    # При has_gaps — переходит на increment-plan-iterations для учёта итерации.
+    # -------------------------------------------------------------------------
+    analyze-report:
+      description: "Проанализировать отчёт: план выполнен полностью?"
+      agents: [kilo-glm, claude-sonnet, kilo-minimax, kilo-deepseek]
+      skill: analyze-report
+      counter: analyze_report_attempts
+      goto:
+        completed: complete-plan
+        has_gaps:
+          stage: increment-plan-iterations
+          params:
+            gaps: "$result.gaps"
+            report_id: "$context.report_id"
+        # blocked по тем же причинам, что и в create-report — завершаем пайплайн.
+        blocked: end
+        error:
+          stage: increment-analyze-report-attempts
+
+    # Счётчик попыток для analyze-report (ротация моделей при API-ошибках)
+    increment-analyze-report-attempts:
+      description: "Обновить счётчик попыток analyze-report"
+      type: update-counter
+      counter: analyze_report_attempts
+      max: 3
+      goto:
+        default: analyze-report
+        max_reached: end
+
+    # -------------------------------------------------------------------------
+    # 7a. complete-plan
+    # Завершает план: обновляет status → completed, архивирует done-тикеты.
+    # Если plan_id не задан в контексте — ищет единственный активный план.
+    # При not_ready (не все тикеты завершены) — тоже завершает пайплайн (end),
+    # т.к. analyze-report уже подтвердил completed.
+    # -------------------------------------------------------------------------
+    complete-plan:
+      description: "Завершить план (status: completed) и архивировать тикеты"
+      agent: script-complete-plan
+      timeout: 120
+      goto:
+        completed: end
+        not_ready: end
+        no_plan: end
+        default: end
+        error: end
+
+    # -------------------------------------------------------------------------
+    # 7b. increment-plan-iterations
+    # Отдельный стейдж обновления счётчика итераций анализа плана.
+    # При достижении max — завершает пайплайн. Иначе — декомпозирует пробелы.
+    # -------------------------------------------------------------------------
+    increment-plan-iterations:
+      description: "Обновить счётчик итераций анализа плана"
+      type: update-counter
+      counter: plan_iterations
+      max: 2
+      goto:
+        default:
+          stage: decompose-gaps
+        max_reached: end
+
+    # -------------------------------------------------------------------------
+    # 8. decompose-gaps
+    # Декомпозирует недочёты из анализа отчёта в новые тикеты (backlog/)
+    # -------------------------------------------------------------------------
+    decompose-gaps:
+      description: "Декомпозировать недочёты из отчёта в новые тикеты"
+      agents: [claude-sonnet, kilo-minimax, kilo-deepseek, kilo-glm]
+      skill: decompose-gaps
+      goto:
+        default: check-conditions
+
+  # ===========================================================================
+  # Точка входа (entry)
+  # ===========================================================================
+  # Stage, с которого начинается выполнение пайплайна.
+  # ===========================================================================
+  entry: pick-first-task
+
+  # ===========================================================================
+  # Контекст (context)
+  # ===========================================================================
+  # Переменные, доступные всем stages через $context.*.
+  # Runner автоматически обновляет context через params в goto-переходах.
+  # Начальные значения задаются здесь или через CLI:
+  #   node runner.mjs --plan PLAN-003
+  # ===========================================================================
+  context:
+    plan_id: ""              # ID плана (задаётся при запуске)
+    mcp_require_for: "qa"    # comma-separated типы тикетов, для которых check-mcp проверяет MCP
+
+  # ===========================================================================
+  # Защита файлов (protected_files)
+  # ===========================================================================
+  # Glob-паттерны файлов, в которые агентам запрещена запись.
+  # Runner проверяет эти паттерны и блокирует изменения.
+  # Пути указываются относительно корня проекта (без префикса .workflow/)
+  # ===========================================================================
+  protected_files:
+    - ".workflow/plans/**"       # Планы — только для чтения
+    - ".workflow/config/**"      # Конфигурация
+    - pattern: ".workflow/tickets/**"
+      mode: structure            # Защита только структуры (создание/удаление файлов)
+
+  # ===========================================================================
+  # Доверенные агенты (trusted_agents)
+  # ===========================================================================
+  # Агенты, для которых FileGuard не откатывает изменения в protected_files.
+  # Поддерживает glob-паттерны: "script-*" соответствует "script-move" и т.д.
+  # ===========================================================================
+  trusted_agents:
+    - "script-check-templates"   # Создаёт планы в plans/current/
+    - "script-*"                  # Все скрипты
+
+  # ===========================================================================
+  # Доверенные стейджи (trusted_stages)
+  # ===========================================================================
+  # Стейджи, которые могут создавать/удалять файлы в protected_files.
+  # Например, decompose-plan и decompose-gaps создают тикеты.
+  # ===========================================================================
+  trusted_stages:
+    - "decompose-plan"
+    - "decompose-gaps"
+
+  # ===========================================================================
+  # Настройки выполнения (execution)
+  # ===========================================================================
+  # Параметры, управляющие поведением runner'а.
+  #
+  #   max_steps:             — абсолютный лимит шагов за один запуск (защита от зацикливания)
+  #   delay_between_stages:  — пауза между этапами в секундах
+  #   timeout_per_stage:     — таймаут на один этап в секундах (по истечении — ошибка)
+  #   log_file:              — путь к файлу логов (относительно корня проекта)
+  # ===========================================================================
+  execution:
+    max_steps: 1500
+    delay_between_stages: 5
+    timeout_per_stage: 1800
+    log_file: ".workflow/logs/pipeline.log"
+    artifact_snapshot_enabled: true

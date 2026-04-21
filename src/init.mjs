@@ -357,7 +357,7 @@ export function initProject(targetPath = process.cwd(), options = {}) {
     errors: []
   };
   
-  // Step 1: Create .workflow/ structure (16 directories)
+  // Step 1: Create .workflow/ structure (directories)
   const directories = [
     'tickets/backlog',
     'tickets/ready',
@@ -371,13 +371,21 @@ export function initProject(targetPath = process.cwd(), options = {}) {
     'logs',
     'templates',
     'src/skills',
-    'tests/skills'
+    'tests/skills',
+    'state'
   ];
 
   for (const dir of directories) {
     ensureDir(join(workflowRoot, dir));
   }
-  result.steps.push('Created .workflow/ directory structure (16 directories)');
+  result.steps.push(`Created .workflow/ directory structure (${directories.length} directories)`);
+
+   // Create .gitkeep in .workflow/tests/skills/
+   // FIX-9: Ensure .gitkeep exists for tests/skills directory
+   const testsSkillsGitkeep = join(workflowRoot, 'tests', 'skills', '.gitkeep');
+   if (!existsSync(testsSkillsGitkeep)) {
+     writeFileSync(testsSkillsGitkeep, '');
+   }
 
   // Step 2: Ensure global dir and create skill junctions
   const globalDir = getGlobalDir();
@@ -431,6 +439,15 @@ export function initProject(targetPath = process.cwd(), options = {}) {
   // Step 9: Update .gitignore
   updateGitignore(projectRoot);
   result.steps.push('Updated .gitignore with .workflow/logs/');
+
+  // Step 10: Copy agent-health-rules.yaml to .workflow/config/
+  const agentHealthRulesSrc = join(packageRoot, 'configs', 'agent-health-rules.yaml');
+  const agentHealthRulesDest = join(workflowRoot, 'config', 'agent-health-rules.yaml');
+  if (existsSync(agentHealthRulesSrc)) {
+    ensureDir(dirname(agentHealthRulesDest));
+    copyFileSync(agentHealthRulesSrc, agentHealthRulesDest);
+    result.steps.push('Copied agent-health-rules.yaml → .workflow/config/');
+  }
 
   return result;
 }

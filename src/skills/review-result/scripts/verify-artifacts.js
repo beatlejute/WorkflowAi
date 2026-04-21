@@ -166,9 +166,12 @@ function verifyTicket(ticketPath) {
   const { frontmatter, body } = parseFrontmatter(content);
 
   const filePaths = parseChangedFiles(body);
-  // Используем updated_at как точку отсчёта для проверки mtime:
-  // если файл не был изменён ПОСЛЕ того как агент начал работу, он считается неизменённым.
-  const filesExist = checkFilesExist(filePaths, frontmatter.updated_at || frontmatter.created_at);
+  // Точка отсчёта для mtime — created_at: это стабильная метка, которая не
+  // перезаписывается при move-ticket / retry-циклах. updated_at мутирует на
+  // каждом перемещении (ready → in-progress → review → ready → …), поэтому
+  // в retry файлы, реально изменённые в ранней попытке, становятся формально
+  // «unchanged» относительно нового updated_at и тикет ложно блокируется.
+  const filesExist = checkFilesExist(filePaths, frontmatter.created_at || frontmatter.updated_at);
 
   const dodStats = parseDoDCompletion(body);
 
