@@ -1,134 +1,163 @@
 # workflow-ai
 
-AI Agent Workflow Coordinator — kanban-based pipeline for AI coding agents.
+Координатор воркфлоу для AI-агентов — конвейер на основе канбан-доски для AI-агентов, пишущих код.
 
 Система координации AI-агентов через файловую канбан-доску. Автоматически оркестрирует выполнение задач: берёт тикеты из очереди, запускает нужного агента, проверяет результат и генерирует отчёты.
 
-## Install
+## Установка
 
 ```bash
 npm install -g workflow-ai
 ```
 
-## Quick Start
+## Быстрый старт
 
 ```bash
-# Initialize workflow in your project
+# 1. Инициализировать воркфлоу в вашем проекте
 workflow init
+```
 
-# Run the workflow pipeline
+```text
+# 2. Открыть проект в AI-агенте (Claude Code, Kilo, и т.д.) и попросить создать план через скил:
+Создай план <описание задачи> используя скил .workflow/src/skills/create-plan/SKILL.md
+```
+
+```bash
+# 3. Запустить конвейер — он декомпозирует план на тикеты и начнёт исполнение
 workflow run
 ```
 
-## Commands
+## Команды
 
-| Command | Description |
-|---------|-------------|
-| `workflow init [path] [--force]` | Initialize `.workflow/` directory with kanban board structure |
-| `workflow run [options]` | Execute the AI pipeline |
-| `workflow update [path]` | Update global dir and recreate junctions |
-| `workflow eject <skill> [path]` | Eject a skill (copy from global to project) |
-| `workflow eject-scripts [path]` | Eject scripts (copy from global to project) |
-| `workflow eject-configs [path]` | Eject configs (copy from global to project) |
-| `workflow list [path]` | List skills with status (shared/ejected/project-only) |
-| `workflow help` | Show help |
-| `workflow version` | Show version |
+| Команда | Описание |
+|---------|----------|
+| `workflow init [path] [--force]` | Инициализировать директорию `.workflow/` со структурой канбан-доски |
+| `workflow run [options]` | Запустить AI-конвейер |
+| `workflow update [path]` | Обновить глобальную директорию и пересоздать junctions |
+| `workflow eject <skill> [path]` | Извлечь скил (скопировать из глобальной директории в проект) |
+| `workflow eject-scripts [path]` | Извлечь скрипты (скопировать из глобальной директории в проект) |
+| `workflow eject-configs [path]` | Извлечь конфиги (скопировать из глобальной директории в проект) |
+| `workflow list [path]` | Вывести список скилов со статусом (shared/ejected/project-only) |
+| `workflow help` | Показать справку |
+| `workflow version` | Показать версию |
 
-### Run Options
+### Опции команды `run`
 
-| Option | Description |
-|--------|-------------|
-| `--plan <plan>` | Plan ID to execute |
-| `--config <path>` | Config file path |
-| `--project <path>` | Project root (default: auto-detect) |
+| Опция | Описание |
+|-------|----------|
+| `--plan <plan>` | ID плана для выполнения |
+| `--config <path>` | Путь к конфиг-файлу |
+| `--project <path>` | Корень проекта (по умолчанию: автоопределение) |
 
-## Init
+## Инициализация
 
-The `workflow init` command creates the `.workflow/` directory structure:
+Команда `workflow init` создаёт структуру директории `.workflow/`:
 
 ```
 .workflow/
-├── config/                       # → junction to ~/.workflow/configs/ (eject to customize)
+├── config/                       # → junction на ~/.workflow/configs/ (eject для кастомизации)
 ├── plans/
-│   ├── current/                  # Current development plans
-│   ├── templates/                # Plan templates with triggers (recurring plans)
-│   └── archive/                  # Archived plans
+│   ├── current/                  # Текущие планы разработки
+│   ├── templates/                # Шаблоны планов с триггерами (повторяющиеся планы)
+│   └── archive/                  # Архивные планы
 ├── tickets/
-│   ├── backlog/                  # Awaiting conditions
-│   ├── ready/                    # Ready to execute
-│   ├── in-progress/              # Currently active
-│   ├── blocked/                  # Blocked by dependencies
-│   ├── review/                   # Awaiting review
-│   └── done/                     # Completed
-├── reports/                      # Generated reports
-├── logs/                         # Pipeline execution logs
-├── metrics/                      # Performance metrics
-├── templates/                    # Ticket/plan/report templates
+│   ├── backlog/                  # Ожидают условий
+│   ├── ready/                    # Готовы к выполнению
+│   ├── in-progress/              # В работе
+│   ├── blocked/                  # Заблокированы зависимостями
+│   ├── review/                   # Ожидают ревью
+│   └── done/                     # Завершены
+├── reports/                      # Сгенерированные отчёты
+├── logs/                         # Логи выполнения конвейера
+├── metrics/                      # Метрики производительности
+├── templates/                    # Шаблоны тикетов/планов/отчётов
 └── src/
-    ├── skills/                   # Skill instructions (junctions to global, per-skill)
-    └── scripts/                  # Automation scripts (junction to global)
+    ├── skills/                   # Инструкции скилов (junctions на глобальные, по каждому скилу)
+    └── scripts/                  # Скрипты автоматизации (junction на глобальные)
 ```
 
-## Pipeline
+## Конвейер
 
-The `workflow run` command executes a multi-stage pipeline:
+Команда `workflow run` исполняет многоэтапный конвейер:
 
-1. **pick-first-task** — select ticket from ready queue
-2. **check-plan-templates** — evaluate plan template triggers, create plans if fired
-3. **check-plan-decomposition** — verify plan is decomposed into tickets
-4. **decompose-plan** — break down plan into tickets (if needed)
-5. **check-conditions** — validate ticket readiness conditions
-6. **move-to-ready** — move tickets from backlog to ready
-7. **pick-next-task** — select next ticket for execution
-8. **move-to-in-progress** — start execution
-9. **check-relevance** — verify ticket is still relevant (script-based, no LLM)
-10. **execute-task** — perform the work via AI agent
-11. **move-to-review** — submit for review
-12. **review-result** — validate results against Definition of Done
-13. **increment-task-attempts** — track retry attempts
-14. **move-ticket** — move to done/blocked based on review
-15. **create-report** — generate execution report
-16. **analyze-report / decompose-gaps** — analyze results and iterate
+1. **pick-first-task** — выбрать тикет из очереди ready
+2. **check-plan-templates** — проверить триггеры шаблонов планов, создать планы при срабатывании
+3. **check-plan-decomposition** — проверить, что план декомпозирован на тикеты
+4. **decompose-plan** — разбить план на тикеты (при необходимости)
+5. **check-conditions** — проверить условия готовности тикета
+6. **move-to-ready** — переместить тикеты из backlog в ready
+7. **pick-next-task** — выбрать следующий тикет для выполнения
+8. **move-to-in-progress** — начать выполнение
+9. **check-relevance** — проверить, что тикет всё ещё актуален (на скриптах, без LLM)
+10. **execute-task** — выполнить работу через AI-агента
+11. **move-to-review** — отправить на ревью
+12. **review-result** — проверить результаты по Definition of Done
+13. **increment-task-attempts** — учесть попытки повторов
+14. **move-ticket** — переместить в done/blocked по результатам ревью
+15. **create-report** — сгенерировать отчёт о выполнении
+16. **analyze-report / decompose-gaps** — проанализировать результаты и итерировать
 
-### Supported Agents
+### Поддерживаемые агенты
 
-| Agent | Description |
-|-------|-------------|
-| `claude-sonnet` | Claude Sonnet — fast model for simple tasks |
-| `claude-opus` | Claude Opus — powerful model for complex tasks |
-| `qwen-code` | Qwen Code — alternative agent |
-| `kilo-code` | Kilo Code — multi-mode agent |
+| Агент | Описание |
+|-------|----------|
+| `claude-code` | Claude Opus — мощная модель для сложных задач |
+| `qwen-code` | Qwen Code — альтернативный агент |
+| `kilo-code` | Kilo Code — мультирежимный агент |
+...
 
-Agents are configured in `configs/pipeline.yaml`.
+Агенты настраиваются в `configs/pipeline.yaml`.
 
-## Skills
+## Скилы
 
-Built-in skills for different task types:
+Встроенные скилы для разных типов задач:
 
-| Skill | Description |
-|-------|-------------|
-| `analyze-report` | Report analysis |
-| `coach` | Skill management and improvement |
-| `create-plan` | Plan creation |
-| `create-report` | Report generation |
-| `decompose-gaps` | Gap decomposition |
-| `decompose-plan` | Plan decomposition into tickets |
-| `deep-research` | Deep research |
-| `execute-task` | Task execution |
-| `review-result` | Result review against DoD |
+| Скил | Описание |
+|------|----------|
+| `analyze-report` | Анализ отчёта |
+| `coach` | Управление и улучшение скилов |
+| `create-plan` | Создание плана |
+| `create-report` | Генерация отчёта |
+| `decompose-gaps` | Декомпозиция пробелов |
+| `decompose-plan` | Декомпозиция плана на тикеты |
+| `deep-research` | Глубокий ресерч |
+| `execute-task` | Выполнение задачи |
+| `review-result` | Ревью результата по DoD |
 
-Skills are stored globally in `~/.workflow/skills/` and linked into projects via junctions.
+Скилы хранятся глобально в `~/.workflow/skills/` и подключаются в проекты через junctions.
 
-Use `workflow eject <skill>` to copy a skill into the project for customization.
+Используйте `workflow eject <skill>` для копирования скила в проект для кастомизации.
 
-## Skill regression tests
+### Как работать с коучем
+
+Коуч — мета-скил для создания и улучшения остальных скилов. Правки в `.workflow/src/skills/` делаются **только** через него.
+
+```text
+# Запрос к AI-агенту:
+Загрузи коуча из .workflow/src/skills/coach/SKILL.md и <действие>
+```
+
+Варианты `<действия>`:
+
+| Тип задачи | Пример запроса |
+|------------|----------------|
+| Создать новый скил | `создай скил <имя> для <назначение>` |
+| Аудит существующего | `сделай аудит скила <имя>` |
+| Анализ эффективности | `проанализируй результаты скила <имя> по завершённым тикетам` |
+| Точечное улучшение | `улучши скил <имя>: <что именно>` |
+| Ресерч практик | `найди лучшие практики для <тема> и обогати скил <имя>` |
+| Ревью скила | `сделай ревью скила <имя>` |
+
+Коуч сам определит тип задачи, загрузит нужный воркфлоу, внесёт правку, прогонит тест скила и запишет результат в `.workflow/coach-backlog.yaml`. Коммит делает пользователь.
+
+## Регрессионные тесты скилов
 
 Трёхуровневая система тестирования скилов для проверки качества AI-агентов.
 
 ### Три слоя тестирования
 
-| Level | Name | Description |
-|-------|------|-------------|
+| Уровень | Название | Описание |
+|---------|----------|----------|
 | L0 | Static | Базовая проверка синтаксиса и структуры: YAML-валидация, проверка обязательных полей, линтер |
 | L1 | Deterministic | Детерминированные тесты: эталонные входные данные → ожидаемый результат (strict match) |
 | L2 | Rubric | Гибкая оценка по критериям: scorer выставляет баллы на основе качества результата |
@@ -157,18 +186,18 @@ npm run test:skills
 
 ### CLI-флаги
 
-| Flag | Description |
-|------|-------------|
+| Флаг | Описание |
+|------|----------|
 | `--skill <name>` | Запустить тесты только для указанного скила |
 | `--relevant` | Запустить только тесты, соответствующие изменённым файлам |
 | `--establish-baseline` | Запустить тесты и сохранить результаты как baseline |
 | `--baseline-ref <ref>` | Использовать конкретный baseline (коммит, тег) |
 | `--yes` | Автоматически подтверждать все действия |
 
-### Verdict-режимы
+### Режимы вердикта
 
-| Mode | Description |
-|------|-------------|
+| Режим | Описание |
+|-------|----------|
 | `no-baseline` | Первый запуск — результаты сохраняются как baseline без сравнения |
 | `no-regression` | Сравнение с baseline — тест считается пройденным, если результат не хуже baseline |
 
@@ -176,29 +205,29 @@ npm run test:skills
 
 Runner и коуч **не выполняют git write-операций**. Все изменения в кодовой базе делает исключительно пользователь. Runner только анализирует и рекомендует, но не коммитит.
 
-### First run on a new project
+### Первый запуск на новом проекте
 
 1. Запустить тесты с флагом `--establish-baseline`
 2. Проверить результаты: красные тесты — ожидаемы для нового проекта
 3. Зафиксировать baseline: `git commit current/` как baseline-коммит
 
-## Scripts
+## Скрипты
 
-Scripts are stored globally in `~/.workflow/scripts/` and linked as a single junction into `.workflow/src/scripts/`.
+Скрипты хранятся глобально в `~/.workflow/scripts/` и подключаются одним junction в `.workflow/src/scripts/`.
 
-Use `workflow eject-scripts` to copy scripts into the project for customization.
+Используйте `workflow eject-scripts` для копирования скриптов в проект для кастомизации.
 
-## Configs
+## Конфиги
 
-Configs are stored globally in `~/.workflow/configs/` and linked as a single junction into `.workflow/config/`.
+Конфиги хранятся глобально в `~/.workflow/configs/` и подключаются одним junction в `.workflow/config/`.
 
-Use `workflow eject-configs` to copy configs into the project for customization.
+Используйте `workflow eject-configs` для копирования конфигов в проект для кастомизации.
 
-## Plan Templates
+## Шаблоны планов
 
-Plan templates allow recurring plans to be created automatically. Templates live in `.workflow/plans/templates/` and contain trigger conditions in their frontmatter.
+Шаблоны планов позволяют автоматически создавать повторяющиеся планы. Шаблоны лежат в `.workflow/plans/templates/` и содержат условия триггеров во frontmatter.
 
-### Template Format
+### Формат шаблона
 
 ```yaml
 id: "TMPL-001"
@@ -206,72 +235,137 @@ title: "Daily manual testing"
 type: template
 trigger:
   type: daily          # daily | weekly | date_after | interval_days
-  params: {}           # type-specific params
-last_triggered: ""     # auto-updated on trigger
+  params: {}           # параметры, зависящие от типа
+last_triggered: ""     # обновляется автоматически при срабатывании
 enabled: true
 ```
 
-### Trigger Types
+### Типы триггеров
 
-| Type | Params | Description |
-|------|--------|-------------|
-| `daily` | — | Once per day |
-| `weekly` | `days_of_week: [1,3,5]` (0=Sun) | On specific weekdays |
-| `date_after` | `date: "2026-04-01"` | Once after a specific date |
-| `interval_days` | `days: 3` | Every N days |
+| Тип | Параметры | Описание |
+|-----|-----------|----------|
+| `daily` | — | Раз в день |
+| `weekly` | `days_of_week: [1,3,5]` (0=вс) | В указанные дни недели |
+| `date_after` | `date: "2026-04-01"` | Один раз после указанной даты |
+| `interval_days` | `days: 3` | Каждые N дней |
 
-When a trigger fires, the pipeline creates a plan in `plans/current/` with status `approved`, then the normal decomposition flow proceeds.
+При срабатывании триггера конвейер создаёт план в `plans/current/` со статусом `approved`, далее идёт обычный поток декомпозиции.
 
-## Task Types
+## Типы задач
 
-| Type | Prefix | Description |
-|------|--------|-------------|
-| `arch` | ARCH | Architecture & planning |
-| `impl` | IMPL | Code implementation |
-| `fix` | FIX | Bug fixes |
-| `review` | REVIEW | Code/documentation review |
-| `docs` | DOCS | Documentation |
-| `admin` | ADMIN | Administrative tasks |
+| Тип | Префикс | Описание |
+|-----|---------|----------|
+| `arch` | ARCH | Архитектура и планирование |
+| `impl` | IMPL | Реализация кода |
+| `fix` | FIX | Исправления ошибок |
+| `review` | REVIEW | Ревью кода/документации |
+| `docs` | DOCS | Документация |
+| `admin` | ADMIN | Административные задачи |
 
-## Configuration
+## Fallback агентов и правила здоровья
+
+Система включает механизм in-stage fallback и health-мониторинг агентов.
+
+### Механика fallback
+
+Когда агент падает во время выполнения задачи, система использует **artifact-snapshot** для принятия решения:
+- Если snapshot пустой (нет записанных файлов) → выполняется fallback на следующего агента
+- Если snapshot непустой (есть изменения) → задача переходит в состояние `goto.error`
+
+**Пример сценария:** Qwen превысил quota и упал без записи файлов → Kilo вызван в той же попытке, task_attempts не инкрементирован.
+
+Конфигурация snapshot:
+```yaml
+execution:
+  artifact_snapshot_enabled: false  # по умолчанию выключено
+  snapshot_paths: ["src/", "configs/"]  # что мониторить
+  snapshot_max_file_size: 524288  # файлы >512KB — только mtime+size
+```
+
+**Baseline производительности:** `p50=169ms p95=299ms files=598` (из QA-20 benchmark).
+
+### Классификатор ошибок и health-реестр
+
+Ошибки классифицируются по классам:
+- `unavailable` — агент временно недоступен (quota, rate limit)
+- `transient` — временная ошибка сети (timeout, 5xx)
+- `misconfigured` — ошибка конфигурации (401, 403, отсутствует API key)
+- `unmatched` — ошибка не распознана
+
+**Семантика TTL:**
+- `5m` — 5 минут
+- `1h` — 1 час
+- `until_utc_midnight` — до полуночи UTC (минимум 30 минут)
+- `infinite` — навсегда
+
+Файл конфигурации: `configs/agent-health-rules.yaml`. Файл состояния: `.workflow/state/agent-health.json`.
+
+### Команда сброса
+
+```bash
+# показать текущее состояние
+node .workflow/src/scripts/reset-agent-health.js
+
+# сбросить конкретного агента
+node .workflow/src/scripts/reset-agent-health.js --agent qwen-code
+
+# сбросить всех агентов
+node .workflow/src/scripts/reset-agent-health.js --all
+```
+
+### Пример добавления правила
+
+```yaml
+# В configs/agent-health-rules.yaml:
+agents:
+  my-new-agent:
+    rules:
+      - id: "my-agent-quota"
+        class: "unavailable"
+        ttl: "until_utc_midnight"
+        pattern: "quota exceeded|daily limit reached"
+        exit_codes: "any"
+```
+
+## Конфигурация
 
 ### `configs/config.yaml`
 
-Main workflow configuration: project info, task types, priorities, statuses, condition types, paths, reporting settings.
+Основная конфигурация воркфлоу: информация о проекте, типы задач, приоритеты, статусы, типы условий, пути, настройки отчётности.
 
 ### `configs/pipeline.yaml`
 
-Pipeline definition: agents, stages, flow control, goto-logic, retry strategies.
+Определение конвейера: агенты, стадии, управление потоком, goto-логика, стратегии повторов.
 
 ### `configs/ticket-movement-rules.yaml`
 
-Rules for automated ticket movement based on review status.
+Правила автоматического перемещения тикетов на основе статуса ревью.
 
-## Project Structure
+## Структура проекта
 
 ```
 workflow-ai/
-├── bin/                    # CLI entry point
+├── bin/                    # Точка входа CLI
 ├── src/
-│   ├── cli.mjs             # Command parsing
-│   ├── runner.mjs           # Core pipeline orchestrator
-│   ├── init.mjs             # Project initialization
-│   ├── global-dir.mjs       # Global ~/.workflow/ management
-│   ├── junction-manager.mjs # Junction/symlink management
-│   ├── wf-loader.mjs        # Config loader
-│   ├── lib/                 # Utility libraries
-│   └── tests/               # Test suite
-├── configs/                # Configuration files (source)
-├── templates/              # Workflow templates (source)
-├── agent-templates/        # AI agent instruction templates
+│   ├── cli.mjs             # Парсинг команд
+│   ├── runner.mjs           # Оркестратор конвейера
+│   ├── init.mjs             # Инициализация проекта
+│   ├── global-dir.mjs       # Управление глобальной ~/.workflow/
+│   ├── junction-manager.mjs # Управление junction/symlink
+│   ├── wf-loader.mjs        # Загрузчик конфигов
+│   ├── lib/                 # Библиотеки утилит
+│   └── tests/               # Набор тестов
+├── configs/                # Файлы конфигурации (источник)
+├── templates/              # Шаблоны воркфлоу (источник)
+├── agent-templates/        # Шаблоны инструкций для AI-агентов
 └── package.json
 ```
 
-## Requirements
+## Требования
 
 - Node.js >= 18.0.0
 - npm
 
-## License
+## Лицензия
 
 MIT

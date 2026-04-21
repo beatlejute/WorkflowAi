@@ -1,0 +1,64 @@
+version: "1.0"
+
+common:
+  - id: "net-econnreset"
+    class: "transient"
+    ttl: "5m"
+    pattern: "ECONNRESET|ETIMEDOUT|EAI_AGAIN|connection reset by peer|socket hang up"
+    exit_codes: "any"
+  - id: "http-5xx-transient"
+    class: "transient"
+    ttl: "5m"
+    pattern: "\\b(502|503|504)\\b.*(Bad Gateway|Service Unavailable|Gateway Timeout)"
+    exit_codes: "any"
+  - id: "http-auth"
+    class: "misconfigured"
+    ttl: "1h"
+    pattern: "\\b(401|403)\\b|Unauthorized|Forbidden|API key (not found|invalid|missing)"
+    exit_codes: "any"
+
+agents:
+  qwen-code:
+    rules:
+      - id: "qwen-quota"
+        class: "unavailable"
+        ttl: "until_utc_midnight"
+        pattern: "Qwen OAuth quota exceeded|qwen.*quota.*exceed|Daily limit.*reached"
+        exit_codes: "any"
+      - id: "qwen-oauth-required"
+        class: "misconfigured"
+        ttl: "1h"
+        pattern: "Please run `qwen login`|qwen OAuth flow"
+        exit_codes: "any"
+
+  claude-sonnet:
+    rules:
+      - id: "claude-overloaded"
+        class: "unavailable"
+        ttl: "10m"
+        pattern: "overloaded_error|\\b529\\b|Overloaded"
+        exit_codes: "any"
+      - id: "claude-rate-limit"
+        class: "unavailable"
+        ttl: "1h"
+        pattern: "rate_limit_error|\\b429\\b.*rate|usage limit"
+        exit_codes: "any"
+
+  claude-opus:
+    extends: claude-sonnet
+
+  kilo-free:
+    rules:
+      - id: "kilo-free-tier-exhausted"
+        class: "unavailable"
+        ttl: "until_utc_midnight"
+        pattern: "free tier.*exhaust|daily limit|too many requests"
+        exit_codes: "any"
+
+  kilo-deepseek:
+    rules:
+      - id: "kilo-deepseek-provider-down"
+        class: "transient"
+        ttl: "15m"
+        pattern: "deepseek.*unavailable|upstream error"
+        exit_codes: "any"

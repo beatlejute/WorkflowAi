@@ -270,6 +270,23 @@ test('initProject does NOT create .workflow/metrics/skill-tests/', () => {
   }
 });
 
+test('initProject creates state dir and copies agent-health-rules', () => {
+  const tmpDir = join(tmpdir(), `workflow-init-state-health-test-${Date.now()}`);
+
+  try {
+    initProject(tmpDir, { force: true });
+
+    const stateDir = join(tmpDir, '.workflow', 'state');
+    assert.ok(existsSync(stateDir), '.workflow/state/ should exist after init');
+
+    const rulesPath = join(tmpDir, '.workflow', 'config', 'agent-health-rules.yaml');
+    assert.ok(existsSync(rulesPath), 'agent-health-rules.yaml should exist after init');
+    assert.ok(readFileSync(rulesPath, 'utf8').length > 0, 'agent-health-rules.yaml should not be empty');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('initProject is idempotent (second run does not break initialized project)', () => {
   const tmpDir = join(tmpdir(), `workflow-init-idempotent-test-${Date.now()}`);
 
