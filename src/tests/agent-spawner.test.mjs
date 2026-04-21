@@ -10,9 +10,12 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import { spawn } from 'child_process';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawnAgent, ResultParser } from '../lib/agent-spawner.mjs';
+import { loadRules } from '../lib/error-classifier.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -235,6 +238,116 @@ multiline:
     const result = ResultParser.parse(output, 'test-stage');
     assert.strictEqual(result.status, 'passed');
     assert(result.data.multiline.includes('line1'));
+  });
+});
+
+// ============================================================================
+// Test: Early-kill по онлайн-детекции stderr (hung process на HTTP 429)
+// ============================================================================
+describe('spawnAgent — Early kill по stderr паттерну', () => {
+  function makeTmpProjectWithRules() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spawn-earlykill-'));
+    const cfg = path.join(dir, '.workflow', 'config');
+    fs.mkdirSync(cfg, { recursive: true });
+    fs.writeFileSync(
+      path.join(cfg, 'agent-health-rules.yaml'),
+      `version: "1.0"
+agents:
+  kilo-glm:
+    rules:
+      - id: "zai-usage-limit"
+        class: "unavailable"
+        ttl: "5h"
+        pattern: "Usage limit reached for \\\\d+ hour"
+        exit_codes: "any"
+`,
+      'utf-8'
+    );
+    return dir;
+  }
+
+  it('должен убить hung-процесс при матче fatal-паттерна в stderr до таймаута', async () => {
+    const projectRoot = makeTmpProjectWithRules();
+    try {
+      const healthRules = loadRules(projectRoot);
+      const agentConfig = {
+        command: 'node',
+        args: [
+          '-e',
+          `process.stderr.write("ERROR fake llm error Usage limit reached for 5 hour. Reset at later\\n");
+           setTimeout(() => {}, 60000);`,
+        ],
+      };
+
+      const start = Date.now();
+      let err = null;
+      try {
+        await spawnAgent(agentConfig, 'test', {
+          timeout: 10, // 10s timeout, но мы должны убить намного раньше
+          agentId: 'kilo-glm',
+          healthRules,
+          projectRoot,
+        });
+      } catch (e) {
+        err = e;
+      }
+      const elapsed = Date.now() - start;
+
+      assert(err !== null, 'должна быть выброшена ошибка');
+      assert.strictEqual(err.code, 'EARLY_KILL', `expected EARLY_KILL, got ${err.code}`);
+      assert.strictEqual(err.earlyKill, true);
+      assert.strictEqual(err.rule?.rule_id, 'zai-usage-limit');
+      assert.strictEqual(err.rule?.class, 'unavailable');
+      assert(err.stderr.includes('Usage limit reached'));
+      assert(elapsed < 5000, `early-kill должен сработать быстро, прошло ${elapsed}ms`);
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('не должен убивать процесс если stderr не содержит fatal-паттерн', async () => {
+    const projectRoot = makeTmpProjectWithRules();
+    try {
+      const healthRules = loadRules(projectRoot);
+      const agentConfig = {
+        command: 'node',
+        args: ['-e', 'process.stderr.write("some benign warning"); console.log("ok")'],
+      };
+
+      const result = await spawnAgent(agentConfig, 'test', {
+        timeout: 5,
+        agentId: 'kilo-glm',
+        healthRules,
+        projectRoot,
+      });
+      assert.strictEqual(result.exitCode, 0);
+      assert(result.output.includes('ok'));
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('не должен сканировать если agentId не передан', async () => {
+    const projectRoot = makeTmpProjectWithRules();
+    try {
+      const agentConfig = {
+        command: 'node',
+        args: [
+          '-e',
+          `process.stderr.write("Usage limit reached for 5 hour");
+           process.exit(0);`,
+        ],
+      };
+
+      // Без agentId online-скан не работает — процесс завершится нормально
+      const result = await spawnAgent(agentConfig, 'test', {
+        timeout: 5,
+        projectRoot,
+      });
+      assert.strictEqual(result.exitCode, 0);
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
   });
 });
 

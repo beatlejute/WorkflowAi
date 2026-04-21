@@ -62,3 +62,14 @@ agents:
         ttl: "15m"
         pattern: "deepseek.*unavailable|upstream error"
         exit_codes: "any"
+
+  kilo-glm:
+    rules:
+      - id: "zai-usage-limit"
+        class: "unavailable"
+        ttl: "5h"
+        pattern: "Usage limit reached for \\d+ hour|api\\.z\\.ai.*\"statusCode\":429|AI_APICallError.*z\\.ai"
+        exit_codes: "any"
+
+  kilo-glm-air:
+    extends: kilo-glm

@@ -203,6 +203,43 @@ export async function classify(rules, agentId, { exitCode, stderr }) {
   return null;
 }
 
+/**
+ * Онлайн-проверка stderr на "фатальные" паттерны для агента.
+ * Используется spawn-хендлером для раннего kill зависшего процесса,
+ * когда дочерний агент уходит в retry-цикл на HTTP 429 / quota без завершения.
+ *
+ * Проверяет только правила самого агента (не common), и только те,
+ * у которых class ∈ {unavailable, misconfigured} — это сигналы, после которых
+ * продолжать вызов бессмысленно.
+ *
+ * @param {{common: Array, agents: Map}} rules — результат loadRules()
+ * @param {string} agentId
+ * @param {string} stderrText — весь накопленный stderr (до STDERR_MATCH_LIMIT)
+ * @returns {{rule_id: string, class: string, ttl: string, reason: string} | null}
+ */
+export function scanStderrForFatalRule(rules, agentId, stderrText) {
+  if (!stderrText || !agentId) return null;
+  const truncated = truncateStderr(stderrText);
+  const agentRules = rules.agents.get(agentId) || [];
+  for (const rule of agentRules) {
+    if (rule.class !== 'unavailable' && rule.class !== 'misconfigured') continue;
+    if (!rule.pattern) continue;
+    try {
+      if (rule.pattern.test(truncated)) {
+        return {
+          rule_id: rule.id,
+          class: rule.class,
+          ttl: rule.ttl,
+          reason: truncated,
+        };
+      }
+    } catch {
+      // broken regex — пропускаем
+    }
+  }
+  return null;
+}
+
 export function parseTtl(ttl, now = Date.now()) {
   if (ttl === 'infinite') {
     return Number.MAX_SAFE_INTEGER;
