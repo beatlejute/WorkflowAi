@@ -8,7 +8,7 @@ import yaml from './lib/js-yaml.mjs';
 import { findProjectRoot } from './lib/find-root.mjs';
 import { loadRules, scanStderrForFatalRule, classify } from './lib/error-classifier.mjs';
 import { snapshot, diff, isEmpty } from './lib/artifact-snapshot.mjs';
-import { markUnhealthy } from './lib/agent-health-registry.mjs';
+import { markUnhealthy, isHealthy } from './lib/agent-health-registry.mjs';
 
 // ============================================================================
 // Logger — система логирования с уровнями DEBUG/INFO/WARN/ERROR
@@ -951,16 +951,23 @@ class StageExecutor {
     };
     const afterCapabilities = agentIds.filter(covers);
 
-    // Фильтр по excludeAgents (для fallback)
+    // Фильтр по health-реестру: unhealthy-агенты с неистёкшим TTL пропускаются.
+    // Реестр персистентный между attempt'ами (план rev.3, решение 6.5).
+    const afterHealth = afterCapabilities.filter(id => isHealthy(this.projectRoot, id));
+
+    // Фильтр по excludeAgents (для in-stage fallback в рамках одной attempt)
     const afterExclude = excludeAgents.length > 0
-      ? afterCapabilities.filter(id => !excludeAgents.includes(id))
-      : afterCapabilities;
+      ? afterHealth.filter(id => !excludeAgents.includes(id))
+      : afterHealth;
 
     if (afterExclude.length === 0) {
-      if (excludeAgents.length > 0 && afterCapabilities.length === 0) {
+      // Все capability-совместимые агенты либо unhealthy в реестре, либо уже пробованы в этой attempt.
+      if (afterCapabilities.length > 0) {
         return {
           blocked: 'all_unhealthy',
-          reason: `All agents tried in fallback`,
+          reason: excludeAgents.length > 0
+            ? `All agents tried in fallback`
+            : `All capable agents are unhealthy in registry`,
           attempt
         };
       }
@@ -983,10 +990,11 @@ class StageExecutor {
   /**
    * Выполняет stage с fallback-логикой: при пустом artifact diff делает retry с другим агентом.
    * @param {string} stageId - ID stage из конфигурации
+   * @param {object} [stageOverride] - явный stage (для тестов и промежуточных вызовов); по умолчанию берётся из pipeline.stages
    * @returns {Promise<{status: string, output: string, result?: object}>}
    */
-  async executeWithFallback(stageId) {
-    const stage = this.pipeline.stages[stageId];
+  async executeWithFallback(stageId, stageOverride) {
+    const stage = stageOverride ?? this.pipeline.stages[stageId];
     if (!stage) {
       throw new Error(`Stage not found: ${stageId}`);
     }
@@ -1004,10 +1012,14 @@ class StageExecutor {
       const resolved = this.resolveAgent(stage, stageId, { excludeAgents: triedInThisAttempt });
 
       if (resolved.blocked) {
+        // all_unhealthy после исчерпания списка в текущей attempt (lastErr есть) —
+        // re-throw, чтобы стадия ушла в goto.error и inc-counter. Без lastErr —
+        // первая итерация while, агентов сразу нет (persistence из прошлой attempt)
+        // → возвращаем blocked, чтобы конфиг мог развести goto.blocked vs goto.error.
         if (resolved.blocked === 'all_unhealthy' && lastErr) {
           throw lastErr;
         }
-        return { status: 'blocked', reason: resolved.reason };
+        return { status: 'blocked', blocked_reason: resolved.blocked, reason: resolved.reason };
       }
 
       const { agentId, effectiveStage } = resolved;
