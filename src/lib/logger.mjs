@@ -30,13 +30,27 @@ function ensureLogDir(logFilePath) {
 }
 
 function createLogger(logFilePath = null, consoleLevel = LEVELS.INFO) {
-  const projectRoot = findProjectRoot();
-  const defaultLogPath = path.join(projectRoot, '.workflow/logs/pipeline.log');
-  const logPath = logFilePath || defaultLogPath;
-  
-  ensureLogDir(logPath);
+  let resolvedLogPath = logFilePath;
+  let logDirEnsured = false;
+
+  function resolveLogPath() {
+    if (resolvedLogPath) return resolvedLogPath;
+    try {
+      const projectRoot = findProjectRoot();
+      resolvedLogPath = path.join(projectRoot, '.workflow/logs/pipeline.log');
+      return resolvedLogPath;
+    } catch {
+      return null;
+    }
+  }
 
   function writeToFile(formatted) {
+    const logPath = resolveLogPath();
+    if (!logPath) return;
+    if (!logDirEnsured) {
+      ensureLogDir(logPath);
+      logDirEnsured = true;
+    }
     fs.appendFileSync(logPath, formatted + '\n', 'utf8');
   }
 
