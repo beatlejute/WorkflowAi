@@ -1350,6 +1350,32 @@ class StageExecutor {
           return;
         }
 
+        // Детекция silent-failure: CLI-агент (kilo и т.п.) auto-rejected permission-
+        // запросы, exit=0, структурированного RESULT нет. Без этой проверки pipeline
+        // получает status=default и идёт дальше, а стейдж фактически не выполнен
+        // (см. incident 2026-04-22: create-report/analyze-report в PulseProxy).
+        // Маппим в ошибку, чтобы executeWithFallback переключился на следующего агента.
+        if (code === 0 && !result.parsed && stderr) {
+          const rejectMatches = stderr.match(/(?:auto-rejecting|rejected permission|permission denied)/gi) || [];
+          if (rejectMatches.length > 0) {
+            const err = new Error(
+              `Agent "${agentId}" exited 0 but auto-rejected ${rejectMatches.length} permission request(s) and produced no RESULT`
+            );
+            err.code = 'PERMISSION_REJECTED';
+            err.exitCode = -1;
+            err.stderr = stderr;
+            err.rejectCount = rejectMatches.length;
+            if (this.logger) {
+              this.logger.error(
+                `Agent "${agentId}" silent-failure: ${rejectMatches.length} auto-rejected permission(s), no RESULT — mapping to status=error`,
+                stageId
+              );
+            }
+            reject(err);
+            return;
+          }
+        }
+
         resolve({
           status: result.status || 'default',
           output: stdout,

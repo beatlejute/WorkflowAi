@@ -64,42 +64,42 @@ pipeline:
 
     kilo-code:
       command: "kilo"
-      args: ["-m", "kilo/kilo-auto/free", "--agent", "orchestrator", "--print-logs", "--log-level", "ERROR", "run"]
+      args: ["-m", "kilo/kilo-auto/free", "--agent", "orchestrator", "--print-logs", "--log-level", "ERROR", "--auto", "run"]
       workdir: "."
       capabilities: [text]
       description: "Kilo мульти-режимный (architect, code, debug)"
 
     kilo-glm:
       command: "kilo"
-      args: ["-m", "zai/glm-5.1", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run"]
+      args: ["-m", "zai/glm-5.1", "--agent", "code", "--print-logs", "--log-level", "ERROR", "--auto", "run"]
       workdir: "."
       capabilities: [text]
       description: "Kilo GLM"
 
     kilo-glm-air:
       command: "kilo"
-      args: ["-m", "zai/glm-4.5-air", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run"]
+      args: ["-m", "zai/glm-4.5-air", "--agent", "code", "--print-logs", "--log-level", "ERROR", "--auto", "run"]
       workdir: "."
       capabilities: [text]
       description: "Kilo GLM air"
 
     kilo-deepseek:
       command: "kilo"
-      args: ["-m", "deepseek/deepseek-reasoner", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run"]
+      args: ["-m", "deepseek/deepseek-reasoner", "--agent", "code", "--print-logs", "--log-level", "ERROR", "--auto", "run"]
       workdir: "."
       capabilities: [text]
       description: "Kilo deepseek"
 
     kilo-minimax:
       command: "kilo"
-      args: ["-m", "kilo/minimax/minimax-m2.7", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run"]
+      args: ["-m", "kilo/minimax/minimax-m2.7", "--agent", "code", "--print-logs", "--log-level", "ERROR", "--auto", "run"]
       workdir: "."
       capabilities: [text]
       description: "Kilo minimax"
 
     kilo-free:
       command: "kilo"
-      args: ["-m", "kilo/kilo-auto/free", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run"]
+      args: ["-m", "kilo/kilo-auto/free", "--agent", "code", "--print-logs", "--log-level", "ERROR", "--auto", "run"]
       workdir: "."
       capabilities: [text]
       description: "Kilo free"

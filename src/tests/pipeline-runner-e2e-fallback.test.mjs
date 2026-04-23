@@ -23,6 +23,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STUBS_DIR = path.join(__dirname, 'fixtures', 'manual-qa-fallback', 'stubs');
 const STUB_QUOTA = path.join(STUBS_DIR, 'qwen-stub.mjs');
 const STUB_WRITES = path.join(STUBS_DIR, 'qwen-stub-writes.mjs');
+const STUB_PERMISSION_REJECT = path.join(STUBS_DIR, 'kilo-permission-reject-stub.mjs');
 
 function makeTmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'runner-e2e-fallback-'));
@@ -129,6 +130,64 @@ test('QA-24-E2E-001: qwen quota → in-stage fallback на следующего 
 // ============================================================================
 // QA-24 Контрольный сценарий: артефакт создан → fallback заблокирован.
 // ============================================================================
+// ============================================================================
+// INC-2026-04-22: kilo auto-rejected permissions (exit=0, пустой RESULT) →
+// runner должен мапить это в ошибку и fallback-ить на следующего агента.
+// Без маппинга stage create-report/analyze-report тихо завершается status=default
+// и pipeline «успешно завершается» без создания отчёта.
+// ============================================================================
+test('INC-2026-04-22-E2E: kilo auto-rejected permissions → fallback на следующего агента', async () => {
+  const projectRoot = makeTmpDir();
+  try {
+    createRulesFile(projectRoot);
+    const marker = path.join(projectRoot, 'success-called.txt');
+    const successStub = writeSuccessStub(projectRoot, marker);
+
+    const config = makeConfig({
+      'kilo-glm': { command: 'node', args: [STUB_PERMISSION_REJECT], capabilities: ['text'] },
+      'claude-sonnet': { command: 'node', args: [successStub], capabilities: ['text'] },
+    });
+    const executor = makeExecutor(config, projectRoot);
+    const stage = { agents: ['kilo-glm', 'claude-sonnet'], instructions: 'Create report', skill: 'create-report' };
+
+    const result = await executor.executeWithFallback('create-report', stage);
+
+    assert.strictEqual(result.status, 'passed', 'Итог — passed через fallback-агента');
+    assert.ok(fs.existsSync(marker), 'claude-sonnet реально вызван после fallback из kilo');
+  } finally {
+    cleanupDir(projectRoot);
+  }
+});
+
+test('INC-2026-04-22-E2E: одиночный permission-reject при наличии RESULT не триггерит fallback', async () => {
+  const projectRoot = makeTmpDir();
+  try {
+    createRulesFile(projectRoot);
+    const stubWithResult = path.join(projectRoot, 'kilo-with-result-stub.mjs');
+    fs.writeFileSync(stubWithResult, `#!/usr/bin/env node
+process.stderr.write('! permission requested: external_directory (/tmp/foo); auto-rejecting\\n');
+process.stdout.write('---RESULT---\\nstatus: passed\\n---RESULT---\\n');
+process.exit(0);
+`);
+    const marker = path.join(projectRoot, 'success-called.txt');
+    const successStub = writeSuccessStub(projectRoot, marker);
+
+    const config = makeConfig({
+      'kilo-glm': { command: 'node', args: [stubWithResult], capabilities: ['text'] },
+      'claude-sonnet': { command: 'node', args: [successStub], capabilities: ['text'] },
+    });
+    const executor = makeExecutor(config, projectRoot);
+    const stage = { agents: ['kilo-glm', 'claude-sonnet'], instructions: 'Create report', skill: 'create-report' };
+
+    const result = await executor.executeWithFallback('create-report', stage);
+
+    assert.strictEqual(result.status, 'passed', 'Итог — passed от первого агента');
+    assert.ok(!fs.existsSync(marker), 'claude-sonnet НЕ вызван — RESULT есть, fallback не нужен');
+  } finally {
+    cleanupDir(projectRoot);
+  }
+});
+
 test('QA-24-E2E-002: qwen записал артефакт + упал → fallback заблокирован, re-throw', async () => {
   const projectRoot = makeTmpDir();
   try {
