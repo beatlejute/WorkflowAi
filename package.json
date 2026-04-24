@@ -25,7 +25,8 @@
     "./lib/find-root.mjs": "./src/lib/find-root.mjs",
     "./lib/utils.mjs": "./src/lib/utils.mjs",
     "./lib/logger.mjs": "./src/lib/logger.mjs",
-    "./lib/js-yaml.mjs": "./src/lib/js-yaml.mjs"
+    "./lib/js-yaml.mjs": "./src/lib/js-yaml.mjs",
+    "./lib/operations/tickets.mjs": "./src/lib/operations/tickets.mjs"
   },
   "engines": {
     "node": ">=18.0.0"
