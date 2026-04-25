@@ -28,3 +28,8 @@ cases:
     origin_chg: [CHG-test-hygiene-2026-04-21]
     tags: [test-hygiene, isolation, knowledge-test-hygiene]
     severity: high
+  - id: TC-REVIEW-RESULT-004
+    file: cases/TC-REVIEW-RESULT-004-baseline-snapshot.yaml
+    origin_chg: [CHG-baseline-snapshot-2026-04-25]
+    tags: [baseline, snapshot, knowledge-baseline-snapshot-validation]
+    severity: high

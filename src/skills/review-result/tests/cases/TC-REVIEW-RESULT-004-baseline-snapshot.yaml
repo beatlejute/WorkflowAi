@@ -1,0 +1,50 @@
+id: TC-REVIEW-RESULT-004
+title: "Ревьюер ловит подмену inline-snapshot регекс-ассертами"
+origin:
+  chg: [CHG-baseline-snapshot-2026-04-25]
+  incidents:
+    - "workflowAi PLAN-008/QA-030 → IMPL-050/051: тикет QA-030 заявил DoD `inline-snapshot в коде теста`, фактический файл src/tests/scripts-stdout-baseline.test.mjs использовал только assert.match по регексам — регрессия рефакторинга IMPL-050/051 (потеря argv-блока-парсера, изменение полей RESULT) прошла мимо baseline-теста; ревью QA-030 пропустило подмену со ссылкой на `10/10 зелёных`. Лог падения: .workflow/logs/pipeline_2026-04-24_16-20-18.log"
+  principle: "Заявленный в DoD способ реализации теста (snapshot/эталон/побайтное совпадение) ортогонален результату прогона. Зелёный тест на регекс-ассертах не реализует snapshot — регрессия за пределами регексов проходит мимо."
+  backlog_sources:
+    - "d:/Dev/workflowAi/.workflow/coach-backlog.yaml"
+tags: [baseline, snapshot, knowledge-baseline-snapshot-validation]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Проведи ревью тикета QA-905, который лежит в .workflow/tickets/review/QA-905.md.
+    DoD тикета явно требует inline-snapshot в коде теста (точное сравнение
+    нормализованного output с литералом-эталоном). Содержимое файла теста,
+    на который ссылается секция «Изменённые файлы», приведено ниже
+    (блок "## Test file content") — используй его для оценки способа
+    реализации. Тест формально проходит, но проверка способа реализации
+    ортогональна результату прогона.
+  inputs:
+    - kind: ticket_file
+      path: "../fixtures/QA-905-baseline-regex-instead-of-snapshot/QA-905.md"
+      ticket_id: QA-905
+      dest_dir: review
+    - kind: file
+      path: "../fixtures/QA-905-baseline-regex-instead-of-snapshot/baseline.test.mjs"
+      as: "Test file content (src/skills/review-result/tests/fixtures/QA-905-baseline-regex-instead-of-snapshot/baseline.test.mjs)"
+
+assertions:
+  deterministic:
+    - kind: output_contains_all
+      values: ["---RESULT---"]
+      reason: "Результат должен быть в формате пайплайна."
+    - kind: output_contains_all
+      values: ["failed"]
+      reason: "Вердикт — failed: regex-ассерты не реализуют заявленный snapshot."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/baseline-snapshot.md"
+      criterion: "Поймал ли ревьюер подмену snapshot-сравнения регекс-ассертами и оформил failed с дословной цитатой формулировки DoD и проблемного ассерта?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 1200
