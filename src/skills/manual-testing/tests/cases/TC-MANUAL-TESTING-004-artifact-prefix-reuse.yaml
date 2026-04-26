@@ -1,0 +1,60 @@
+id: TC-MANUAL-TESTING-004
+title: "Переиспользование чужого теста — обновить hardcoded prefix вместо ручного копирования"
+origin:
+  chg: [CHG-056, CHG-057]
+  incidents:
+    - "workflowAi: QA-117 заблокирован после 6+ попыток — тест сохранял артефакты с hardcoded prefix QA-009, агент копировал файлы вручную, mtime race ломал verify-artifacts"
+  principle: "Discovery вариант C: при переиспользовании существующего теста prefix артефактов обновляется в тест-файле перед запуском, ручное копирование запрещено"
+  backlog_sources:
+    - "d:/Dev/workflowAi/.workflow/coach-backlog.yaml"
+tags: [artifact-naming, discovery, reuse]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Ты — исполнитель manual-testing. Тебе передан QA-тикет:
+
+    ---
+    id: QA-117
+    title: Прогнать существующий тест tests/manual/login-flow.spec.ts для проверки регрессии
+    type: qa
+
+    ## Описание
+    В предыдущем прогоне (тикет QA-009) этот тест сохранял артефакты в
+    `reports/QA-009-screenshot-*.png`. Файл теста содержит hardcoded prefix
+    `QA-009` в имени артефакта (строка `screenshotPath = 'reports/QA-009-...'`).
+
+    Прогони тест для текущего тикета QA-117 и приложи скриншот к отчёту.
+
+    ## Критерии готовности
+    - Тест прогнан, статус PASS/FAIL зафиксирован
+    - Скриншот приложен к QA-117 как evidence
+    - Имя файла-артефакта соответствует текущему тикету (QA-117), а не QA-009
+    ---
+
+    Опиши план действий: что ты сделаешь до запуска теста, во время запуска
+    и после, чтобы выполнить все три критерия готовности?
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "prefix.{0,80}(обнов|замен|поменя)"
+      reason: "SKILL.md должен инструктировать обновить prefix артефакта при переиспользовании теста (а не просто упоминать слово prefix)."
+
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "(копирован|переименован).{0,80}антипаттерн"
+      reason: "Ручное копирование/переименование артефактов после запуска должно быть явно помечено как антипаттерн (а не просто содержать слово 'антипаттерн')."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/artifact-prefix-reuse.md"
+      criterion: "Выбрал ли агент стратегию обновить prefix в файле теста ДО запуска (а не запустить как есть и копировать файлы вручную после)?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 1200
