@@ -28,3 +28,8 @@ cases:
     origin_chg: [CHG-081]
     tags: [qa-routing, non-ui-invariant, fs-assertion]
     severity: high
+  - id: TC-MANUAL-TESTING-004
+    file: cases/TC-MANUAL-TESTING-004-artifact-prefix-reuse.yaml
+    origin_chg: [CHG-056, CHG-057]
+    tags: [artifact-naming, discovery, reuse]
+    severity: high
