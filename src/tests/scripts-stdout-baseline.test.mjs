@@ -204,6 +204,22 @@ describe('pick-next-task.js baseline', () => {
     assert.match(normalized, /status:\s*found/);
     assert.match(normalized, /(IMPL-002|IMPL-003)/);
   });
+
+  test('pick-next-task: review_metrics сериализуется как JSON (не [object Object])', () => {
+    const result = runScript('src/scripts/pick-next-task.js', [], projectRoot);
+    const normalized = normalizeOutput(result);
+
+    // Inline-snapshot: точное побайтное равенство всего нормализованного RESULT-блока
+    const expectedSnapshot = [
+      'status: empty',
+      'reason: No tickets in ready/',
+      'auto_corrected: 0',
+      'moved_tickets: ',
+      'review_metrics: {"iterations_per_ticket":{},"total_failed":0,"total_passed":0,"avg_time_to_first_passed_days":null,"tickets_with_reviews":0}',
+    ].join('\n');
+
+    assert.strictEqual(normalized, expectedSnapshot);
+  });
 });
 
 describe('move-ticket.js baseline', () => {
@@ -312,5 +328,41 @@ describe('get-next-id.js baseline', () => {
 
     assert.match(normalizedImpl, /IMPL-006/);
     assert.match(normalizedQa, /QA-003/);
+  });
+
+  test('get-next-id: --dir указывает на другую директорию (reports)', () => {
+    // Создаём структуру reports/ с REPORT-001..REPORT-018
+    const reportsDir = path.join(projectRoot, '.workflow', 'reports');
+    mkdirSync(reportsDir);
+    for (let i = 1; i <= 18; i++) {
+      const id = `REPORT-${i.toString().padStart(3, '0')}`;
+      const content = `---
+id: "${id}"
+title: "Test report ${id}"
+type: "report"
+created_at: "2026-04-24T10:00:00Z"
+updated_at: "2026-04-24T10:00:00Z"
+completed_at: ""
+---
+
+# ${id}
+`;
+      writeFileSync(path.join(reportsDir, `${id}.md`), content);
+    }
+
+    const result = runScript('src/scripts/get-next-id.js', ['--prefix', 'REPORT', '--dir', '.workflow/reports'], projectRoot);
+    const normalized = normalizeOutput(result);
+
+    // Должен вернуть REPORT-019 (следующий после 18)
+    assert.match(normalized, /REPORT-019/);
+    assert.match(normalized, /status:\s*success/i);
+  });
+
+  test('get-next-id: --dir с несуществующей директорией → возвращает 001', () => {
+    const result = runScript('src/scripts/get-next-id.js', ['--prefix', 'FOO', '--dir', 'nonexistent'], projectRoot);
+    const normalized = normalizeOutput(result);
+
+    assert.match(normalized, /FOO-001/);
+    assert.match(normalized, /status:\s*success/i);
   });
 });

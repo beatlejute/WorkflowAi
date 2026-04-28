@@ -6,7 +6,7 @@
       "trials": [
         {
           "trial": 1,
-          "score": 5,
+          "score": 4,
           "passed": true
         },
         {
@@ -26,7 +26,7 @@
     {
       "agentId": "claude-sonnet",
       "trial": 1,
-      "score": 5,
+      "score": 4,
       "errored": false
     },
     {
@@ -42,5 +42,5 @@
       "errored": false
     }
   ],
-  "timestamp": "2026-04-21T08:59:39.808Z"
+  "timestamp": "2026-04-26T01:45:45.847Z"
 }

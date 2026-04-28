@@ -48,11 +48,11 @@ function checkCondition(condition) {
 
   switch (type) {
     case 'file_exists':
-      const filePath = path.join(PROJECT_DIR, value);
+      const filePath = path.isAbsolute(value) ? value : path.join(PROJECT_DIR, value);
       return fs.existsSync(filePath);
 
     case 'file_not_exists':
-      const filePath2 = path.join(PROJECT_DIR, value);
+      const filePath2 = path.isAbsolute(value) ? value : path.join(PROJECT_DIR, value);
       return !fs.existsSync(filePath2);
 
     case 'tasks_completed':
@@ -768,13 +768,7 @@ async function main() {
     ...result,
     auto_corrected: correctionResult.moved.length,
     moved_tickets: correctionResult.moved.map(m => m.id).join(','),
-    review_metrics: {
-      tickets_with_reviews: reviewMetrics.tickets_with_reviews,
-      total_failed: reviewMetrics.total_failed,
-      total_passed: reviewMetrics.total_passed,
-      avg_time_to_first_passed_days: reviewMetrics.avg_time_to_first_passed_days,
-      iterations_per_ticket: reviewMetrics.iterations_per_ticket
-    }
+    review_metrics: JSON.stringify(reviewMetrics)
   };
 
   printResult(finalResult);

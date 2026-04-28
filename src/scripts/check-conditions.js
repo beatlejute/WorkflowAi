@@ -46,10 +46,10 @@ function checkCondition(condition) {
 
   switch (type) {
     case 'file_exists':
-      return fs.existsSync(path.join(PROJECT_DIR, value));
+      return fs.existsSync(path.isAbsolute(value) ? value : path.join(PROJECT_DIR, value));
 
     case 'file_not_exists':
-      return !fs.existsSync(path.join(PROJECT_DIR, value));
+      return !fs.existsSync(path.isAbsolute(value) ? value : path.join(PROJECT_DIR, value));
 
     case 'tasks_completed': {
       if (!value || (Array.isArray(value) && value.length === 0)) return true;

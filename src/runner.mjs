@@ -1406,6 +1406,38 @@ class StageExecutor {
 class PipelineRunner {
   constructor(config, args) {
     this.config = config;
+    
+    // Validate manual-gate stages in pipeline.yaml at startup
+    if (config.pipeline && config.pipeline.stages) {
+      for (const [stageId, stage] of Object.entries(config.pipeline.stages)) {
+        if (stage.type === 'manual-gate') {
+          // Validate goto.approved
+          if (!stage.goto || !stage.goto.approved) {
+            throw new Error(`pipeline.yaml validation error in stage '${stageId}' (type: manual-gate): missing required 'goto.approved'`);
+          }
+          
+          // Validate goto.rejected
+          if (!stage.goto || !stage.goto.rejected) {
+            throw new Error(`pipeline.yaml validation error in stage '${stageId}' (type: manual-gate): missing required 'goto.rejected'`);
+          }
+          
+          // Validate poll_interval_ms if present
+          if (stage.poll_interval_ms !== undefined) {
+            if (typeof stage.poll_interval_ms !== 'number' || stage.poll_interval_ms < 100) {
+              throw new Error(`pipeline.yaml validation error in stage '${stageId}' (type: manual-gate): poll_interval_ms must be a number >= 100`);
+            }
+          }
+          
+          // Validate timeout_seconds if present
+          if (stage.timeout_seconds !== undefined) {
+            if (typeof stage.timeout_seconds !== 'number' || stage.timeout_seconds <= 0) {
+              throw new Error(`pipeline.yaml validation error in stage '${stageId}' (type: manual-gate): timeout_seconds must be a number > 0`);
+            }
+          }
+        }
+      }
+    }
+    
     this.args = args;
     this.pipeline = config.pipeline;
     this.context = { ...this.pipeline.context };
@@ -1464,36 +1496,266 @@ class PipelineRunner {
     }
   }
 
-  /**
-   * Выполняет встроенный стейдж типа update-counter:
-   * инкрементирует счётчик и возвращает статус для goto-перехода.
-   *
-   * Конфигурация стейджа:
-   *   type: update-counter
-   *   counter: <name>   — имя счётчика
-   *   max: <number>     — максимальное значение (опционально)
-   *   goto:
-   *     default: <stage>           — следующий стейдж
-   *     max_reached: <stage>       — стейдж при достижении max
-   */
-  executeUpdateCounter(stageId, stage) {
-    const counterName = stage.counter;
-    if (!counterName) {
-      throw new Error(`Stage "${stageId}" has type update-counter but no counter specified`);
+   /**
+    * Вычисляет детерминированный идентификатор шага для approval-файла.
+    * Формат: {ticket_id}_{stageId}_{attempt}
+    *
+    * @param {Object} context - Контекст выполнения пайплайна
+    * @param {string} [context.ticket_id] - ID тикета (может быть undefined)
+    * @param {string} stageId - Идентификатор стадии
+    * @param {Object} counters - Счётчики выполнения
+    * @param {number} [counters.task_attempts] - Номер попытки выполнения (0 если не задано)
+    * @returns {string} Детерминированный step_id
+    */
+   computeStepId(context, stageId, counters) {
+     const ticketId = context.ticket_id || 'no-ticket';
+     const attempt = counters.task_attempts ?? 0;
+     return `${ticketId}_${stageId}_${attempt}`;
+   }
+
+    /**
+     * Создаёт approval-файл со статусом "pending" (идемпотентно).
+     * Если файл уже существует — не перезаписывает, возвращает его содержимое.
+     *
+     * @param {string} filePath - Путь к approval-файлу (абсолютный)
+     * @param {Object} payload - Данные для approval-файла
+     * @param {string} payload.step_id - Идентификатор шага (должен совпадать с именем файла)
+     * @param {string} payload.ticket_id - ID тикета
+     * @param {string} payload.stage_id - ID стадии
+     * @param {number} payload.attempt - Номер попытки
+     * @param {Object} [payload.context_snapshot] - Снапшот контекста (опционально)
+     * @returns {Promise<Object>} Объект approval-файла (прочитанный или созданный)
+     * @throws {Error} При ошибке создания директории или записи файла
+     */
+    async writeApprovalPending(filePath, payload) {
+      // Создаём директорию заранее (recursive, безопасно)
+      const dir = path.dirname(filePath);
+      await fs.promises.mkdir(dir, { recursive: true });
+
+      // Формируем данные approval-файла
+      const now = new Date().toISOString();
+      const approvalData = {
+        step_id: payload.step_id,
+        ticket_id: payload.ticket_id,
+        stage_id: payload.stage_id,
+        attempt: payload.attempt,
+        status: 'pending',
+        created_at: now,
+        updated_at: now,
+        decided_by: null,
+        comment: null,
+        context_snapshot: payload.context_snapshot || {}
+      };
+
+      const content = JSON.stringify(approvalData, null, 2);
+
+      // Атомарно создаём файл с флагом 'wx' (fail if exists)
+      try {
+        const handle = await fs.promises.open(filePath, 'wx');
+        await handle.write(content);
+        await handle.close();
+        return approvalData;
+      } catch (err) {
+        if (err.code === 'EEXIST') {
+          // Файл уже был создан (например, при recovery) — читаем и возвращаем
+          const existing = await fs.promises.readFile(filePath, 'utf8');
+          return JSON.parse(existing);
+        }
+        throw err;
+      }
     }
 
-    this.counters[counterName] = (this.counters[counterName] || 0) + 1;
-    const value = this.counters[counterName];
-
-    if (this.logger) {
-      this.logger.info(`Counter "${counterName}" incremented to ${value}`, stageId);
+    /**
+     * Читает approval-файл и парсит его как JSON.
+     *
+     * @param {string} filePath - Путь к approval-файлу (абсолютный)
+     * @returns {Promise<Object|null>} Объект approval-файла или null если файл не существует
+     * @throws {Error} При невалидном JSON — с сообщением "corrupt approval file at {path}: {parse error}"
+     */
+    async readApprovalFile(filePath) {
+      try {
+        const content = await fs.promises.readFile(filePath, 'utf8');
+        return JSON.parse(content);
+      } catch (err) {
+        if (err.code === 'ENOENT') {
+          return null;
+        }
+        if (err instanceof SyntaxError) {
+          throw new Error(`corrupt approval file at ${filePath}: ${err.message}`);
+        }
+        // Перебрасываем другие ошибки (например, fs-ошибки) без изменений
+        throw err;
+      }
     }
 
-    const max = stage.max;
-    const status = (max && value >= max) ? 'max_reached' : 'default';
+    /**
+     * Выполняет встроенный стейдж типа update-counter:
+     * инкрементирует счётчик и возвращает статус для goto-перехода.
+     *
+     * Конфигурация стейджа:
+     *   type: update-counter
+     *   counter: <name>   — имя счётчика
+     *   max: <number>     — максимальное значение (опционально)
+     *   goto:
+     *     default: <stage>           — следующий стейдж
+     *     max_reached: <stage>       — стейдж при достижении max
+     */
+    executeUpdateCounter(stageId, stage) {
+      const counterName = stage.counter;
+      if (!counterName) {
+        throw new Error(`Stage "${stageId}" has type update-counter but no counter specified`);
+      }
 
-    return { status, result: { counter: counterName, value } };
-  }
+      this.counters[counterName] = (this.counters[counterName] || 0) + 1;
+      const value = this.counters[counterName];
+
+      if (this.logger) {
+        this.logger.info(`Counter "${counterName}" incremented to ${value}`, stageId);
+      }
+
+      const max = stage.max;
+      const status = (max && value >= max) ? 'max_reached' : 'default';
+
+      return { status, result: { counter: counterName, value } };
+    }
+
+    /**
+     * Выполняет встроенный стейдж типа manual-gate: создаёт approval-файл
+     * и ждёт решения (approved/rejected) через polling файловой системы.
+     *
+     * Конфигурация стейджа:
+     *   type: manual-gate
+     *   poll_interval_ms: <number>  — интервал опроса в мс (опц., default 2000)
+     *   timeout_seconds: <number>   — таймаут в секундах (опц., default null)
+     *   goto:
+     *     approved: <stage>         — обязательный, при одобрении
+     *     rejected: <stage>         — обязательный, при отклонении
+     *     timeout: <stage>          — опц., при истечении таймаута
+     *     aborted: <stage>          — опц., при остановке runner'а
+     *
+     * @param {string} stageId - ID стадии
+     * @param {object} stage - конфигурация стадии
+     * @returns {Promise<{status: 'approved'|'rejected'|'timeout'|'aborted', result: object}>}
+     */
+    async executeManualGate(stageId, stage) {
+      const stepId = this.computeStepId(this.context, stageId, this.counters);
+      const filePath = path.join(this.projectRoot, '.workflow', 'approvals', `${stepId}.json`);
+
+      const payload = {
+        step_id: stepId,
+        ticket_id: this.context.ticket_id || 'no-ticket',
+        stage_id: stageId,
+        attempt: this.counters.task_attempts || 0,
+        context_snapshot: { ...this.context }
+      };
+
+      const existing = await this.writeApprovalPending(filePath, payload);
+
+      // Если файл уже был и статус уже resolved — сразу возвращаем результат (recovery)
+      if (existing.status === 'approved' || existing.status === 'rejected') {
+        if (this.logger) {
+          this.logger.info(
+            `[${stageId}] manual-gate: already ${existing.status} by ${existing.decided_by || 'unknown'}${existing.comment ? `, comment="${existing.comment}"` : ''}`,
+            stageId
+          );
+        }
+        return {
+          status: existing.status,
+          result: {
+            step_id: stepId,
+            decided_by: existing.decided_by,
+            comment: existing.comment
+          }
+        };
+      }
+
+      // Создан новый pending-файл
+      if (this.logger) {
+        this.logger.info(`[${stageId}] manual-gate: created pending approval at ${filePath}`, stageId);
+      }
+
+      const pollIntervalMs = stage.poll_interval_ms || 2000;
+      const timeoutSeconds = stage.timeout_seconds || null;
+      const startTime = Date.now();
+
+      // Polling-цикл
+      while (this.running) {
+        await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+
+        // Проверка остановки runner'а
+        if (!this.running) {
+          if (this.logger) {
+            this.logger.warn(`[${stageId}] manual-gate: aborted (runner stopped)`, stageId);
+          }
+          return { status: 'aborted', result: { step_id: stepId } };
+        }
+
+        // Проверка таймаута
+        if (timeoutSeconds !== null) {
+          const elapsed = (Date.now() - startTime) / 1000;
+          if (elapsed >= timeoutSeconds) {
+            if (this.logger) {
+              this.logger.warn(`[${stageId}] manual-gate: timeout after ${timeoutSeconds}s, no decision`, stageId);
+            }
+            return { status: 'timeout', result: { step_id: stepId } };
+          }
+        }
+
+        // Читаем текущее состояние файла
+        let data;
+        try {
+          data = await this.readApprovalFile(filePath);
+        } catch (err) {
+          // Corrupt JSON — пробрасываем ошибку для goto.error
+          throw err;
+        }
+
+        if (data && data.status === 'approved') {
+          if (this.logger) {
+            this.logger.info(
+              `[${stageId}] manual-gate: approved by ${data.decided_by || 'unknown'}${data.comment ? `, comment="${data.comment}"` : ''}`,
+              stageId
+            );
+          }
+          return {
+            status: 'approved',
+            result: {
+              step_id: stepId,
+              decided_by: data.decided_by,
+              comment: data.comment
+            }
+          };
+        }
+
+        if (data && data.status === 'rejected') {
+          if (this.logger) {
+            this.logger.info(
+              `[${stageId}] manual-gate: rejected by ${data.decided_by || 'unknown'}${data.comment ? `, comment="${data.comment}"` : ''}`,
+              stageId
+            );
+          }
+          return {
+            status: 'rejected',
+            result: {
+              step_id: stepId,
+              decided_by: data.decided_by,
+              comment: data.comment
+            }
+          };
+        }
+
+        // DEBUG-лог polling (оставляем только если нужен)
+        if (this.logger && this.logger.level === 'debug') {
+          this.logger.debug(`[${stageId}] manual-gate: polling, current status=pending`, stageId);
+        }
+      }
+
+      // Выход по this.running = false
+      if (this.logger) {
+        this.logger.warn(`[${stageId}] manual-gate: aborted (runner stopped)`, stageId);
+      }
+      return { status: 'aborted', result: { step_id: stepId } };
+    }
 
   /**
    * Запускает основной цикл выполнения
@@ -1528,16 +1790,18 @@ class PipelineRunner {
           throw new Error(`Stage not found: ${this.currentStage}`);
         }
 
-        let result;
+         let result;
 
-        // Встроенный тип стейджа: update-counter — инкрементирует счётчик без вызова агента
-        if (stage.type === 'update-counter') {
-          result = this.executeUpdateCounter(this.currentStage, stage);
-        } else {
-          this.currentExecutor = new StageExecutor(this.config, this.context, this.counters, {}, this.fileGuard, this.logger, this.projectRoot);
-          result = await this.currentExecutor.execute(this.currentStage);
-          this.currentExecutor = null;
-        }
+         // Встроенные типы стейджа — выполняются без вызова внешних агентов
+         if (stage.type === 'update-counter') {
+           result = this.executeUpdateCounter(this.currentStage, stage);
+         } else if (stage.type === 'manual-gate') {
+           result = await this.executeManualGate(this.currentStage, stage);
+         } else {
+           this.currentExecutor = new StageExecutor(this.config, this.context, this.counters, {}, this.fileGuard, this.logger, this.projectRoot);
+           result = await this.currentExecutor.execute(this.currentStage);
+           this.currentExecutor = null;
+         }
 
         this.logger.info(`Stage ${this.currentStage} completed with status: ${result.status}`, 'PipelineRunner');
 
@@ -1841,6 +2105,22 @@ function validateConfig(config) {
       const resolvedAgent = stage.agent || pipeline.default_agent;
       if (resolvedAgent && !agentIds.includes(resolvedAgent)) {
         errors.push(`Stage "${stageId}" references non-existent agent: ${resolvedAgent}`);
+      }
+
+      // Валидация для manual-gate стадии
+      if (stage.type === 'manual-gate') {
+        if (!stage.goto || !stage.goto.approved) {
+          errors.push(`Stage "${stageId}" has type manual-gate but missing required goto.approved`);
+        }
+        if (!stage.goto || !stage.goto.rejected) {
+          errors.push(`Stage "${stageId}" has type manual-gate but missing required goto.rejected`);
+        }
+        if (stage.poll_interval_ms !== undefined && (typeof stage.poll_interval_ms !== 'number' || stage.poll_interval_ms < 100)) {
+          errors.push(`Stage "${stageId}" has invalid poll_interval_ms: must be a number >= 100`);
+        }
+        if (stage.timeout_seconds !== undefined && (typeof stage.timeout_seconds !== 'number' || stage.timeout_seconds <= 0)) {
+          errors.push(`Stage "${stageId}" has invalid timeout_seconds: must be a number > 0`);
+        }
       }
 
       if (stage.goto) {

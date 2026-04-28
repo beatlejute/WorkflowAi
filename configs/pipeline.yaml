@@ -90,6 +90,20 @@ pipeline:
       capabilities: [text]
       description: "Kilo deepseek"
 
+    deepseek-flash:
+      command: "kilo"
+      args: ["-m", "deepseek/deepseek-v4-flash", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
+      workdir: "."
+      capabilities: [text]
+      description: "Kilo deepseek"
+
+    deepseek-pro:
+      command: "kilo"
+      args: ["-m", "deepseek/deepseek-v4-pro", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
+      workdir: "."
+      capabilities: [text]
+      description: "Kilo deepseek"
+
     kilo-minimax:
       command: "kilo"
       args: ["-m", "kilo/minimax/minimax-m2.7", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
@@ -100,6 +114,13 @@ pipeline:
     kilo-free:
       command: "kilo"
       args: ["-m", "kilo/kilo-auto/free", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
+      workdir: "."
+      capabilities: [text]
+      description: "Kilo free"
+
+    openrouter-free:
+      command: "kilo"
+      args: ["-m", "kilo/openrouter/free", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
       workdir: "."
       capabilities: [text]
       description: "Kilo free"
@@ -576,10 +597,10 @@ pipeline:
       description: "Выполнить выбранную задачу"
       skill: execute-task
       counter: task_attempts
-      agents: [kilo-free, kilo-glm-air, claude-haiku, claude-sonnet, claude-opus, kilo-minimax, kilo-deepseek]
+      agents: [kilo-free, openrouter-free, kilo-glm-air, claude-haiku, claude-sonnet, claude-opus, kilo-minimax, deepseek-flash]
       agents_by_type:
         coach:
-          agents: [kilo-glm, claude-sonnet, kilo-minimax, kilo-deepseek]
+          agents: [kilo-glm, claude-sonnet, deepseek-pro, kilo-minimax]
           instructions: "Твоя роль: coach"
         qa:
           agents: [claude-haiku, kilo-glm, claude-sonnet, claude-opus, kilo-minimax]

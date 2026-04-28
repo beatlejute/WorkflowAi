@@ -1,4 +1,7 @@
+src/tests/
 src/tests
-*.test.mjs
-.git
+.test.mjs
+*.test.js
+src/scripts/tests/
+.git/
 .gitignore
