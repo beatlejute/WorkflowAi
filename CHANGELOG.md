@@ -1,4 +1,9 @@
-## [1.2.0] — 2026-04-28
+## [1.2.1] — 2026-04-28
+
+> **Примечание:** версия 1.2.0 не была опубликована в npm. При выполнении `npm publish`
+> сработал prepublishOnly/postversion скрипт, автоматически поднявший версию до 1.2.1.
+> Git-тег `v1.2.0` (коммит 179d52b) соответствует состоянию до publish; `v1.2.1` (коммит 83d1b70) —
+> фактически опубликованной версии.
 
 ### New Features
 - **New built-in stage type: `manual-gate`** — Adds support for manual approval steps in pipelines. When a stage with `type: manual-gate` is encountered, the runner creates a pending approval file in `.workflow/approvals/{step_id}.json` and enters a polling loop, waiting for an external decision (`approved`/`rejected`).
