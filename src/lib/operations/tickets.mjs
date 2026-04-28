@@ -36,21 +36,37 @@ function formatNumber(num) {
  * Находит следующий свободный ID для указанного типа тикетов
  * @param {string} projectRoot - Корень проекта
  * @param {string} type - Тип тикета (например, IMPL, QA)
+ * @param {object} options - Опции
+ * @param {string} [options.dir] - Опциональный override директории для сканирования (например, 'tickets', 'reports', или абсолютный путь)
  * @returns {Promise<string>} Следующий ID в формате TYPE-NNN
  */
-export async function getNextId(projectRoot, type) {
+export async function getNextId(projectRoot, type, options = {}) {
   // Если projectRoot не предоставлен, ищем его сами
   const root = projectRoot || findProjectRoot();
 
-  const ticketsDir = join(root, '.workflow', 'tickets');
+  // Определяем директорию для сканирования
+  let targetDir;
+  if (options.dir) {
+    // Если dir указан, используем resolveTargetId-like логику
+    if (options.dir === "tickets") {
+      targetDir = join(root, '.workflow', 'tickets');
+    } else if (options.dir === "plans") {
+      targetDir = join(root, '.workflow', 'plans');
+    } else {
+      targetDir = join(root, options.dir);
+    }
+  } else {
+    // По умолчанию используем .workflow/tickets
+    targetDir = join(root, '.workflow', 'tickets');
+  }
 
-  // Если директория тикетов не существует, возвращаем первый ID
-  if (!existsSync(ticketsDir)) {
+  // Если директория не существует, возвращаем первый ID
+  if (!existsSync(targetDir)) {
     return `${type}-001`;
   }
 
   // Рекурсивный поиск всех файлов {TYPE}-*.md
-  const maxNum = findMaxNumber(ticketsDir, type);
+  const maxNum = findMaxNumber(targetDir, type);
   const nextNum = maxNum + 1;
   return `${type}-${formatNumber(nextNum)}`;
 }

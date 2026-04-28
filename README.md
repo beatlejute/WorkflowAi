@@ -102,14 +102,63 @@ workflow run
 20. **analyze-report / decompose-gaps** — проанализировать результаты и итерировать
 21. **complete-plan / increment-plan-iterations** — закрыть план или запустить следующую итерацию
 
-### Поддерживаемые агенты
+### Типы стадий
 
-| Агент | Описание |
-|-------|----------|
-| `claude-code` | Claude Opus — мощная модель для сложных задач |
-| `qwen-code` | Qwen Code — альтернативный агент |
-| `kilo-code` | Kilo Code — мультирежимный агент |
-...
+#### `update-counter`
+Встроенная стадия, инкрементирует счётчик и возвращает статус для перехода. Требует `counter` и опционально `max`. Возвращает `default` или `max_reached`.
+
+#### `manual-gate`
+Встроенная стадия для ручного одобрения. Создаёт файл `.workflow/approvals/{step_id}.json` со статусом `pending` и ждёт решения через polling (интервал по умолчанию 2000мс).
+
+**Параметры:**
+- `poll_interval_ms` — интервал опроса (опц., default 2000)
+- `timeout_seconds` — таймаут в секундах (опц., default без таймаута)
+
+**Требуемые goto:**
+- `approved` — обязательный, переход при одобрении
+- `rejected` — обязательный, переход при отклонении
+
+**Опциональные goto:**
+- `timeout` — при истечении таймаута
+- `aborted` — при остановке runner'а (SIGTERM)
+
+**Формат step_id:** `{ticket_id}_{stageId}_{attempt}` (например, `QA-12_manual-approve_0`)
+
+**Approval-файл содержит:**
+```json
+{
+  "step_id": "QA-12_manual-approve_0",
+  "ticket_id": "QA-12",
+  "stage_id": "manual-approve",
+  "attempt": 0,
+  "status": "pending",
+  "created_at": "2026-04-28T12:34:56.789Z",
+  "updated_at": "2026-04-28T12:34:56.789Z",
+  "decided_by": null,
+  "comment": null,
+  "context_snapshot": { ... }
+}
+```
+
+**Два способа одобрения:**
+1. **Через MCP-клиент** (например `workflow-mcp`): tool `approve_step({step_id, decision, comment})` пишет в файл approval
+2. **Прямая правка файла:** открыть `.workflow/approvals/{step_id}.json`, изменить `"status": "pending"` на `"approved"` или `"rejected"`, сохранить
+
+**Важное:** `manual-gate` — **opt-in**. Если ваш pipeline не использует стадии `manual-gate`, поведение полностью идентично предыдущим версиям! Никаких breaking changes.
+
+**Пример:**
+```yaml
+stages:
+  manual-approve-deploy:
+    type: manual-gate
+    poll_interval_ms: 2000
+    timeout_seconds: 86400
+    goto:
+      approved: continue-deploy
+      rejected: rollback
+      timeout: notify-stuck
+      aborted: end
+```
 
 Агенты настраиваются в `configs/pipeline.yaml`.
 
@@ -342,6 +391,55 @@ agents:
 ### `configs/pipeline.yaml`
 
 Определение конвейера: агенты, стадии, управление потоком, goto-логика, стратегии повторов.
+
+#### `manual-gate` stage
+
+`type: manual-gate` — встроенный тип стадии для ручного одобрения. Создаёт файл `.workflow/approvals/{step_id}.json` со статусом `pending` и ждёт решения через polling.
+
+**Поля:**
+- `type: manual-gate` — обязательное, идентификатор типа стадии
+- `poll_interval_ms` — опциональное, интервал опроса в мс (default: 2000, минимум: 100)
+- `timeout_seconds` — опциональное, таймаут в секундах (default: null — без таймаута)
+- `goto.approved` — обязательное, следующая стадия при одобрении
+- `goto.rejected` — обязательное, следующая стадия при отклонении
+- `goto.timeout` — опциональное, следующая стадия при истечении таймаута
+- `goto.aborted` — опциональное, следующая стадия при остановке runner'а (SIGTERM)
+
+**Пример:**
+```yaml
+stages:
+  manual-approve-deploy:
+    type: manual-gate
+    poll_interval_ms: 2000
+    timeout_seconds: 86400
+    goto:
+      approved: continue-deploy
+      rejected: rollback
+      timeout: notify-stuck
+      aborted: end
+```
+
+**Два способа одобрения:**
+1. **Через MCP-клиент** (например `workflow-mcp`): tool `approve_step({step_id, decision, comment})` пишет в файл approval. Опционально — пользователю не обязал подключать MCP.
+2. **Прямая правка файла:** открыть `.workflow/approvals/{step_id}.json`, изменить `"status": "pending"` на `"approved"` или `"rejected"`, сохранить. **Базовый способ, работающий без какой-либо внешней инфраструктуры** — достаточно текстового редактора.
+
+**Важное:** `manual-gate` — **opt-in**. Если ваш pipeline не использует стадии `manual-gate`, поведение полностью идентично предыдущим версиям! Никаких breaking changes.
+
+**Формат approval-файла:**
+```json
+{
+  "step_id": "QA-12_manual-approve_0",
+  "ticket_id": "QA-12",
+  "stage_id": "manual-approve",
+  "attempt": 0,
+  "status": "pending",
+  "created_at": "2026-04-28T12:34:56.789Z",
+  "updated_at": "2026-04-28T12:34:56.789Z",
+  "decided_by": null,
+  "comment": null,
+  "context_snapshot": { ... }
+}
+```
 
 ### `configs/ticket-movement-rules.yaml`
 

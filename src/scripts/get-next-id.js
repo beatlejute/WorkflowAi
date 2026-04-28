@@ -21,6 +21,7 @@ import fs from "fs";
 import path from "path";
 import { findProjectRoot } from "workflow-ai/lib/find-root.mjs";
 import { printResult } from "workflow-ai/lib/utils.mjs";
+import { getNextId } from "workflow-ai/lib/operations/tickets.mjs";
 
 const PROJECT_DIR = findProjectRoot();
 
@@ -77,15 +78,6 @@ function findMaxNumber(targetDir, prefix) {
   return maxNum;
 }
 
-function formatNumber(num) {
-  return num.toString().padStart(3, "0");
-}
-
-/**
- * Извлекает значения prefix из .workflow/config/config.yaml → task_types.*.prefix.
- * Минимальный YAML-парсер: не тянем зависимость, читаем только нужную секцию.
- * Возвращает массив уникальных префиксов в порядке появления.
- */
 function readPrefixesFromConfig() {
   const configPath = path.join(PROJECT_DIR, ".workflow", "config", "config.yaml");
 
@@ -136,30 +128,15 @@ function readPrefixesFromConfig() {
   return prefixes;
 }
 
-function resolveTargetDir(dir) {
-  if (dir === "tickets") {
-    return path.join(PROJECT_DIR, ".workflow", "tickets");
-  } else if (dir === "plans") {
-    return path.join(PROJECT_DIR, ".workflow", "plans");
-  } else {
-    return path.join(PROJECT_DIR, dir);
-  }
-}
-
 async function runSinglePrefix(prefix, dir) {
-  const targetDir = resolveTargetDir(dir);
-
-  if (!fs.existsSync(targetDir)) {
-    const nextId = `${prefix}-001`;
+  try {
+    const nextId = await getNextId(PROJECT_DIR, prefix, { dir });
     printResult({ status: "success", id: nextId });
-    return;
+  } catch (err) {
+    console.error(err.message);
+    printResult({ status: "error", error: err.message });
+    process.exit(1);
   }
-
-  const maxNum = findMaxNumber(targetDir, prefix);
-  const nextNum = maxNum + 1;
-  const nextId = `${prefix}-${formatNumber(nextNum)}`;
-
-  printResult({ status: "success", id: nextId });
 }
 
 async function runAllFromConfig() {
