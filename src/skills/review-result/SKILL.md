@@ -57,7 +57,29 @@ description: >
 
 ## Шаги проверки
 
-### 0. Быстрый выход
+### 0. Целостность frontmatter (pre-flight)
+
+Перед любой содержательной проверкой убедись, что frontmatter тикета **валидно парсится** YAML-парсером. Запусти:
+
+```
+node -e "const y=require('js-yaml'),f=require('fs');const c=f.readFileSync(process.argv[1],'utf8');const m=c.match(/^---\\n([\\s\\S]*?)\\n---/);if(!m){console.log('NO_FRONTMATTER');process.exit(1)}try{y.load(m[1]);console.log('OK')}catch(e){console.log('YAML_ERROR:'+e.message);process.exit(2)}" .workflow/tickets/in-progress/{TICKET-ID}.md
+```
+
+(или эквивалент в проекте — `js-yaml.load` секции между `---`).
+
+Если parse возвращает ошибку (`duplicated mapping key`, `bad indentation`, `:` followed by space в неэкранированном скаляре и т.п.) — **немедленный fail**:
+
+```
+---RESULT---
+status: failed
+issues:
+  - "Frontmatter тикета невалиден: <текст YAML-ошибки>. Файл нельзя смержить в done — downstream MCP-ресурсы (workflow://human-queue, alerts) падают на парсинге. Исправить frontmatter и перезапустить."
+---RESULT---
+```
+
+Не пытайся «прочесть содержимое глазами» и одобрить — структурно повреждённый frontmatter ломает скрипты пайплайна и MCP-ресурсы.
+
+### 0.1. Быстрый выход
 
 Прочитай тикет. Если секция `## Ревью` существует и последняя запись — `passed` или `⏭ skipped` → немедленно верни `status: passed`.
 

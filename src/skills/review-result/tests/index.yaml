@@ -33,3 +33,8 @@ cases:
     origin_chg: [CHG-baseline-snapshot-2026-04-25]
     tags: [baseline, snapshot, knowledge-baseline-snapshot-validation]
     severity: high
+  - id: TC-REVIEW-RESULT-005
+    file: cases/TC-REVIEW-RESULT-005-frontmatter-integrity.yaml
+    origin_chg: [CHG-frontmatter-integrity-2026-04-29]
+    tags: [frontmatter, yaml-integrity]
+    severity: high

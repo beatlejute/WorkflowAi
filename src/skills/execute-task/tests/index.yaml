@@ -37,3 +37,8 @@ cases:
     origin_chg: []
     tags: [dod-fill, ticket-update, ghost-execution]
     severity: critical
+  - id: TC-EXECUTE-TASK-006
+    file: cases/TC-EXECUTE-TASK-006-frontmatter-immutable.yaml
+    origin_chg: [CHG-frontmatter-integrity-2026-04-29]
+    tags: [frontmatter, immutable, discipline]
+    severity: high
