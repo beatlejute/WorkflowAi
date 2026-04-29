@@ -1,0 +1,49 @@
+id: TC-REVIEW-RESULT-005
+title: "Ревьюер ловит структурно невалидный frontmatter (YAML parse error)"
+origin:
+  chg: [CHG-frontmatter-integrity-2026-04-29]
+  incidents:
+    - "workflow-mcp QA-34.md (2026-04-27): notes-поле frontmatter содержит неэкранированную фразу `Attempt 5: добавлен vitest.config.js`. Двоеточие+пробел внутри неквотированного YAML-скаляра — js-yaml бросает `bad indentation of a mapping entry`. Тикет прошёл review-result как passed на 2026-04-27 15:12. Downstream MCP-ресурс `workflow://human-queue` падал на парсинге, эндпоинт был непригоден до ручного фикса (заворачивание notes в кавычки 2026-04-29)."
+    - "documentaions GML-017.md (2026-03-22): дубликат ключа `updated_at` в frontmatter (один в начале, второй после блока tags:). Тот же endpoint падал — `duplicated mapping key`."
+  principle: "Структурно невалидный frontmatter — не косметический дефект, а блокер. Скрипты пайплайна и MCP-ресурсы парсят frontmatter через строгий YAML-парсер; парс-ошибка обрушивает весь endpoint, не только конкретный тикет. Ревьюер обязан проверять, что frontmatter валидно парсится `js-yaml.load`, ДО любых содержательных проверок DoD."
+  backlog_sources:
+    - "d:/Dev/workflowAi/.workflow/coach-backlog.yaml"
+tags: [frontmatter, yaml-integrity, knowledge-frontmatter-integrity]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Проведи ревью тикета QA-906, который лежит в .workflow/tickets/review/QA-906.md.
+    Тикет визуально оформлен корректно: чекбоксы DoD в [x], секция Result заполнена,
+    Summary осмысленный. Однако frontmatter тикета структурно повреждён — поле `notes:`
+    содержит неэкранированную фразу с двоеточием+пробелом, что ломает YAML-парсер.
+
+    Проверь целостность frontmatter ДО любых содержательных проверок DoD. Если
+    `js-yaml.load` секции frontmatter падает с ошибкой — немедленный вердикт failed
+    с issue про структурную невалидность frontmatter и текстом YAML-ошибки.
+  inputs:
+    - kind: ticket_file
+      path: "../fixtures/QA-906-broken-frontmatter/QA-906.md"
+      ticket_id: QA-906
+      dest_dir: review
+
+assertions:
+  deterministic:
+    - kind: output_contains_all
+      values: ["---RESULT---"]
+      reason: "Результат должен быть в формате пайплайна."
+    - kind: output_contains_all
+      values: ["failed"]
+      reason: "Вердикт — failed: frontmatter структурно невалиден, парс-ошибка YAML."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/frontmatter-integrity.md"
+      criterion: "Поймал ли ревьюер структурную невалидность frontmatter (YAML parse error) и оформил failed с упоминанием YAML-ошибки и проблемного поля, ДО проверки DoD?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 1200

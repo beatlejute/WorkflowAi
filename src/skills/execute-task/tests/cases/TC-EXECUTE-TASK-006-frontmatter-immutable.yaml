@@ -1,0 +1,46 @@
+id: TC-EXECUTE-TASK-006
+title: "Исполнитель не модифицирует frontmatter (включая notes/tags/context)"
+origin:
+  chg: [CHG-frontmatter-integrity-2026-04-29]
+  incidents:
+    - "workflow-mcp QA-34.md (2026-04-27): поле frontmatter `notes:` получило приписку `Attempt 5: добавлен vitest.config.js, все 4 теста PASS.` — неэкранированное двоеточие+пробел внутри неквотированного YAML-скаляра обрушило парсинг (`bad indentation of a mapping entry`). Downstream MCP-ресурс `workflow://human-queue` падал на endpoint, до ручного фикса 2026-04-29."
+    - "documentaions GML-017.md (2026-03-22): дубликат ключа `updated_at` после блока `tags:` — кто-то append'ил поле, не проверив, что оно уже есть выше."
+  principle: "Frontmatter — собственность создателя тикета и пайплайна. Любая правка от исполнителя — потенциальный источник YAML-несовместимостей (двоеточие в неэкранированном скаляре, дубль ключа, нарушенный отступ массива). Если необходимо зафиксировать прогресс/итерации/наблюдения — пиши в тело тикета (секция Result), не в frontmatter. Существующее ограничение #5 в SKILL.md покрывало только `status:` / `completed_at:`; теперь покрытие расширено до всех полей frontmatter."
+  backlog_sources:
+    - "d:/Dev/workflowAi/.workflow/coach-backlog.yaml"
+tags: [frontmatter, immutable, discipline]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Выполни тикет IMPL-907 (см. .workflow/tickets/in-progress/IMPL-907.md).
+
+    Считай, что первая попытка реализации `retryWithBackoff` даёт падающий тест на jitter-bounds, и тебе нужно итерировать (не менее 2 попыток). Зафиксируй журнал попыток.
+
+    КЛЮЧЕВАЯ ПРОВЕРКА: журнал попыток должен попасть в **тело тикета** (секция Result, подсекция «Журнал попыток»), а **не во frontmatter** (поля `notes`, `tags`, `context.*`).
+
+    Не записывай в frontmatter ни одного нового ключа, не модифицируй существующие. Файл `tests/utils/retry.test.mjs` создавать **не нужно**, считай что он уже существует и тесты прогнаны (можно мок-evidence в Result).
+  inputs:
+    - kind: ticket_file
+      path: "../fixtures/IMPL-907-frontmatter-immutable/IMPL-907.md"
+      ticket_id: IMPL-907
+      dest_dir: in-progress
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Frontmatter не модифицирован"
+      reason: "SKILL.md шаг 9 должен явно требовать неизменность frontmatter."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/frontmatter-immutable.md"
+      criterion: "Сохранён ли frontmatter тикета IMPL-907 в исходном виде после прогона (никаких новых ключей, никаких изменённых значений в notes/tags/context), при этом журнал попыток зафиксирован в теле тикета (Result)?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 1200
