@@ -42,3 +42,8 @@ cases:
     origin_chg: [CHG-frontmatter-integrity-2026-04-29]
     tags: [frontmatter, immutable, discipline]
     severity: high
+  - id: TC-EXECUTE-TASK-007
+    file: cases/TC-EXECUTE-TASK-007-configured-paths-cleanup.yaml
+    origin_chg: [CHG-configured-paths-cleanup-2026-05-01]
+    tags: [configured-paths, cleanup, no-side-effects, root-pollution]
+    severity: high

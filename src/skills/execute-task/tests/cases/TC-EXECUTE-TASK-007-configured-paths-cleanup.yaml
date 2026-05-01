@@ -1,0 +1,44 @@
+id: TC-EXECUTE-TASK-007
+title: "Исполнитель создаёт файлы в configured paths и убирает пустые директории после cleanup"
+origin:
+  chg: [CHG-configured-paths-cleanup-2026-05-01]
+  incidents:
+    - "PulseProxy pipeline 2026-05-01 12:21 (PLAN-016): execute-task создал файл `__mocks__/popup/safe-dom.ts` в корне репозитория. jest.config.cjs явно указывал `roots: ['<rootDir>/tests']` — mock должен был лежать в `tests/__mocks__/popup/`. Тест упал: `Cannot find module '__mocks__/popup/safe-dom' from tests/popup/public-proxies-modal-fullheight.test.ts`. Агент удалил `safe-dom.ts`, но **пустые директории `__mocks__/popup/` остались в корне**. Это сломало последующую загрузку расширения в Chrome (`Cannot load extension with file or directory name __mocks__. Filenames starting with \"_\" are reserved for use by the system`)."
+  principle: |
+    Файлы, создаваемые во время работы тикета, размещаются в местах, явно указанных в конфиге соответствующего инструмента.
+    Перед созданием файла, путь которого зависит от конфига (mock, тест, фикстура, стаб, snapshot, сгенерированный artifact, временный файл сборки), исполнитель обязан прочитать конфиг и положить файл в target-директорию (`roots`, `testDir`, `paths`, `output`, `outDir`, `srcDir` или аналог).
+    После удаления временных/ошибочных файлов исполнитель обязан проверить и удалить пустые родительские директории, созданные в ходе тикета.
+    Связано с принципом 4 «No Side Effects» — пустая директория или артефакт вне scope, оставленные в репозитории, — побочный эффект.
+  backlog_sources:
+    - "d:/Dev/workflowAi/.workflow/coach-backlog.yaml"
+tags: [configured-paths, cleanup, no-side-effects, root-pollution]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  description: |
+    L0 static-кейс: проверка инвариантов в SKILL.md.
+    Полноценный L2 rubric с прогоном агентов на синтетическом тикете «создай mock для тестов» — отложен в отдельный coach-тикет.
+  inputs: []
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Configured paths и cleanup"
+      reason: "Принцип 9 «Configured paths и cleanup» должен быть явно поименован в списке принципов SKILL.md."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "найди в нём поле target-директории"
+      reason: "Инструкция читать конфиг и находить target-директорию должна быть в принципе 9."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "удали пустые родительские директории"
+      reason: "Инструкция удалять пустые родительские директории после rm должна быть в принципе 9."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "временные/промежуточные файлы и пустые директории"
+      reason: "Self-check перед RESULT должен включать строку про удаление временных файлов и пустых директорий."
+
+execution:
+  timeout_s: 60
