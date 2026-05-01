@@ -1,0 +1,6 @@
+assertions:
+  static:
+    []
+  deterministic:
+    - kind: output_matches
+      regex: "status: passed"

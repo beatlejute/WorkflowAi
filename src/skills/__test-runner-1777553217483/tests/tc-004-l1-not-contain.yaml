@@ -1,0 +1,8 @@
+assertions:
+  static:
+    []
+  deterministic:
+    - kind: output_does_not_contain
+      values:
+        - "git add"
+        - "git commit"

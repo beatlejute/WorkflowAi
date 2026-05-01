@@ -100,10 +100,12 @@ function findTicketInColumns(ticketId) {
 
 async function checkRelevance(ticketPath) {
   if (!fs.existsSync(ticketPath)) {
+    // file_not_found — это не ошибка скрипта (verdict=relevant — fail-safe).
+    // Не выходим с exit=1, чтобы pipeline продолжил выполнение следующего стейджа.
     return {
       verdict: "relevant",
       reason: "file_not_found",
-      error: `Ticket file not found: ${ticketPath}`,
+      warning: `Ticket file not found: ${ticketPath}`,
     };
   }
 

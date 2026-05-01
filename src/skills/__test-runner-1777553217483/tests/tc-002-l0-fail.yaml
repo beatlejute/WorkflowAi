@@ -1,0 +1,7 @@
+assertions:
+  static:
+    - kind: skill_contains
+      pattern: 'SIGNATURE_MISSING'
+      reason: 'Should fail'
+  deterministic:
+    []

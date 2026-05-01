@@ -1,0 +1,7 @@
+assertions:
+  static:
+    - kind: skill_contains
+      pattern: 'SIGNATURE_PRESENT'
+      reason: 'Must be present'
+  deterministic:
+    []

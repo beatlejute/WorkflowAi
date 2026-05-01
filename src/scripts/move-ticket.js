@@ -12,6 +12,7 @@
 
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import YAML from "workflow-ai/lib/js-yaml.mjs";
 import { findProjectRoot } from "workflow-ai/lib/find-root.mjs";
 import {
@@ -20,6 +21,11 @@ import {
   serializeFrontmatter,
   getLastReviewStatus,
 } from "workflow-ai/lib/utils.mjs";
+
+const logger = {
+  info: (msg) => console.error(`[INFO] ${msg}`),
+  warn: (msg) => console.error(`[WARN] ${msg}`),
+};
 
 // Корень проекта
 const PROJECT_DIR = findProjectRoot();
@@ -87,6 +93,45 @@ function isValidTransition(from, to) {
   }
 
   return { valid: true };
+}
+
+/**
+ * Hook для обновления approval-файлов при перемещении тикета
+ * @param {string} ticketId - ID тикета
+ * @param {string} target - целевой статус
+ * @param {object} fsModule - модуль fs (для mock в тестах)
+ * @param {string} workflowDir - директория .workflow
+ */
+function updateApprovalFilesHook(ticketId, target, fsModule = fs, workflowDir = WORKFLOW_DIR) {
+  try {
+    const approvalsDir = path.join(workflowDir, "approvals");
+    if (fsModule.existsSync(approvalsDir)) {
+      const files = fsModule.readdirSync(approvalsDir);
+      const escapedTicketId = ticketId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pattern = new RegExp(`^${escapedTicketId}_manual-gate-.*_\\d+\\.json$`);
+      for (const file of files) {
+        if (!pattern.test(file)) continue;
+        const filePath = path.join(approvalsDir, file);
+        try {
+          const data = JSON.parse(fsModule.readFileSync(filePath, "utf8"));
+          if (data.status === "pending") {
+            data.status = "approved";
+            data.decided_by = "move-ticket";
+            data.comment = `auto-approved on move to ${target}`;
+            data.updated_at = new Date().toISOString();
+            fsModule.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
+            logger.info(`Approval file ${file} auto-approved on move to ${target}`);
+          }
+        } catch (err) {
+          logger.warn(`Corrupt approval file ${file}: ${err.message}`);
+          // продолжаем, не падаем
+        }
+      }
+    }
+  } catch (err) {
+    // Ошибка hook'а не должна фейлить само перемещение
+    logger.warn(`Approval hook error: ${err.message}`);
+  }
 }
 
 /**
@@ -210,6 +255,9 @@ async function moveTicket(ticketId, target) {
     };
   }
 
+  // Hook: обновление approval-файлов (если есть) — срабатывает на любой move
+  updateApprovalFilesHook(ticketId, target);
+
   return {
     status: "moved",
     ticket_id: ticketId,
@@ -218,43 +266,60 @@ async function moveTicket(ticketId, target) {
   };
 }
 
-// Main entry point
-const rawArgs = process.argv.slice(2);
-let ticketId, target;
+// Export for testing
+export { moveTicket, updateApprovalFilesHook };
 
-if (rawArgs.length >= 2) {
-  // Прямой вызов: node move-ticket.js IMPL-001 in-progress
-  ticketId = rawArgs[0];
-  target = rawArgs[1];
-} else if (rawArgs.length === 1) {
-  // Вызов через pipeline runner: один аргумент — промпт с контекстом
-  // Формат: "skill-name\n\nContext:\n  ticket_id: X\n  target: Y\n..."
-  const prompt = rawArgs[0];
-  const ticketMatch = prompt.match(/ticket_id:\s*(\S+)/);
-  const targetMatch = prompt.match(/target:\s*(\S+)/);
-  ticketId = ticketMatch?.[1];
-  target = targetMatch?.[1];
-  if (!ticketId || !target) {
-    console.error(
-      "[ERROR] Cannot parse ticket_id or target from pipeline context",
-    );
-    printResult({
-      status: "error",
-      error: "Missing ticket_id or target in pipeline context",
-    });
-    process.exit(1);
+// Main entry point — guard prevents execution when imported as module in tests.
+// Используем fs.realpathSync чтобы корректно сравнивать пути на Windows когда .workflow/src/scripts/ — junction.
+// Без realpathSync argv[1] = путь через junction, а import.meta.url = разрешённый target — строки не совпадают.
+function __isMainModule() {
+  try {
+    const argvPath = fs.realpathSync(path.resolve(process.argv[1] || ""));
+    const metaPath = fileURLToPath(import.meta.url);
+    return argvPath === metaPath;
+  } catch {
+    return false;
   }
-} else {
-  console.error("Usage: node move-ticket.js <ticket_id> <target>");
-  console.error("Example: node move-ticket.js IMPL-001 in-progress");
-  console.error("Available targets:", VALID_STATUSES.join(", "));
-  printResult({ status: "error", error: "Missing arguments" });
-  process.exit(1);
 }
 
-moveTicket(ticketId, target).then((result) => {
-  printResult(result);
-  if (result.status === "error") {
+if (__isMainModule()) {
+  const rawArgs = process.argv.slice(2);
+  let ticketId, target;
+
+  if (rawArgs.length >= 2) {
+    // Прямой вызов: node move-ticket.js IMPL-001 in-progress
+    ticketId = rawArgs[0];
+    target = rawArgs[1];
+  } else if (rawArgs.length === 1) {
+    // Вызов через pipeline runner: один аргумент — промпт с контекстом
+    // Формат: "skill-name\n\nContext:\n  ticket_id: X\n  target: Y\n..."
+    const prompt = rawArgs[0];
+    const ticketMatch = prompt.match(/ticket_id:\s*(\S+)/);
+    const targetMatch = prompt.match(/target:\s*(\S+)/);
+    ticketId = ticketMatch?.[1];
+    target = targetMatch?.[1];
+    if (!ticketId || !target) {
+      console.error(
+        "[ERROR] Cannot parse ticket_id or target from pipeline context",
+      );
+      printResult({
+        status: "error",
+        error: "Missing ticket_id or target in pipeline context",
+      });
+      process.exit(1);
+    }
+  } else {
+    console.error("Usage: node move-ticket.js <ticket_id> <target>");
+    console.error("Example: node move-ticket.js IMPL-001 in-progress");
+    console.error("Available targets:", VALID_STATUSES.join(", "));
+    printResult({ status: "error", error: "Missing arguments" });
     process.exit(1);
   }
-});
+
+  moveTicket(ticketId, target).then((result) => {
+    printResult(result);
+    if (result.status === "error") {
+      process.exit(1);
+    }
+  });
+}
