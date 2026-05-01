@@ -567,28 +567,25 @@ function pickNextTicket(planId) {
     return { status: 'empty', reason: 'No tickets in ready/' };
   }
 
-  // Фильтрация по условиям и зависимостям
-  const eligibleTickets = tickets.filter(ticket => {
+  // Фильтрация: разделяем на обычные и human с проверкой условий/зависимостей
+  const eligibleNonHuman = [];
+  const humanCandidates = [];
+  
+  for (const ticket of tickets) {
     const { frontmatter } = ticket;
-
-    // Пропускаем тикеты, требующие ручного выполнения
-    if (frontmatter.type === 'human') {
-      logger.info(`Skipping ticket ${ticket.id}: type is 'human' (requires manual execution)`);
-      return false;
-    }
 
     // Проверка условий
     const conditions = frontmatter.conditions || [];
     const conditionsMet = conditions.every(checkCondition);
     if (!conditionsMet) {
-      return false;
+      continue;
     }
 
     // Проверка зависимостей
     const dependencies = frontmatter.dependencies || [];
     const depsMet = checkDependencies(dependencies);
     if (!depsMet) {
-      return false;
+      continue;
     }
 
     // Обнаружение и удаление дубликатов: тикет не должен существовать в других колонках
@@ -607,45 +604,74 @@ function pickNextTicket(planId) {
       } catch (err) {
         logger.error(`Failed to archive duplicate ${ticket.id}: ${err.message}`);
       }
-      return false;
+      continue;
     }
 
-    return true;
-  });
+    // Разделение по типу
+    if (frontmatter.type === 'human') {
+      humanCandidates.push(ticket);
+    } else {
+      eligibleNonHuman.push(ticket);
+    }
+  }
 
-  if (eligibleTickets.length === 0) {
+  // Имеются ли обычные (non-human) готовые тикеты — старший приоритет
+  if (eligibleNonHuman.length > 0) {
+    eligibleNonHuman.sort((a, b) => {
+      const priorityA = a.frontmatter.priority || 999;
+      const priorityB = b.frontmatter.priority || 999;
+
+      if (priorityA !== priorityB) {
+        return priorityA - priorityB;
+      }
+
+      const dateA = new Date(a.frontmatter.created_at || '9999-12-31');
+      const dateB = new Date(b.frontmatter.created_at || '9999-12-31');
+      return dateA - dateB;
+    });
+
+    const selected = eligibleNonHuman[0];
     return {
-      status: 'empty',
-      reason: 'No eligible tickets (conditions/dependencies not met)'
+      status: 'found',
+      ticket_id: selected.id,
+      priority: selected.frontmatter.priority,
+      title: selected.frontmatter.title,
+      type: selected.frontmatter.type,
+      required_capabilities: JSON.stringify(selected.frontmatter.required_capabilities || [])
     };
   }
 
-  // Сортировка по приоритету (меньше = важнее), затем по created_at
-  eligibleTickets.sort((a, b) => {
-    const priorityA = a.frontmatter.priority || 999;
-    const priorityB = b.frontmatter.priority || 999;
+  // Если есть созревшие human-тикеты — новый статус human_ready (для manual-gate)
+  if (humanCandidates.length > 0) {
+    humanCandidates.sort((a, b) => {
+      const priorityA = a.frontmatter.priority || 999;
+      const priorityB = b.frontmatter.priority || 999;
 
-    if (priorityA !== priorityB) {
-      return priorityA - priorityB;
-    }
+      if (priorityA !== priorityB) {
+        return priorityA - priorityB;
+      }
 
-    // При равном приоритете - по дате создания (старые первые)
-    const dateA = new Date(a.frontmatter.created_at || '9999-12-31');
-    const dateB = new Date(b.frontmatter.created_at || '9999-12-31');
-    return dateA - dateB;
-  });
+      const dateA = new Date(a.frontmatter.created_at || '9999-12-31');
+      const dateB = new Date(b.frontmatter.created_at || '9999-12-31');
+      return dateA - dateB;
+    });
 
-  const selected = eligibleTickets[0];
+    const selected = humanCandidates[0];
+    return {
+      status: 'human_ready',
+      ticket_id: selected.id,
+      priority: selected.frontmatter.priority,
+      title: selected.frontmatter.title,
+      pending_count: humanCandidates.length
+    };
+  }
 
   return {
-    status: 'found',
-    ticket_id: selected.id,
-    priority: selected.frontmatter.priority,
-    title: selected.frontmatter.title,
-    type: selected.frontmatter.type,
-    required_capabilities: JSON.stringify(selected.frontmatter.required_capabilities || [])
+    status: 'empty',
+    reason: 'No eligible non-human tickets (and no ready human tickets)'
   };
 }
+
 
 /**
  * Архивирует все done-тикеты, принадлежащие архивным планам (plans/archive/).
@@ -777,6 +803,9 @@ async function main() {
     process.exit(0);
   }
 }
+
+// Экспортируем функции для тестирования
+export { pickNextTicket, readReadyTickets, readReviewTickets, readInProgressTickets, findCompletedInProgress, filterByPlan };
 
 main().catch(e => {
   logger.error(e.message);

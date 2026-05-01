@@ -1,0 +1,25 @@
+{
+  "testRunner": "node",
+  "testCommand": "node --test src/tests/scripts-pick-next-task-human-ready.test.mjs",
+  "files": [
+    "src/scripts/pick-next-task.js"
+  ],
+  "mutate": [
+    "src/scripts/pick-next-task.js"
+  ],
+  "reporters": [
+    "html",
+    "clear-text",
+    "json"
+  ],
+  "reportDir": "stryker-report",
+  "concurrency": 4,
+  "timeoutMS": 5000,
+  "maxTestRunnerReuse": 1,
+  "disableBail": false,
+  "disableTypeChecks": true,
+  "mutator": {
+    "name": "javascript"
+  },
+  "nirvana": false
+}

@@ -1,0 +1,7 @@
+assertions:
+  static:
+    - kind: skill_contains
+      pattern: 'SIGNATURE_\w+'
+      reason: 'Regex should match'
+  deterministic:
+    []

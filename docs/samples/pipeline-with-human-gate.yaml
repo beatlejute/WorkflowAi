@@ -1,0 +1,205 @@
+# Sample pipeline with human gate stages
+# copy-paste ready for consumers with ejected config
+
+stages:
+  # ---------------------------------------------------------------------------
+  # pick-first-task
+  # Выбирает следующую задачу из ready/ по приоритету и зависимостям
+  # human_ready — тикет типа human готов к ручному выполнению
+  # ---------------------------------------------------------------------------
+  pick-first-task:
+    description: "Выбрать задачу из ready по приоритету"
+    agent: script-pick
+    goto:
+      found:
+        stage: move-to-in-progress
+        params:
+          ticket_id: "$result.ticket_id"
+          task_type: "$result.type"
+          required_capabilities: "$result.required_capabilities"
+          target: in-progress
+      human_ready:
+        stage: manual-gate-human
+        params:
+          ticket_id: "$result.ticket_id"
+      in_review:
+        stage: verify-artifacts
+        params:
+          ticket_id: "$result.ticket_id"
+          required_capabilities: "$result.required_capabilities"
+          attempt: "1"
+      completed_in_progress:
+        stage: move-to-review
+        params:
+          ticket_id: "$result.ticket_id"
+          required_capabilities: "$result.required_capabilities"
+      in_progress:
+        stage: check-relevance
+        params:
+          ticket_id: "$result.ticket_id"
+          task_type: "$result.type"
+          required_capabilities: "$result.required_capabilities"
+      empty: check-conditions
+      error: create-report
+
+  # ---------------------------------------------------------------------------
+  # pick-next-task
+  # Выбирает следующую задачу из ready/ по приоритету и зависимостям
+  # human_ready — тикет типа human готов к ручному выполнению
+  # ---------------------------------------------------------------------------
+  pick-next-task:
+    description: "Выбрать следующую задачу из ready по приоритету"
+    agent: script-pick
+    goto:
+      found:
+        stage: move-to-in-progress
+        params:
+          ticket_id: "$result.ticket_id"
+          task_type: "$result.type"
+          required_capabilities: "$result.required_capabilities"
+          target: in-progress
+      human_ready:
+        stage: manual-gate-human
+        params:
+          ticket_id: "$result.ticket_id"
+      in_review:
+        stage: verify-artifacts
+        params:
+          ticket_id: "$result.ticket_id"
+          required_capabilities: "$result.required_capabilities"
+          attempt: "1"
+      completed_in_progress:
+        stage: move-to-review
+        params:
+          ticket_id: "$result.ticket_id"
+          required_capabilities: "$result.required_capabilities"
+      in_progress:
+        stage: check-relevance
+        params:
+          ticket_id: "$result.ticket_id"
+          task_type: "$result.type"
+          required_capabilities: "$result.required_capabilities"
+      empty: check-conditions
+      default: check-conditions
+      error: create-report
+
+  # ---------------------------------------------------------------------------
+  # execute-task
+  # Выполняет выбранную задачу
+  # ---------------------------------------------------------------------------
+  execute-task:
+    description: "Выполнить выбранную задачу"
+    skill: execute-task
+    counter: task_attempts
+    agents: [kilo-free, openrouter-free, kilo-glm-air, claude-haiku, claude-sonnet]
+    goto:
+      default:
+        stage: move-to-review
+        params:
+          ticket_id: "$context.ticket_id"
+          attempt: "$counter.task_attempts"
+          target: review
+      blocked:
+        stage: move-ticket
+        params:
+          ticket_id: "$context.ticket_id"
+          target: blocked
+      error:
+        stage: move-to-review
+        params:
+          ticket_id: "$context.ticket_id"
+          attempt: "$counter.task_attempts"
+          target: review
+
+  # ---------------------------------------------------------------------------
+  # increment-task-attempts
+  # Обновляет счётчик попыток выполнения тикета
+  # При max_reached переходит на mark-blocked (не напрямую на move-ticket)
+  # ---------------------------------------------------------------------------
+  increment-task-attempts:
+    description: "Обновить счётчик попыток выполнения тикета"
+    type: update-counter
+    counter: task_attempts
+    max: 6
+    goto:
+      default:
+        stage: move-ticket
+        params:
+          ticket_id: "$context.ticket_id"
+          target: ready
+      max_reached:
+        stage: mark-blocked
+        params:
+          ticket_id: "$context.ticket_id"
+          attempts: "$counter.task_attempts"
+          reason: "max_review_attempts"
+
+  # ---------------------------------------------------------------------------
+  # mark-blocked
+  # Записывает причину автоблокировки в frontmatter тикета и эмитит alert
+  # ---------------------------------------------------------------------------
+  mark-blocked:
+    description: "Записать причину автоблокировки в frontmatter и эмитить alert"
+    agent: script-mark-blocked
+    command: node .workflow/src/scripts/mark-blocked.js
+    timeout: 30
+    goto:
+      default:
+        stage: move-ticket
+        params:
+          ticket_id: "$context.ticket_id"
+          target: blocked
+
+  # ---------------------------------------------------------------------------
+  # manual-gate-human
+  # Ожидание ручного выполнения созревшего human-тикета
+  # Ждёт решения по approval-файлу (approved/rejected/timeout)
+  # ---------------------------------------------------------------------------
+  manual-gate-human:
+    description: "Ожидание ручного выполнения созревшего human-тикета"
+    type: manual-gate
+    poll_interval_ms: 2000
+    timeout_seconds: 86400
+    goto:
+      approved: pick-first-task
+      rejected:
+        stage: mark-human-rejected
+        params:
+          ticket_id: "$context.ticket_id"
+      timeout:
+        stage: mark-human-rejected
+        params:
+          ticket_id: "$context.ticket_id"
+          reason: "human_gate_timeout"
+      aborted: end
+
+  # ---------------------------------------------------------------------------
+  # mark-human-rejected
+  # Записывает причину отклонения human-тикета и перемещает в blocked
+  # Использует тот же скрипт, что и mark-blocked, но с другой причиной
+  # ---------------------------------------------------------------------------
+  mark-human-rejected:
+    description: "Записать причину отклонения human-тикета и переместить в blocked"
+    agent: script-mark-blocked
+    command: node .workflow/src/scripts/mark-blocked.js
+    timeout: 30
+    goto:
+      default:
+        stage: move-ticket
+        params:
+          ticket_id: "$context.ticket_id"
+          target: blocked
+
+  # ---------------------------------------------------------------------------
+  # move-ticket
+  # Перемещает тикет в целевую директорию (done/ready/blocked)
+  # ---------------------------------------------------------------------------
+  move-ticket:
+    description: "Переместить тикет"
+    agent: script-move
+    timeout: 30
+    goto:
+      default:
+        stage: pick-next-task
+
+entry: pick-first-task

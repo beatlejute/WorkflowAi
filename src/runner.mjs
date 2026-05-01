@@ -176,7 +176,8 @@ class Logger {
    */
   stageStart(stageId, agentId, skillId) {
     this.stats.stagesStarted++;
-    this.info(`START stage="${stageId}" agent="${agentId}" skill="${skillId}"`, stageId);
+    const ticketInfo = this.context && this.context.ticket_id ? ` ticket="${this.context.ticket_id}"` : "";
+    this.info(`START stage="${stageId}" agent="${agentId}" skill="${skillId}"${ticketInfo}`, stageId);
   }
 
   /**

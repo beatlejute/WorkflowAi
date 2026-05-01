@@ -1,0 +1,23 @@
+name: Tests
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+      - run: npm test
+      - run: npm run coverage
+      - name: Check branch coverage thresholds
+        run: |
+          echo "Branch Coverage Report:"
+          npx c8 check-coverage
+          grep "mark-blocked.js" coverage/coverage-summary.json
+          grep "pick-next-task.js" coverage/coverage-summary.json
+          grep "move-ticket.js" coverage/coverage-summary.json

@@ -1,0 +1,8 @@
+assertions:
+  static:
+    - kind: skill_contains
+      pattern: 'PATTERN_NOT_FOUND'
+  deterministic:
+    - kind: output_does_not_contain
+      values:
+        - "should-not-matter"

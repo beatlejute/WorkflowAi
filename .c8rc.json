@@ -1,0 +1,41 @@
+{
+  "all": true,
+  "provider": "v8",
+  "reporter": [
+    "text",
+    "text-summary",
+    "json",
+    "json-summary",
+    "html"
+  ],
+  "report-dir": "coverage",
+  "temp-dir": ".nyc_output",
+  "lines": 80,
+  "statements": 80,
+  "functions": 80,
+  "branches": 75,
+  "check-coverage": true,
+  "per-file": true,
+  "skip-full": false,
+  "exclude": [
+    "coverage/**",
+    ".nyc_output/**",
+    "node_modules/**",
+    "src/tests/**",
+    "**/*.test.mjs",
+    ".workflow/**",
+    "src/skills/**",
+    "src/cli.mjs",
+    "src/init.mjs",
+    "src/runner.mjs",
+    "src/wf-loader.mjs",
+    "src/global-dir.mjs",
+    "src/junction-manager.mjs",
+    "src/lib/**",
+    "bin/**"
+  ],
+  "extension": [
+    ".js",
+    ".mjs"
+  ]
+}

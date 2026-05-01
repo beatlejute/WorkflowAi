@@ -185,6 +185,18 @@ pipeline:
       workdir: "."
       description: "Проверка доступности MCP-серверов"
 
+    script-mark-blocked:
+      command: "node"
+      args: [".workflow/src/scripts/mark-blocked.js"]
+      workdir: "."
+      description: "Обновление frontmatter и запись в alerts.jsonl при автоблокировке"
+
+    script-mark-human-rejected:
+      command: "node"
+      args: [".workflow/src/scripts/mark-blocked.js"]
+      workdir: "."
+      description: "Обновление frontmatter при отклонении human-тикета"
+
     script-verify-artifacts:
       command: "node"
       args: [".workflow/src/skills/review-result/scripts/verify-artifacts.js"]
@@ -274,6 +286,10 @@ pipeline:
             task_type: "$result.type"
             required_capabilities: "$result.required_capabilities"
             target: in-progress
+        human_ready:
+          stage: manual-gate-human
+          params:
+            ticket_id: "$result.ticket_id"
         in_review:
           stage: verify-artifacts
           params:
@@ -487,6 +503,10 @@ pipeline:
             task_type: "$result.type"
             required_capabilities: "$result.required_capabilities"
             target: in-progress
+        human_ready:
+          stage: manual-gate-human
+          params:
+            ticket_id: "$result.ticket_id"
         in_review:
           stage: verify-artifacts
           params:
@@ -650,6 +670,73 @@ pipeline:
             attempt: "$counter.task_attempts"
 
     # -------------------------------------------------------------------------
+    # 2d. manual-gate-human
+    # Используется для созревших human-тикетов (pick-first-task возвращает human_ready).
+    # Ждёт решения по approval-файлу (approved/rejected/timeout).
+    # -------------------------------------------------------------------------
+    manual-gate-human:
+      description: "Ожидание ручного выполнения созревшего human-тикета"
+      type: manual-gate
+      poll_interval_ms: 2000
+      timeout_seconds: 86400
+      goto:
+        approved: pick-first-task
+        rejected:
+          stage: mark-human-rejected
+          params:
+            ticket_id: "$context.ticket_id"
+        timeout:
+          stage: mark-human-rejected
+          params:
+            ticket_id: "$context.ticket_id"
+            reason: "human_gate_timeout"
+        aborted: end
+
+    # -------------------------------------------------------------------------
+    # 3b. mark-blocked
+    # Записывает причину автоблокировки в frontmatter тикета и эмитит alert
+    # в alerts.jsonl. Вставлен между increment-task-attempts.max_reached и
+    # move-ticket(blocked).
+    # -------------------------------------------------------------------------
+    mark-blocked:
+      description: "Записать причину автоблокировки в frontmatter и эмитить alert"
+      agent: script-mark-blocked
+      timeout: 30
+      goto:
+        default:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: blocked
+        error:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: blocked
+
+    # -------------------------------------------------------------------------
+    # 3b'. mark-human-rejected
+    # Записывает причину отклонения human-тикета (reject/timeout) и переходит
+    # в move-ticket(blocked). Используется ветками rejected и timeout стейджа
+    # manual-gate-human.
+    # -------------------------------------------------------------------------
+    mark-human-rejected:
+      description: "Записать причину отклонения human-тикета и переместить в blocked"
+      agent: script-mark-human-rejected
+      timeout: 30
+      goto:
+        default:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: blocked
+        error:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: blocked
+
+    # -------------------------------------------------------------------------
     # 3c. verify-artifacts
     # Механическая предпроверка артефактов тикета перед AI-ревью.
     # Блокирует AI-рационализацию: если DoD пустой или Result не заполнен —
@@ -729,10 +816,11 @@ pipeline:
             ticket_id: "$context.ticket_id"
             target: ready
         max_reached:
-          stage: move-ticket
+          stage: mark-blocked
           params:
             ticket_id: "$context.ticket_id"
-            target: blocked
+            attempts: "$counter.task_attempts"
+            reason: "max_review_attempts"
 
     # -------------------------------------------------------------------------
     # 5. move-ticket

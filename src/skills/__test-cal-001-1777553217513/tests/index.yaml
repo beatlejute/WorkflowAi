@@ -1,0 +1,6 @@
+cases:
+  - id: TC-CAL
+    file: tc-cal.yaml
+execution:
+  target_agents: [agent-a]
+  judge_agent: mock-judge
