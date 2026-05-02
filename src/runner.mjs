@@ -10,8 +10,8 @@ import { loadRules, scanStderrForFatalRule, classify } from './lib/error-classif
 import { snapshot, diff, isEmpty } from './lib/artifact-snapshot.mjs';
 import { markUnhealthy, isHealthy } from './lib/agent-health-registry.mjs';
 import { writeMarker, removeMarker } from './lib/marker.mjs';
-import { appendAgentRun, classifyAgentResult } from '../workflow-ai/src/lib/agent-history.mjs';
-import { incrementMetrics } from '../workflow-ai/src/lib/metrics-incremental.mjs';
+import { appendAgentRun, classifyAgentResult } from './lib/agent-history.mjs';
+import { incrementMetrics } from './lib/metrics-incremental.mjs';
 
 // ============================================================================
 // Audit-log helpers (used by executeWithFallback hook — IMPL-83)

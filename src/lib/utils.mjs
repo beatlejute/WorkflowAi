@@ -98,7 +98,7 @@ export function getPackageRoot() {
   return path.resolve(__dirname, '../../');
 }
 
-export { getLastReviewStatus, appendReviewEntry } from '../../workflow-ai/src/lib/review-section.mjs';
+export { getLastReviewStatus, appendReviewEntry } from './review-section.mjs';
 
 /**
  * Загружает конфигурацию правил перемещения тикетов.

@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'url';
 
 import { StageExecutor } from '../runner.mjs';
-import { parseAgentHistory } from '../../workflow-ai/src/lib/agent-history.mjs';
+import { parseAgentHistory } from '../lib/agent-history.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
