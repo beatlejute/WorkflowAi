@@ -380,7 +380,7 @@ async function appendReviewNote(ticketPath, humanIssues) {
     }
   } catch {}
 
-  const { appendReviewEntry } = await import('../../../../workflow-ai/src/lib/review-section.mjs');
+  const { appendReviewEntry } = await import('../../../lib/review-section.mjs');
   const r = appendReviewEntry(ticketPath, {
     date,
     agent: 'script-verify-artifacts',

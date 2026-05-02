@@ -10,7 +10,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { classifyAgentResult } from '../../workflow-ai/src/lib/agent-history.mjs';
+import { classifyAgentResult } from '../lib/agent-history.mjs';
 
 describe('runner-script-stage-ok — script-стейдж с пустым stdout', () => {
   it('should return "ok" for script agent with empty stdout and exitCode=0', () => {
