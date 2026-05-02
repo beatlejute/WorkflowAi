@@ -9,6 +9,7 @@ import { findProjectRoot } from './lib/find-root.mjs';
 import { loadRules, scanStderrForFatalRule, classify } from './lib/error-classifier.mjs';
 import { snapshot, diff, isEmpty } from './lib/artifact-snapshot.mjs';
 import { markUnhealthy, isHealthy } from './lib/agent-health-registry.mjs';
+import { writeMarker, removeMarker } from './lib/marker.mjs';
 
 // ============================================================================
 // Logger — система логирования с уровнями DEBUG/INFO/WARN/ERROR
@@ -2146,17 +2147,39 @@ async function runPipeline(argv = process.argv.slice(2)) {
     return { exitCode: 0, help: true };
   }
 
-  // Resolve config path
+  // Resolve config path and projectRoot
   if (!args.config) {
     const projectRoot = args.project ? path.resolve(args.project) : findProjectRoot();
     args.config = path.resolve(projectRoot, '.workflow/config/pipeline.yaml');
+    args.projectRoot = projectRoot;
   }
+
+  const projectRoot = args.projectRoot || (args.project ? path.resolve(args.project) : findProjectRoot());
 
   console.log('=== Workflow Runner ===');
   console.log(`Config: ${args.config}`);
   if (args.plan) console.log(`Plan: ${args.plan}`);
   if (args.project) console.log(`Project: ${args.project}`);
   console.log('');
+
+  // Write marker to protect against stale processes
+  try {
+    writeMarker(projectRoot, {
+      pid: process.pid,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error(`[runner] failed to write marker: ${err.message}`);
+    return { exitCode: 1, error: 'Failed to acquire pipeline lock', details: err.message };
+  }
+
+  // Register signal handlers for cleanup
+  const cleanup = () => {
+    removeMarker(projectRoot);
+    process.exit(130); // 128 + SIGINT(2) — standard exit code for signal-terminated
+  };
+  process.once('SIGINT', cleanup);
+  process.once('SIGTERM', cleanup);
 
   try {
     const config = loadConfig(args.config);
@@ -2192,6 +2215,16 @@ async function runPipeline(argv = process.argv.slice(2)) {
     await new Promise(resolve => setTimeout(resolve, 100));
 
     return { exitCode: 1, error: err.message, stack: err.stack };
+  } finally {
+    // Ensure marker is cleaned up on normal exit
+    try {
+      removeMarker(projectRoot);
+    } catch (err) {
+      // ENOENT is expected, log warnings for other errors
+      if (err.code && err.code !== 'ENOENT') {
+        console.warn(`[runner] cleanup warning: ${err.message}`);
+      }
+    }
   }
 }
 

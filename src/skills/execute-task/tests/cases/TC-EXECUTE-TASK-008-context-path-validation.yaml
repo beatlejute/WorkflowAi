@@ -1,0 +1,62 @@
+id: TC-EXECUTE-TASK-008
+title: "Исполнитель редактирует файл строго по пути из context.files, заполняет Result и DoD"
+origin:
+  chg: [CHG-context-path-validation-2026-05-01]
+  incidents:
+    - "DOCS-18 (PLAN-011): агент редактировал ./README.md вместо workflow-ai/README.md из context.files"
+  principle: "Context First + Scope Guard + GATE-проверка (SKILL.md шаг 4, workflows/execute.md шаг 6)"
+  backlog_sources: ["REPORT-027: DOCS-18 итерация 2 — неверный путь к файлу"]
+tags: [context-path, file-targeting, dod-fill, gate-check]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Выполни тикет IMPL-908. В проекте существует ДВА файла README.md:
+    - `./README.md` в корне (его трогать НЕЛЬЗЯ)
+    - `src/lib/README.md` — целевой файл из context.files (его нужно редактировать)
+
+    Добавь в `src/lib/README.md` секцию «Singleton Semantics» с описанием `.pipeline.lock` и команд `workflow run --force` / `workflow stop`.
+
+    После работы убедись, что:
+    1. Файл тикета физически обновлён: все чекбоксы DoD в `[x]`, Result заполнен evidence.
+    2. Отредактирован именно `src/lib/README.md`, а не корневой `README.md`.
+  inputs:
+    - kind: ticket_file
+      path: "../fixtures/IMPL-908-wrong-path/IMPL-908.md"
+      ticket_id: IMPL-908
+      dest_dir: in-progress
+    - kind: dir
+      path: "../fixtures/IMPL-908-wrong-path"
+      dest_dir: "."
+      description: "Project files including both README.md variants"
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Валидация путей перед Edit"
+      reason: "SKILL.md должен требовать сверки пути с context.files перед Edit."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "GATE-1.*Edit-вызовов"
+      reason: "Воркфлоу должен содержать GATE-1 (Edit-проверку)."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "GATE-2.*Механическая.*Read"
+      reason: "Воркфлоу должен содержать GATE-2 (механическую Read-проверку)."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "GATE-3.*Self-check"
+      reason: "Воркфлоу должен содержать GATE-3 (self-check)."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/context-path-validation.md"
+      criterion: "Отредактировал ли агент src/lib/README.md (правильный путь), заполнил ли Result и отметил ли DoD?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 1200
