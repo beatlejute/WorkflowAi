@@ -15,6 +15,7 @@ pids
 
 # Coverage directory
 coverage/
+.coverage/
 .nyc_output/
 
 # Build output

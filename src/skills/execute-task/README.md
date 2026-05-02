@@ -12,8 +12,11 @@ execute-task/
 │   └── execution-strategy.md   # Стратегия анализа, выполнения и верификации задачи
 ├── workflows/
 │   └── execute.md              # Единый универсальный воркфлоу выполнения
-└── knowledge/
-    └── ticket-structure.md     # Структура тикета, поля и их семантика
+├── knowledge/
+│   ├── ticket-structure.md         # Структура тикета, поля и их семантика
+│   └── context-checkpoints.md      # Управление контекстом при длительных задачах
+└── templates/
+    └── result-template.md          # Шаблон секции Result с правилами заполнения
 ```
 
 ## Как это работает
@@ -42,3 +45,4 @@ execute-task/
 
 - `knowledge/code-standards.md` — стандарты кода проекта
 - `knowledge/testing-guide.md` — руководство по тестированию
+- `templates/result-template.md` — шаблон заполнения секции Result в тикете

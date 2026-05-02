@@ -1,0 +1,65 @@
+id: TC-EXECUTE-TASK-009
+title: "Workflow execute.md содержит шаг проверки существующего прогресса, инкрементальную запись и ссылки на knowledge/algorithms/templates"
+origin:
+  chg: [CHG-workflow-structure-2026-05-01]
+  incidents:
+    - "REPORT-027 (PLAN-011): execute-task системно не заполняет Result и не отмечает DoD (4 тикета из 15). COACH-034 добавил GATE-систему, но workflow execute.md не содержал шага проверки существующего прогресса (SKILL.md шаг 2) и не требовал инкрементальной записи (SKILL.md шаг 5). Агент, следующий по воркфлоу, мог пропустить эти критичные шаги."
+  principle: |
+    Workflow execute.md должен быть консистентен с SKILL.md: содержать шаг проверки существующего прогресса (шаг 1),
+    требовать инкрементальную запись (шаг 3), ссылаться на knowledge/algorithms/templates (F7, F4-F8).
+    Антипаттерн «Пропуск проверки существующего прогресса» и «Отложенная запись результата» должны быть в списке антипаттернов.
+  backlog_sources:
+    - "COACH-034 analysis: F7 (workflow без ссылок на knowledge/algorithms), F11 (пропуск шага проверки прогресса), F12 (пропуск инкрементальной записи)"
+tags: [workflow-structure, incremental-recording, progress-check, knowledge-links]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  description: |
+    L0 static-кейс: проверка структурных инвариантов в workflows/execute.md и SKILL.md.
+    После улучшений COACH-035 воркфлоу должен содержать:
+    - шаг «Проверить существующий прогресс»
+    - секцию «Инкрементальная запись» с инструкцией записывать после каждого пункта DoD
+    - ссылки на knowledge/ticket-structure.md, algorithms/execution-strategy.md, templates/result-template.md
+    - антипаттерн «Пропуск проверки существующего прогресса»
+    - антипаттерн «Отложенная запись результата»
+    - секцию «Загрузка шаблонов» в SKILL.md
+  inputs: []
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "Проверить существующий прогресс"
+      reason: "Workflow должен содержать шаг 1 проверки существующего прогресса (Result/Ревью/DoD из предыдущих попыток)."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "Инкрементальная запись"
+      reason: "Workflow должен содержать секцию инкрементальной записи с требованием записывать результат после каждого пункта DoD."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "knowledge/ticket-structure.md"
+      reason: "Workflow должен ссылаться на knowledge/ticket-structure.md в шаге проверки прогресса."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "algorithms/execution-strategy.md"
+      reason: "Workflow должен ссылаться на algorithms/execution-strategy.md для стратегии выполнения."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "templates/result-template.md"
+      reason: "Workflow должен ссылаться на templates/result-template.md в шаге записи результата."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "Пропуск проверки существующего прогресса"
+      reason: "Список антипаттернов должен включать пропуск проверки существующего прогресса."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "Отложенная запись результата"
+      reason: "Список антипаттернов должен включать отложенную запись результата (вместо инкрементальной)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Загрузка шаблонов"
+      reason: "SKILL.md должен содержать секцию «Загрузка шаблонов» с ссылкой на templates/result-template.md."
+
+execution:
+  timeout_s: 60

@@ -47,3 +47,13 @@ cases:
     origin_chg: [CHG-configured-paths-cleanup-2026-05-01]
     tags: [configured-paths, cleanup, no-side-effects, root-pollution]
     severity: high
+  - id: TC-EXECUTE-TASK-008
+    file: cases/TC-EXECUTE-TASK-008-context-path-validation.yaml
+    origin_chg: [CHG-context-path-validation-2026-05-01]
+    tags: [context-path, file-targeting, dod-fill, gate-check]
+    severity: high
+  - id: TC-EXECUTE-TASK-009
+    file: cases/TC-EXECUTE-TASK-009-workflow-structure.yaml
+    origin_chg: [CHG-workflow-structure-2026-05-01]
+    tags: [workflow-structure, incremental-recording, progress-check, knowledge-links]
+    severity: high
