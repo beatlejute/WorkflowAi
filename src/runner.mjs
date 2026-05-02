@@ -10,6 +10,93 @@ import { loadRules, scanStderrForFatalRule, classify } from './lib/error-classif
 import { snapshot, diff, isEmpty } from './lib/artifact-snapshot.mjs';
 import { markUnhealthy, isHealthy } from './lib/agent-health-registry.mjs';
 import { writeMarker, removeMarker } from './lib/marker.mjs';
+import { appendAgentRun, classifyAgentResult } from '../workflow-ai/src/lib/agent-history.mjs';
+import { incrementMetrics } from '../workflow-ai/src/lib/metrics-incremental.mjs';
+
+// ============================================================================
+// Audit-log helpers (used by executeWithFallback hook — IMPL-83)
+// ============================================================================
+
+function formatLocalDateTime(d) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function findTicketPathForId(ticketId, projectRoot) {
+  if (!ticketId) return null;
+  const dirs = ['ready', 'in-progress', 'review', 'done', 'backlog', 'blocked'];
+  for (const d of dirs) {
+    const p = path.join(projectRoot, '.workflow', 'tickets', d, `${ticketId}.md`);
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+  return null;
+}
+
+// IMPL-86: normalize agent_id in last row of ## Ревью section
+// Re-writes the agent column if it differs from expectedAgent. Other columns untouched.
+// Returns { ok: true, changed: boolean } or { ok: false, code, error }.
+function normalizeReviewAgentId(ticketPath, expectedAgent) {
+  if (!ticketPath || !expectedAgent) return { ok: false, code: 'INVALID_INPUT' };
+  let content;
+  try {
+    content = fs.readFileSync(ticketPath, 'utf8');
+  } catch (err) {
+    return { ok: false, code: 'READ_ERROR', error: err.message };
+  }
+
+  const sectionRegex = /(##\s+Ревью\s*\r?\n)([\s\S]*?)(?=\r?\n##\s+|$)/i;
+  const match = content.match(sectionRegex);
+  if (!match) return { ok: false, code: 'NO_SECTION' };
+
+  const sectionBody = match[2];
+  const lines = sectionBody.split('\n');
+  let headerIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t.startsWith('|') && t.endsWith('|') && !/^\s*\|[-:|\s]+\|\s*$/.test(t)) {
+      headerIdx = i;
+      break;
+    }
+  }
+  if (headerIdx === -1) return { ok: false, code: 'NO_HEADER' };
+
+  const headerCells = lines[headerIdx].trim().slice(1, -1).split(/(?<!\\)\|/).map(c => c.trim());
+  const agentColIdx = headerCells.findIndex(c => /^(агент|agent)$/i.test(c));
+  if (agentColIdx === -1) return { ok: false, code: 'NO_AGENT_COLUMN' };
+
+  let lastDataIdx = -1;
+  for (let i = lines.length - 1; i > headerIdx; i--) {
+    const t = lines[i].trim();
+    if (t.startsWith('|') && t.endsWith('|') && !/^\s*\|[-:|\s]+\|\s*$/.test(t)) {
+      lastDataIdx = i;
+      break;
+    }
+  }
+  if (lastDataIdx === -1) return { ok: false, code: 'NO_DATA_ROW' };
+
+  const cells = lines[lastDataIdx].trim().slice(1, -1).split(/(?<!\\)\|/).map(c => c.trim());
+  if (agentColIdx >= cells.length) return { ok: false, code: 'CELL_MISSING' };
+
+  const currentAgent = cells[agentColIdx];
+  if (currentAgent === expectedAgent) return { ok: true, changed: false };
+
+  cells[agentColIdx] = expectedAgent;
+  lines[lastDataIdx] = `| ${cells.join(' | ')} |`;
+
+  const newSection = match[1] + lines.join('\n');
+  const newContent = content.replace(sectionRegex, newSection);
+
+  const dir = path.dirname(ticketPath);
+  const tmp = path.join(dir, `.${path.basename(ticketPath)}.normagent.${process.pid}.${Date.now()}`);
+  try {
+    fs.writeFileSync(tmp, newContent, 'utf8');
+    fs.renameSync(tmp, ticketPath);
+    return { ok: true, changed: true };
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch {}
+    return { ok: false, code: 'WRITE_ERROR', error: err.message };
+  }
+}
 
 // ============================================================================
 // Logger — система логирования с уровнями DEBUG/INFO/WARN/ERROR
@@ -1041,6 +1128,29 @@ class StageExecutor {
 
         const result = await this.callAgent(agent, prompt, stageId, effectiveStage.skill, agentId);
 
+        // IMPL-83: audit-log hook (success path)
+        await this._auditAgentRun(stageId, effectiveStage, agentId, {
+          exitCode: result.exitCode ?? 0,
+          stderr: '',
+          stdout: result.output || '',
+          parsedResult: result.result || null,
+        });
+
+        // IMPL-86: normalize agent_id in ## Ревью after review-result stage
+        if ((effectiveStage.skill === 'review-result' || stageId === 'review-result') && this.context?.ticket_id) {
+          try {
+            const tp = findTicketPathForId(this.context.ticket_id, this.projectRoot);
+            if (tp) {
+              const r = normalizeReviewAgentId(tp, agentId);
+              if (!r.ok && r.code !== 'NO_SECTION' && r.code !== 'NO_DATA_ROW' && this.logger) {
+                this.logger.warn(`review agent normalize: ${r.code} ${r.error || ''}`, stageId);
+              }
+            }
+          } catch (err) {
+            if (this.logger) this.logger.warn(`review agent normalize threw: ${err.message}`, stageId);
+          }
+        }
+
         if (this.logger) this.logger.stageComplete(stageId, result.status, result.exitCode);
         return result;
       } catch (err) {
@@ -1048,6 +1158,16 @@ class StageExecutor {
 
         const exitCode = err.exitCode ?? err.code;
         const stderr = err.stderr || '';
+
+        // IMPL-83: audit-log hook (failure path)
+        await this._auditAgentRun(stageId, effectiveStage, agentId, {
+          exitCode,
+          stderr,
+          stdout: err.stdout || '',
+          parsedResult: err.parsedResult || null,
+          timedOut: err.timedOut === true,
+          signal: err.signal,
+        });
 
         const after = snapshotEnabled ? await snapshot(this.projectRoot, snapshotOpts) : null;
         const diffResult = snapshotEnabled ? diff(before, after) : null;
@@ -1085,6 +1205,68 @@ class StageExecutor {
         triedInThisAttempt.push(agentId);
         lastErr = err;
       }
+    }
+  }
+
+  /**
+   * IMPL-83: Audit-log hook — write entry to ticket history + bump metrics.
+   * Non-blocking: errors are logged via logger.warn, never thrown.
+   */
+  async _auditAgentRun(stageId, effectiveStage, agentId, callResult) {
+    try {
+      const ticketId = this.context?.ticket_id;
+      if (!ticketId) return;
+
+      const agentType = (agentId || '').startsWith('script-') ? 'script' : 'ai';
+      const status = classifyAgentResult({
+        exitCode: callResult.exitCode ?? 0,
+        stderr: callResult.stderr || '',
+        stdout: callResult.stdout || '',
+        timedOut: callResult.timedOut === true,
+        signal: callResult.signal,
+        parsedResult: callResult.parsedResult || null,
+        agentType,
+      });
+
+      // For move-* stages prefer destination from parsedResult.to
+      let ticketPath = null;
+      if (stageId.startsWith('move-') && callResult.parsedResult?.to) {
+        ticketPath = path.join(this.projectRoot, '.workflow/tickets', callResult.parsedResult.to, `${ticketId}.md`);
+        try { if (!fs.existsSync(ticketPath)) ticketPath = null; } catch { ticketPath = null; }
+      }
+      if (!ticketPath) {
+        ticketPath = findTicketPathForId(ticketId, this.projectRoot);
+      }
+      if (!ticketPath) return;
+
+      const skillName = effectiveStage.skill || stageId;
+      const entry = {
+        timestamp: formatLocalDateTime(new Date()),
+        skill: skillName,
+        agent: agentId || 'unknown',
+        status,
+      };
+
+      try {
+        const r = appendAgentRun(ticketPath, entry);
+        if (!r?.ok && this.logger) {
+          this.logger.warn(`audit-log appendAgentRun failed: ${r?.code || 'unknown'} ${r?.error || ''}`, stageId);
+        }
+      } catch (err) {
+        if (this.logger) this.logger.warn(`audit-log appendAgentRun threw: ${err.message}`, stageId);
+      }
+
+      try {
+        const r = incrementMetrics(this.projectRoot, entry, ticketId);
+        if (!r?.ok && this.logger) {
+          this.logger.warn(`metrics update failed: ${r?.code || 'unknown'} ${r?.error || ''}`, stageId);
+        }
+      } catch (err) {
+        if (this.logger) this.logger.warn(`metrics update threw: ${err.message}`, stageId);
+      }
+    } catch (outer) {
+      // Final safety net — never let audit-log break the pipeline
+      if (this.logger) this.logger.warn(`audit-log hook crashed: ${outer.message}`, stageId);
     }
   }
 
@@ -1197,7 +1379,10 @@ class StageExecutor {
         if (this.logger) {
           this.logger.timeout(stageId, timeout);
         }
-        reject(new Error(`Stage "${stageId}" timed out after ${timeout}s`));
+        const err = new Error(`Stage "${stageId}" timed out after ${timeout}s`);
+        err.timedOut = true;
+        err.exitCode = -1;
+        reject(err);
       }, timeout * 1000);
 
       let stdoutBuffer = '';
@@ -1271,7 +1456,7 @@ class StageExecutor {
         reject(err);
       });
 
-      child.on('close', (code) => {
+      child.on('close', (code, signal) => {
         this.currentChild = null;
         clearTimeout(timeoutId);
         // Обрабатываем остаток буфера стриминга
@@ -1340,6 +1525,7 @@ class StageExecutor {
           err.code = 'NON_ZERO_EXIT';
           err.exitCode = code;
           err.stderr = stderr;
+          err.signal = signal;
           if (this.logger) {
             this.logger.error(`Agent exited with code ${code}`, stageId);
             if (stderr.trim()) {

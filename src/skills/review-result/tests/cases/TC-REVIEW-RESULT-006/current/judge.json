@@ -1,0 +1,49 @@
+{
+  "per_model": {
+    "claude-sonnet": {
+      "pass_count": 0,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": null,
+          "passed": false
+        },
+        {
+          "trial": 2,
+          "score": null,
+          "passed": false
+        },
+        {
+          "trial": 3,
+          "score": null,
+          "passed": false
+        }
+      ]
+    }
+  },
+  "rubric_scores": [
+    {
+      "agentId": "claude-sonnet",
+      "trial": 1,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 2,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 3,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    }
+  ],
+  "timestamp": "2026-05-02T07:59:27.526Z"
+}

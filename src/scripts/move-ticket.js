@@ -20,6 +20,7 @@ import {
   printResult,
   serializeFrontmatter,
   getLastReviewStatus,
+  appendReviewEntry,
 } from "workflow-ai/lib/utils.mjs";
 
 const logger = {
@@ -210,13 +211,19 @@ async function moveTicket(ticketId, target) {
   }
 
   // Fallback: если тикет идёт в done из review, но агент не записал секцию "## Ревью" — дописываем
+  // IMPL-88: используем appendReviewEntry вместо ручного markdown-write.
+  // ВАЖНО: пишем напрямую через body manipulation (а не file rewrite через appendReviewEntry),
+  // потому что move-ticket в этой же транзакции serializeFrontmatter(...) + renameSync — иначе
+  // запись в исходный файл потеряется при rename. Используем те же поля что и appendReviewEntry.
   if (
     target === "done" &&
     currentStatus === "review" &&
     getLastReviewStatus(content) === null
   ) {
     const date = now.slice(0, 16).replace("T", " ");
-    const reviewSection = `\n## Ревью\n\n| Дата | Статус | Самари |\n|------|--------|--------|\n| ${date} | ✅ passed | Pipeline fallback: агент не записал секцию ревью |\n`;
+    const summary = "Pipeline fallback: агент не записал секцию ревью";
+    const agent = "script-move-fallback";
+    const reviewSection = `\n## Ревью\n\n| Дата | Статус | Самари | Агент |\n|------|--------|--------|-------|\n| ${date} | ✅ passed | ${summary} | ${agent} |\n`;
     body = body.trimEnd() + "\n" + reviewSection;
   }
 

@@ -98,78 +98,7 @@ export function getPackageRoot() {
   return path.resolve(__dirname, '../../');
 }
 
-/**
- * Парсит секцию "## Ревью" тикета и возвращает статус последней записи.
- * Поддерживает табличный и текстовый форматы.
- *
- * Табличный формат:
- * | Дата | Статус | Комментарий |
- * |------|--------|-------------|
- * | 2026-03-08 | passed | Всё ок |
- *
- * Текстовый формат:
- * - 2026-03-08: passed - Всё ок
- * - 2026-03-08: failed - Есть замечания
- *
- * @param {string} content - Содержимое тикета (markdown)
- * @returns {string|null} "passed", "failed" или null (если нет ревью)
- */
-export function getLastReviewStatus(content) {
-  if (!content) return null;
-
-  // Находим последний заголовок H2 "## Ревью" (только строки начинающиеся с "## ")
-  const lines = content.split('\n');
-  let lastHeaderLineIndex = -1;
-  
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].startsWith('## ') && lines[i].includes('Ревью')) {
-      lastHeaderLineIndex = i;
-    }
-  }
-
-  if (lastHeaderLineIndex === -1) return null;
-
-  // Собираем содержимое после заголовка до следующего H2 заголовка
-  const reviewLines = [];
-  for (let i = lastHeaderLineIndex + 1; i < lines.length; i++) {
-    if (lines[i].startsWith('## ')) break; // следующий H2 заголовок
-    reviewLines.push(lines[i]);
-  }
-  
-  const reviewSection = reviewLines.join('\n').trim();
-  if (!reviewSection) return null;
-
-  // Пробуем распарсить табличный формат
-  const tableRows = reviewSection.split('\n').filter(line => line.trim().startsWith('|'));
-  if (tableRows.length >= 2) {
-    // Есть заголовок и разделитель, ищем строки с данными
-    const dataRows = tableRows.slice(2).filter(row => {
-      const cells = row.split('|').map(c => c.trim()).filter(c => c);
-      return cells.length >= 2;
-    });
-
-    if (dataRows.length > 0) {
-      // Последняя строка таблицы = самое свежее ревью (записи ведутся хронологически сверху вниз)
-      const latestRow = dataRows[dataRows.length - 1];
-      const cells = latestRow.split('|').map(c => c.trim()).filter(c => c);
-      const statusRaw = cells[1]?.toLowerCase() || '';
-      if (statusRaw.includes('passed')) return 'passed';
-      if (statusRaw.includes('failed')) return 'failed';
-      if (statusRaw.includes('skipped')) return 'skipped';
-    }
-  }
-
-  // Пробуем распарсить текстовый формат (список)
-  const listItems = reviewSection.split('\n').filter(line => line.trim().match(/^[-*]\s/));
-  if (listItems.length > 0) {
-    // Последний элемент списка = самое свежее ревью (записи ведутся хронологически)
-    const latestItem = listItems[listItems.length - 1].trim();
-    const statusMatch = latestItem.match(/:\s*(passed|failed|skipped)\b/i);
-    if (statusMatch) return statusMatch[1].toLowerCase();
-  }
-
-  return null;
-}
+export { getLastReviewStatus, appendReviewEntry } from '../../workflow-ai/src/lib/review-section.mjs';
 
 /**
  * Загружает конфигурацию правил перемещения тикетов.
