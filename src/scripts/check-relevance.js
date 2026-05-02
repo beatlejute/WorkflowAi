@@ -21,6 +21,7 @@ import {
   parseFrontmatter,
   serializeFrontmatter,
   getLastReviewStatus,
+  appendReviewEntry,
 } from "workflow-ai/lib/utils.mjs";
 
 const PROJECT_DIR = findProjectRoot();
@@ -212,43 +213,18 @@ async function checkRelevance(ticketPath) {
   return { verdict: "relevant", reason: "all_checks_passed" };
 }
 
+// IMPL-89: Replace manual markdown-write with appendReviewEntry from review-section.mjs.
 function addSkippedReview(ticketPath, reason) {
-  const now = new Date();
-  const date = now.toISOString().slice(0, 10);
-
-  let content;
-  try {
-    content = fs.readFileSync(ticketPath, "utf8");
-  } catch (e) {
-    throw new Error(`Failed to read ticket: ${e.message}`);
+  const date = new Date().toISOString().slice(0, 10);
+  const r = appendReviewEntry(ticketPath, {
+    date,
+    agent: 'script-check-relevance',
+    status: 'skipped',
+    summary: reason,
+  });
+  if (!r?.ok) {
+    throw new Error(`addSkippedReview failed: ${r?.code || 'unknown'} ${r?.error || ''}`);
   }
-
-  let { frontmatter, body } = parseFrontmatter(content);
-
-  const reviewSectionMatch = body.match(/##\s*Ревью\s*\n([\s\S]*)/i);
-  let newBody;
-
-  if (reviewSectionMatch) {
-    const reviewContent = reviewSectionMatch[1];
-    const lines = reviewContent.split("\n");
-    let insertIndex = 0;
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].trim().startsWith("|") && lines[i].includes("---")) {
-        insertIndex = i + 1;
-        break;
-      }
-    }
-
-    const newRow = `| ${date} | ⏭️ skipped | ${reason} |`;
-    lines.splice(insertIndex, 0, newRow);
-    newBody = body.slice(0, reviewSectionMatch.index) + lines.join("\n");
-  } else {
-    const reviewTable = `\n## Ревью\n\n| Дата | Статус | Самари |\n|------|--------|--------|\n| ${date} | ⏭️ skipped | ${reason} |\n`;
-    newBody = body.trimEnd() + reviewTable;
-  }
-
-  const newContent = serializeFrontmatter(frontmatter) + newBody;
-  fs.writeFileSync(ticketPath, newContent, "utf8");
 }
 
 async function main() {

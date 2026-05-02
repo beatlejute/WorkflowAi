@@ -1,3 +1,15 @@
+## [1.5.0] — 2026-05-02
+
+### Added
+- **Audit log агентов в тикетах**: каждая попытка агента (включая fallback) пишет строку в секцию `## История работы` тикета: `| Дата/время | Скил | Агент | Статус |`. 10 классов статуса (ok, error, timeout, empty_response, rate_limit, network_error, auth_error, aborted, blocked, skipped_relevance) детектируются автоматически.
+- **Колонка Агент в `## Ревью`**: миграция 3→4 колонки. Видно кто проставил вердикт.
+- **Agent history aggregation в metrics**: ключ `agent_history` в `metrics/review-metrics.json` с разрезами by_status/by_agent/by_skill/by_skill_by_agent + fallback_stats. Incremental update от runner.
+- New helpers: `lib/agent-history.mjs`, `lib/review-section.mjs`, `lib/metrics-incremental.mjs`.
+
+### Changed
+- `getLastReviewStatus` parsing теперь header-based (whitelist: Статус/Status/Вердикт/Verdict). Поддержка legacy 3-колоночных таблиц через `unknown` placeholder в Agent при first append.
+- `verify-artifacts.js`, `move-ticket.js` fallback, `check-relevance.js` теперь пишут review через `appendReviewEntry` helper.
+
 ## [1.3.0] — 2026-04-30
 
 ### Добавлено

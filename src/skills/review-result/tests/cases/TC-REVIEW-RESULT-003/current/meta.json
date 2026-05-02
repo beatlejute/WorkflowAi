@@ -1,15 +1,15 @@
 {
-  "date": "2026-04-25T07:10:27.577Z",
-  "skill_sha": "b6cda8a",
-  "status": "passed",
-  "duration_ms": 79287,
+  "date": "2026-05-02T07:58:53.444Z",
+  "skill_sha": "9cf88e6",
+  "status": "failed",
+  "duration_ms": 160861,
   "l1_skipped": true,
   "per_model": {
     "claude-sonnet": {
-      "passed": true,
+      "passed": false,
       "errored": false,
-      "pass_count": 3,
-      "error_count": 0,
+      "pass_count": 1,
+      "error_count": 2,
       "total": 3,
       "threshold": 2
     },
@@ -96,19 +96,21 @@
     {
       "agentId": "claude-sonnet",
       "trial": 1,
-      "score": 5,
-      "errored": false
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
     },
     {
       "agentId": "claude-sonnet",
       "trial": 2,
-      "score": 5,
-      "errored": false
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
     },
     {
       "agentId": "claude-sonnet",
       "trial": 3,
-      "score": 4,
+      "score": 5,
       "errored": false
     }
   ]

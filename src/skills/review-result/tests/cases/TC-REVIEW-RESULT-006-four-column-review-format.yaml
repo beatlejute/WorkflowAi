@@ -1,0 +1,51 @@
+id: TC-REVIEW-RESULT-006
+title: "Ревьюер записывает секцию ревью в 4-колоночном формате с колонкой Агент"
+origin:
+  chg: [COACH-36]
+  incidents:
+    - "COACH-36 (2026-05-02): обновлён формат секции ревью — добавлена колонка Агент. Регрессионный тест фиксирует новый инвариант."
+  principle: "Секция ревью должна использовать 4-колоночный формат | Дата | Статус | Самари | Агент | с непустым значением в колонке Агент (Агент в конце)."
+tags: [review-format, agent-column, four-column]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Проведи ревью тикета IMPL-907, который лежит в .workflow/tickets/review/IMPL-907.md.
+    Оба пункта DoD выполнены [x]. Секция Result заполнена. Frontmatter валидный.
+    После ревью запиши секцию ## Ревью в тикет — используй формат, указанный в SKILL.md.
+  inputs:
+    - kind: ticket_file
+      path: "../fixtures/IMPL-907-simple-completed.md"
+      ticket_id: IMPL-907
+      dest_dir: review
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Агент"
+      reason: "SKILL.md должен содержать инструкцию о колонке Агент."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "unknown"
+      reason: "SKILL.md должен содержать fallback 'unknown' для неизвестного имени модели."
+
+  deterministic:
+    - kind: output_contains_all
+      values: ["---RESULT---"]
+      reason: "Результат должен быть в формате пайплайна."
+    - kind: output_contains_all
+      values: ["passed"]
+      reason: "Вердикт должен быть passed: все DoD выполнены, Result заполнен."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/four-column-review-format.md"
+      criterion: "Записал ли ревьюер секцию ревью в тикете в 4-колоночном формате с непустым значением в колонке Агент?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 1200

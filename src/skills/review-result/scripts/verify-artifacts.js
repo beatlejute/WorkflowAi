@@ -363,64 +363,31 @@ function formatVerdict(result) {
   return { status, missingFiles, unchangedFiles, failReasons, humanIssues };
 }
 
-function buildReviewRow(humanIssues) {
-  const date = new Date().toISOString().slice(0, 10);
+// IMPL-87: Replace manual review-section write with appendReviewEntry from review-section.mjs.
+// Idempotency: skip if last summary already matches.
+async function appendReviewNote(ticketPath, humanIssues) {
   const summary = `verify-artifacts: ${humanIssues.join('; ')}`;
-  return `| ${date} | ❌ failed | ${summary} |`;
-}
+  const date = new Date().toISOString().slice(0, 10);
 
-function appendReviewNote(ticketPath, humanIssues) {
-  const content = fs.readFileSync(ticketPath, 'utf8');
-  const newRow = buildReviewRow(humanIssues);
-
-  const reviewHeaderRegex = /^##\s*(Ревью|Review)\s*$/m;
-  const headerMatch = reviewHeaderRegex.exec(content);
-
-  if (headerMatch) {
-    // Секция существует — добавить строку в конец таблицы.
-    const startIdx = headerMatch.index + headerMatch[0].length;
-    const nextH2 = content.indexOf('\n## ', startIdx);
-    const sectionEnd = nextH2 === -1 ? content.length : nextH2;
-    const sectionContent = content.substring(startIdx, sectionEnd);
-
-    // Идемпотентность: не дублировать, если последняя непустая строка
-    // таблицы уже совпадает с новой по самари (дата игнорируется).
-    const lines = sectionContent.split('\n').map((l) => l.trimEnd()).filter(Boolean);
-    const lastRow = [...lines].reverse().find((l) => l.startsWith('|'));
-    if (lastRow) {
-      const lastSummary = lastRow.split('|').slice(3, -1).join('|').trim();
-      const newSummary = newRow.split('|').slice(3, -1).join('|').trim();
-      if (lastSummary === newSummary) return false;
+  // Idempotency check
+  try {
+    const content = fs.readFileSync(ticketPath, 'utf8');
+    const sectionMatch = content.match(/(?:^|\n)\s*##\s+Ревью\s*\r?\n([\s\S]*?)(?=\r?\n##\s+|$)/i);
+    if (sectionMatch) {
+      const lines = sectionMatch[1].split('\n').map(l => l.trim()).filter(Boolean);
+      const lastRow = [...lines].reverse().find(l => l.startsWith('|') && !/^\|[-:|\s]+\|$/.test(l));
+      if (lastRow && lastRow.includes(summary)) return false;
     }
+  } catch {}
 
-    const trimmedSection = sectionContent.replace(/\s+$/, '');
-    const hasTable = /\|\s*Дата\s*\|/i.test(trimmedSection);
-    const tableHeader = hasTable
-      ? ''
-      : '\n\n| Дата | Статус | Самари |\n|------|--------|--------|';
-    const updatedSection = `${trimmedSection}${tableHeader}\n${newRow}\n`;
-    const suffix = nextH2 === -1 ? '' : content.substring(sectionEnd);
-    const updated = content.substring(0, startIdx) + updatedSection + (suffix.startsWith('\n') ? suffix : `\n${suffix}`);
-    fs.writeFileSync(ticketPath, updated, 'utf8');
-    return true;
-  }
-
-  // Секции нет — создать перед "## Результат выполнения" / "## Result".
-  const resultHeaderRegex = /^##\s*(Результат выполнения|Результат|Result)\s*$/m;
-  const resultMatch = resultHeaderRegex.exec(content);
-
-  const newSection = `## Ревью\n\n| Дата | Статус | Самари |\n|------|--------|--------|\n${newRow}\n\n`;
-
-  let updated;
-  if (resultMatch) {
-    updated = content.substring(0, resultMatch.index) + newSection + content.substring(resultMatch.index);
-  } else {
-    // Fallback: в конец файла.
-    const sep = content.endsWith('\n') ? '' : '\n';
-    updated = `${content}${sep}\n${newSection}`;
-  }
-  fs.writeFileSync(ticketPath, updated, 'utf8');
-  return true;
+  const { appendReviewEntry } = await import('../../../../workflow-ai/src/lib/review-section.mjs');
+  const r = appendReviewEntry(ticketPath, {
+    date,
+    agent: 'script-verify-artifacts',
+    status: 'failed',
+    summary,
+  });
+  return r?.ok === true;
 }
 
 async function main() {
@@ -461,7 +428,7 @@ async function main() {
 
     let reviewNoteWritten = false;
     if (verdict.status === 'failed' && verdict.humanIssues.length > 0) {
-      reviewNoteWritten = appendReviewNote(ticketPath, verdict.humanIssues);
+      reviewNoteWritten = await appendReviewNote(ticketPath, verdict.humanIssues);
     }
 
     const assertionsTotal = result.assertionResults.length;

@@ -38,3 +38,8 @@ cases:
     origin_chg: [CHG-frontmatter-integrity-2026-04-29]
     tags: [frontmatter, yaml-integrity]
     severity: high
+  - id: TC-REVIEW-RESULT-006
+    file: cases/TC-REVIEW-RESULT-006-four-column-review-format.yaml
+    origin_chg: [COACH-36]
+    tags: [review-format, agent-column, four-column]
+    severity: medium
