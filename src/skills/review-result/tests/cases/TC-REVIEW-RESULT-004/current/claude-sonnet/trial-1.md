@@ -1,5 +1,7 @@
-# TRIAL ERRORED
+Тикет обновлён. Вердикт: **failed**.
 
-agent: claude-sonnet
-trial: 1
-error: Agent exited with code 1
+---RESULT---
+status: failed
+issues:
+  - "Пункт DoD 2 не выполнен: DoD требует «Каждый сценарий содержит inline-snapshot в коде теста (литерал-эталон, точное сравнение)», однако все 5 тест-кейсов в файле `baseline.test.mjs` используют исключительно `assert.match(normalized, /regex/)` — фрагментарные регекс-ассерты без единого литерала-эталона. Строки DoD: «Каждый сценарий содержит **inline-snapshot** в коде теста (литерал-эталон, точное сравнение)». Фактический код теста: `assert.match(normalized, /status:\\s*empty/); assert.match(normalized, /reason:/);` — ни одного `assert.strictEqual` с полным строковым эталоном. Регрессия за пределами шаблонов регексов (новые/изменённые поля, изменённый порядок ключей, потерянные строки stdout) не будет поймана."
+---RESULT---

@@ -1,13 +1,13 @@
 {
   "per_model": {
     "claude-sonnet": {
-      "pass_count": 2,
+      "pass_count": 3,
       "total": 3,
       "trials": [
         {
           "trial": 1,
-          "score": null,
-          "passed": false
+          "score": 4,
+          "passed": true
         },
         {
           "trial": 2,
@@ -26,9 +26,8 @@
     {
       "agentId": "claude-sonnet",
       "trial": 1,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
+      "score": 4,
+      "errored": false
     },
     {
       "agentId": "claude-sonnet",
@@ -43,5 +42,5 @@
       "errored": false
     }
   ],
-  "timestamp": "2026-05-02T07:58:47.640Z"
+  "timestamp": "2026-05-03T09:52:03.491Z"
 }

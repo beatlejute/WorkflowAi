@@ -1,0 +1,24 @@
+id: TC-MANUAL-TESTING-008
+title: "SKILL.md ссылается на shared через project-relative путь, не через `..`-relative"
+origin:
+  chg: ["ad-hoc-2026-05-03-shared-path"]
+  incidents:
+    - "workflowAiVsCode QA-54: skills в проекте подключены как POSIX symlinks → Windows junctions → canonical-каталог скилов. SKILL.md ссылался на shared через `../shared/`. Когда LLM/runtime вычисляет `..` от skill location, на Windows symlinks резолвится через realpath в canonical-каталог, где shared/ отсутствует (shared живёт в проекте). Эмпирически проверено через node fs.readFileSync: project-relative путь `<project>/.workflow/src/skills/shared/...` работает; `realpath(skill)/../shared/...` — ENOENT."
+  principle: "Project-relative путь к shared не зависит от типа deployment (junction/symlink/copy) и резолвится одинаково везде. `..`-relative ломается под symlink-deployment, что незаметно при редактировании canonical-каталога, но проявляется при выполнении в проекте."
+  backlog_sources:
+    - "d:/Dev/workflowAi/.workflow/coach-backlog.yaml"
+tags: [shared-path, project-relative, symlink-resolution, regression-guard]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым SKILL.md.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "\\.workflow/src/skills/shared/"
+      reason: "SKILL.md должен ссылаться на shared через project-relative путь, гарантирующий корректный резолвинг под symlink-deployment."

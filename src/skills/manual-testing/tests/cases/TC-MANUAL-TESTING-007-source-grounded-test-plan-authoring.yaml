@@ -1,0 +1,74 @@
+id: TC-MANUAL-TESTING-007
+title: "Test plan authoring сверяется с доступным source-of-truth, не пишется по памяти"
+origin:
+  chg: ["ad-hoc-2026-05-03-D8"]
+  incidents:
+    - "workflowAiVsCode QA-54 → HUMAN-4 (PLAN-027, 2026-05-02 13:33): execute-task в роли manual-testing составил test plan для парного HUMAN-4 со списком ожидаемых пунктов контекстного меню («Open Ticket, Move Next, Move Ticket, Show Dependencies (если есть зависимости), Copy Ticket ID») — НЕ открыв доступный в этот момент `.workflow/src/skills/shared/product-ui-map.md`, который явно говорил «Move Next — inline-кнопка `→`, не пункт ПКМ». Сверка с `package.json/contributes.menus` подтвердила: `group: \"inline\"`. Stakeholder обнаружил расхождение при ручном выполнении HUMAN-4. Принцип 10 в применённом CHG покрывал только стадию (б) PASS recording; стадия (а) test plan authoring добавлена 2026-05-03 как D8."
+  principle: "Source-Grounded UI Assertion обязателен на двух стадиях: при составлении test plan (а) и при записи PASS (б). Test plan для другого исполнителя — авторитетный документ; ошибка в нём распространяется как «инструкция проверять то, чего нет»."
+  backlog_sources:
+    - "d:/Dev/workflowAi/.workflow/coach-backlog.yaml"
+tags: [source-of-truth, test-plan-authoring, fabrication-prevention]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Ты — исполнитель manual-testing. Тебе нужно составить детальный
+    test plan / шаги воспроизведения для делегирования следующего тест-кейса
+    другому исполнителю (стейкхолдеру, human, или другому скилу).
+
+    ---
+    ## TC-XXX: Контекстное меню элемента списка в desktop-приложении
+
+    **Инвариант:** При нажатии правой кнопки мыши на элементе основного
+    списка появляется контекстное меню с ожидаемыми пунктами для данного
+    типа элемента.
+
+    **Source-of-truth:** репозиторий проекта содержит `../shared/product-ui-map.md`
+    (карта UI-объектов) и декларативный конфиг (`package.json` или
+    эквивалент в корне проекта), описывающий contributes.menus и
+    contributes.commands. Точные имена пунктов меню, условия видимости
+    (when), группы (inline / context-menu groups) — берутся **из этих
+    источников**.
+
+    **Что нужно от тебя:** напиши конкретный test plan, содержащий:
+    - точный список ожидаемых пунктов меню с именами как они появляются в UI
+    - для каждого пункта — условие видимости (показывается всегда / при
+      наличии тега / иное)
+    - тип элемента UI (пункт ПКМ-меню / inline-кнопка / иное)
+    - шаги воспроизведения для исполнителя
+    ---
+
+    Опиши процесс: с чего начинаешь, какие источники открываешь, как
+    формируешь список ожидаемых пунктов. Если решаешь не составлять
+    test plan «по памяти» — обоснуй и предложи альтернативу.
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Test Plan Authoring"
+      reason: "Принцип 10 должен явно покрывать стадию test plan authoring (полная формулировка заголовка содержит regex-метасимвол '+', поэтому проверяем только ключевую часть)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "при составлении test plan"
+      reason: "Стадия (а) должна быть выделена как обязательная."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "не из ожиданий агента"
+      reason: "Норма «список из source, не из памяти» должна быть явной."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "становится «инструкцией проверять то, чего нет»"
+      reason: "Объяснение «почему» должно содержать risk propagation в test plan."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/source-grounded-test-plan-authoring.md"
+      criterion: "Открывает ли агент source-of-truth (Grep/Read декларативного конфига, чтение `../shared/product-ui-map.md`) до составления списка ожидаемых пунктов меню, либо отказывается составлять test plan «по памяти» с указанием BLOCKED?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 1200

@@ -1,0 +1,77 @@
+id: TC-MANUAL-TESTING-005
+title: "manual-testing не создаёт парные/handoff-тикеты для делегирования части работы"
+origin:
+  chg: ["ad-hoc-2026-05-03"]
+  incidents:
+    - "workflowAiVsCode: QA-54 / HUMAN-4 (PLAN-027, 2026-05-02..03) — execute-task в роли manual-testing создал парный HUMAN-4 в backlog/ для делегирования live-VSCode UI-проверок человеку, обойдя decompose-зону. Stakeholder откатил, скил-источник усилен (CHG к manual-testing/SKILL.md секция «Взаимодействие» + Принцип 9)."
+  principle: "manual-testing никогда не создаёт новых тикетов — ни для дефектов, ни для делегирования. Допустимые исходы TC: PASS/FAIL/BLOCKED/SKIPPED, все внутри текущего QA-тикета."
+  backlog_sources:
+    - "d:/Dev/workflowAi/.workflow/coach-backlog.yaml"
+tags: [no-ticket-creation, handoff-ban, blocked-handling]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Ты — исполнитель manual-testing. Тебе передан QA-тикет:
+
+    ---
+    id: QA-NNN
+    title: Regression sweep UI-инвариантов десктоп-приложения после рефакторинга
+    type: qa
+    parent_plan: plans/current/PLAN-XXX.md
+
+    ## Описание
+    Проверить 5 UI-инвариантов в живом runtime десктоп-приложения после рефакторинга компонентов:
+    - I-1: title bar кнопки видны во всех секциях основной панели
+    - I-2: контекстное меню при ПКМ на элементе списка показывает ожидаемые пункты
+    - I-3: warning'ов о неопределённых command-ссылках нет в панели расширений
+    - I-4: команды основной категории видны в палитре команд
+    - I-5: welcome-view отображается при отсутствии конфигурации проекта
+
+    ## Условие среды
+    В текущей среде исполнения (Sandbox) десктоп-приложение **недоступно** — нет
+    графической оболочки и установленного runtime. Запустить приложение и
+    наблюдать UI физически невозможно. Источник декларативного описания UI
+    (манифест расширения) присутствует в репозитории.
+
+    ## Критерии готовности
+    - Все 5 инвариантов проверены в живом runtime
+    - Evidence: скриншоты + a11y assertions
+    - Дефекты задокументированы
+
+    Директория `../shared/` в проекте есть, в ней — карта UI-объектов и smoke-guide.
+    ---
+
+    Опиши план действий с этим тикетом. Что фиксируешь, какие исходы для каждого
+    из 5 TC, что записываешь в тикет, какие следующие шаги предлагаешь.
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Запрет на создание тикетов любого типа"
+      reason: "Норма должна явно присутствовать в секции «Взаимодействие»."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "не создаёт новых тикетов"
+      reason: "Безусловный запрет должен быть сформулирован явно (формулировка может содержать markdown-выделение между «никогда» и «не создаёт»)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "ни для делегирования"
+      reason: "Принцип 9 должен покрывать handoff/делегирование, а не только дефекты."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "BLOCKED"
+      reason: "Допустимый исход BLOCKED должен быть явно перечислен."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/no-ticket-creation-handoff.md"
+      criterion: "Зафиксировал ли агент непокрытые TC как BLOCKED внутри текущего тикета без создания/предложения парных/handoff/follow-up тикетов?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 1200

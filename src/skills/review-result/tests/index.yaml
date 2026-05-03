@@ -43,3 +43,13 @@ cases:
     origin_chg: [COACH-36]
     tags: [review-format, agent-column, four-column]
     severity: medium
+  - id: TC-REVIEW-RESULT-007
+    file: cases/TC-REVIEW-RESULT-007-source-of-truth-ui-assertion.yaml
+    origin_chg: [ad-hoc-2026-05-03]
+    tags: [source-of-truth, ui-assertion, fabrication-prevention]
+    severity: high
+  - id: TC-REVIEW-RESULT-008
+    file: cases/TC-REVIEW-RESULT-008-handoff-ticket-ban.yaml
+    origin_chg: [ad-hoc-2026-05-03]
+    tags: [handoff-ban, ticket-creation-zone, delegation]
+    severity: high

@@ -60,7 +60,7 @@ description: >
 |--------|----------------|
 | `knowledge/ticket-structure.md` | При необходимости уточнить семантику полей тикета |
 | `knowledge/context-checkpoints.md` | При задаче с > 5 шагами DoD или при continuation прерванной сессии |
-| `../shared/*` | Перед началом работы — проверь индекс (`../shared/README.md`) и загрузи релевантные модули |
+| `.workflow/src/skills/shared/*` | Перед началом работы — проверь индекс (`.workflow/src/skills/shared/README.md`) и загрузи релевантные модули |
 
 ## Загрузка алгоритмов
 

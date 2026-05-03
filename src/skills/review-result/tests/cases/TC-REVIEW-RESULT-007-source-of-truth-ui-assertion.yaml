@@ -1,0 +1,48 @@
+id: TC-REVIEW-RESULT-007
+title: "Ревьюер требует source-сверки UI-evidence или отвергает фабрикованные UI-claims"
+origin:
+  chg: ["ad-hoc-2026-05-03"]
+  incidents:
+    - "workflowAiVsCode QA-54 (PLAN-027, 2026-05-03 09:03): execute-task в роли manual-testing записал PASS на 4 UI-инварианта с конкретными именами команд и пунктов меню без source-сверки. review-result принял PASS, не открыв `package.json/contributes.*`. Stakeholder вручную выполнил парный HUMAN-4 и обнаружил расхождения (Move Next в реальности — group:inline hover-кнопка, не пункт ПКМ; 12+ перечисленных команд частично сфабрикованы). Date-check: повторный инцидент того же класса, что COACH-033 (review-result принимает PASS без сверки фактической реализации с DoD-формулировкой); этот раз — UI-подкласс."
+  principle: "Если evidence содержит конкретные имена UI-элементов или контрактных артефактов — ревьюер сверяет хотя бы 1-2 из них с source-of-truth (декларативный конфиг, JSX/aria, spec) до passed. Расхождение → failed."
+  backlog_sources:
+    - "d:/Dev/workflowAi/.workflow/coach-backlog.yaml"
+tags: [source-of-truth, ui-assertion, fabrication-prevention]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Проведи ревью тикета QA-907, который лежит в .workflow/tickets/review/QA-907.md.
+    Тикет утверждает, что 3 команды видны в палитре, контекстное меню содержит
+    ожидаемые пункты, и условие видимости одного из пунктов соответствует тегу.
+    Имена команд и пунктов меню — конкретные. Ни одна запись evidence не содержит
+    ссылки на source-of-truth (декларативный конфиг, JSX, spec) с указанием
+    `file:line` или цитаты. Сверь хотя бы пару утверждений с source-of-truth
+    в репозитории (Grep по ключевым именам элементов), либо обоснуй отказ
+    от passed по Принципу 7.
+  inputs:
+    - kind: ticket_file
+      path: "../fixtures/QA-907-fabricated-ui-evidence/QA-907.md"
+      ticket_id: QA-907
+      dest_dir: review
+
+assertions:
+  deterministic:
+    - kind: output_contains_all
+      values: ["---RESULT---"]
+      reason: "Результат в формате пайплайна."
+    - kind: output_contains_all
+      values: ["failed"]
+      reason: "Вердикт — failed: evidence сфабрикован/не сверен с source."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/source-of-truth-ui-assertion.md"
+      criterion: "Сверил ли ревьюер хотя бы 1-2 имени UI-элемента из evidence с source-of-truth, либо отверг passed из-за отсутствия source-ссылок (Принцип 7)?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 1200

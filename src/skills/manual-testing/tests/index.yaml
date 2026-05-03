@@ -33,3 +33,23 @@ cases:
     origin_chg: [CHG-056, CHG-057]
     tags: [artifact-naming, discovery, reuse]
     severity: high
+  - id: TC-MANUAL-TESTING-005
+    file: cases/TC-MANUAL-TESTING-005-no-ticket-creation-handoff.yaml
+    origin_chg: [ad-hoc-2026-05-03]
+    tags: [no-ticket-creation, handoff-ban, blocked-handling]
+    severity: high
+  - id: TC-MANUAL-TESTING-006
+    file: cases/TC-MANUAL-TESTING-006-source-grounded-ui-assertion.yaml
+    origin_chg: [ad-hoc-2026-05-03]
+    tags: [source-of-truth, ui-grounding, blocked-handling, fabrication-prevention]
+    severity: high
+  - id: TC-MANUAL-TESTING-007
+    file: cases/TC-MANUAL-TESTING-007-source-grounded-test-plan-authoring.yaml
+    origin_chg: [ad-hoc-2026-05-03-D8]
+    tags: [source-of-truth, test-plan-authoring, fabrication-prevention]
+    severity: high
+  - id: TC-MANUAL-TESTING-008
+    file: cases/TC-MANUAL-TESTING-008-shared-project-relative-path.yaml
+    origin_chg: [ad-hoc-2026-05-03-shared-path]
+    tags: [shared-path, project-relative, symlink-resolution, regression-guard]
+    severity: medium

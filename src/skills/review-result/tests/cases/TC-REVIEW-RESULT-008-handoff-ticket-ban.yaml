@@ -1,0 +1,46 @@
+id: TC-REVIEW-RESULT-008
+title: "Ревьюер отвергает результат с handoff/парным тикетом, созданным исполнителем"
+origin:
+  chg: ["ad-hoc-2026-05-03"]
+  incidents:
+    - "workflowAiVsCode QA-54 → HUMAN-4 (PLAN-027, 2026-05-02): execute-task в роли manual-testing создал парный HUMAN-4 (handoff живых UI-проверок человеку), затем закрыл QA-54 как PARTIAL PASS со ссылкой на HUMAN-4. review-result не отверг handoff-конструкцию. Stakeholder откатил QA-54 и удалил HUMAN-4. CHG к review-result: Принцип 8 явно запрещает делегирующие тикеты как evidence handoff'а."
+  principle: "Создание тикетов — исключительная зона decompose-*. Если результат тикета ссылается на парный/handoff/follow-up тикет, созданный не decompose-* скилом — failed. Происхождение определяется по parent_task или записи скила-создателя в логе."
+  backlog_sources:
+    - "d:/Dev/workflowAi/.workflow/coach-backlog.yaml"
+tags: [handoff-ban, ticket-creation-zone, delegation]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Проведи ревью тикета QA-908, который лежит в .workflow/tickets/review/QA-908.md.
+    Тикет заявляет PARTIAL PASS (4 из 5 инвариантов проверены), а 5-й инвариант
+    «делегирован» в парный HUMAN-998, созданный самим исполнителем для
+    переноса проверки на человека. В DoD пункт I-5 не отмечен `[x]`, но
+    статус результата заявлен как ✅ PASS со ссылкой на handoff. Оцени,
+    допустимо ли такое handoff-делегирование, и сформируй вердикт.
+  inputs:
+    - kind: ticket_file
+      path: "../fixtures/QA-908-handoff-delegation/QA-908.md"
+      ticket_id: QA-908
+      dest_dir: review
+
+assertions:
+  deterministic:
+    - kind: output_contains_all
+      values: ["---RESULT---"]
+      reason: "Результат в формате пайплайна."
+    - kind: output_contains_all
+      values: ["failed"]
+      reason: "Вердикт — failed: handoff-тикет создан исполнителем вне decompose-зоны."
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/handoff-ticket-ban.md"
+      criterion: "Отверг ли ревьюер passed с обоснованием «исполнитель создал тикет вне зоны компетенции; результат должен быть BLOCKED, а не делегирован»?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  timeout_s: 1200

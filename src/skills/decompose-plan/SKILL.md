@@ -41,7 +41,7 @@ ticket_prefix: null
 | `knowledge/atomicity-checklist.md` | **ВСЕГДА** — 6 проверок атомарности перед созданием каждого тикета |
 | `knowledge/scope-guard-checklist.md` | **ВСЕГДА** — 4 проверки scope перед созданием каждого тикета |
 | `knowledge/capabilities.md` | **ВСЕГДА** — критерий назначения `required_capabilities` для каждого тикета |
-| `../shared/*` | **Перед началом работы** проверь `../shared/README.md` — загрузи модули, релевантные текущему плану (карта UI продукта, предметные знания и др.) |
+| `.workflow/src/skills/shared/*` | **Перед началом работы** проверь `.workflow/src/skills/shared/README.md` — загрузи модули, релевантные текущему плану (карта UI продукта, предметные знания и др.) |
 
 ## Загрузка алгоритмов
 
