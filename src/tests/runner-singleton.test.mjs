@@ -55,7 +55,7 @@ test('singleton: second pipeline launch returns PIPELINE_ALREADY_RUNNING when ma
   try {
     await pollForFile(MARKER_PATH(projectRoot), { timeoutMs: 5000, intervalMs: 100 });
 
-    const result = await runPipeline({ project: projectRoot });
+    const result = await runPipeline(['--project', projectRoot]);
 
     assert.strictEqual(result.ok, false);
     assert.strictEqual(result.code, 'PIPELINE_ALREADY_RUNNING');
@@ -63,6 +63,11 @@ test('singleton: second pipeline launch returns PIPELINE_ALREADY_RUNNING when ma
     assert.ok(result.pid > 0, `pid should be positive, got ${result.pid}`);
     assert.strictEqual(typeof result.started_at, 'string');
     assert.ok(result.started_at.length > 0, 'started_at should not be empty');
+    assert.strictEqual(
+      result.project_root,
+      projectRoot,
+      'runner must stay inside the sandbox project, not fall back to cwd'
+    );
   } finally {
     try {
       if (process.platform === 'win32') {
@@ -76,3 +81,17 @@ test('singleton: second pipeline launch returns PIPELINE_ALREADY_RUNNING when ma
     try { rmSync(projectRoot, { recursive: true, force: true }); } catch {}
   }
 }, { timeout: 30000 });
+
+// Регрессия инцидента 2026-09-18. `runPipeline({ project })` — объект вместо
+// argv-массива — не парсился (`argv.length` undefined), args.project оставался
+// null, корень резолвился через findProjectRoot() от process.cwd(), и раннер
+// запускал настоящий пайплайн на живом проекте: 25 стадий, реальные LLM-агенты,
+// тикеты разъехались по доске. Сам тест при этом падал на assert'ах, так что
+// сигнал выглядел как обычный красный тест.
+test('singleton: runPipeline rejects an options object instead of silently falling back to cwd', async () => {
+  await assert.rejects(
+    () => runPipeline({ project: resolve(process.cwd(), '.tmp-never-created') }),
+    (err) => err instanceof TypeError && /argv array/.test(err.message),
+    'форма аргумента должна отвергаться до любой работы с проектом'
+  );
+});

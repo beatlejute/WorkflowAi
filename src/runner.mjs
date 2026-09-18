@@ -9,7 +9,8 @@ import { findProjectRoot } from './lib/find-root.mjs';
 import { loadRules, scanStderrForFatalRule, classify } from './lib/error-classifier.mjs';
 import { snapshot, diff, isEmpty } from './lib/artifact-snapshot.mjs';
 import { markUnhealthy, isHealthy } from './lib/agent-health-registry.mjs';
-import { writeMarker, removeMarker } from './lib/marker.mjs';
+import { writeMarker, readMarker, removeMarker } from './lib/marker.mjs';
+import { processAlive } from './lib/process-alive.mjs';
 import { appendAgentRun, classifyAgentResult } from './lib/agent-history.mjs';
 import { incrementMetrics } from './lib/metrics-incremental.mjs';
 
@@ -2195,6 +2196,16 @@ class PipelineRunner {
   }
 }
 
+function markerStartedAt(projectRoot, marker) {
+  if (typeof marker.started_at === 'string' && marker.started_at) return marker.started_at;
+  if (typeof marker.timestamp === 'string' && marker.timestamp) return marker.timestamp;
+  try {
+    return fs.statSync(path.join(projectRoot, '.workflow/logs/.pipeline.lock')).mtime.toISOString();
+  } catch {
+    return '';
+  }
+}
+
 function parseArgs(argv) {
   const args = {
     plan: null,
@@ -2335,6 +2346,13 @@ function validateConfig(config) {
 }
 
 async function runPipeline(argv = process.argv.slice(2)) {
+  if (!Array.isArray(argv)) {
+    throw new TypeError(
+      `runPipeline expects an argv array (e.g. ['--project', root]), got ${typeof argv}. ` +
+      'Passing an options object silently falls back to process.cwd() as project root.'
+    );
+  }
+
   const args = parseArgs(argv);
 
   if (args.help) {
@@ -2357,11 +2375,35 @@ async function runPipeline(argv = process.argv.slice(2)) {
   if (args.project) console.log(`Project: ${args.project}`);
   console.log('');
 
+  // Singleton: живой маркер блокирует запуск, протухший — снимается
+  const existingMarker = readMarker(projectRoot);
+  if (existingMarker) {
+    if (processAlive(existingMarker.pid)) {
+      const runningSince = markerStartedAt(projectRoot, existingMarker);
+      console.error(
+        `[runner] pipeline already running for ${projectRoot} ` +
+        `(pid ${existingMarker.pid}, started ${runningSince})`
+      );
+      return {
+        ok: false,
+        exitCode: 1,
+        code: 'PIPELINE_ALREADY_RUNNING',
+        pid: existingMarker.pid,
+        started_at: runningSince,
+        project_root: projectRoot
+      };
+    }
+    console.warn(`[runner] stale marker found (pid ${existingMarker.pid} not alive) — removing`);
+    removeMarker(projectRoot);
+  }
+
   // Write marker to protect against stale processes
+  const startedAt = new Date().toISOString();
   try {
     writeMarker(projectRoot, {
       pid: process.pid,
-      timestamp: new Date().toISOString()
+      started_at: startedAt,
+      timestamp: startedAt
     });
   } catch (err) {
     console.error(`[runner] failed to write marker: ${err.message}`);
