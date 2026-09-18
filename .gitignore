@@ -47,6 +47,10 @@ temp/
 .cache/
 .workflow/
 
+# Временные скилы тестов (run-skill-tests.test.mjs). after() не выполняется,
+# если прогон убит по таймауту, — мусор не должен попадать в канон скилов.
+src/skills/__test-*/
+
 # AI
 QWEN.md
 CLAUDE.md

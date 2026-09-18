@@ -1,8 +1,0 @@
-description: "Calibration test"
-prompt: "Test prompt"
-severity: normal
-assertions:
-  rubric:
-    - rubric_file: rubrics/cal-rubric.md
-  static: []
-  deterministic: []

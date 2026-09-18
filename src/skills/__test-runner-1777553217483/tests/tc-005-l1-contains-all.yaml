@@ -1,7 +1,0 @@
-assertions:
-  static:
-    []
-  deterministic:
-    - kind: output_contains_all
-      values:
-        - "required-string"

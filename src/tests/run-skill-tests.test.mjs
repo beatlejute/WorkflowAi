@@ -14,7 +14,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { join, dirname, resolve } from 'node:path';
-import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -92,7 +92,39 @@ function buildCaseYaml(staticAssertions = [], deterministicAssertions = []) {
 // Setup / Teardown
 // ============================================================================
 
+/**
+ * Подметает временные скилы от прогонов, не доживших до after().
+ *
+ * after() — обычный хук: если node --test снимает файл по таймауту или процесс
+ * падает, хук не выполняется, и `__test-*` остаётся в канонном src/skills/ —
+ * а на него junction'ятся все проекты. Так в репозиторий уже попали
+ * __test-runner-1777553217483 и __test-cal-001-1777553217513.
+ *
+ * Час запаса — чтобы не снести директорию параллельного прогона.
+ */
+function sweepStaleTestSkills() {
+  const STALE_MS = 60 * 60 * 1000;
+  let entries;
+  try {
+    entries = readdirSync(SKILLS_DIR);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (!name.startsWith('__test-')) continue;
+    const dir = join(SKILLS_DIR, name);
+    try {
+      if (Date.now() - statSync(dir).mtimeMs < STALE_MS) continue;
+      rmSync(dir, { recursive: true, force: true });
+      console.warn(`[run-skill-tests.test] удалён протухший временный скил: ${name}`);
+    } catch {
+      // параллельный прогон мог удалить раньше — не наша забота
+    }
+  }
+}
+
 before(() => {
+  sweepStaleTestSkills();
   mkdirSync(TESTS_DIR, { recursive: true });
 
   // SKILL.md содержит "SIGNATURE_PRESENT" для L0 pass-тестов
