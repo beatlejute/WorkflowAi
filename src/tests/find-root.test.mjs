@@ -83,3 +83,41 @@ test('findProjectRoot uses process.cwd() by default', () => {
   assert.ok(typeof result === 'string');
   assert.ok(result.length > 0);
 });
+
+// Глобальная директория ~/.workflow (или WORKFLOW_HOME) — установочный каталог,
+// а не проект. Пока findProjectRoot считал её корнем, любой запуск из-под
+// домашней папки уезжал туда: в ~/.workflow/logs/pipeline.log осели записи от
+// тестовых песочниц, а сами тесты про «корень не найден» падали на машине,
+// где глобальная директория создана.
+test('findProjectRoot не принимает глобальную директорию за корень проекта', () => {
+  const globalHome = join(tmpdir(), `find-root-global-${Date.now()}`);
+  const globalDir = join(globalHome, '.workflow');
+  const nested = join(globalHome, 'nested');
+  const prevHome = process.env.WORKFLOW_HOME;
+
+  try {
+    mkdirSync(globalDir, { recursive: true });
+    mkdirSync(nested, { recursive: true });
+    process.env.WORKFLOW_HOME = globalDir;
+
+    let result = null;
+    try {
+      result = findProjectRoot(nested);
+    } catch {
+      // корень не найден — тоже корректный исход
+    }
+
+    assert.notStrictEqual(
+      result,
+      globalHome,
+      'установочный каталог не должен становиться корнем проекта'
+    );
+  } finally {
+    if (prevHome === undefined) {
+      delete process.env.WORKFLOW_HOME;
+    } else {
+      process.env.WORKFLOW_HOME = prevHome;
+    }
+    rmSync(globalHome, { recursive: true, force: true });
+  }
+});

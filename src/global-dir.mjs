@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, cpSync, rmSync, lstatSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 
@@ -48,6 +48,16 @@ function getGlobalVersion() {
   return readFileSync(versionFile, 'utf-8').trim();
 }
 
+/**
+ * Временные скилы прогонов (__test-* в src/skills) в глобальную установку не
+ * попадают. Они живут секунды: run-skill-tests.test.mjs создаёт и удаляет их
+ * прямо в каноне, и cpSync успевал поймать ENOENT на исчезнувшей директории —
+ * параллельный init.test.mjs падал целиком, без единого проваленного сабтеста.
+ */
+function isTemporaryTestEntry(entryPath) {
+  return basename(entryPath).startsWith('__test-');
+}
+
 function copyDirectory(src, dest) {
   if (!existsSync(src)) {
     return;
@@ -56,7 +66,7 @@ function copyDirectory(src, dest) {
     return;
   }
   rmSync(dest, { recursive: true, force: true });
-  cpSync(src, dest, { recursive: true });
+  cpSync(src, dest, { recursive: true, filter: (from) => !isTemporaryTestEntry(from) });
 }
 
 function copySkillsScriptsAndConfigs(packageRoot) {

@@ -2025,6 +2025,11 @@ Ticket with valid review section.
     // This is harder to test reliably, but we can simulate a script error
     
     // Test the error handling by directly calling the script with invalid arguments
+    // Без .workflow/ в песочнице тест проверял не скрипт, а silent fallback:
+    // findProjectRoot поднимался до ~/.workflow (глобальная установка) и гонял
+    // pick-next-task по домашней директории пользователя.
+    createTempWorkflow(tempDir, {});
+
     const result = await runPickNextTaskWithArgs(tempDir, ['--invalid-argument']);
     const data = parseResult(result.stdout);
 

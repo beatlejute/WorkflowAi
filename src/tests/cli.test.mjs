@@ -69,10 +69,15 @@ test('workflow version shows version', () => {
 
 test('Unknown command shows error message', () => {
   const originalLog = console.log;
+  // Сообщение об unknown command уходит в stderr, а не в stdout.
+  const originalError = console.error;
   const loggedLines = [];
   let exitCode = null;
   
   console.log = (...args) => {
+    loggedLines.push(args.join(' '));
+  };
+  console.error = (...args) => {
     loggedLines.push(args.join(' '));
   };
   
@@ -96,6 +101,7 @@ test('Unknown command shows error message', () => {
     assert.strictEqual(exitCode, 1, 'Should exit with code 1');
   } finally {
     console.log = originalLog;
+    console.error = originalError;
     process.exit = originalExit;
   }
 });
