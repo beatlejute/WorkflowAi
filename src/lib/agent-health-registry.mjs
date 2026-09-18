@@ -10,7 +10,21 @@ const MAX_LOCK_RETRIES = 5;
 const LOCK_TIMEOUT_MS = 2000;
 const LOCK_BACKOFFS = [100, 200, 400, 800, 1600];
 
-const logger = createLogger();
+// Лог пишется в проект, которому принадлежит реестр. Раньше здесь стоял
+// модульный createLogger(): он резолвил корень от process.cwd(), и жалоба на
+// реестр из тестовой песочницы в os.tmpdir() уходила в боевой
+// .workflow/logs/pipeline.log рабочего проекта — вперемешку с записями пайплайна.
+const loggers = new Map();
+
+function loggerForHealthFile(filePath) {
+  const projectRoot = path.resolve(path.dirname(filePath), '..', '..');
+  let logger = loggers.get(projectRoot);
+  if (!logger) {
+    logger = createLogger(path.join(projectRoot, '.workflow', 'logs', 'pipeline.log'));
+    loggers.set(projectRoot, logger);
+  }
+  return logger;
+}
 
 export class AgentHealthLockError extends Error {
   constructor(message) {
@@ -50,7 +64,7 @@ function readHealthFile(filePath) {
     const content = fs.readFileSync(filePath, 'utf-8');
     const data = JSON.parse(content);
     if (!data || typeof data !== 'object') {
-      logger.warn(`agent-health-registry: corrupted JSON in ${filePath}, returning empty state`);
+      loggerForHealthFile(filePath).warn(`agent-health-registry: corrupted JSON in ${filePath}, returning empty state`);
       return { version: SUPPORTED_VERSION, updated_at: null, agents: {} };
     }
     return {
@@ -59,7 +73,7 @@ function readHealthFile(filePath) {
       agents: data.agents || {}
     };
   } catch (e) {
-    logger.warn(`agent-health-registry: corrupted JSON in ${filePath}, returning empty state`);
+    loggerForHealthFile(filePath).warn(`agent-health-registry: corrupted JSON in ${filePath}, returning empty state`);
     return { version: SUPPORTED_VERSION, updated_at: null, agents: {} };
   }
 }

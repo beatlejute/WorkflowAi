@@ -922,6 +922,20 @@ class FileGuard {
 // ============================================================================
 // StageExecutor — выполняет stages через вызов CLI-агентов
 // ============================================================================
+// FIX-16. stderr агента писался в pipeline-лог построчно и без ограничения
+// длины. При ошибке LLM-провайдера (AI_APICallError) туда попадает
+// сериализованный request body с промптами: наблюдались строки по 74–232 КБ и
+// логи до 9.9 МБ, а list_ghost_executions в workflow-mcp отдавал 5.5 МБ, потому
+// что excerpt захватывал такую строку целиком. Заодно это утечка содержимого
+// контекста агентов в логи. Режем head+tail, как уже делает error-classifier.
+const STDERR_LOG_LINE_LIMIT = 2048;
+
+export function truncateStderrLine(line, limit = STDERR_LOG_LINE_LIMIT) {
+  if (typeof line !== 'string' || line.length <= limit) return line;
+  const half = Math.floor(limit / 2);
+  return `${line.slice(0, half)}...[TRUNCATED ${line.length - limit} bytes]...${line.slice(-half)}`;
+}
+
 class StageExecutor {
   constructor(config, context, counters, previousResults = {}, fileGuard = null, logger = null, projectRoot = process.cwd()) {
     this.config = config;
@@ -945,6 +959,34 @@ class StageExecutor {
 
     // Лениво загружаемые правила health-классификатора для онлайн-сканирования stderr
     this._healthRules = null;
+  }
+
+  /**
+   * Готовит stderr к записи в лог: длинные строки режутся, а полный текст
+   * кладётся отдельным файлом рядом с логом — диагностика не теряется.
+   */
+  prepareStderrForLog(stderr, stageId) {
+    const lines = stderr.trim().split('\n');
+    const prepared = lines.map(line => truncateStderrLine(line));
+    const truncated = prepared.some((line, i) => line !== lines[i]);
+    return {
+      lines: prepared,
+      dumpPath: truncated ? this.dumpFullStderr(stderr, stageId) : null
+    };
+  }
+
+  /** Полный stderr в .workflow/logs/stderr/. Возвращает путь или null. */
+  dumpFullStderr(stderr, stageId) {
+    try {
+      const dir = path.join(this.projectRoot, '.workflow', 'logs', 'stderr');
+      fs.mkdirSync(dir, { recursive: true });
+      const safeStage = String(stageId || 'stage').replace(/[^\w.-]+/g, '_');
+      const file = path.join(dir, `${safeStage}-${Date.now()}.log`);
+      fs.writeFileSync(file, stderr);
+      return path.relative(this.projectRoot, file).replace(/\\/g, '/');
+    } catch {
+      return null;
+    }
   }
 
   /** Возвращает правила health-классификатора, загружая их при первом обращении. */
@@ -1476,10 +1518,12 @@ class StageExecutor {
         if (timedOut) return;
         if (earlyKilled) {
           if (this.logger && stderr.trim()) {
+            const { lines, dumpPath } = this.prepareStderrForLog(stderr, stageId);
             this.logger.warn(`STDERR ↓`, stageId);
-            for (const line of stderr.trim().split('\n')) {
+            for (const line of lines) {
               this.logger.warn(`  ${line}`, stageId);
             }
+            if (dumpPath) this.logger.warn(`  полный stderr: ${dumpPath}`, stageId);
             this.logger.warn(`STDERR ↑`, stageId);
           }
           return;
@@ -1501,10 +1545,12 @@ class StageExecutor {
 
           // Логгируем stderr независимо от exit code
           if (stderr.trim()) {
+            const { lines, dumpPath } = this.prepareStderrForLog(stderr, stageId);
             this.logger.warn(`STDERR ↓`, stageId);
-            for (const line of stderr.trim().split('\n')) {
+            for (const line of lines) {
               this.logger.warn(`  ${line}`, stageId);
             }
+            if (dumpPath) this.logger.warn(`  полный stderr: ${dumpPath}`, stageId);
             this.logger.warn(`STDERR ↑`, stageId);
           }
         }
@@ -1530,9 +1576,11 @@ class StageExecutor {
           if (this.logger) {
             this.logger.error(`Agent exited with code ${code}`, stageId);
             if (stderr.trim()) {
-              for (const line of stderr.trim().split('\n')) {
+              const { lines, dumpPath } = this.prepareStderrForLog(stderr, stageId);
+              for (const line of lines) {
                 this.logger.error(`  stderr: ${line}`, stageId);
               }
+              if (dumpPath) this.logger.error(`  полный stderr: ${dumpPath}`, stageId);
             }
           }
           reject(err);
