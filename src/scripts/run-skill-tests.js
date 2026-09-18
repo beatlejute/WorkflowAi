@@ -13,8 +13,37 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = findProjectRoot(process.cwd());
 
+// current/meta.json — не временный вывод прогона, а baseline: loadBaselineMeta()
+// читает его через `git show origin/main:...`, чтобы отличить previously_green
+// от now_red. --skip-meta-write позволяет прогнать тесты, не трогая baseline.
+let skipMetaWrite = false;
+
 import os from 'os';
 import { execSync } from 'child_process';
+
+/**
+ * Делает пути к скриптам-агентам абсолютными.
+ *
+ * Target-агент запускается в изолированном workdir (projectRoot: taskWorkdir),
+ * но сам скрипт лежит в репозитории: и mock-агенты тестов
+ * (node src/tests/fixtures/mock-agent-pass.js), и боевые script-агенты
+ * pipeline.yaml (node .workflow/src/scripts/move-ticket.js) заданы путём
+ * относительно корня проекта. Внутри workdir такого файла нет — node падал
+ * с "Cannot find module", и L2-прогон получал errored вместо оценки.
+ *
+ * Переписываем только те аргументы, которые действительно существуют в корне:
+ * флаги и произвольные строки остаются как есть.
+ */
+function resolveAgentScriptArgs(agentConfig) {
+  const SCRIPT_EXT = /\.(js|mjs|cjs|ts|py|sh)$/;
+  const args = (agentConfig.args || []).map(arg => {
+    if (typeof arg !== 'string' || arg.startsWith('-') || path.isAbsolute(arg)) return arg;
+    if (!SCRIPT_EXT.test(arg)) return arg;
+    const abs = path.resolve(projectRoot, arg);
+    return fs.existsSync(abs) ? abs : arg;
+  });
+  return { ...agentConfig, args };
+}
 
 function createTestWorkdir(skillName, suffix = '') {
   const prefix = suffix ? `wf-test-${skillName}-${suffix}-` : `wf-test-${skillName}-`;
@@ -113,6 +142,8 @@ function parseArgs() {
       opts.primaryOnly = true;
     } else if (arg === '--skip-secret-scan') {
       opts.skipSecretScan = true;
+    } else if (arg === '--skip-meta-write') {
+      opts.skipMetaWrite = true;
     } else if (arg === '--fast') {
       opts.fast = true;
     } else if (arg === '--yes') {
@@ -926,7 +957,14 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
       total: trials
     };
     for (let trial = 1; trial <= trials; trial++) {
-      allTasks.push({ agentId, trial, agentConfig, judgeAgentConfig, rubric, testCase });
+      allTasks.push({
+        agentId,
+        trial,
+        agentConfig: resolveAgentScriptArgs(agentConfig),
+        judgeAgentConfig,
+        rubric,
+        testCase
+      });
     }
   }
 
@@ -1117,6 +1155,8 @@ function aggregateResults(results, testCase) {
 }
 
 async function writeMetaJson(caseId, skillName, status, durationMs, l2Results = null, l1_skipped = null) {
+  if (skipMetaWrite) return;
+
   const skillsDir = findSkillsDir();
   const caseDir = path.join(skillsDir, skillName, 'tests', 'cases', caseId, 'current');
   ensureDir(caseDir);
@@ -1510,6 +1550,8 @@ async function runSkillTests(opts) {
     throw new Error('Either --skill or --all must be specified');
   }
 
+  skipMetaWrite = Boolean(opts.skipMetaWrite);
+
   const results = {
     status: 'passed',
     skill: opts.skill || 'unknown',
@@ -1675,6 +1717,7 @@ function showHelp() {
   console.log('  node run-skill-tests.js --agent <id>      Run only on specific model from target_agents[]');
   console.log('  node run-skill-tests.js --primary-only    Run only on first model from target_agents[]');
   console.log('  node run-skill-tests.js --skip-secret-scan  Skip secret scanning before L2');
+  console.log('  node run-skill-tests.js --skip-meta-write  Do not update current/meta.json (baseline)');
   console.log('  node run-skill-tests.js --fast            Run with trials=1 for all cases');
   console.log('  node run-skill-tests.js --yes             Skip pre-flight approval gate');
   console.log('  node run-skill-tests.js --calibrate       Run only calibration gate (no full suite)');

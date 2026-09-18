@@ -123,6 +123,41 @@ function sweepStaleTestSkills() {
   }
 }
 
+/**
+ * Слепок current/meta.json всех НЕтестовых скилов.
+ *
+ * meta.json — baseline, а не вывод прогона: loadBaselineMeta() читает его через
+ * `git show origin/main:...`, чтобы отличить previously_green от now_red.
+ * Прогон юнит-тестов гонял --all по канону и переписывал baseline живым скилам.
+ */
+function snapshotRealSkillMetas() {
+  const snapshot = {};
+  let skills;
+  try {
+    skills = readdirSync(SKILLS_DIR);
+  } catch {
+    return snapshot;
+  }
+  for (const skill of skills) {
+    if (skill.startsWith('__test-')) continue;
+    const casesDir = join(SKILLS_DIR, skill, 'tests', 'cases');
+    let cases;
+    try {
+      cases = readdirSync(casesDir);
+    } catch {
+      continue;
+    }
+    for (const caseId of cases) {
+      try {
+        snapshot[`${skill}/${caseId}`] = readFileSync(join(casesDir, caseId, 'current', 'meta.json'), 'utf8');
+      } catch {
+        // кейс ещё ни разу не прогоняли — meta.json нет
+      }
+    }
+  }
+  return snapshot;
+}
+
 before(() => {
   sweepStaleTestSkills();
   mkdirSync(TESTS_DIR, { recursive: true });
@@ -151,17 +186,16 @@ before(() => {
     buildCaseYaml([{ kind: 'skill_contains', pattern: 'SIGNATURE_\\w+', reason: 'Regex should match' }])
   );
 
-  // TC-004: L1 output_does_not_contain — PASS на пустом mock output
+  // TC-004..006 — L1-ассершены по выводу агента у скила без rubric и агентов.
+  // Вывода нет, проверить нечего → no_coverage (см. describe ниже).
   writeFileSync(join(TESTS_DIR, 'tc-004-l1-not-contain.yaml'),
     buildCaseYaml([], [{ kind: 'output_does_not_contain', values: ['git add', 'git commit'] }])
   );
 
-  // TC-005: L1 output_contains_all — FAIL на пустом mock output (ничего нет в пустой строке)
   writeFileSync(join(TESTS_DIR, 'tc-005-l1-contains-all.yaml'),
     buildCaseYaml([], [{ kind: 'output_contains_all', values: ['required-string'] }])
   );
 
-  // TC-006: L1 output_matches — FAIL на пустом mock output (regex не совпадает)
   writeFileSync(join(TESTS_DIR, 'tc-006-l1-matches.yaml'),
     buildCaseYaml([], [{ kind: 'output_matches', regex: 'status: passed' }])
   );
@@ -282,36 +316,33 @@ describe('L0 Static assertions', () => {
 // L1 Deterministic assertions
 // ============================================================================
 
+// Тесты раньше проверяли вердикт L1 по ПУСТОМУ выводу: output_does_not_contain
+// на пустой строке «проходил», output_contains_all «падал». Это был зелёный при
+// нулевом покрытии, и 4de6dea его убрал: если L1-ассершены зависят от вывода
+// агента, а L2 не сконфигурирован (нет rubric или агентов), runL1Assertions
+// помечает их skipped, и кейс получает status: no_coverage — ни passed, ни failed.
+//
+// Реальное вычисление L1 по выводу агента этими тестами не покрыто: раннер
+// вызывает runL1Assertions ровно один раз и всегда с пустой строкой
+// (run-skill-tests.js), то есть output-ассершены не исполняются никогда.
 describe('L1 Deterministic assertions', () => {
-  it('output_does_not_contain → PASS (запрещённые строки отсутствуют в mock output)', async () => {
-    const { stdout } = await runRunner([
-      '--skill', TEST_SKILL, '--case', 'TC-004',
-      '--layer', 'deterministic', '--skip-secret-scan'
-    ]);
+  for (const [caseId, kind] of [
+    ['TC-004', 'output_does_not_contain'],
+    ['TC-005', 'output_contains_all'],
+    ['TC-006', 'output_matches']
+  ]) {
+    it(`${kind} без вывода агента → no_coverage, а не вердикт по пустой строке`, async () => {
+      const { stdout } = await runRunner([
+        '--skill', TEST_SKILL, '--case', caseId,
+        '--layer', 'deterministic', '--skip-secret-scan'
+      ]);
 
-    assert.match(stdout, /status: passed/);
-    assert.match(stdout, /current_run.passed: 1/);
-  });
-
-  it('output_contains_all → FAIL (требуемые строки отсутствуют в пустом mock output)', async () => {
-    const { stdout } = await runRunner([
-      '--skill', TEST_SKILL, '--case', 'TC-005',
-      '--layer', 'deterministic', '--skip-secret-scan'
-    ]);
-
-    assert.match(stdout, /status: failed/);
-    assert.match(stdout, /current_run.failed: 1/);
-  });
-
-  it('output_matches → FAIL (regex не совпадает с пустым mock output)', async () => {
-    const { stdout } = await runRunner([
-      '--skill', TEST_SKILL, '--case', 'TC-006',
-      '--layer', 'deterministic', '--skip-secret-scan'
-    ]);
-
-    assert.match(stdout, /status: failed/);
-    assert.match(stdout, /current_run.failed: 1/);
-  });
+      assert.match(stdout, /status: no_coverage/);
+      assert.match(stdout, /current_run.no_coverage: 1/);
+      assert.doesNotMatch(stdout, /current_run.passed: [1-9]/, 'ложный зелёный при нулевом покрытии');
+      assert.doesNotMatch(stdout, /current_run.failed: [1-9]/, 'нечего проваливать — вывода нет');
+    });
+  }
 });
 
 // ============================================================================
@@ -1373,12 +1404,24 @@ describe('All skills aggregation', () => {
 // ============================================================================
 
 describe('Combined flags --all --severity', () => {
+  // --all идёт по канону src/skills/, включая живые скилы: coach,
+  // decompose-plan, execute-task — единственные с severity: critical. Без
+  // --skip-meta-write каждый прогон этого теста переписывал им current/meta.json,
+  // то есть baseline, с которым сравнивается следующий прогон.
   it('--all --severity critical returns at least 3 tests (current state)', async () => {
-    const { stdout } = await runRunner(['--all', '--severity', 'critical', '--layer', 'static']);
+    const metasBefore = snapshotRealSkillMetas();
+
+    const { stdout } = await runRunner(['--all', '--severity', 'critical', '--layer', 'static', '--skip-meta-write']);
     const totalMatch = stdout.match(/total:\s*(\d+)/);
     assert.ok(totalMatch, 'Output should contain total');
     const total = parseInt(totalMatch[1], 10);
     assert.ok(total >= 3, `Expected at least 3 critical tests, got ${total}`);
+
+    assert.deepStrictEqual(
+      snapshotRealSkillMetas(),
+      metasBefore,
+      'прогон тестов не должен переписывать baseline живых скилов'
+    );
   });
 });
 
