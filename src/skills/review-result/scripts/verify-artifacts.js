@@ -22,6 +22,7 @@
  *   dod_completion_pct: <int>
  *   result_filled: <bool>
  *   missing_files: <comma-separated list or empty>
+ *   warnings: <предупреждения через "; "; строка печатается только при наличии>
  *   ---RESULT---
  */
 
@@ -70,6 +71,55 @@ function parseChangedFiles(body) {
 function stripLineSuffix(filePath) {
   const match = filePath.match(/^(.*?):(\d+)(?:-\d+)?$/);
   return match ? match[1] : filePath;
+}
+
+// Допуск на рассинхрон часов между машиной, где создавался тикет, и машиной,
+// где идёт verify. Метка в пределах допуска считается валидной.
+const CLOCK_SKEW_TOLERANCE_MS = 60 * 1000;
+
+/**
+ * Выбирает точку отсчёта для проверки file_unchanged и валидирует её.
+ *
+ * FIX-68: LLM-агенты регулярно пишут во frontmatter ЛОКАЛЬНОЕ время с суффиксом Z
+ * (тикет реально создан в 17:31Z, а в created_at лежит "2026-08-04T22:30:00.000Z").
+ * Метка «из будущего» делает unchanged=true для ЛЮБОГО свежего артефакта — verify
+ * фейлится, и никакой touch не помогает. Поэтому:
+ *   - created_at в будущем → метка битая, пробуем updated_at;
+ *   - updated_at тоже в будущем (или отсутствует) → проверку unchanged НЕ применяем
+ *     вовсе (пропускаем, а не фейлим — ложный fail хуже пропущенной проверки).
+ *
+ * @returns {{baseline: string|Date|null, source: string|null, warnings: string[]}}
+ */
+function resolveWorkStartBaseline(frontmatter, nowMs = Date.now()) {
+  const warnings = [];
+  const cutoffMs = nowMs + CLOCK_SKEW_TOLERANCE_MS;
+  const skip = { baseline: null, source: null, warnings };
+
+  for (const field of ['created_at', 'updated_at']) {
+    const raw = frontmatter[field];
+    if (!raw) continue;
+
+    const ms = new Date(raw).getTime();
+    if (Number.isNaN(ms)) {
+      // Битый формат — сравнивать не с чем. Раньше такая метка молча давала
+      // unchanged=false; сохраняем поведение, но теперь с предупреждением.
+      warnings.push(`${field}="${raw}" не парсится как дата — проверка file_unchanged пропущена`);
+      return skip;
+    }
+
+    if (ms <= cutoffMs) {
+      return { baseline: raw, source: field, warnings };
+    }
+
+    warnings.push(
+      `${field}="${raw}" в будущем (вероятно, локальное время записано с суффиксом Z) — метка не используется`
+    );
+  }
+
+  if (warnings.length > 0) {
+    warnings.push('проверка file_unchanged пропущена: нет корректной точки отсчёта');
+  }
+  return skip;
 }
 
 function checkFilesExist(filePaths, workStartTime) {
@@ -156,6 +206,84 @@ function checkResultSection(body) {
     exists: true,
     summaryFilled: hasContent
   };
+}
+
+// ===========================================================================
+// D4: Source-grounding gate
+// Проверяет, что DoD-пункты с UI/контракт-требованиями подкреплены
+// ссылками на source-of-truth в секции Result.
+// Инцидент-основание: QA-54/HUMAN-4 (workflowAiVsCode, 2026-05-02..03) —
+// review-result принял сфабрикованные UI-assertions без сверки с package.json.
+// ===========================================================================
+
+// Ключевые слова, сигнализирующие что DoD-пункт требует верификации UI-элемента
+// или контрактного артефакта (команды, меню, конфиг-ключи, визуальный элемент).
+const SOURCE_GROUNDING_DOD_INDICATORS = [
+  /\bUI\b/,
+  /visual/i,
+  /screenshot/i,
+  /snapshot/i,
+  /baseline/i,
+  /контракт/i,
+  /кнопк/i,
+  /меню/i,
+  /элемент/i,
+  /команд/i,
+  /package\.json/i,
+  /contributes\./i,
+  /source.of.truth/i,
+  /source_of_truth/i,
+  /декларативн/i,
+];
+
+// Паттерн ссылки на конкретный файл с номером строки: file.ext:NNN или path/file.ext:NNN.
+// Исключаем Windows-пути вида C:\ (после двоеточия не цифра).
+const SOURCE_REF_FILE_LINE = /[\w][\w/\\.-]+\.\w{1,10}:\d+/;
+
+/**
+ * D4 gate: если выполненные DoD-пункты содержат UI/контракт-индикаторы,
+ * проверяет наличие source-ссылок в Result (file:line или ключевые артефакты).
+ *
+ * @returns {{ required: boolean, satisfied: boolean }}
+ */
+function checkSourceGrounding(body) {
+  // Извлекаем DoD секцию
+  const dodSectionRegex = /^##\s*(?:Критерии готовности|Definition of Done)(?:\s*\([^)]*\))?\s*$/gm;
+  const dodMatch = dodSectionRegex.exec(body);
+  if (!dodMatch) return { required: false, satisfied: true };
+
+  const dodStart = dodMatch.index + dodMatch[0].length;
+  const dodNextH2 = body.indexOf('\n## ', dodStart);
+  const dodEnd = dodNextH2 === -1 ? body.length : dodNextH2;
+  const dodContent = body.substring(dodStart, dodEnd);
+
+  // Только выполненные пункты ([x]) — незавершённые не в scope проверки
+  const completedItems = dodContent
+    .split('\n')
+    .filter(line => /^\s*-\s*\[x\]/i.test(line));
+
+  const hasSourceGroundingDod = completedItems.some(line =>
+    SOURCE_GROUNDING_DOD_INDICATORS.some(re => re.test(line))
+  );
+
+  if (!hasSourceGroundingDod) return { required: false, satisfied: true };
+
+  // Извлекаем Result секцию для проверки evidence
+  const resultSectionRegex = /^##\s*(Результат выполнения|Результат|Result)\s*$/m;
+  const resultMatch = resultSectionRegex.exec(body);
+  if (!resultMatch) return { required: true, satisfied: false };
+
+  const resultStart = resultMatch.index + resultMatch[0].length;
+  const resultNextH2 = body.indexOf('\n## ', resultStart);
+  const resultEnd = resultNextH2 === -1 ? body.length : resultNextH2;
+  const resultContent = body.substring(resultStart, resultEnd);
+
+  const hasSourceRef =
+    SOURCE_REF_FILE_LINE.test(resultContent) ||
+    /package\.json/i.test(resultContent) ||
+    /contributes\./i.test(resultContent);
+
+  return { required: true, satisfied: hasSourceRef };
 }
 
 /**
@@ -264,13 +392,17 @@ function verifyTicket(ticketPath) {
   // каждом перемещении (ready → in-progress → review → ready → …), поэтому
   // в retry файлы, реально изменённые в ранней попытке, становятся формально
   // «unchanged» относительно нового updated_at и тикет ложно блокируется.
-  const filesExist = checkFilesExist(filePaths, frontmatter.created_at || frontmatter.updated_at);
+  // На updated_at откатываемся, только если created_at не прошёл валидацию
+  // (см. resolveWorkStartBaseline).
+  const workStart = resolveWorkStartBaseline(frontmatter);
+  const filesExist = checkFilesExist(filePaths, workStart.baseline);
 
   const dodStats = parseDoDCompletion(body);
 
   const resultStats = checkResultSection(body);
 
   const assertions = parseImplementationAssertions(body);
+  const sourceGrounding = checkSourceGrounding(body);
 
   return {
     ticket_id: frontmatter.id,
@@ -282,6 +414,9 @@ function verifyTicket(ticketPath) {
     result_exists: resultStats.exists,
     result_filled: resultStats.summaryFilled,
     assertions,
+    source_grounding: sourceGrounding,
+    work_start_source: workStart.source,
+    warnings: workStart.warnings,
   };
 }
 
@@ -345,6 +480,13 @@ function formatVerdict(result) {
     failReasons.push(`file_unchanged=${unchangedFiles.join(',')}`);
     humanIssues.push(
       `файлы не были изменены после начала выполнения тикета: ${unchangedFiles.join(', ')}`
+    );
+  }
+
+  if (result.source_grounding?.required && !result.source_grounding?.satisfied) {
+    failReasons.push('source_grounding_missing');
+    humanIssues.push(
+      'DoD содержит UI/контракт-проверки, но Result не содержит ссылок на source (file:line или package.json)'
     );
   }
 
@@ -424,6 +566,11 @@ async function main() {
     const result = verifyTicket(ticketPath);
     result.assertionResults = await runImplementationAssertions(result.assertions || []);
 
+    const warnings = result.warnings || [];
+    for (const warning of warnings) {
+      console.error(`Warning: ${warning}`);
+    }
+
     const verdict = formatVerdict(result);
 
     let reviewNoteWritten = false;
@@ -445,6 +592,11 @@ async function main() {
     console.log(`unchanged_files: ${verdict.unchangedFiles.join(',')}`);
     console.log(`assertions_total: ${assertionsTotal}`);
     console.log(`assertions_failed: ${assertionsFailed}`);
+    // Дополнительная строка, а не замена существующих полей: runner парсит
+    // RESULT-блок по ключам, лишний ключ формат не ломает.
+    if (warnings.length > 0) {
+      console.log(`warnings: ${warnings.join('; ')}`);
+    }
     if (verdict.failReasons.length > 0) {
       console.log(`fail_reasons: ${verdict.failReasons.join('; ')}`);
       console.log(`issues: ${verdict.humanIssues.join('; ')}`);

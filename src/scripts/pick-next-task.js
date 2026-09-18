@@ -299,6 +299,16 @@ function autoCorrectTickets(config) {
 
         const reviewStatus = getLastReviewStatus(content);
 
+        // FIX-69: не откатываем из done/ тикет, закрытый штатно пайплайном.
+        // Признак штатного закрытия — заполненный completed_at (его проставляет move-ticket).
+        // Review-агент может вынести passed-вердикт и не дописать строку в таблицу "## Ревью"
+        // (наблюдалось у claude-haiku и при пустом выводе стейджа) — тогда без этой защиты
+        // закрытый тикет уезжал на новый круг (HUMAN-4 2026-08-04, HUMAN-5 2026-08-04).
+        if (dir === DONE_DIR && frontmatter.completed_at) {
+          logger.info(`[AUTO-CORRECT] ${ticketId}: skipped (completed_at=${frontmatter.completed_at}, review=${reviewStatus || 'none'})`);
+          continue;
+        }
+
         for (const rule of rules) {
           const ruleCondition = rule.condition;
           let shouldMove = false;

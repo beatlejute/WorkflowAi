@@ -875,6 +875,88 @@ describe('FileGuard — isTrusted with stageId', () => {
 });
 
 // ============================================================================
+// D1+D2: File guard на tickets/** — негативный и позитивный кейсы
+// Регрессионные тесты для COACH-37: machine-protection от создания тикетов
+// из скилов вне decompose-зоны (execute-task, manual-testing, review-result).
+// ============================================================================
+describe('FileGuard — D1+D2: tickets/** protection (COACH-37)', () => {
+  const PROJECT_ROOT = path.resolve(__dirname, '..');
+  // Паттерн из configs/pipeline.yaml
+  const TICKETS_PATTERN = { pattern: '.workflow/tickets/**', mode: 'structure' };
+  // Trusted stages из configs/pipeline.yaml
+  const TRUSTED_STAGES = ['decompose-plan', 'decompose-gaps'];
+  // Временная тест-директория вместо реальных tickets/
+  const TEMP_TICKETS_DIR = path.join(PROJECT_ROOT, '.workflow', 'temp_test_tickets_d1d2');
+
+  function setupTempTicketsPattern() {
+    fs.mkdirSync(TEMP_TICKETS_DIR, { recursive: true });
+    const relPattern = '.workflow/temp_test_tickets_d1d2/**';
+    return { pattern: relPattern, mode: 'structure' };
+  }
+
+  function cleanup() {
+    try {
+      if (fs.existsSync(TEMP_TICKETS_DIR)) {
+        const files = fs.readdirSync(TEMP_TICKETS_DIR);
+        for (const f of files) {
+          try { fs.unlinkSync(path.join(TEMP_TICKETS_DIR, f)); } catch {}
+        }
+        try { fs.rmdirSync(TEMP_TICKETS_DIR); } catch {}
+      }
+    } catch {}
+  }
+
+  it('TC-009: D1/D2 негативный — execute-task создаёт HUMAN-*.md → FileGuard удаляет (violation)', () => {
+    cleanup();
+    const pattern = setupTempTicketsPattern();
+    const fileGuard = new FileGuard([pattern], PROJECT_ROOT, [], TRUSTED_STAGES);
+
+    // Снапшот ДО выполнения стейджа execute-task
+    fileGuard.takeSnapshot();
+
+    // execute-task создаёт парный HUMAN-тикет (нарушение)
+    const humanTicket = path.join(TEMP_TICKETS_DIR, 'HUMAN-999.md');
+    fs.writeFileSync(humanTicket, '---\nid: HUMAN-999\n---\n');
+
+    const violations = fileGuard.checkAndRollback();
+
+    assert.ok(
+      violations.some(v => v.includes('HUMAN-999')),
+      `HUMAN-999.md должен быть обнаружен как violation, got: ${violations}`
+    );
+    assert.strictEqual(
+      fs.existsSync(humanTicket),
+      false,
+      'HUMAN-999.md должен быть удалён FileGuard'
+    );
+    cleanup();
+  });
+
+  it('TC-010: D1/D2 позитивный — decompose-plan пропускается FileGuard (isTrusted)', () => {
+    const pattern = setupTempTicketsPattern();
+    const fileGuard = new FileGuard([pattern], PROJECT_ROOT, [], TRUSTED_STAGES);
+
+    // decompose-plan в trustedStages → isTrusted возвращает true → FileGuard пропускается
+    assert.strictEqual(
+      fileGuard.isTrusted('claude-sonnet', 'decompose-plan'),
+      true,
+      'decompose-plan должен быть trusted — FileGuard не должен применяться'
+    );
+    assert.strictEqual(
+      fileGuard.isTrusted('claude-sonnet', 'decompose-gaps'),
+      true,
+      'decompose-gaps должен быть trusted'
+    );
+    assert.strictEqual(
+      fileGuard.isTrusted('claude-sonnet', 'execute-task'),
+      false,
+      'execute-task НЕ должен быть trusted'
+    );
+    cleanup();
+  });
+});
+
+// ============================================================================
 // Main — запуск тестов
 // ============================================================================
 console.log('Running PipelineRunner Integration Tests...\n');

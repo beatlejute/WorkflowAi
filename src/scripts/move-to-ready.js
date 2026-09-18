@@ -51,10 +51,13 @@ function moveToReady(ticketId) {
   const content = fs.readFileSync(sourcePath, 'utf8');
   const { frontmatter, body } = parseFrontmatter(content);
 
-  // Пропускаем тикеты, требующие ручного выполнения
+  // human-тикеты тоже переносим в ready/: оттуда их забирает pick-next-task
+  // со статусом human_ready и отправляет на стейдж manual-gate-human.
+  // Раньше они здесь пропускались и навсегда оставались в backlog/, из-за чего
+  // связка check-conditions (has_ready) → move-to-ready (moved: 0) →
+  // pick-next-task (empty) → check-conditions крутилась вхолостую до max_steps.
   if (frontmatter.type === 'human') {
-    console.log(`[INFO] ${ticketId}: type is 'human', skipping (requires manual execution)`);
-    return false;
+    console.log(`[INFO] ${ticketId}: type is 'human' (выполняется человеком через manual-gate)`);
   }
 
   frontmatter.updated_at = new Date().toISOString();
@@ -104,8 +107,12 @@ async function main() {
     }
   }
 
+  const skipped = ticketIds.length - moved;
   console.log(`[INFO] Moved: ${moved}/${ticketIds.length}`);
-  printResult({ status: moved > 0 ? 'moved' : 'default', moved });
+  if (skipped > 0) {
+    console.log(`[WARN] Not moved: ${skipped}/${ticketIds.length} (тикеты не найдены в backlog/)`);
+  }
+  printResult({ status: moved > 0 ? 'moved' : 'default', moved, skipped });
 }
 
 main().catch(e => {

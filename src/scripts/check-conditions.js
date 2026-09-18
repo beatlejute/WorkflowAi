@@ -100,7 +100,7 @@ function readTickets(dir) {
     try {
       const content = fs.readFileSync(filePath, 'utf8');
       const { frontmatter } = parseFrontmatter(content);
-      tickets.push({ id: frontmatter.id || file.replace('.md', ''), frontmatter });
+      tickets.push({ id: frontmatter.id || file.replace('.md', ''), file, frontmatter });
     } catch (e) {
       console.error(`[WARN] Failed to read ticket ${file}: ${e.message}`);
     }
@@ -139,6 +139,12 @@ function demoteToBacklog(ticketId) {
 
 /**
  * Проверяет все тикеты в backlog/ и возвращает список готовых
+ *
+ * ВАЖНО: этот скрипт ничего не перемещает — физический перенос backlog/ → ready/
+ * делает move-to-ready.js по имени файла `${id}.md`. Поэтому в ready попадают
+ * только те тикеты, которые move-to-ready реально сможет найти и переместить,
+ * иначе has_ready → moved: 0 → pick-next-task (empty) → check-conditions
+ * закручивается в холостой цикл до max_steps.
  */
 function checkBacklog(planId) {
   const allTickets = readTickets(BACKLOG_DIR);
@@ -148,9 +154,10 @@ function checkBacklog(planId) {
 
   const ready = [];
   const waiting = [];
+  const unmovable = [];
 
   for (const ticket of tickets) {
-    const { frontmatter, id } = ticket;
+    const { frontmatter, id, file } = ticket;
 
     const conditions = frontmatter.conditions || [];
     const dependencies = frontmatter.dependencies || [];
@@ -159,9 +166,14 @@ function checkBacklog(planId) {
     const conditionsMet = conditions.every(checkCondition);
 
     if (depsMet && conditionsMet) {
+      // frontmatter.id не совпал с именем файла — move-to-ready не найдёт `${id}.md`
+      if (file !== `${id}.md`) {
+        unmovable.push({ id, file });
+        continue;
+      }
       ready.push(id);
       if (frontmatter.type === 'human') {
-        console.log(`[INFO] ${id}: type is 'human', moved to ready/ (requires manual execution)`);
+        console.log(`[INFO] ${id}: type is 'human' (выполняется человеком через manual-gate)`);
       }
     } else {
       const reasons = [];
@@ -173,7 +185,7 @@ function checkBacklog(planId) {
     }
   }
 
-  return { ready, waiting, total: tickets.length };
+  return { ready, waiting, unmovable, total: tickets.length };
 }
 
 /**
@@ -222,13 +234,17 @@ async function main() {
   // Затем проверка backlog — демотированные тикеты сразу переоцениваются
   console.log(`[INFO] Scanning backlog/: ${BACKLOG_DIR}`);
 
-  const { ready, waiting, total } = checkBacklog(planId);
+  const { ready, waiting, unmovable, total } = checkBacklog(planId);
 
   console.log(`[INFO] Total in backlog${planId ? ` (plan ${planId})` : ''}: ${total}`);
   console.log(`[INFO] Ready: ${ready.length}, Waiting: ${waiting.length}`);
 
+  for (const { id, file } of unmovable) {
+    console.error(`[WARN] ${id}: id не совпадает с именем файла (${file}) — move-to-ready не сможет переместить, пропускаем`);
+  }
+
   if (ready.length > 0) {
-    console.log(`[INFO] Ready tickets: ${ready.join(', ')}`);
+    console.log(`[INFO] Ready tickets (будут перемещены стадией move-to-ready): ${ready.join(', ')}`);
   }
 
   for (const { id, reasons } of waiting) {

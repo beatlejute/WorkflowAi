@@ -168,6 +168,123 @@ test('verify-artifacts: отсутствующий файл всегда вал�
 });
 
 // ============================================================================
+// FIX-68: битая точка отсчёта (created_at в будущем).
+// LLM-агенты пишут в created_at локальное время с суффиксом Z — тогда ЛЮБОЙ
+// свежий артефакт формально «старше» тикета и ложно попадает в unchanged_files.
+// ============================================================================
+
+const HOUR_MS = 60 * 60 * 1000;
+
+test('verify-artifacts: created_at в будущем + свежий файл → unchanged не выставляется', () => {
+  const tmpDir = join(PROJECT_ROOT, '.tmp-verify-artifacts-future-created');
+  rmSync(tmpDir, { recursive: true, force: true });
+  mkdirSync(tmpDir, { recursive: true });
+
+  const deliverableRel = '.tmp-verify-artifacts-future-created/deliverable.txt';
+  const deliverableAbs = join(PROJECT_ROOT, deliverableRel);
+  writeFileSync(deliverableAbs, 'payload', 'utf8');
+
+  // Живой кейс HUMAN-5: агент записал локальное время (+5ч) с суффиксом Z
+  // в обе метки, файл при этом реально изменён только что.
+  const now = Date.now();
+  const brokenStamp = new Date(now + 5 * HOUR_MS);
+  const fileMtime = new Date(now - 60 * 1000);
+  utimesSync(deliverableAbs, fileMtime, fileMtime);
+
+  const ticketPath = makeTicket(tmpDir, {
+    id: 'QA-904',
+    createdAt: brokenStamp.toISOString(),
+    updatedAt: brokenStamp.toISOString(),
+    deliverablePath: deliverableRel,
+    dod: '- [x] deliverable создан',
+  });
+
+  try {
+    const result = runScript(ticketPath);
+    assert.equal(
+      result.unchanged_files,
+      '',
+      `unchanged_files должен быть пустым при битой метке, получили "${result.unchanged_files}"`
+    );
+    assert.doesNotMatch(
+      result.fail_reasons || '',
+      /file_unchanged/,
+      'не должно быть fail по file_unchanged'
+    );
+    assert.equal(
+      result.status,
+      'passed',
+      `Ожидался passed, получили ${result.status}. fail_reasons=${result.fail_reasons || ''}`
+    );
+    assert.match(result.warnings || '', /created_at/, 'должно быть предупреждение о битой метке');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('verify-artifacts: created_at в будущем → fallback на updated_at (unchanged всё ещё детектится)', () => {
+  const tmpDir = join(PROJECT_ROOT, '.tmp-verify-artifacts-future-fallback');
+  rmSync(tmpDir, { recursive: true, force: true });
+  mkdirSync(tmpDir, { recursive: true });
+
+  const deliverableRel = '.tmp-verify-artifacts-future-fallback/deliverable.txt';
+  const deliverableAbs = join(PROJECT_ROOT, deliverableRel);
+  writeFileSync(deliverableAbs, 'payload', 'utf8');
+
+  const now = Date.now();
+  const fileMtime = new Date(now - 10 * HOUR_MS);
+  utimesSync(deliverableAbs, fileMtime, fileMtime);
+
+  const ticketPath = makeTicket(tmpDir, {
+    id: 'QA-905',
+    createdAt: new Date(now + 5 * HOUR_MS).toISOString(), // битая метка
+    updatedAt: new Date(now - 1 * HOUR_MS).toISOString(), // валидная метка
+    deliverablePath: deliverableRel,
+    dod: '- [x] deliverable создан',
+  });
+
+  try {
+    const result = runScript(ticketPath);
+    assert.equal(result.status, 'failed', 'Ожидался failed: файл старше updated_at');
+    assert.match(result.unchanged_files || '', /deliverable\.txt/);
+    assert.match(result.warnings || '', /created_at/);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('verify-artifacts: регресс — валидный created_at в прошлом + старый файл → unchanged детектится', () => {
+  const tmpDir = join(PROJECT_ROOT, '.tmp-verify-artifacts-past-regress');
+  rmSync(tmpDir, { recursive: true, force: true });
+  mkdirSync(tmpDir, { recursive: true });
+
+  const deliverableRel = '.tmp-verify-artifacts-past-regress/deliverable.txt';
+  const deliverableAbs = join(PROJECT_ROOT, deliverableRel);
+  writeFileSync(deliverableAbs, 'payload', 'utf8');
+
+  const now = Date.now();
+  const fileMtime = new Date(now - 5 * HOUR_MS);
+  utimesSync(deliverableAbs, fileMtime, fileMtime);
+
+  const ticketPath = makeTicket(tmpDir, {
+    id: 'QA-906',
+    createdAt: new Date(now - 2 * HOUR_MS).toISOString(),
+    updatedAt: new Date(now - 1 * HOUR_MS).toISOString(),
+    deliverablePath: deliverableRel,
+    dod: '- [x] deliverable создан',
+  });
+
+  try {
+    const result = runScript(ticketPath);
+    assert.equal(result.status, 'failed', 'Ожидался failed по unchanged');
+    assert.match(result.unchanged_files || '', /deliverable\.txt/);
+    assert.equal(result.warnings, undefined, 'при валидных метках предупреждений быть не должно');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// ============================================================================
 // E2E-gate против ghost-execution (предотвращение регрессий IMPL-35/36/42).
 // Парсит `### Implementation assertions`, динамически импортирует модуль
 // и проверяет, что заявленные экспорт/метод действительно существуют.
@@ -332,6 +449,142 @@ test('verify-artifacts: тикет без секции Implementation assertions
     const result = runScript(ticketPath);
     assert.equal(result.status, 'passed', 'Тикет без секции assertions должен проходить');
     assert.equal(result.assertions_total, '0', 'Нет assertions');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// ============================================================================
+// D4: Source-grounding gate
+// Регрессионные тесты на детекцию UI/контракт-DoD без source-ссылок в Result.
+// Инцидент-основание: QA-54/HUMAN-4 — сфабрикованные UI-assertions без сверки
+// с package.json прошли через verify-artifacts и review-result.
+// ============================================================================
+
+function makeTicketWithResult(dir, { id, dod, resultContent }) {
+  mkdirSync(dir, { recursive: true });
+  const ticketPath = join(dir, `${id}.md`);
+  const content = `---
+id: ${id}
+title: "fixture"
+priority: 3
+type: qa
+required_capabilities: []
+created_at: "2026-04-21T00:00:00Z"
+updated_at: "2026-04-21T10:00:00Z"
+completed_at: ""
+parent_plan: ""
+parent_task: ""
+dependencies: []
+conditions: []
+context:
+  files: []
+  references: []
+  notes: ""
+complexity: simple
+tags: []
+---
+## Описание
+
+fixture
+
+## Критерии готовности (Definition of Done)
+
+${dod}
+
+## Результат выполнения
+
+### Summary
+
+${resultContent}
+
+### Изменённые файлы
+
+`;
+  writeFileSync(ticketPath, content, 'utf8');
+  return ticketPath;
+}
+
+test('verify-artifacts: D4 негативный — UI-DoD без source-ссылок в Result → failed (source_grounding_missing)', () => {
+  const tmpDir = join(PROJECT_ROOT, '.tmp-verify-artifacts-d4-negative');
+  rmSync(tmpDir, { recursive: true, force: true });
+
+  const ticketPath = makeTicketWithResult(tmpDir, {
+    id: 'QA-910',
+    dod: '- [x] Команда "Move Next" видна в контекстном меню тикета',
+    resultContent: 'Проверено вручную, Move Next работает корректно.',
+  });
+
+  try {
+    const result = runScript(ticketPath);
+    assert.equal(
+      result.status,
+      'failed',
+      `Ожидался failed (source_grounding_missing), получили ${result.status}. fail_reasons=${result.fail_reasons || ''}`
+    );
+    assert.match(
+      result.fail_reasons || '',
+      /source_grounding_missing/,
+      'fail_reasons должен содержать source_grounding_missing'
+    );
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('verify-artifacts: D4 позитивный — UI-DoD с file:line ссылкой в Result → passed', () => {
+  const tmpDir = join(PROJECT_ROOT, '.tmp-verify-artifacts-d4-positive');
+  rmSync(tmpDir, { recursive: true, force: true });
+
+  const ticketPath = makeTicketWithResult(tmpDir, {
+    id: 'QA-911',
+    dod: '- [x] Команда "Move Next" видна в контекстном меню тикета',
+    resultContent: [
+      'Проверено по package.json:42 — команда workflow.moveTicketNext зарегистрирована',
+      'с group: "inline", что соответствует hover-кнопке, а не ПКМ-меню.',
+      'Команда передаётся через contributes.menus.view/item/context.',
+    ].join('\n'),
+  });
+
+  try {
+    const result = runScript(ticketPath);
+    assert.equal(
+      result.status,
+      'passed',
+      `Ожидался passed, получили ${result.status}. fail_reasons=${result.fail_reasons || ''}`
+    );
+    assert.doesNotMatch(
+      result.fail_reasons || '',
+      /source_grounding_missing/,
+      'source_grounding_missing не должен быть в fail_reasons при наличии ссылки на source'
+    );
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('verify-artifacts: D4 пропускает тикеты без UI/контракт-DoD (нет ложных срабатываний)', () => {
+  const tmpDir = join(PROJECT_ROOT, '.tmp-verify-artifacts-d4-skip');
+  rmSync(tmpDir, { recursive: true, force: true });
+
+  const ticketPath = makeTicketWithResult(tmpDir, {
+    id: 'IMPL-912',
+    dod: '- [x] Функция parseConfig возвращает корректный объект',
+    resultContent: 'Функция реализована и покрыта юнит-тестами. Все тесты зелёные.',
+  });
+
+  try {
+    const result = runScript(ticketPath);
+    assert.equal(
+      result.status,
+      'passed',
+      `Ожидался passed (нет UI/контракт-DoD), получили ${result.status}. fail_reasons=${result.fail_reasons || ''}`
+    );
+    assert.doesNotMatch(
+      result.fail_reasons || '',
+      /source_grounding/,
+      'source_grounding не должен срабатывать для non-UI DoD'
+    );
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }

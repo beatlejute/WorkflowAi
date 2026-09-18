@@ -205,6 +205,12 @@ async function moveTicket(ticketId, target) {
   const now = new Date().toISOString();
   frontmatter.updated_at = now;
 
+  // FIX-69: синхронизируем frontmatter.status с целевой папкой.
+  // Без этого в done/ оказывались тикеты со status: ready / in-progress, и все потребители
+  // frontmatter (MCP get_ticket_stats, check-conditions, валидатор расширения) видели
+  // фантомное состояние.
+  frontmatter.status = target;
+
   // Если переход в done, добавляем completed_at
   if (target === "done" && currentStatus !== "done") {
     frontmatter.completed_at = now;

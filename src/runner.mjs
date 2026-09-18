@@ -1837,7 +1837,11 @@ class PipelineRunner {
         context_snapshot: { ...this.context }
       };
 
-      const existing = await this.writeApprovalPending(filePath, payload);
+      // Approval-файл ключуется парой (ticket_id, stage_id, attempt). Если он уже есть —
+      // читаем его как есть и НЕ создаём поверх новый pending: иначе повторный заход на
+      // стейдж затирает уже принятое человеком решение (status/decided_by/comment).
+      const preexisting = await this.readApprovalFile(filePath);
+      const existing = preexisting || await this.writeApprovalPending(filePath, payload);
 
       // Если файл уже был и статус уже resolved — сразу возвращаем результат (recovery)
       if (existing.status === 'approved' || existing.status === 'rejected') {
@@ -1857,9 +1861,14 @@ class PipelineRunner {
         };
       }
 
-      // Создан новый pending-файл
+      // Ждём решения: либо только что создали pending, либо переиспользуем уже существующий
       if (this.logger) {
-        this.logger.info(`[${stageId}] manual-gate: created pending approval at ${filePath}`, stageId);
+        this.logger.info(
+          preexisting
+            ? `[${stageId}] manual-gate: reusing existing approval at ${filePath} (status=${existing.status})`
+            : `[${stageId}] manual-gate: created pending approval at ${filePath}`,
+          stageId
+        );
       }
 
       const pollIntervalMs = stage.poll_interval_ms || 2000;
