@@ -530,7 +530,7 @@ function runL1Assertions(output, testCase) {
   const assertions = testCase.assertions?.deterministic || [];
   const results = [];
   
-  const outputDependentKinds = ['output_contains_all', 'output_matches', 'output_does_not_contain', 'output_yaml_shape'];
+  const outputDependentKinds = ['output_contains_all', 'output_matches', 'output_does_not_contain', 'output_yaml_shape', 'is_json'];
   if (!output && assertions.some(a => outputDependentKinds.includes(a.kind))) {
     return assertions.map(a => ({
       passed: true,
@@ -1037,6 +1037,7 @@ reason: <brief explanation>
           output: targetOutput.output || '',
           judge_output: judgeResult.output || '',
           passed: score >= 4,
+          l1: evaluateTrialL1(targetOutput.output || '', task.testCase),
           errored: false
         };
       } catch (err) {
@@ -1089,6 +1090,85 @@ reason: <brief explanation>
   );
 
   return results;
+}
+
+/**
+ * L1-ассершены по фактическому выводу одной попытки.
+ *
+ * Раньше runL1Assertions вызывался ровно один раз и всегда с пустой строкой:
+ * все пять видов ассершенов зависят от вывода агента, поэтому помечались
+ * skipped и не исполнялись никогда — 29 из 42 кейсов канона объявляли их
+ * вхолостую. Вывод уже лежит в результате попытки L2, так что проверка не
+ * стоит ни одного дополнительного вызова модели.
+ *
+ * Пустой вывод успехом не считается: output_does_not_contain на пустой строке
+ * «проходит» вакуумно — ровно тот ложный зелёный, который убрал 4de6dea.
+ */
+function evaluateTrialL1(output, testCase) {
+  const declared = (testCase.assertions?.deterministic || []).length;
+  if (declared === 0) return { declared: 0, passed: true, failures: [] };
+
+  const results = runL1Assertions(output, testCase);
+  const skipped = results.filter(r => r.skipped);
+  if (skipped.length > 0) {
+    return {
+      declared,
+      passed: false,
+      skipped: true,
+      failures: [`нечего проверять: вывод пуст (${skipped.length}/${declared} ассершенов)`]
+    };
+  }
+
+  const failed = results.filter(r => !r.passed);
+  return {
+    declared,
+    passed: failed.length === 0,
+    failures: failed.map(formatL1Failure)
+  };
+}
+
+function formatL1Failure(r) {
+  switch (r.kind) {
+    case 'output_contains_all':
+      return `output_contains_all: нет ${JSON.stringify(r.missing || [])}`;
+    case 'output_does_not_contain':
+      return `output_does_not_contain: найдено ${JSON.stringify(r.found || [])}`;
+    case 'output_matches':
+      return `output_matches: не совпал /${r.regex}/`;
+    case 'output_yaml_shape':
+      return `output_yaml_shape: нет ключей ${JSON.stringify(r.required_keys || [])}`;
+    default:
+      return r.error ? `${r.kind}: ${r.error}` : r.kind;
+  }
+}
+
+/**
+ * Агрегирует L1 теми же порогами, что и L2: majority по умолчанию, все попытки
+ * при aggregate: all или severity: critical.
+ */
+function aggregateL1Results(l2Results, testCase) {
+  const perModel = {};
+  for (const [agentId, modelData] of Object.entries(l2Results.per_model)) {
+    const trials = modelData.trials || [];
+    perModel[agentId] = {
+      total: modelData.total,
+      error_count: modelData.error_count || 0,
+      pass_count: trials.filter(t => !t.errored && t.l1 && t.l1.passed).length
+    };
+  }
+  return aggregateResults({ per_model: perModel }, testCase);
+}
+
+function describeL1Failures(l2Results) {
+  const lines = [];
+  for (const [agentId, modelData] of Object.entries(l2Results.per_model)) {
+    for (const trial of modelData.trials || []) {
+      for (const failure of trial.l1?.failures || []) {
+        lines.push(`${agentId} trial ${trial.trial}: ${failure}`);
+      }
+    }
+  }
+  return lines;
 }
 
 function parseJudgeResult(output) {
@@ -1396,41 +1476,12 @@ async function runTestsForSkill(skillName, opts) {
         }
 
         if (runL1) {
-          const mockOutput = '';
-          const l1Results = runL1Assertions(mockOutput, testCase);
-          const l1Failed = l1Results.filter(r => !r.passed);
-          const l1Skipped = l1Results.some(r => r.skipped);
           const l1Declared = (testCase.assertions?.deterministic || []).length;
-          const l1Executed = l1Results.filter(r => !r.skipped).length;
-
           const willRunL2 = runL2 && effectiveTargetAgents.length > 0 && judgeAgent && hasRubric;
-          const noCoverage = l1Declared > 0 && l1Executed === 0 && !willRunL2;
-
-          let caseStatus;
-          if (l1Failed.length > 0) {
-            caseStatus = 'failed';
-          } else if (noCoverage) {
-            caseStatus = 'no_coverage';
-          } else {
-            caseStatus = 'passed';
-          }
-          currentRunStatuses[caseDef.id] = caseStatus;
-
-          if (caseStatus === 'failed') {
-            result.current_run.failed++;
-            result.status = 'failed';
-          } else if (caseStatus === 'no_coverage') {
-            result.current_run.no_coverage = (result.current_run.no_coverage || 0) + 1;
-            console.log(`[Runner] ${caseDef.id}: no_coverage — L1 assertions require agent output but L2 is not configured (no rubric or no agents)`);
-          } else {
-            result.current_run.passed++;
-          }
-
-          if (l1Skipped) {
-            result.l1_skipped = true;
-          }
 
           let l2Results = null;
+          let l2Failed = false;
+
           if (willRunL2) {
             const trials = opts.fast ? 1 : 3;
             const index = loadIndexYaml(skillName);
@@ -1460,14 +1511,51 @@ async function runTestsForSkill(skillName, opts) {
               await writeJudgeResults(skillName, caseDef.id, l2Results);
 
               if (!aggregated.overall_passed) {
-                result.status = 'failed';
-                currentRunStatuses[caseDef.id] = 'failed';
+                l2Failed = true;
               }
             } catch (l2Err) {
               console.error(`[Runner] L2 evaluation failed:`, l2Err.message);
-              result.status = 'failed';
-              currentRunStatuses[caseDef.id] = 'failed';
+              l2Failed = true;
             }
+          }
+
+          // L1 проверяется по выводу агента, а вывод появляется только вместе с
+          // L2: своего прогона агентов у слоя нет.
+          let l1Verdict = 'passed';
+          if (l1Declared > 0) {
+            if (!l2Results) {
+              l1Verdict = 'no_coverage';
+              result.l1_skipped = true;
+            } else {
+              const l1Aggregated = aggregateL1Results(l2Results, testCase);
+              console.log(`[Runner] L1 Results for ${caseDef.id}:`, JSON.stringify(l1Aggregated, null, 2));
+              if (!l1Aggregated.overall_passed) {
+                l1Verdict = 'failed';
+                for (const line of describeL1Failures(l2Results)) {
+                  console.log(`[Runner] ${caseDef.id}: L1 ${line}`);
+                }
+              }
+            }
+          }
+
+          let caseStatus;
+          if (l1Verdict === 'failed' || l2Failed) {
+            caseStatus = 'failed';
+          } else if (l1Verdict === 'no_coverage') {
+            caseStatus = 'no_coverage';
+          } else {
+            caseStatus = 'passed';
+          }
+          currentRunStatuses[caseDef.id] = caseStatus;
+
+          if (caseStatus === 'failed') {
+            result.current_run.failed++;
+            result.status = 'failed';
+          } else if (caseStatus === 'no_coverage') {
+            result.current_run.no_coverage = (result.current_run.no_coverage || 0) + 1;
+            console.log(`[Runner] ${caseDef.id}: no_coverage — L1 assertions require agent output but L2 is not configured (no rubric or no agents)`);
+          } else {
+            result.current_run.passed++;
           }
 
           await writeMetaJson(caseDef.id, skillName, caseStatus, Date.now() - caseStart, l2Results, result.l1_skipped);

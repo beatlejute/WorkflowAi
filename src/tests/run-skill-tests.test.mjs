@@ -1717,3 +1717,122 @@ describe('buildTargetPrompt() — сборка prompt из scenario', () => {
     assert.match(stdout, /total: 1/, 'тест должен быть найден');
   });
 });
+
+// ============================================================================
+// L1 по фактическому выводу агента
+//
+// До этого runL1Assertions вызывался ровно один раз и всегда с пустой строкой,
+// так что output-ассершены не исполнялись никогда. Теперь вердикт считается по
+// выводу попытки L2 — дополнительных вызовов модели это не стоит.
+// Моки: agent-a → MOCK_HIGH_SCORE (judge поставит 5 → L2 pass), mock-judge.
+// ============================================================================
+
+describe('L1 по фактическому выводу агента', () => {
+  const SKILL_L1 = `__test-l1-live-${Date.now()}`;
+  const DIR_L1 = join(SKILLS_DIR, SKILL_L1);
+  const TESTS_L1 = join(DIR_L1, 'tests');
+
+  function writeCase(caseId, deterministicYaml) {
+    writeFileSync(join(TESTS_L1, `${caseId}.yaml`), [
+      `description: "${caseId}"`,
+      'prompt: "Test prompt"',
+      'severity: normal',
+      'assertions:',
+      '  rubric:',
+      '    - rubric_file: rubrics/l1-rubric.md',
+      '  static: []',
+      '  deterministic:',
+      deterministicYaml
+    ].join('\n'));
+
+    writeFileSync(join(TESTS_L1, 'index.yaml'), [
+      'cases:',
+      `  - id: ${caseId}`,
+      `    file: ${caseId}.yaml`,
+      '    tags: [l1-live]',
+      'execution:',
+      '  target_agents: [agent-a]',
+      '  judge_agent: mock-judge'
+    ].join('\n'));
+  }
+
+  function runCase(caseId) {
+    return runRunner([
+      '--skill', SKILL_L1, '--case', caseId,
+      '--skip-secret-scan', '--fast', '--yes',
+      '--pipeline', TEST_PIPELINE_PATH
+    ]);
+  }
+
+  before(() => {
+    mkdirSync(join(TESTS_L1, 'rubrics'), { recursive: true });
+    writeFileSync(join(DIR_L1, 'SKILL.md'), '# L1 Live Test Skill\nversion: 1.0\n');
+    writeFileSync(join(TESTS_L1, 'rubrics', 'l1-rubric.md'), '# Rubric\n\nScore >= 4: pass\nScore < 4: fail\n');
+  });
+
+  after(() => {
+    if (existsSync(DIR_L1)) rmSync(DIR_L1, { recursive: true, force: true });
+  });
+
+  it('ассершен по выводу агента исполняется, а не скипается', async () => {
+    writeCase('TC-L1-OK', '    - kind: output_contains_all\n      values: ["MOCK_HIGH_SCORE"]');
+
+    const { stdout } = await runCase('TC-L1-OK');
+
+    assert.match(stdout, /status: passed/);
+    assert.match(stdout, /current_run.passed: 1/);
+    assert.doesNotMatch(stdout, /no_coverage/, 'вывод агента есть — покрытие тоже');
+  });
+
+  it('L1 валит кейс, даже когда judge доволен', async () => {
+    writeCase(
+      'TC-L1-FAIL',
+      '    - kind: output_contains_all\n      values: ["NEVER_PRESENT_XYZ"]\n' +
+      '    - kind: output_does_not_contain\n      values: ["MOCK_HIGH_SCORE"]'
+    );
+
+    const { stdout } = await runCase('TC-L1-FAIL');
+
+    assert.match(stdout, /status: failed/, 'agent-a проходит по rubric — валит именно L1');
+    assert.match(stdout, /current_run.failed: 1/);
+    assert.doesNotMatch(stdout, /current_run.passed: [1-9]/);
+  });
+
+  it('диагностика называет конкретный ассершен и попытку', async () => {
+    writeCase('TC-L1-DIAG', '    - kind: output_matches\n      regex: "NEVER_MATCHES_THIS"');
+
+    const { stdout } = await runCase('TC-L1-DIAG');
+
+    assert.match(stdout, /L1 agent-a trial 1: output_matches/, 'нужно знать, какой ассершен и на какой попытке упал');
+  });
+
+  it('падение L2 больше не засчитывается в passed', async () => {
+    // Регрессия: счётчики инкрементировались до прогона L2, поэтому провал
+    // rubric давал status: failed при current_run.passed: 1.
+    writeFileSync(join(TESTS_L1, 'TC-L2-ONLY.yaml'), [
+      'description: "TC-L2-ONLY"',
+      'prompt: "Test prompt"',
+      'severity: normal',
+      'assertions:',
+      '  rubric:',
+      '    - rubric_file: rubrics/l1-rubric.md',
+      '  static: []',
+      '  deterministic: []'
+    ].join('\n'));
+    writeFileSync(join(TESTS_L1, 'index.yaml'), [
+      'cases:',
+      '  - id: TC-L2-ONLY',
+      '    file: TC-L2-ONLY.yaml',
+      '    tags: [l1-live]',
+      'execution:',
+      '  target_agents: [agent-b]',
+      '  judge_agent: mock-judge'
+    ].join('\n'));
+
+    const { stdout } = await runCase('TC-L2-ONLY');
+
+    assert.match(stdout, /status: failed/, 'agent-b → MOCK_LOW_SCORE → rubric fail');
+    assert.match(stdout, /current_run.failed: 1/);
+    assert.doesNotMatch(stdout, /current_run.passed: [1-9]/, 'провал L2 не может быть засчитан как passed');
+  });
+});
