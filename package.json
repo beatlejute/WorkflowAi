@@ -4,7 +4,7 @@
   "description": "AI Agent Workflow Coordinator — kanban-based pipeline for AI coding agents",
   "type": "module",
   "bin": {
-    "workflow": "./bin/workflow.mjs"
+    "workflow": "bin/workflow.mjs"
   },
   "files": [
     "bin/",
@@ -41,7 +41,7 @@
     "coverage:pick-next-task": "node scripts/coverage-pick-next-task.js",
     "coverage:move-ticket": "c8 node --test src/tests/scripts-move-ticket-approval-hook.test.mjs",
     "mutation-test": "stryker run",
-    "release": "npm version patch && npm publish"
+    "release": "npm version patch && git push --follow-tags"
   },
   "dependencies": {
     "js-yaml": "^4.1.0"
