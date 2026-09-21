@@ -95,6 +95,11 @@ for (const file of Object.keys(baseline.files)) {
 if (failures.length > 0) {
   console.error(`[coverage-ratchet] ниже порога: ${failures.length}`);
   for (const line of failures) { console.error(`  ${line}`); }
+  // В GitHub Actions — ещё и аннотациями: лог задания без авторизации не
+  // отдаётся, а аннотации видны в интерфейсе и через API.
+  if (process.env.GITHUB_ACTIONS === 'true') {
+    for (const line of failures) { console.log(`::error title=coverage-ratchet::${line}`); }
+  }
   process.exit(1);
 }
 

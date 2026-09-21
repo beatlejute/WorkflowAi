@@ -3,6 +3,9 @@ on: [push, pull_request]
 jobs:
   test:
     strategy:
+      # Каждая ОС доводится до конца: при fail-fast упавший Windows отменял
+      # ubuntu и macOS, и за один прогон была видна одна причина из трёх.
+      fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -26,6 +29,25 @@ jobs:
         run: |
           set -o pipefail
           npm test 2>&1 | tee test-output.log
+      # Бенчмарк отдельно от параллельного `npm test`: там он мерил
+      # конкуренцию соседних файлов, а не сам snapshot.
+      - run: npm run bench
+      - name: npm run coverage
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run coverage 2>&1 | tee coverage-output.log
+      # Порог у каждого файла свой — его измеренное покрытие из
+      # coverage-baseline.json (проверяет сам `npm run coverage`). Прежний
+      # `c8 check-coverage` держал один порог 80/75 на всех и не проходил ни
+      # разу. Здесь остаётся проверка, что ключевые скрипты вообще попали в отчёт.
+      - name: Check key scripts are in coverage report
+        run: |
+          grep "mark-blocked.js" coverage/coverage-summary.json
+          grep "pick-next-task.js" coverage/coverage-summary.json
+          grep "move-ticket.js" coverage/coverage-summary.json
+      # В конце, чтобы разобрать и `npm test`, и повторный прогон под
+      # `npm run coverage`; храповик покрытия пишет свои аннотации сам.
       - name: Report failing tests
         if: failure()
         shell: bash
@@ -42,17 +64,4 @@ jobs:
               print "::error::" msg " | " err; msg = ""; next
             }
             END { if (msg != "") print "::error::" msg }
-          ' test-output.log
-      # Бенчмарк отдельно от параллельного `npm test`: там он мерил
-      # конкуренцию соседних файлов, а не сам snapshot.
-      - run: npm run bench
-      - run: npm run coverage
-      # Порог у каждого файла свой — его измеренное покрытие из
-      # coverage-baseline.json (проверяет сам `npm run coverage`). Прежний
-      # `c8 check-coverage` держал один порог 80/75 на всех и не проходил ни
-      # разу. Здесь остаётся проверка, что ключевые скрипты вообще попали в отчёт.
-      - name: Check key scripts are in coverage report
-        run: |
-          grep "mark-blocked.js" coverage/coverage-summary.json
-          grep "pick-next-task.js" coverage/coverage-summary.json
-          grep "move-ticket.js" coverage/coverage-summary.json
+          ' $(ls test-output.log coverage-output.log 2>/dev/null)
