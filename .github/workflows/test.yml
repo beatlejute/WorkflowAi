@@ -30,8 +30,22 @@ jobs:
           set -o pipefail
           npm test 2>&1 | tee test-output.log
       # Бенчмарк отдельно от параллельного `npm test`: там он мерил
-      # конкуренцию соседних файлов, а не сам snapshot.
-      - run: npm run bench
+      # конкуренцию соседних файлов, а не сам snapshot. Сборку он не валит:
+      # абсолютный порог по времени на общих раннерах шумит — на macOS тот же
+      # код прошёл его в прогонах 146b97a и 2d5edc7 и не прошёл в 98ecb4e.
+      # Цифры уходят аннотацией `notice`, падение — `warning`.
+      - name: npm run bench
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          if npm run bench 2>&1 | tee bench-output.log; then level=notice; else level=warning; fi
+          numbers=$(grep -o '\[benchmark\].*' bench-output.log | head -1)
+          # Причина — в формате TAP (`error: '…'`, node 22 без терминала) или
+          # spec (`AssertionError …: …`, node 25): ловятся оба.
+          reason=$(grep -oE "(error: '.*'|AssertionError[^:]*: .*)" bench-output.log | head -1)
+          echo "::${level} title=benchmark::${numbers} ${reason}"
+          [ "$level" = notice ]
       - name: npm run coverage
         shell: bash
         run: |
