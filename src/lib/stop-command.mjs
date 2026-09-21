@@ -37,6 +37,12 @@ export async function stopPipeline(projectRoot, options = {}) {
   const startMs = Date.now();
   const isWindows = process.platform === 'win32';
 
+  // Объявлено до ветвления: прежде `let escalated` жил внутри POSIX-ветки, а
+  // читался в `return` снаружи — на Linux и macOS `stopPipeline` падал с
+  // `ReferenceError: escalated is not defined` после того, как уже послал
+  // сигнал. На Windows ветка другая, поэтому ошибка там не проявлялась.
+  let escalated = false;
+
   if (isWindows) {
     // taskkill /T /F /PID <pid> — kills process tree immediately (forceful)
     // No graceful period on Windows — taskkill /T does tree kill in one shot
@@ -53,7 +59,6 @@ export async function stopPipeline(projectRoot, options = {}) {
       // Process may have exited between check and kill
     }
 
-    let escalated = false;
     const deadline = Date.now() + graceSec * 1000;
 
     while (processAlive(marker.pid)) {
@@ -76,7 +81,7 @@ export async function stopPipeline(projectRoot, options = {}) {
   return {
     ok: true,
     pid: marker.pid,
-    escalated: isWindows ? false : (escalated || false),
+    escalated,
     duration_ms: Date.now() - startMs
   };
 }

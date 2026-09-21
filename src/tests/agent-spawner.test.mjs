@@ -161,7 +161,10 @@ describe('spawnAgent — Передача prompt через stdin', () => {
       // На non-Windows системах используется argv
       const agentConfig = {
         command: 'node',
-        args: ['-e', 'console.log(process.argv[2])']
+        // С `node -e` скрипта в argv нет: первый пользовательский аргумент —
+        // argv[1] (замер: `node -e "…" "single line"` → [node, "single line"]).
+        // С argv[2] печаталось `undefined`, и тест падал везде, кроме Windows.
+        args: ['-e', 'console.log(process.argv[1])']
       };
       const result = await spawnAgent(agentConfig, 'single line', { timeout: 5 });
       assert.strictEqual(result.exitCode, 0);

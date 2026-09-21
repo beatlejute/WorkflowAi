@@ -8,10 +8,14 @@ import { run } from '../cli.mjs';
 let testDir;
 let originalCwd;
 let originalWorkflowHome;
+let originalNodeOptions;
 
 beforeEach(() => {
   originalCwd = process.cwd();
   originalWorkflowHome = process.env.WORKFLOW_HOME;
+  // `workflow run` дописывает в NODE_OPTIONS `--import` своего лоадера, и без
+  // восстановления его наследовали бы все процессы, порождённые после теста.
+  originalNodeOptions = process.env.NODE_OPTIONS;
   testDir = join(tmpdir(), `cli-test-${Date.now()}`);
   mkdirSync(testDir, { recursive: true });
   process.chdir(testDir);
@@ -20,6 +24,11 @@ beforeEach(() => {
 
 afterEach(() => {
   process.chdir(originalCwd);
+  if (originalNodeOptions === undefined) {
+    delete process.env.NODE_OPTIONS;
+  } else {
+    process.env.NODE_OPTIONS = originalNodeOptions;
+  }
   if (originalWorkflowHome === undefined) {
     delete process.env.WORKFLOW_HOME;
   } else {
@@ -175,49 +184,36 @@ test('workflow init with path executes', () => {
   }
 });
 
-test('workflow run executes', () => {
+// Два теста ниже прежде звали `run(['run'])`, не дожидаясь результата, и
+// проходили при любом исходе (`assert.ok(true)` в обеих ветках). Хуже того:
+// корень искался подъёмом от временного каталога, а `WORKFLOW_HOME` здесь
+// подменён — настоящая `~/.workflow` переставала считаться глобальной, и на
+// машине разработчика раннер принимал домашний каталог за проект. На чистой
+// машине отказ всплывал unhandledRejection'ом после конца теста и ронял файл.
+//
+// Теперь корень задан явно (`--project`), подъёма нет, и проверяется честный
+// исход: в пустом проекте конфига нет, раннер отвечает кодом 1 и причиной.
+test('workflow run executes', async () => {
   const originalLog = console.log;
-  const loggedLines = [];
-  console.log = (...args) => {
-    loggedLines.push(args.join(' '));
-  };
-
-  // Mock process.exit to prevent test from exiting
-  const originalExit = process.exit;
-  process.exit = () => { throw new Error('process.exit called'); };
-
+  console.log = () => {};
   try {
-    run(['run']);
-    // If we get here, the command was parsed (pipeline may fail)
-    assert.ok(true, 'run command executed');
-  } catch (e) {
-    // Expected to fail without proper workflow setup or if process.exit called
-    assert.ok(true, 'run command executed (may have failed)');
+    const result = await run(['run', '--project', testDir]);
+    assert.strictEqual(result.exitCode, 1);
+    assert.match(result.error, /Config file not found/);
   } finally {
     console.log = originalLog;
-    process.exit = originalExit;
   }
 });
 
-test('workflow run with plan option executes', () => {
+test('workflow run with plan option executes', async () => {
   const originalLog = console.log;
-  const loggedLines = [];
-  console.log = (...args) => {
-    loggedLines.push(args.join(' '));
-  };
-
-  // Mock process.exit
-  const originalExit = process.exit;
-  process.exit = () => { throw new Error('process.exit called'); };
-
+  console.log = () => {};
   try {
-    run(['run', '--plan', 'PLAN-001']);
-    assert.ok(true, 'run command with options executed');
-  } catch (e) {
-    assert.ok(true, 'run command with options executed (may have failed)');
+    const result = await run(['run', '--project', testDir, '--plan', 'PLAN-001']);
+    assert.strictEqual(result.exitCode, 1);
+    assert.match(result.error, /Config file not found/);
   } finally {
     console.log = originalLog;
-    process.exit = originalExit;
   }
 });
 

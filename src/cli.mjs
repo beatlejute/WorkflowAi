@@ -201,7 +201,7 @@ async function runRun(runArgv) {
     ? `${process.env.NODE_OPTIONS} --import ${loaderUrl}`
     : `--import ${loaderUrl}`;
 
-  await runPipeline(runArgv);
+  return runPipeline(runArgv);
 }
 
 export function run(argv) {
@@ -224,8 +224,9 @@ export function run(argv) {
       break;
     case 'run':
       // Раннеру отдаём исходный хвост argv, а не разобранные args: см. runRun.
-      runRun(argv.slice(argv.indexOf('run') + 1));
-      break;
+      // Промис отдаётся вызывающему: прежде он терялся, и отказ раннера
+      // становился unhandledRejection уже после возврата из `run()`.
+      return runRun(argv.slice(argv.indexOf('run') + 1));
     case 'update':
       runUpdate(args);
       break;
