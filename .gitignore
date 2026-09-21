@@ -57,4 +57,4 @@ CLAUDE.md
 .kilocode/
 .kilocodemodes
 .mcp.json
-.claude/settings.local.json
+.claude/
