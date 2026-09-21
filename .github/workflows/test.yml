@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@v4
       # Node 22, а не 20: `npm test` — это `node --test src/tests/*.test.mjs`,
       # и на Windows глоб раскрывает сам node, а не оболочка. Node 20 этого
-      # не умеет — `Could not find '…\src	ests\*.test.mjs'` за секунду, и
+      # не умеет — `Could not find '…\src\tests\*.test.mjs'` за секунду, и
       # задание на Windows падало, не запустив ни одного теста. Node 20 к тому
       # же снят с поддержки (EOL 2026-04-30).
       - uses: actions/setup-node@v4
