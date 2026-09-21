@@ -14,7 +14,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { join, dirname, resolve } from 'node:path';
-import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync, statSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, rmdirSync, readdirSync, statSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -24,6 +24,29 @@ const PROJECT_ROOT = resolve(__dirname, '../..');
 const RUNNER_PATH = join(PROJECT_ROOT, 'src', 'scripts', 'run-skill-tests.js');
 const SKILLS_DIR = join(PROJECT_ROOT, 'src', 'skills');
 const TEST_PIPELINE_PATH = join(PROJECT_ROOT, 'src', 'tests', 'fixtures', 'test-pipeline.yaml');
+
+// Раннер — инструмент разработки этого репозитория: скилы берёт из
+// `<корень>/src/skills`, а корень находит при импорте по каталогу `.workflow/`.
+// На машине разработчика он лежит в корне репозитория, на чистом клоне (CI) —
+// нет, и 57 проверок падали: раннер умирал на `Could not find .workflow/`
+// раньше, чем успевал что-то найти.
+//
+// Каталог создаётся, только если его нет, и убирается только тот, что создан
+// здесь: `rmdirSync` без рекурсии не пойдёт по ссылкам и откажет, если внутри
+// что-то есть. Рабочую `.workflow/` разработчика с junction'ами тест не трогает.
+const WORKFLOW_MARKER = join(PROJECT_ROOT, '.workflow');
+const markerCreated = !existsSync(WORKFLOW_MARKER);
+if (markerCreated) {
+  mkdirSync(WORKFLOW_MARKER);
+}
+process.on('exit', () => {
+  if (!markerCreated) return;
+  try {
+    rmdirSync(WORKFLOW_MARKER);
+  } catch {
+    // Не пуст — значит, раннер что-то записал; чужое содержимое не трогаем.
+  }
+});
 
 // Уникальное имя временного скила для изоляции от боевых данных
 const TEST_SKILL = `__test-runner-${Date.now()}`;

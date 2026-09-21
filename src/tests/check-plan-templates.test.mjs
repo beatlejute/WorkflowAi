@@ -3,7 +3,17 @@ import { strict as assert } from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { evaluateTrigger, generateNextPlanId } from '../scripts/check-plan-templates.js';
+// Скрипт ищет корень проекта при импорте модуля (`findProjectRoot()` от `cwd`).
+// Прежде импорт шёл из корня репозитория и работал только там, где в нём лежит
+// рабочая `.workflow/`; на чистом клоне (CI) файл падал целиком ещё до первого
+// теста. Импорт делается из временного проекта, дальше `cwd` возвращается.
+const importRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'check-plan-templates-'));
+fs.mkdirSync(path.join(importRoot, '.workflow'), { recursive: true });
+process.on('exit', () => fs.rmSync(importRoot, { recursive: true, force: true }));
+const cwdBeforeImport = process.cwd();
+process.chdir(importRoot);
+const { evaluateTrigger, generateNextPlanId } = await import('../scripts/check-plan-templates.js');
+process.chdir(cwdBeforeImport);
 
 // ============ evaluateTrigger tests ============
 

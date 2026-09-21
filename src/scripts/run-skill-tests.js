@@ -375,7 +375,13 @@ function resolvePipelineYaml(overridePath = null) {
 
   const projectRootDir = findProjectRoot(process.cwd());
   const workflowConfigPath = path.join(projectRootDir, '.workflow', 'config', 'pipeline.yaml');
-  const packageRoot = path.dirname(projectRootDir);
+  // Корень пакета — там, где лежит сам раннер (`src/scripts/` → два уровня
+  // вверх), а не родитель корня проекта. Прежде здесь стоял
+  // `path.dirname(projectRootDir)`, и в репозитории workflow-ai поиск уходил в
+  // `D:\Dev\configs\pipeline.yaml` вместо `D:\Dev\workflowAi\configs\…`:
+  // запасной путь не срабатывал ни разу, а без рабочей `.workflow/config/`
+  // раннер падал с `pipeline.yaml not found`.
+  const packageRoot = path.resolve(__dirname, '..', '..');
   const packageConfigPath = path.join(packageRoot, 'configs', 'pipeline.yaml');
 
   if (fs.existsSync(workflowConfigPath)) {

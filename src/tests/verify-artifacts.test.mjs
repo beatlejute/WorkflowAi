@@ -1,17 +1,30 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, mkdirSync, rmSync, utimesSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const PROJECT_ROOT = join(__dirname, '..', '..');
-const SCRIPT = join(PROJECT_ROOT, 'src', 'skills', 'review-result', 'scripts', 'verify-artifacts.js');
+const REPO_ROOT = join(__dirname, '..', '..');
+const SCRIPT = join(REPO_ROOT, 'src', 'skills', 'review-result', 'scripts', 'verify-artifacts.js');
+
+/**
+ * Корень проекта для скрипта — временный, со своим `.workflow/`.
+ *
+ * Скрипт ищет корень при импорте (`findProjectRoot()` от `cwd`). Прежде тесты
+ * запускали его из корня репозитория и держали фикстуры там же — это работало
+ * только на машине, где в корне репозитория лежит рабочая `.workflow/`. На
+ * чистом клоне (CI) все 17 проверок падали с `Could not find .workflow/`.
+ */
+const PROJECT_ROOT = mkdtempSync(join(tmpdir(), 'verify-artifacts-'));
+mkdirSync(join(PROJECT_ROOT, '.workflow'), { recursive: true });
+process.on('exit', () => rmSync(PROJECT_ROOT, { recursive: true, force: true }));
 
 function runScript(ticketPath) {
-  const out = execFileSync('node', [SCRIPT, ticketPath], { encoding: 'utf8' });
+  const out = execFileSync('node', [SCRIPT, ticketPath], { encoding: 'utf8', cwd: PROJECT_ROOT });
   const block = out.match(/---RESULT---([\s\S]*?)---RESULT---/);
   assert.ok(block, `verify-artifacts не выдал RESULT-блок:\n${out}`);
   const fields = {};
@@ -606,7 +619,7 @@ test('verify-artifacts: D4 пропускает тикеты без UI/конт�
 
 /** Полный stdout скрипта: маркер печатается вне RESULT-блока. */
 function runScriptRaw(ticketPath) {
-  return execFileSync('node', [SCRIPT, ticketPath], { encoding: 'utf8' });
+  return execFileSync('node', [SCRIPT, ticketPath], { encoding: 'utf8', cwd: PROJECT_ROOT });
 }
 
 /** Строка маркера, если она есть. */

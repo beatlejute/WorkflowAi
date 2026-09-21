@@ -7,7 +7,17 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "url";
 
 // Import the real function from the actual module
-import { updateApprovalFilesHook } from "../scripts/move-ticket.js";
+// Скрипт ищет корень проекта при импорте модуля (`findProjectRoot()` от `cwd`).
+// Прежде импорт шёл из корня репозитория и работал только там, где в нём лежит
+// рабочая `.workflow/`; на чистом клоне (CI) файл падал целиком ещё до первого
+// теста. Импорт делается из временного проекта, дальше `cwd` возвращается.
+const importRoot = fs.mkdtempSync(path.join(os.tmpdir(), "move-ticket-hook-"));
+fs.mkdirSync(path.join(importRoot, ".workflow"), { recursive: true });
+process.on("exit", () => fs.rmSync(importRoot, { recursive: true, force: true }));
+const cwdBeforeImport = process.cwd();
+process.chdir(importRoot);
+const { updateApprovalFilesHook } = await import("../scripts/move-ticket.js");
+process.chdir(cwdBeforeImport);
 
 
 const __filename = fileURLToPath(import.meta.url);

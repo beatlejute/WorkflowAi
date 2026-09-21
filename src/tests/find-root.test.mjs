@@ -77,11 +77,21 @@ test('findProjectRoot stops at filesystem root (no infinite loop)', () => {
 });
 
 test('findProjectRoot uses process.cwd() by default', () => {
-  // This test verifies the function works with cwd
-  // We just check it doesn't throw unexpectedly when .workflow exists
-  const result = findProjectRoot();
-  assert.ok(typeof result === 'string');
-  assert.ok(result.length > 0);
+  // Прежде тест звал функцию из корня репозитория и проходил только там, где в
+  // нём лежит рабочая `.workflow/`; на чистом клоне (CI) падал. Теперь `cwd`
+  // — временный проект, и проверяется, что найден именно он.
+  const testDir = join(tmpdir(), `find-root-test-cwd-${Date.now()}`);
+  const savedCwd = process.cwd();
+  mkdirSync(join(testDir, '.workflow'), { recursive: true });
+  try {
+    process.chdir(testDir);
+    // `process.cwd()` после chdir, а не `testDir`: на macOS временный каталог
+    // лежит за симлинком `/var` → `/private/var`, и строки не совпали бы.
+    assert.strictEqual(findProjectRoot(), process.cwd());
+  } finally {
+    process.chdir(savedCwd);
+    rmSync(testDir, { recursive: true, force: true });
+  }
 });
 
 // Глобальная директория ~/.workflow (или WORKFLOW_HOME) — установочный каталог,
