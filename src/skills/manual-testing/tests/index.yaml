@@ -53,3 +53,13 @@ cases:
     origin_chg: [ad-hoc-2026-05-03-shared-path]
     tags: [shared-path, project-relative, symlink-resolution, regression-guard]
     severity: medium
+  - id: TC-MANUAL-TESTING-009
+    file: cases/TC-MANUAL-TESTING-009-blocked-no-ticket-in-algorithms.yaml
+    origin_chg: [ad-hoc-2026-09-21-audit]
+    tags: [no-ticket-creation, blocked-handling, algorithm-consistency, regression-guard]
+    severity: critical
+  - id: TC-MANUAL-TESTING-010
+    file: cases/TC-MANUAL-TESTING-010-frontmatter-pipeline-owned.yaml
+    origin_chg: [ad-hoc-2026-09-21-audit]
+    tags: [frontmatter, immutable, pipeline-contract, regression-guard]
+    severity: high

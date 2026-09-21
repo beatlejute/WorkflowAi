@@ -1,0 +1,45 @@
+id: TC-MANUAL-TESTING-009
+title: "Алгоритм и knowledge при заблокированном инструменте не предписывают создавать тикет"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (CRITICAL): algorithms/blocked-tool-strategy.md:52,70,71 и knowledge/browser-extension-testing.md:56 инструктировали «Создать HUMAN-тикет» / «создай тикет» при блокировке инструмента — ровно сценарий инцидента QA-54/HUMAN-4, ради которого в SKILL.md введён «Запрет на создание тикетов любого типа». TC-005 этого не ловил: его static-ассерты и system_prompt покрывают только SKILL.md, а алгоритм загружается именно при блокировке."
+  principle: "Запрет на создание тикетов действует во всех файлах скила, которые агент загружает при блокировке инструмента: BLOCKED фиксируется внутри текущего QA-тикета, эскалация — зона соответствующего скила проекта."
+  backlog_sources: []
+tags: [no-ticket-creation, blocked-handling, algorithm-consistency, regression-guard]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над файлами algorithms/ и knowledge/, которые SKILL.md
+    предписывает загружать при блокировке инструмента. Негативные anchor'ы
+    выражены через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "algorithms/blocked-tool-strategy.md"
+      pattern: "^(?![\\s\\S]*(?<!не )созда(ть|й|йте|вай|ние)\\W+(\\S+\\W+){0,2}?тикет)"
+      reason: "Ни одна ветка алгоритма не предписывает создание тикета: любая словоформа глагола, до двух слов-вставок между ним и «тикет»; отрицание «не …» не считается предписанием."
+    - kind: skill_contains
+      file: "algorithms/blocked-tool-strategy.md"
+      pattern: "^(?![\\s\\S]*HUMAN-тикет)"
+      reason: "Тип тикета-эскалации в алгоритме не упоминается вовсе: эскалация — не зона этого скила."
+    - kind: skill_contains
+      file: "algorithms/blocked-tool-strategy.md"
+      pattern: "(внутри|в) (текущ|исходн)[а-яё]+ (QA-)?тикет"
+      reason: "BLOCKED для критических TC фиксируется внутри текущего/исходного тикета."
+    - kind: skill_contains
+      file: "knowledge/browser-extension-testing.md"
+      pattern: "^(?![\\s\\S]*(?<!не )созда(ть|й|йте|вай|ние)\\W+(\\S+\\W+){0,2}?тикет)"
+      reason: "Стратегия 3 не предписывает создание тикета ни в какой словоформе."
+    - kind: skill_contains
+      file: "knowledge/browser-extension-testing.md"
+      pattern: "^(?![\\s\\S]*HUMAN-тикет)"
+      reason: "Тип тикета-эскалации в knowledge не упоминается вовсе."
+    - kind: skill_contains
+      file: "knowledge/browser-extension-testing.md"
+      pattern: "(внутри|в) (текущ|исходн)[а-яё]+ (QA-)?тикет"
+      reason: "Стратегия 3 фиксирует BLOCKED внутри текущего/исходного тикета."

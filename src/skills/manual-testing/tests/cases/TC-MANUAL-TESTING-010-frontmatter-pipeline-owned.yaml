@@ -1,0 +1,28 @@
+id: TC-MANUAL-TESTING-010
+title: "Self-check не требует записывать completed_at/status во frontmatter — поля заполняет пайплайн"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (кросс-скиловый, CRITICAL): SKILL.md:167 «6. Заполни `completed_at` в frontmatter тикета» прямо противоречил инварианту скила исполнения (frontmatter-поля `status`/`completed_at` заполняет пайплайн; дубль ключа ломает строгий YAML-парсер, тикет застревает в текущей директории). QA-тикет выполняется в роли исполнителя, поэтому инструкция вела к поломке пайплайна."
+  principle: "Исполнитель QA-тикета не записывает `status` и `completed_at` во frontmatter ни в каком виде — эти поля принадлежат пайплайну."
+  backlog_sources: []
+tags: [frontmatter, immutable, pipeline-contract, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым SKILL.md. Негативный anchor выражен через
+    lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*(?<!не )(заполни|проставь|запиши|обнови|установи)[а-яё]*[^\\n]{0,40}(completed_at|`status`|status:))"
+      reason: "Ни одна инструкция SKILL.md не предписывает исполнителю записать completed_at или status в тикет (любой глагол записи в пределах строки; отрицание «не …» не считается предписанием)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "НЕ (записывай|заполняй|обновляй|проставляй)[^\\n]{0,80}(status|completed_at)[^\\n]{0,40}(status|completed_at)"
+      reason: "Запрет на запись обоих frontmatter-полей сформулирован явно в self-check."

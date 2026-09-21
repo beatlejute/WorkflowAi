@@ -43,3 +43,8 @@ cases:
     origin_chg: []
     tags: [atomicity, dod, threshold]
     severity: high
+  - id: TC-DECOMPOSE-PLAN-007
+    file: cases/TC-DECOMPOSE-PLAN-007-id-collision-stop-no-realloc.yaml
+    origin_chg: [ad-hoc-2026-09-21-audit]
+    tags: [id-generation, collision-prevention, stop-gate, atomicity-retry, regression-guard]
+    severity: critical

@@ -1,0 +1,105 @@
+id: TC-DECOMPOSE-PLAN-007
+title: "При коллизии ID декомпозитор проверяет занятость до записи, не удаляет файлы и не перевыделяет диапазон; повторный проход правит только тикеты из atomicity_failures"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (CRITICAL): workflows/decompose.md:279 после сохранения тикета предписывал «Удали только что созданный файл, вернись к 9.B и перевыдели диапазон заново» — невыполнимо (9.B запрещает выделять диапазон внутри стадии, `id_ranges` — фиксированный вход) и разрушительно (Write по занятому пути перезаписывает чужой тикет, а Glob после записи видит ровно одно совпадение и коллизию не замечает). Четыре ревью правки 2026-09-21 добавили: повторный проход по atomicity feedback-loop приходит с теми же `id_ranges` и находит собственные тикеты прошлого прохода; правило «Edit по совпадению пути» легализовало бы перезапись собственного тикета другим содержимым; «следующий номер после последнего собственного» противоречило запрету выводить номер из состояния tickets/; сужение исходного тикета до создания новых частей теряло работу при СТОП; зависимые тикеты (dependencies и conditions tasks_completed) после разбиения должны ссылаться на все части."
+  principle: "Занятость ID проверяется до Write (Glob по всем папкам tickets/); любое совпадение — СТОП без удаления, без перевыделения диапазона и без ручного сдвига номера. На повторном проходе правятся только тикеты из atomicity_failures (Edit по их ID после сверки), новые части создаются раньше сужения исходного тикета, их ID — только из id_ranges; зависимые тикеты получают ID новых частей."
+  backlog_sources: []
+tags: [id-generation, collision-prevention, stop-gate, atomicity-retry, regression-guard]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над workflows/decompose.md. Негативные anchor'ы выражены через
+    lookahead — runner поддерживает только skill_contains.
+    Известное ограничение слоя L0: static-anchor ловит удаление правила и
+    известные формулировки нарушения, но не произвольное противоречащее
+    дополнение в другом месте файла. Поведение агента на повторном проходе
+    (разбиение X → X + X' без потери содержимого) требует L2-сценария —
+    отложено, runner не запускался по решению стейкхолдера 2026-09-21.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "^(?![\\s\\S]*((?<!не )перевыдел[а-яё]* диапазон|выдели[^\\n]{0,30}заново|удали[^\\n]{0,40}файл))"
+      reason: "Воркфлоу нигде не предписывает перевыделить диапазон, выделить заново или удалить файл тикета (отрицание «не …» не считается предписанием)."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "(не (перевыдел|выдел)[а-яё]* диапазон|диапазон не (перевыдел|выдел)[а-яё]*)"
+      reason: "При коллизии перевыделение диапазона запрещено явно."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "^(?![\\s\\S]*(сохрани|запиши|создай|write)[^\\n]{0,40}\\.workflow/tickets/backlog/\\{TYPE\\}[\\s\\S]*Пре-валидация занятости ID)"
+      reason: "Ни одно предписание записать файл тикета (любым глаголом) не стоит раньше пре-валидации занятости."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "Пре-валидация занятости ID[\\s\\S]{0,1500}\\n5\\. Сохрани в `\\.workflow/tickets/backlog"
+      reason: "Пре-валидация занятости — отдельный пункт непосредственно перед пунктом сохранения файла."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "Glob[^\\n]{0,20}\\.workflow/tickets/\\*\\*/\\{TYPE\\}-\\{NNN\\}\\.md"
+      reason: "Пре-валидация ищет занятость по всем папкам tickets/ (**), а не только в backlog/."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "Есть совпадение\\*\\*[^\\n]{0,30}СТОП"
+      reason: "Совпадение при пре-валидации ведёт к СТОП."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "^(?![\\s\\S]*Есть совпадение\\*\\*[^\\n]{0,80}(Edit|Write|перезапиш))"
+      reason: "Совпадение при пре-валидации не разрешает ни Edit, ни Write, ни перезапись — класс «Edit по совпадению пути» запрещён."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "^(?![\\s\\S]*сдвинь[^\\n]{0,20}номер)"
+      reason: "Ручной сдвиг номера при занятом пути не предписан нигде."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "через `Edit` существующего файла"
+      reason: "Повторный проход правит существующие тикеты через Edit, а не через Write."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "^(?![\\s\\S]*(перезапиши|через `Write`)[^\\n]{0,60}исходн)"
+      reason: "Исходный тикет при разбиении не перезаписывается целиком через Write."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "(правь|редактируй|изменяй|обновляй)[^\\n]{0,20}(только|исключительно)[^\\n]{0,80}atomicity_failures"
+      reason: "На повторном проходе правятся только тикеты из atomicity_failures — остальные собственные тикеты не трогаются."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "остальные задачи плана пропускаются"
+      reason: "На повторном проходе задачи плана вне atomicity_failures не декомпозируются заново."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "^(?![\\s\\S]*заново для всех задач)"
+      reason: "Повторный проход не переделывает декомпозицию всех задач плана."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "(перед|до) `?Edit`?[^\\n]{0,20}(сверь|проверь|убедись)"
+      reason: "Перед Edit существующего тикета выполняется сверка."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "(не найден|отсутстви[ея]) файл[а-яё]*[^\\n]{0,40}СТОП"
+      reason: "Отсутствие файла тикета из atomicity_failures — СТОП, а не создание файла с тем же ID."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "не редактируй исходн[а-яё]+ тикет[^\\n]{0,20}пока не (созданы|записаны)"
+      reason: "При разбиении исходный тикет сужается только после успешной записи всех новых частей — иначе при СТОП теряется часть работы."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "(первая|1-я) часть[^\\n]{0,40}(остаётся|остается)[^\\n]{0,30}исходн"
+      reason: "Первая часть разбиения остаётся в исходном файле с прежним ID."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "(dependencies|conditions)[^\\n]{0,120}добавь[^\\n]{0,80}нов[а-яё]+ част"
+      reason: "Зависимые тикеты (dependencies / conditions tasks_completed) получают ID всех новых частей разбитого тикета."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "исходн[а-яё]+ тикет[^\\n]{0,40}не считается дубликатом"
+      reason: "Дедупликация не отбрасывает новые части как дубли исходного тикета."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "не сканируешь[^\\n]{0,60}для определения номера"
+      reason: "Номер тикета не выводится из состояния tickets/ — источник только id_ranges со входа."
