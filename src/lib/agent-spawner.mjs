@@ -185,10 +185,13 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
 
     const startTime = Date.now();
 
+    // windowsHide: без него у раннера без консоли (запуск из MCP) каждый
+    // агент открывает своё окно терминала — см. callAgent в runner.mjs.
     const child = spawn(agentConfig.command, args, {
       cwd: path.resolve(projectRoot, agentConfig.workdir || '.'),
       stdio: ['pipe', 'pipe', 'pipe'],
-      shell: useShell
+      shell: useShell,
+      windowsHide: true
     });
 
     if (currentChildRef) {
@@ -210,7 +213,7 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
 
     const killChild = () => {
       if (process.platform === 'win32' && child.pid) {
-        try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe' }); } catch {}
+        try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe', windowsHide: true }); } catch {}
       } else {
         try { child.kill('SIGTERM'); } catch {}
       }

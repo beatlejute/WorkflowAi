@@ -911,7 +911,7 @@ class FileGuard {
    */
   _rollbackFile(filePath) {
     try {
-      execSync(`git checkout -- "${filePath}"`, { stdio: 'pipe' });
+      execSync(`git checkout -- "${filePath}"`, { stdio: 'pipe', windowsHide: true });
       console.warn(`[FileGuard] WARNING: Rolled back: ${filePath}`);
     } catch (err) {
       const errMsg = err.stderr ? err.stderr.toString().trim() : err.message;
@@ -1011,7 +1011,7 @@ class StageExecutor {
     const child = this.currentChild;
     if (!child || !child.pid) return;
     if (process.platform === 'win32') {
-      try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe' }); } catch {}
+      try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe', windowsHide: true }); } catch {}
     } else {
       try { child.kill('SIGTERM'); } catch {}
     }
@@ -1385,10 +1385,14 @@ class StageExecutor {
         }
       }
 
+      // windowsHide: раннер, запущенный из MCP (detached), живёт без консоли,
+      // и Windows открывает каждому агенту новое окно терминала. С флагом
+      // консоль создаётся скрытой, а внуки агента наследуют её без окон.
       const child = spawn(agent.command, args, {
         cwd: path.resolve(this.projectRoot, agent.workdir || '.'),
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: useShell
+        shell: useShell,
+        windowsHide: true
       });
       this.currentChild = child;
 
@@ -1409,7 +1413,7 @@ class StageExecutor {
 
       const killChild = () => {
         if (process.platform === 'win32' && child.pid) {
-          try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe' }); } catch {}
+          try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe', windowsHide: true }); } catch {}
         } else {
           try { child.kill('SIGTERM'); } catch {}
         }
