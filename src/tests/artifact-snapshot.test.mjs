@@ -218,40 +218,8 @@ test('Case 7: snapshot outside git repo returns empty git output', async () => {
   }
 });
 
-// Кейс 8: Benchmark на реальном src/ репо
-test('Case 8: benchmark snapshot on real src directory', async (t) => {
-  const projectRoot = path.resolve(__dirname, '../..');
-  const iterations = 10;
-  const durations = [];
-
-  for (let i = 0; i < iterations; i++) {
-    const start = performance.now();
-    const snap = await snapshot(projectRoot, {
-      includePaths: ['src'],
-      excludePatterns: []
-    });
-    const end = performance.now();
-
-    durations.push(end - start);
-  }
-
-  // Вычисляем median и p95
-  const sortedDurations = [...durations].sort((a, b) => a - b);
-  const median = sortedDurations[Math.floor(sortedDurations.length / 2)];
-  const p95Idx = Math.ceil(sortedDurations.length * 0.95) - 1;
-  const p95 = sortedDurations[p95Idx];
-
-  const fileCountSnap = await snapshot(projectRoot, {
-    includePaths: ['src'],
-    excludePatterns: []
-  });
-  const fileCount = fileCountSnap.fs.size;
-
-  console.log(`[benchmark] snapshot p50=${Math.round(median)}ms p95=${Math.round(p95)}ms files=${fileCount}`);
-
-  assert(median < 800, `median (${Math.round(median)}ms) should be < 800ms`);
-  assert(p95 < 1500, `p95 (${Math.round(p95)}ms) should be < 1500ms`);
-});
+// Кейс 8 (бенчмарк snapshot на живом src/) вынесен в artifact-snapshot.bench.mjs:
+// под параллельным `npm test` он мерил конкуренцию, а не код.
 
 // Кейс 9: isEmpty возвращает true только при всех трёх массивах пустых
 test('Case 9: isEmpty returns true only when all arrays are empty', async () => {

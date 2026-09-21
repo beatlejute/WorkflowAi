@@ -18,6 +18,9 @@ jobs:
           node-version: '22'
       - run: npm install
       - run: npm test
+      # Бенчмарк отдельно от параллельного `npm test`: там он мерил
+      # конкуренцию соседних файлов, а не сам snapshot.
+      - run: npm run bench
       - run: npm run coverage
       # Порог у каждого файла свой — его измеренное покрытие из
       # coverage-baseline.json (проверяет сам `npm run coverage`). Прежний
