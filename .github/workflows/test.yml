@@ -40,10 +40,13 @@ jobs:
         run: |
           set -o pipefail
           if npm run bench 2>&1 | tee bench-output.log; then level=notice; else level=warning; fi
-          numbers=$(grep -o '\[benchmark\].*' bench-output.log | head -1)
+          # `|| true`: bash на раннере идёт с `-eo pipefail`, и `grep` без
+          # совпадения (при успехе строки с ошибкой нет) обрывал шаг до `echo`
+          # — провал шага на всех ОС, скрытый `continue-on-error`.
+          numbers=$(grep -o '\[benchmark\].*' bench-output.log | head -1 || true)
           # Причина — в формате TAP (`error: '…'`, node 22 без терминала) или
           # spec (`AssertionError …: …`, node 25): ловятся оба.
-          reason=$(grep -oE "(error: '.*'|AssertionError[^:]*: .*)" bench-output.log | head -1)
+          reason=$(grep -oE "(error: '.*'|AssertionError[^:]*: .*)" bench-output.log | head -1 || true)
           echo "::${level} title=benchmark::${numbers} ${reason}"
           [ "$level" = notice ]
       - name: npm run coverage
