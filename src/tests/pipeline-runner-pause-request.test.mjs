@@ -41,10 +41,10 @@ function createConfig() {
   };
 }
 
-function writeRequest(root, pid) {
+function writeRequest(root, pid, requestedAt = new Date().toISOString()) {
   const file = pauseRequestPath(root);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify({ pid, requested_at: new Date().toISOString(), requested_by: 'test' }));
+  fs.writeFileSync(file, JSON.stringify({ pid, requested_at: requestedAt, requested_by: 'test' }));
 }
 
 function readLog(runner) {
@@ -72,6 +72,12 @@ test('readPauseRequest отдаёт запрос только своему pid',
     assert.equal(readPauseRequest(root, process.pid), null, 'чужой pid — не запрос');
     writeRequest(root, process.pid);
     assert.equal(readPauseRequest(root, process.pid).pid, process.pid);
+    const now = Date.now();
+    writeRequest(root, process.pid, new Date(now - 60_000).toISOString());
+    assert.equal(readPauseRequest(root, process.pid, now), null, 'запрос старше старта раннера — чужой');
+    assert.ok(readPauseRequest(root, process.pid, now - 120_000), 'запрос моложе старта — свой');
+    writeRequest(root, process.pid, 'not a date');
+    assert.equal(readPauseRequest(root, process.pid, now), null, 'без даты возраст не проверить');
     fs.writeFileSync(pauseRequestPath(root), '{ не json');
     assert.equal(readPauseRequest(root, process.pid), null, 'нечитаемый файл — не запрос');
   } finally {
@@ -86,9 +92,10 @@ test('раннер объявляет pause-request в capabilities', () => {
 test('запрос паузы держит следующую стадию до удаления файла', async () => {
   const root = createTmpDir();
   try {
-    writeRequest(root, process.pid);
     const runner = new PipelineRunner(createConfig(), { project: root });
     runner.pausePollMs = 20;
+    // Запрос — после старта раннера: так его пишет расширение, увидев lock.
+    writeRequest(root, process.pid);
     const done = runner.run();
 
     assert.ok(await waitFor(() => readLog(runner).includes('PAUSED before stage="first"')), 'нет строки PAUSED');
@@ -121,6 +128,22 @@ test('запрос для другого pid раннер не останавл�
 
     const log = readLog(runner);
     assert.ok(!log.includes('PAUSED'), 'чужой запрос не должен ставить паузу');
+    assert.ok(log.includes('Pipeline completed successfully!'));
+  } finally {
+    cleanupDir(root);
+  }
+});
+
+test('запрос, оставшийся от прошлого запуска с тем же pid, раннер не останавливает', async () => {
+  const root = createTmpDir();
+  try {
+    writeRequest(root, process.pid, new Date(Date.now() - 60_000).toISOString());
+    const runner = new PipelineRunner(createConfig(), { project: root });
+    runner.pausePollMs = 20;
+    await runner.run();
+
+    const log = readLog(runner);
+    assert.ok(!log.includes('PAUSED'), 'старый запрос не должен ставить паузу');
     assert.ok(log.includes('Pipeline completed successfully!'));
   } finally {
     cleanupDir(root);

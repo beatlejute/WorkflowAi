@@ -47,7 +47,7 @@ export async function stopPipeline(projectRoot, options = {}) {
     // taskkill /T /F /PID <pid> — kills process tree immediately (forceful)
     // No graceful period on Windows — taskkill /T does tree kill in one shot
     try {
-      execSync(`taskkill /T /F /PID ${marker.pid}`, { stdio: 'ignore' });
+      execSync(`taskkill /T /F /PID ${marker.pid}`, { stdio: 'ignore', windowsHide: true });
     } catch (err) {
       // Ignore errors — process may have exited already
     }

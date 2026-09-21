@@ -161,7 +161,10 @@ export async function snapshot(projectRoot, options = {}) {
       gitOutput = execFileSync('git', ['status', '--porcelain=v1', '-z'], {
         cwd: projectRoot,
         encoding: 'utf8',
-        maxBuffer: 10 * 1024 * 1024
+        maxBuffer: 10 * 1024 * 1024,
+        // Раннер из MCP живёт без консоли: без флага git.exe получал бы
+        // свою консоль и окно терминала на каждый снимок (два на стадию).
+        windowsHide: true
       });
     } catch (e) {
       console.warn(`[WARN] artifact-snapshot: git status failed: ${e.message}`);

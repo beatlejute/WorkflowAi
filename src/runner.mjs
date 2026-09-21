@@ -1727,6 +1727,13 @@ class PipelineRunner {
     this.logger = new Logger(this.logFilePath);
     this.loggerInitialized = false;
 
+    // Момент старта — тот же, что в lock'е (`started_at`), когда раннер
+    // запускает runPipeline. Запрос паузы старше него оставлен прошлым запуском.
+    const startedAtMs = Date.parse(overrides.startedAt ?? '');
+    this.startedAtMs = Number.isNaN(startedAtMs) ? Date.now() : startedAtMs;
+    // Как часто перечитывать запрос паузы, пока раннер стоит.
+    this.pausePollMs = 1000;
+
     // Инициализация контекста из CLI аргументов
     if (args.plan) {
       this.context.plan_id = args.plan;
@@ -2273,10 +2280,11 @@ class PipelineRunner {
    * снаружи показывается как стоящий на паузе.
    */
   async waitWhilePauseRequested() {
-    if (!readPauseRequest(this.projectRoot, process.pid)) { return; }
+    const requested = () => readPauseRequest(this.projectRoot, process.pid, this.startedAtMs);
+    if (!requested()) { return; }
     this.logger.info(`PAUSED before stage="${this.currentStage}"`, 'PipelineRunner');
-    while (this.running && readPauseRequest(this.projectRoot, process.pid)) {
-      await this.sleep(this.pausePollMs ?? 1000);
+    while (this.running && requested()) {
+      await this.sleep(this.pausePollMs);
     }
     if (this.running) {
       this.logger.info(`RESUMED stage="${this.currentStage}"`, 'PipelineRunner');
@@ -2626,7 +2634,7 @@ async function runPipeline(argv = process.argv.slice(2)) {
   try {
     // Запускаем пайплайн. run_id и путь к логу уже записаны в маркер — раннер
     // получает ровно их, чтобы имя файла и lock не разъехались.
-    const runner = new PipelineRunner(config, args, { runId, logFilePath });
+    const runner = new PipelineRunner(config, args, { runId, logFilePath, startedAt });
     const result = await runner.run();
 
     console.log('\n=== Summary ===');
