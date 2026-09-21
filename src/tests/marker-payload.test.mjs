@@ -89,6 +89,8 @@ test('runPipeline writes the whole payload in one go', async () => {
     assert.ok(marker.pipeline_log, 'pipeline_log должен быть заполнен сразу');
     assert.equal(marker.started_by, 'cli');
     assert.equal(marker.pipeline_version, packageVersion());
+    // По этому полю расширение VS Code решает, предлагать ли паузу.
+    assert.deepEqual(marker.capabilities, ['pause-request']);
     assert.equal(resolve(marker.project_root), resolve(root));
     assert.equal(marker.started_at, marker.timestamp);
     assert.ok(Number.isInteger(marker.pid) && marker.pid > 0);

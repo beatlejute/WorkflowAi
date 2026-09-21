@@ -11,6 +11,7 @@ import { snapshot, diff, isEmpty } from './lib/artifact-snapshot.mjs';
 import { markUnhealthy, isHealthy } from './lib/agent-health-registry.mjs';
 import { writeMarker, readMarker, removeMarker } from './lib/marker.mjs';
 import { processAlive } from './lib/process-alive.mjs';
+import { readPauseRequest, RUNNER_CAPABILITIES } from './lib/pause-request.mjs';
 import { packageVersion as pipelineVersion } from './lib/package-version.mjs';
 import { appendAgentRun, classifyAgentResult } from './lib/agent-history.mjs';
 import { incrementMetrics } from './lib/metrics-incremental.mjs';
@@ -2049,6 +2050,11 @@ class PipelineRunner {
     this.logger.info(`Context: ${JSON.stringify(this.context)}`, 'PipelineRunner');
 
     while (this.running && this.stepCount < maxSteps) {
+      if (this.currentStage !== 'end') {
+        await this.waitWhilePauseRequested();
+        if (!this.running) { break; }
+      }
+
       this.stepCount++;
 
       this.logger.info(`Step ${this.stepCount}`, 'PipelineRunner');
@@ -2252,6 +2258,29 @@ class PipelineRunner {
    */
   sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Держит раннер перед следующей стадией, пока есть адресованный ему запрос
+   * паузы (`lib/pause-request.mjs`).
+   *
+   * Пауза кооперативная: проверяется между стадиями, текущая стадия и её агент
+   * доигрывают до конца. Приостановка процесса раннера агента не
+   * останавливает, а таймаут стадии продолжает тикать — после долгой паузы
+   * стадию убивало бы по таймауту.
+   *
+   * Строки `PAUSED …` и `RESUMED …` читает расширение VS Code: по ним запуск
+   * снаружи показывается как стоящий на паузе.
+   */
+  async waitWhilePauseRequested() {
+    if (!readPauseRequest(this.projectRoot, process.pid)) { return; }
+    this.logger.info(`PAUSED before stage="${this.currentStage}"`, 'PipelineRunner');
+    while (this.running && readPauseRequest(this.projectRoot, process.pid)) {
+      await this.sleep(this.pausePollMs ?? 1000);
+    }
+    if (this.running) {
+      this.logger.info(`RESUMED stage="${this.currentStage}"`, 'PipelineRunner');
+    }
   }
 
   /**
@@ -2575,6 +2604,9 @@ async function runPipeline(argv = process.argv.slice(2)) {
       ...(startedByIdValue !== null ? { started_by_id: startedByIdValue } : {}),
       project_root: projectRoot,
       pipeline_version: pipelineVersion(),
+      // Что умеет этот раннер. По полю расширение решает, предлагать ли паузу:
+      // старый раннер запрос паузы молча проигнорировал бы.
+      capabilities: [...RUNNER_CAPABILITIES],
       run_id: runId,
       pipeline_log: path.relative(projectRoot, logFilePath).split(path.sep).join('/')
     });
