@@ -1,12 +1,33 @@
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { getGlobalDir } from '../global-dir.mjs';
 
-/** Windows сравнивает пути без учёта регистра, POSIX — с учётом. */
+/**
+ * Один и тот же ли это каталог.
+ *
+ * Сравниваются настоящие пути (`realpathSync.native`), а не строки: на
+ * Windows у каталога бывает короткое имя 8.3, и `C:\Users\RUNNER~1\.workflow`
+ * с `C:\Users\runneradmin\.workflow` строками не совпадают. Так было на
+ * раннере GitHub: `TEMP` там короткий, подъём от него приходил к глобальному
+ * каталогу под коротким именем, исключение не срабатывало, и домашний каталог
+ * принимался за корень проекта. JS-версия `realpathSync` короткие имена не
+ * раскрывает — только `native` (замер: native(short) === native(long)).
+ *
+ * Если пути не существуют, остаётся строковое сравнение: Windows — без учёта
+ * регистра, POSIX — с учётом.
+ */
 function samePath(a, b) {
+  let left = a;
+  let right = b;
+  try {
+    left = realpathSync.native(a);
+    right = realpathSync.native(b);
+  } catch {
+    // Какого-то из путей нет — сравниваем как есть.
+  }
   return process.platform === 'win32'
-    ? a.toLowerCase() === b.toLowerCase()
-    : a === b;
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right;
 }
 
 /**

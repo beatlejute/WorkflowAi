@@ -5,6 +5,22 @@ import { join } from 'node:path';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { initProject } from '../init.mjs';
 
+// `initProject` зовёт `ensureGlobalDir()`: без подмены `WORKFLOW_HOME` тест
+// создавал настоящую `~/.workflow` — на машине разработчика трогал рабочий
+// каталог, а на раннере GitHub посреди прогона появлялась
+// `C:\Users\runneradmin\.workflow`, и соседние тесты `find-root` находили её
+// подъёмом от `TEMP`.
+const savedWorkflowHome = process.env.WORKFLOW_HOME;
+process.env.WORKFLOW_HOME = join(tmpdir(), `workflow-example-global-${process.pid}-${Date.now()}`);
+process.on('exit', () => {
+  rmSync(process.env.WORKFLOW_HOME, { recursive: true, force: true });
+  if (savedWorkflowHome === undefined) {
+    delete process.env.WORKFLOW_HOME;
+  } else {
+    process.env.WORKFLOW_HOME = savedWorkflowHome;
+  }
+});
+
 test('initProject creates .workflow/state/ directory', () => {
   const projectRoot = join(tmpdir(), `workflow-example-state-test-${Date.now()}`);
 

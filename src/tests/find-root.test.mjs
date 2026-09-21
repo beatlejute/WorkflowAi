@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { findProjectRoot } from '../lib/find-root.mjs';
 
 test('findProjectRoot finds .workflow/ in current directory', () => {
@@ -129,5 +130,50 @@ test('findProjectRoot не принимает глобальную директ�
       process.env.WORKFLOW_HOME = prevHome;
     }
     rmSync(globalHome, { recursive: true, force: true });
+  }
+});
+
+// На раннере GitHub `TEMP` — короткое имя 8.3 (`C:\Users\RUNNER~1\…`), а
+// глобальный каталог — длинное (`C:\Users\runneradmin\.workflow`). Подъём
+// от `TEMP` приходил к глобальному каталогу под коротким именем, строковое
+// сравнение его не узнавало, и домашний каталог становился корнем проекта.
+test('глобальный каталог узнаётся и по короткому имени 8.3', {
+  skip: process.platform !== 'win32' && 'короткие имена 8.3 есть только на Windows'
+}, (t) => {
+  const home = join(tmpdir(), `find-root-long-home-directory-${Date.now()}`);
+  const start = join(home, 'AppData', 'Local', 'Temp', 'job');
+  const savedHome = process.env.WORKFLOW_HOME;
+  mkdirSync(join(home, '.workflow'), { recursive: true });
+  mkdirSync(start, { recursive: true });
+  try {
+    const shortStart = execSync(`cmd /c for %I in ("${start}") do @echo %~sI`, { encoding: 'utf8' }).trim();
+    if (shortStart.toLowerCase() === start.toLowerCase()) {
+      t.skip('на этом томе короткие имена 8.3 не создаются');
+      return;
+    }
+    process.env.WORKFLOW_HOME = join(home, '.workflow');
+
+    let found = null;
+    try {
+      found = findProjectRoot(shortStart);
+    } catch {
+      // Корня выше нет — тоже верный исход: глобальный каталог пропущен.
+    }
+    // Выше по дереву может лежать чужая `.workflow` (у разработчика — своя
+    // `~/.workflow`), поэтому проверяется одно: найденный корень — не дом.
+    if (found !== null) {
+      assert.notStrictEqual(
+        realpathSync.native(found).toLowerCase(),
+        realpathSync.native(home).toLowerCase(),
+        `домашний каталог принят за проект: ${found}`
+      );
+    }
+  } finally {
+    if (savedHome === undefined) {
+      delete process.env.WORKFLOW_HOME;
+    } else {
+      process.env.WORKFLOW_HOME = savedHome;
+    }
+    rmSync(home, { recursive: true, force: true });
   }
 });

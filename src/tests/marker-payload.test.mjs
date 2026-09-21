@@ -37,7 +37,9 @@ ${extraExecution}  stages:
 
 function cleanup(root) {
   if (existsSync(root)) {
-    rmSync(root, { recursive: true, force: true });
+    // Повторы — на случай, если Windows ещё не отпустил дескриптор лога
+    // после выхода процесса: `rmSync` сам повторяет при EBUSY/EPERM.
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 
@@ -65,8 +67,14 @@ async function runAndReadMarker(root, env = {}) {
     }
     return readMarker(root);
   } finally {
-    child.kill();
-    await wait(200);
+    // Ждём настоящего выхода, а не 200 мс. Пока раннер жив, каталог проекта —
+    // его `cwd`, и Windows не даёт удалить его: на раннере GitHub два теста
+    // падали с `EBUSY: resource busy or locked, rmdir …wf-marker-payload-…`.
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise((resolveExit) => child.once('exit', resolveExit));
+      child.kill();
+      await Promise.race([exited, wait(10000)]);
+    }
   }
 }
 
