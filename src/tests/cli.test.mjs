@@ -220,3 +220,100 @@ test('workflow run with plan option executes', () => {
     process.exit = originalExit;
   }
 });
+
+// ============ Version Reporting Tests ============
+
+import { readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const pkgVersion = JSON.parse(
+  readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json'), 'utf-8')
+).version;
+
+function captureLog(fn) {
+  const originalLog = console.log;
+  const loggedLines = [];
+  console.log = (...args) => {
+    loggedLines.push(args.join(' '));
+  };
+  try {
+    fn();
+  } finally {
+    console.log = originalLog;
+  }
+  return loggedLines.join('\n');
+}
+
+test('workflow version shows actual package.json version', () => {
+  const output = captureLog(() => run(['version']));
+  assert.ok(
+    output.includes(`workflow-ai v${pkgVersion}`),
+    `Version should be ${pkgVersion}, got: ${output}`
+  );
+});
+
+test('workflow help shows actual package.json version, not a hardcoded one', () => {
+  const output = captureLog(() => run(['help']));
+  assert.ok(
+    output.includes(`workflow-ai v${pkgVersion}`),
+    `Help header should carry version ${pkgVersion}, got: ${output.split('\n')[0]}`
+  );
+});
+
+test('workflow --version shows version instead of help', () => {
+  const output = captureLog(() => run(['--version']));
+  assert.ok(
+    output.includes(`workflow-ai v${pkgVersion}`),
+    `--version should print version ${pkgVersion}, got: ${output}`
+  );
+  assert.ok(!output.includes('Usage:'), '--version should not print the help text');
+});
+
+test('workflow -v shows version instead of unknown command error', () => {
+  const output = captureLog(() => run(['-v']));
+  assert.ok(
+    output.includes(`workflow-ai v${pkgVersion}`),
+    `-v should print version ${pkgVersion}, got: ${output}`
+  );
+});
+
+// ============ Help Flags & Layout Tests ============
+
+test('workflow --help shows help text', () => {
+  const output = captureLog(() => run(['--help']));
+  assert.ok(output.includes('Usage:'), '--help should print the help text');
+  assert.ok(output.includes('workflow init'), '--help should list commands');
+});
+
+test('workflow -h shows help instead of unknown command error', () => {
+  const originalError = console.error;
+  const errorLines = [];
+  console.error = (...args) => {
+    errorLines.push(args.join(' '));
+  };
+
+  try {
+    const output = captureLog(() => run(['-h']));
+    assert.ok(output.includes('Usage:'), '-h should print the help text');
+    assert.equal(errorLines.length, 0, '-h should not report an unknown command');
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('help command list is aligned in a single description column', () => {
+  const output = captureLog(() => run(['help']));
+  const columns = output
+    .split('\n')
+    .map((line) => /^ {2}workflow \S.*? {2,}(?=\S)/.exec(line))
+    .filter(Boolean)
+    .map((match) => match[0].length);
+
+  assert.ok(columns.length > 1, 'help should list several commands');
+  assert.equal(
+    new Set(columns).size,
+    1,
+    `command descriptions should start at one column, got: ${[...new Set(columns)].join(', ')}`
+  );
+});

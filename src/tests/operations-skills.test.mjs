@@ -6,6 +6,8 @@ import { mkdirSync, writeFileSync, rmSync, symlinkSync, lstatSync } from 'node:f
 import { listSkills } from '../lib/operations/skills.mjs';
 
 describe('operations/skills.mjs', () => {
+  // Каталог общих скилов по умолчанию берётся из глобальной установки
+  // (`~/.workflow/skills`), поэтому тесты подставляют свой через options.
   let testDir, globalRoot, projectRoot, globalSkillsDir, projectSkillsDir;
 
   beforeEach(() => {
@@ -33,7 +35,7 @@ describe('operations/skills.mjs', () => {
 
     // Do NOT create project skills directory
 
-    const skills = await listSkills(projectRoot);
+    const skills = await listSkills(projectRoot, { globalSkillsDir });
 
     assert.equal(skills.length, 2, 'Should return 2 skills');
 
@@ -63,7 +65,7 @@ describe('operations/skills.mjs', () => {
     writeFileSync(join(projectSkillsDir, 'skill1', 'SKILL.md'), '# Ejected Skill 1');
     writeFileSync(join(projectSkillsDir, 'skill3', 'SKILL.md'), '# Ejected Skill 3');
 
-    const skills = await listSkills(projectRoot);
+    const skills = await listSkills(projectRoot, { globalSkillsDir });
 
     assert.equal(skills.length, 3, 'Should return 3 skills (skill1 ejected, skill2 shared, skill3 ejected)');
 
@@ -97,7 +99,7 @@ describe('operations/skills.mjs', () => {
 
     // Explicitly do NOT create project skills directory
 
-    const skills = await listSkills(projectRoot);
+    const skills = await listSkills(projectRoot, { globalSkillsDir });
 
     assert.equal(skills.length, 2, 'Should return 2 skills from global directory');
 
@@ -124,7 +126,7 @@ describe('operations/skills.mjs', () => {
     const stats = lstatSync(projectSkillsDir);
     assert.ok(stats.isSymbolicLink(), 'Project skills directory should be a symlink/junction');
 
-    const skills = await listSkills(projectRoot);
+    const skills = await listSkills(projectRoot, { globalSkillsDir });
 
     assert.equal(skills.length, 2, 'Should return 2 skills');
 
@@ -139,7 +141,7 @@ describe('operations/skills.mjs', () => {
     // Create empty global skills directory
     mkdirSync(globalSkillsDir, { recursive: true });
 
-    const skills = await listSkills(projectRoot);
+    const skills = await listSkills(projectRoot, { globalSkillsDir });
 
     assert.equal(skills.length, 0, 'Should return empty array when no skills exist');
   });
@@ -159,7 +161,7 @@ describe('operations/skills.mjs', () => {
     writeFileSync(join(projectSkillsDir, 'skill2', 'SKILL.md'), '# Ejected Skill 2');
     writeFileSync(join(projectSkillsDir, 'skill4', 'SKILL.md'), '# Ejected Skill 4');
 
-    const skills = await listSkills(projectRoot);
+    const skills = await listSkills(projectRoot, { globalSkillsDir });
 
     assert.equal(skills.length, 4, 'Should return 4 unique skills');
 
@@ -179,5 +181,39 @@ describe('operations/skills.mjs', () => {
 
     // skill4: ejected (ejected only)
     assert.equal(skill4.source, 'ejected', 'skill4 should be ejected (ejected only)');
+  });
+
+  test('TC7: нет каталога общих скилов → скилы проекта не теряются', async () => {
+    // Так выглядит обычная раскладка: workflow-ai стоит зависимостью,
+    // `workflow init` не запускался, глобального каталога нет вовсе. Раньше
+    // функция выходила сразу и скопированные в проект скилы пропадали.
+    mkdirSync(join(projectSkillsDir, 'skill1'), { recursive: true });
+    mkdirSync(join(projectSkillsDir, 'skill2'), { recursive: true });
+    writeFileSync(join(projectSkillsDir, 'skill1', 'SKILL.md'), '# Ejected Skill 1');
+    writeFileSync(join(projectSkillsDir, 'skill2', 'SKILL.md'), '# Ejected Skill 2');
+
+    // globalSkillsDir намеренно не создан
+    const skills = await listSkills(projectRoot, { globalSkillsDir });
+
+    assert.equal(skills.length, 2, 'скилы проекта должны вернуться и без глобального каталога');
+    for (const skill of skills) {
+      assert.equal(skill.source, 'ejected', `${skill.name} должен быть ejected`);
+      assert.equal(skill.path, join(projectSkillsDir, skill.name));
+    }
+  });
+
+  test('TC8: каталог без SKILL.md скилом не считается', async () => {
+    mkdirSync(join(globalSkillsDir, 'skill1'), { recursive: true });
+    writeFileSync(join(globalSkillsDir, 'skill1', 'SKILL.md'), '# Skill 1');
+    // В `.workflow/src/skills` реальных проектов лежит, например, папка `shared`
+    // с общими документами — она попадала в выдачу как ejected-скил.
+    mkdirSync(join(projectSkillsDir, 'shared'), { recursive: true });
+    writeFileSync(join(projectSkillsDir, 'shared', 'README.md'), '# не скил');
+    // И в глобальном каталоге тоже.
+    mkdirSync(join(globalSkillsDir, 'docs'), { recursive: true });
+
+    const skills = await listSkills(projectRoot, { globalSkillsDir });
+
+    assert.deepEqual(skills.map(s => s.name), ['skill1']);
   });
 });

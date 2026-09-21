@@ -134,7 +134,8 @@ export function checkAndClosePlan(workflowDir, planId) {
     const dir = path.join(ticketsDir, dirName);
     if (!fs.existsSync(dir)) continue;
 
-    const files = fs.readdirSync(dir).filter(f => f.endsWith('.md') && f !== '.gitkeep.md');
+    // Точечные файлы каталога служебные: `.gitkeep.md` кладёт `workflow init`.
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.md') && !f.startsWith('.'));
     for (const file of files) {
       try {
         const content = fs.readFileSync(path.join(dir, file), 'utf8');

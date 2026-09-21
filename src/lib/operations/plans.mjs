@@ -4,15 +4,15 @@ import path from 'path';
 import fs from 'fs/promises';
 
 /**
- * List all plans in plans/current and plans/archive directories.
+ * List all plans in .workflow/plans/current and .workflow/plans/archive directories.
  * @param {string} projectRoot - Absolute path to project root
  * @param {{ status?: string }} [options] - Filter options
  * @returns {Promise<Array<{id: string, title: string, status: string, path: string}>>}
  */
 export async function listPlans(projectRoot, { status } = {}) {
   const plansDirs = [
-    path.join(projectRoot, 'plans', 'current'),
-    path.join(projectRoot, 'plans', 'archive')
+    path.join(projectRoot, '.workflow', 'plans', 'current'),
+    path.join(projectRoot, '.workflow', 'plans', 'archive')
   ];
 
   const allPlans = [];
@@ -21,7 +21,10 @@ export async function listPlans(projectRoot, { status } = {}) {
     try {
       const files = await fs.readdir(plansDir);
       for (const file of files) {
-        if (!file.endsWith('.md')) continue;
+        // `.gitkeep.md` кладёт `workflow init` в каждый каталог планов: без
+        // отсечки точечных файлов он выходил из `listPlans` как план с пустым
+        // заголовком, id `.gitkeep` и статусом `unknown`.
+        if (!file.endsWith('.md') || file.startsWith('.')) continue;
         const filePath = path.join(plansDir, file);
         const content = await fs.readFile(filePath, 'utf8');
         const { frontmatter } = parseFrontmatter(content);
@@ -51,15 +54,18 @@ export async function listPlans(projectRoot, { status } = {}) {
  */
 export async function getPlan(projectRoot, planId) {
   const plansDirs = [
-    path.join(projectRoot, 'plans', 'current'),
-    path.join(projectRoot, 'plans', 'archive')
+    path.join(projectRoot, '.workflow', 'plans', 'current'),
+    path.join(projectRoot, '.workflow', 'plans', 'archive')
   ];
 
   for (const plansDir of plansDirs) {
     try {
       const files = await fs.readdir(plansDir);
       for (const file of files) {
-        if (!file.endsWith('.md')) continue;
+        // `.gitkeep.md` кладёт `workflow init` в каждый каталог планов: без
+        // отсечки точечных файлов он выходил из `listPlans` как план с пустым
+        // заголовком, id `.gitkeep` и статусом `unknown`.
+        if (!file.endsWith('.md') || file.startsWith('.')) continue;
         // Normalize file name to plan ID format for comparison
         const fileId = file.replace('.md', '');
         if (fileId === planId || fileId.toUpperCase() === planId.toUpperCase()) {

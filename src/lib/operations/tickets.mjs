@@ -141,6 +141,53 @@ function assertValidTransition(from, to) {
 }
 
 /**
+ * Открывает manual-gate, ждущие этот тикет.
+ *
+ * Раньше хук жил только в CLI-скрипте `src/scripts/move-ticket.js`, а все
+ * прочие потребители (MCP `move_ticket`/`resolve_human_ticket`, VS Code-расширение)
+ * двигали тикет мимо него. Раннер ждёт решения в approval-файле до
+ * `manual-gate-human.timeout` (сутки), после чего уводит тикет в blocked, —
+ * поэтому хук должен срабатывать на любом перемещении, не только через CLI.
+ *
+ * Ошибка хука не должна фейлить само перемещение: тикет уже переехал.
+ *
+ * @param {string} root - Корень проекта
+ * @param {string} id - ID тикета
+ * @param {string} target - Целевой статус
+ * @returns {Promise<string[]>} Имена файлов, переведённых в approved
+ */
+export async function approveOpenGates(root, id, target) {
+  const approved = [];
+  try {
+    const approvalsDir = join(root, '.workflow', 'approvals');
+    if (!existsSync(approvalsDir)) return approved;
+
+    const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`^${escapedId}_manual-gate-.*_\\d+\\.json$`);
+
+    for (const file of readdirSync(approvalsDir)) {
+      if (!pattern.test(file)) continue;
+      const filePath = join(approvalsDir, file);
+      try {
+        const data = JSON.parse(await fs.readFile(filePath, 'utf8'));
+        if (data.status !== 'pending') continue;
+        data.status = 'approved';
+        data.decided_by = 'move-ticket';
+        data.comment = `auto-approved on move to ${target}`;
+        data.updated_at = new Date().toISOString();
+        await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
+        approved.push(file);
+      } catch {
+        // Битый или исчезнувший файл — пропускаем остальные не трогаем.
+      }
+    }
+  } catch {
+    // Нет каталога, нет прав — гейта просто нет.
+  }
+  return approved;
+}
+
+/**
  * Перемещает тикет между колонками канбан-доски
  * @param {string} projectRoot - Корень проекта
  * @param {string} id - ID тикета
@@ -227,7 +274,10 @@ export async function moveTicket(projectRoot, id, target) {
     throw new Error(`Не удалось записать файл: ${e.message}`);
   }
 
-  return { from, to: target, path: targetPath };
+  // Хук: открываем manual-gate — срабатывает на любом перемещении.
+  const gates = await approveOpenGates(root, id, target);
+
+  return { from, to: target, path: targetPath, approvals: gates };
 }
 
 /**
@@ -285,6 +335,8 @@ function checkDependencies(projectRoot, dependencies) {
  * Создаёт новый тикет в tickets/backlog/ с автоинкрементированным ID
  * @param {string} projectRoot - Корень проекта
  * @param {object} data - Данные для frontmatter (title, type, priority, tags, context, etc.)
+ * @param {string} [data.body] - Тело тикета; без него берётся пустой шаблон
+ * @param {string} [data.plan_id] - План-родитель; синоним `parent_plan`
  * @returns {Promise<{id: string, path: string}>} Созданный ID и абсолютный путь
  */
 export async function createTicket(projectRoot, data) {
@@ -306,7 +358,10 @@ export async function createTicket(projectRoot, data) {
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     completed_at: '',
-    parent_plan: data.parent_plan ?? '',
+    // `plan_id` — имя того же поля у вызывающих: так его называет MCP-tool
+    // `create_ticket` и так о нём говорят планы. Без синонима связь тикета с
+    // планом молча терялась: параметр принимали, в файл он не попадал.
+    parent_plan: data.parent_plan ?? data.plan_id ?? '',
     parent_task: data.parent_task ?? '',
     dependencies: data.dependencies ?? [],
     conditions: data.conditions ?? [],
@@ -326,7 +381,13 @@ export async function createTicket(projectRoot, data) {
   }
 
   const path = join(backlogDir, `${id}.md`);
-  const content = serializeFrontmatter(frontmatter) + '\n## Описание\n\n\n## Критерии готовности (Definition of Done)\n\n- [ ] \n';
+  // Пустой шаблон — запасной вариант, а не единственный: переданное тело
+  // раньше отбрасывалось, и тикет из MCP всегда выходил с пустым описанием.
+  const template = '\n## Описание\n\n\n## Критерии готовности (Definition of Done)\n\n- [ ] \n';
+  const body = typeof data.body === 'string' && data.body.trim().length > 0
+    ? '\n' + data.body.replace(/\s+$/, '') + '\n'
+    : template;
+  const content = serializeFrontmatter(frontmatter) + body;
 
   try {
     await fs.writeFile(path, content, 'utf8');
@@ -351,7 +412,7 @@ export async function pickNext(projectRoot) {
     return { empty: true, reason: 'no_ready_tickets' };
   }
 
-  const files = readdirSync(readyDir).filter(f => f.endsWith('.md') && f !== '.gitkeep.md');
+  const files = readdirSync(readyDir).filter(f => f.endsWith('.md') && !f.startsWith('.'));
   if (files.length === 0) {
     return { empty: true, reason: 'no_ready_tickets' };
   }

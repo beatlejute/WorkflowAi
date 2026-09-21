@@ -11,6 +11,7 @@ import { snapshot, diff, isEmpty } from './lib/artifact-snapshot.mjs';
 import { markUnhealthy, isHealthy } from './lib/agent-health-registry.mjs';
 import { writeMarker, readMarker, removeMarker } from './lib/marker.mjs';
 import { processAlive } from './lib/process-alive.mjs';
+import { packageVersion as pipelineVersion } from './lib/package-version.mjs';
 import { appendAgentRun, classifyAgentResult } from './lib/agent-history.mjs';
 import { incrementMetrics } from './lib/metrics-incremental.mjs';
 
@@ -1641,7 +1642,30 @@ class StageExecutor {
 // PipelineRunner — основной цикл выполнения пайплайна
 // ============================================================================
 class PipelineRunner {
-  constructor(config, args) {
+  /**
+   * run_id для запуска, начавшегося в момент `isoTimestamp`.
+   * Совпадает с именем лог-файла без расширения — на это полагаются
+   * внешние наблюдатели (VS Code расширение, workflow-mcp).
+   */
+  static buildRunId(isoTimestamp) {
+    return `pipeline_${isoTimestamp.replace(/[:.]/g, '-').replace('T', '_').substring(0, 19)}`;
+  }
+
+  /** Полный путь к логу запуска. Каталог берётся из `execution.log_file`, если задан. */
+  static resolveLogFilePath(pipeline, projectRoot, runId) {
+    const logDir = pipeline.execution?.log_file
+      ? path.dirname(path.resolve(projectRoot, pipeline.execution.log_file))
+      : path.resolve(projectRoot, '.workflow/logs');
+    return path.resolve(logDir, `${runId}.log`);
+  }
+
+  /**
+   * @param {object} config — загруженный pipeline.yaml
+   * @param {object} args — аргументы CLI
+   * @param {{runId?: string, logFilePath?: string}} [overrides] — заранее
+   *   вычисленные идентификаторы запуска (см. runPipeline)
+   */
+  constructor(config, args, overrides = {}) {
     this.config = config;
     
     // Validate manual-gate stages in pipeline.yaml at startup
@@ -1687,13 +1711,15 @@ class PipelineRunner {
     // Базовая директория проекта вычисляется динамически
     const projectRoot = args.project ? path.resolve(args.project) : findProjectRoot();
 
-    // Инициализация Logger — каждый запуск пишется в отдельный файл
-    const logDir = this.pipeline.execution?.log_file
-      ? path.dirname(path.resolve(projectRoot, this.pipeline.execution.log_file))
-      : path.resolve(projectRoot, '.workflow/logs');
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').substring(0, 19);
-    const logFilePath = path.resolve(logDir, `pipeline_${timestamp}.log`);
-    this.logger = new Logger(logFilePath);
+    // Инициализация Logger — каждый запуск пишется в отдельный файл.
+    // runPipeline вычисляет run_id и путь заранее, чтобы записать маркер одной
+    // атомарной записью, и передаёт их сюда; при прямом создании раннера
+    // (тесты, встраивание) считаем сами.
+    this.runId = overrides.runId || PipelineRunner.buildRunId(new Date().toISOString());
+    this.logFilePath = overrides.logFilePath
+      || PipelineRunner.resolveLogFilePath(this.pipeline, projectRoot, this.runId);
+
+    this.logger = new Logger(this.logFilePath);
     this.loggerInitialized = false;
 
     // Инициализация контекста из CLI аргументов
@@ -2244,6 +2270,56 @@ class PipelineRunner {
   }
 }
 
+/** Кто может значиться в `started_by`. Остальное — мусор в env. */
+const STARTED_BY_VALUES = new Set(['cli', 'mcp', 'extension']);
+
+/**
+ * Источник запуска для маркера.
+ *
+ * Значение приходит через `WORKFLOW_STARTED_BY` от того, кто спавнит раннер.
+ * Переменная тут же снимается: `spawn` для агентов наследует окружение, и
+ * вложенный `workflow run` иначе унаследовал бы чужой источник.
+ * Неизвестное значение отбрасывается — контракт поля закрытый.
+ */
+function startedBy() {
+  const raw = process.env.WORKFLOW_STARTED_BY;
+  delete process.env.WORKFLOW_STARTED_BY;
+
+  if (!raw) { return 'cli'; }
+  if (STARTED_BY_VALUES.has(raw)) { return raw; }
+
+  console.warn(`[runner] unknown WORKFLOW_STARTED_BY=${JSON.stringify(raw)} — writing 'cli'`);
+  return 'cli';
+}
+
+/** Непрозрачная метка: буквы, цифры и немного разделителей, до 128 символов. */
+const STARTED_BY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9@._:-]{0,127}$/;
+
+/**
+ * Идентификатор экземпляра, запустившего раннер.
+ *
+ * Приходит через `WORKFLOW_STARTED_BY_ID` рядом с `WORKFLOW_STARTED_BY` и
+ * ложится в lock отдельным полем. По нему MCP-сервер узнаёт собственный
+ * запуск, не заводя второго файла владения: до этого поля он писал рядом
+ * `.workflow/logs/.mcp-started-by`, и два файла про один запуск умели
+ * разойтись.
+ *
+ * Значение раннер не расшифровывает — для него это метка. Отбрасывается явный
+ * мусор: пустое, длиннее 128 символов, с пробелами или управляющими символами.
+ * Переменная снимается по той же причине, что и `WORKFLOW_STARTED_BY`:
+ * вложенный `workflow run` иначе унаследовал бы чужую метку.
+ */
+function startedById() {
+  const raw = process.env.WORKFLOW_STARTED_BY_ID;
+  delete process.env.WORKFLOW_STARTED_BY_ID;
+
+  if (!raw) { return null; }
+  if (STARTED_BY_ID_PATTERN.test(raw)) { return raw; }
+
+  console.warn(`[runner] unknown WORKFLOW_STARTED_BY_ID=${JSON.stringify(raw)} — omitting the field`);
+  return null;
+}
+
 function markerStartedAt(projectRoot, marker) {
   if (typeof marker.started_at === 'string' && marker.started_at) return marker.started_at;
   if (typeof marker.timestamp === 'string' && marker.timestamp) return marker.timestamp;
@@ -2445,13 +2521,58 @@ async function runPipeline(argv = process.argv.slice(2)) {
     removeMarker(projectRoot);
   }
 
+  // Конфиг читается ДО записи lock'а (но ПОСЛЕ проверки занятости — иначе
+  // ошибка конфига маскировала бы ответ «уже запущен»). Так путь к логу известен
+  // заранее и весь payload пишется одной атомарной записью: дозапись вторым
+  // вызовом означала бы `rename` поверх файла, который в этот момент уже читают
+  // наблюдатели, а на Windows это EPERM — и run_id не появился бы до конца
+  // запуска. Побочных эффектов у загрузки конфига нет, а битый конфиг больше не
+  // создаёт lock, который тут же снимается.
+  let config;
+  try {
+    config = loadConfig(args.config);
+  } catch (err) {
+    console.error(`\nError: ${err.message}`);
+    return { exitCode: 1, error: err.message, stack: err.stack };
+  }
+
+  const configErrors = validateConfig(config);
+  if (configErrors.length > 0) {
+    console.error('Configuration validation failed:');
+    configErrors.forEach(err => console.error(`  - ${err}`));
+    return { exitCode: 1, error: 'Configuration validation failed', details: configErrors };
+  }
+
+  console.log(`Pipeline: ${config.pipeline.name} v${config.pipeline.version}`);
+  console.log(`Agents: ${Object.keys(config.pipeline.agents).join(', ')}`);
+  console.log(`Stages: ${Object.keys(config.pipeline.stages).join(', ')}`);
+  console.log('');
+  console.log('Configuration validated successfully!');
+
   // Write marker to protect against stale processes
   const startedAt = new Date().toISOString();
+  const runId = PipelineRunner.buildRunId(startedAt);
+  const logFilePath = PipelineRunner.resolveLogFilePath(config.pipeline, projectRoot, runId);
+
+  // Считывается до записи lock'а: обе функции снимают свою переменную из
+  // окружения, и порядок полей в литерале не должен на это влиять.
+  const startedByIdValue = startedById();
+
   try {
     writeMarker(projectRoot, {
       pid: process.pid,
       started_at: startedAt,
-      timestamp: startedAt
+      timestamp: startedAt,
+      // Кто запустил раннер. Определяет запускающая сторона: CLI ничего не
+      // ставит, MCP-сервер и VS Code расширение передают env при spawn.
+      started_by: startedBy(),
+      // Какой именно экземпляр запустил. Поля нет, если запускающий не
+      // представился, — отсутствие и «неизвестно» тут одно и то же.
+      ...(startedByIdValue !== null ? { started_by_id: startedByIdValue } : {}),
+      project_root: projectRoot,
+      pipeline_version: pipelineVersion(),
+      run_id: runId,
+      pipeline_log: path.relative(projectRoot, logFilePath).split(path.sep).join('/')
     });
   } catch (err) {
     console.error(`[runner] failed to write marker: ${err.message}`);
@@ -2467,23 +2588,9 @@ async function runPipeline(argv = process.argv.slice(2)) {
   process.once('SIGTERM', cleanup);
 
   try {
-    const config = loadConfig(args.config);
-    const errors = validateConfig(config);
-
-    if (errors.length > 0) {
-      console.error('Configuration validation failed:');
-      errors.forEach(err => console.error(`  - ${err}`));
-      return { exitCode: 1, error: 'Configuration validation failed', details: errors };
-    }
-
-    console.log(`Pipeline: ${config.pipeline.name} v${config.pipeline.version}`);
-    console.log(`Agents: ${Object.keys(config.pipeline.agents).join(', ')}`);
-    console.log(`Stages: ${Object.keys(config.pipeline.stages).join(', ')}`);
-    console.log('');
-    console.log('Configuration validated successfully!');
-
-    // Запускаем пайплайн
-    const runner = new PipelineRunner(config, args);
+    // Запускаем пайплайн. run_id и путь к логу уже записаны в маркер — раннер
+    // получает ровно их, чтобы имя файла и lock не разъехались.
+    const runner = new PipelineRunner(config, args, { runId, logFilePath });
     const result = await runner.run();
 
     console.log('\n=== Summary ===');

@@ -1,6 +1,6 @@
 {
   "name": "workflow-ai",
-  "version": "1.5.2",
+  "version": "1.7.2",
   "description": "AI Agent Workflow Coordinator — kanban-based pipeline for AI coding agents",
   "type": "module",
   "bin": {
@@ -28,7 +28,9 @@
     "./lib/utils.mjs": "./src/lib/utils.mjs",
     "./lib/logger.mjs": "./src/lib/logger.mjs",
     "./lib/js-yaml.mjs": "./src/lib/js-yaml.mjs",
-    "./lib/operations/tickets.mjs": "./src/lib/operations/tickets.mjs"
+    "./lib/operations/tickets.mjs": "./src/lib/operations/tickets.mjs",
+    "./lib/operations/plans.mjs": "./src/lib/operations/plans.mjs",
+    "./lib/operations/skills.mjs": "./src/lib/operations/skills.mjs"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -40,7 +42,6 @@
     "coverage:mark-blocked": "c8 node --test src/tests/scripts-mark-blocked.test.mjs",
     "coverage:pick-next-task": "node scripts/coverage-pick-next-task.js",
     "coverage:move-ticket": "c8 node --test src/tests/scripts-move-ticket-approval-hook.test.mjs",
-    "mutation-test": "stryker run",
     "release": "npm version patch && git push --follow-tags"
   },
   "dependencies": {

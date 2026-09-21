@@ -2,21 +2,21 @@
 
 import { initProject } from './init.mjs';
 import { runPipeline } from './runner.mjs';
-import { readFileSync } from 'node:fs';
+import { packageVersion } from './lib/package-version.mjs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getGlobalDir, refreshGlobalDir, ensureGlobalDir } from './global-dir.mjs';
 import { createSkillJunctions, createScriptJunction, createConfigJunction, ejectSkill, ejectScripts, ejectConfigs, listSkillsWithStatus } from './junction-manager.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const pkgPath = join(__dirname, '..', 'package.json');
 
-const HELP_TEXT = `workflow-ai v1.0.0
+const VERSION_FLAGS = new Set(['--version', '-v']);
+const HELP_FLAGS = new Set(['--help', '-h']);
 
-Usage:
+const USAGE_TEXT = `Usage:
   workflow init [path] [--force]     Initialize .workflow/ in target directory
   workflow run [options]             Run the AI pipeline
-  workflow update [path]               Update global dir and recreate junctions
+  workflow update [path]             Update global dir and recreate junctions
   workflow eject <skill> [path]      Eject a skill (copy from global to project)
   workflow eject-scripts [path]      Eject scripts (copy from global to project)
   workflow eject-configs [path]      Eject configs (copy from global to project)
@@ -30,14 +30,26 @@ Run options:
   --project <path>   Project root (default: auto-detect)
 `;
 
+function readVersion() {
+  // Общий источник с полем pipeline_version в .pipeline.lock.
+  return packageVersion();
+}
+
 function showHelp() {
-  console.log(HELP_TEXT);
+  let version;
+  try {
+    version = readVersion();
+  } catch {
+    version = 'unknown';
+  }
+  console.log(`workflow-ai v${version}
+
+${USAGE_TEXT}`);
 }
 
 function showVersion() {
   try {
-    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-    console.log(`workflow-ai v${pkg.version}`);
+    console.log(`workflow-ai v${readVersion()}`);
   } catch (err) {
     console.error('Error reading package.json:', err.message);
     process.exit(1);
@@ -170,7 +182,18 @@ function runList(args) {
   }
 }
 
-async function runRun(args) {
+/**
+ * Запускает пайплайн, передавая раннеру аргументы как есть.
+ *
+ * Именно как есть, а не белым списком `--plan/--config/--project`: у раннера
+ * свой разбор, он понимает `--help` и `-h` и отвечает `Unknown option` с кодом
+ * 1 на незнакомый флаг. Пересборка аргументов здесь молча теряла всё
+ * остальное, и `workflow run -h` или опечатка во флаге означали реальный
+ * запуск пайплайна вместо справки или ошибки.
+ *
+ * @param {string[]} runArgv — аргументы после подкоманды `run`
+ */
+async function runRun(runArgv) {
   // Expose wf's node_modules to child ESM scripts via a custom loader
   const loaderPath = join(__dirname, 'wf-loader.mjs');
   const loaderUrl = `file:///${loaderPath.replace(/\\/g, '/')}`;
@@ -178,21 +201,20 @@ async function runRun(args) {
     ? `${process.env.NODE_OPTIONS} --import ${loaderUrl}`
     : `--import ${loaderUrl}`;
 
-  const argv = [];
-  if (args.plan) {
-    argv.push('--plan', args.plan);
-  }
-  if (args.config) {
-    argv.push('--config', args.config);
-  }
-  if (args.project) {
-    argv.push('--project', args.project);
-  }
-  
-  await runPipeline(argv);
+  await runPipeline(runArgv);
 }
 
 export function run(argv) {
+  if (argv.length > 0 && VERSION_FLAGS.has(argv[0])) {
+    showVersion();
+    return;
+  }
+
+  if (argv.length > 0 && HELP_FLAGS.has(argv[0])) {
+    showHelp();
+    return;
+  }
+
   const args = parseArgs(argv);
   const command = args._.shift();
 
@@ -201,7 +223,8 @@ export function run(argv) {
       runInit(args);
       break;
     case 'run':
-      runRun(args);
+      // Раннеру отдаём исходный хвост argv, а не разобранные args: см. runRun.
+      runRun(argv.slice(argv.indexOf('run') + 1));
       break;
     case 'update':
       runUpdate(args);

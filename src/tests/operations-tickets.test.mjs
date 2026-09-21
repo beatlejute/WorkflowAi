@@ -377,5 +377,66 @@ blocked_reason: "Waiting for dependency"
       assert.equal(result1.id, 'QA-001', 'First ticket should be QA-001');
       assert.equal(result2.id, 'QA-002', 'Second ticket should be QA-002');
     });
+
+    test('TC15: createTicket writes the body it was given', async () => {
+      const result = await createTicket(projectRoot, {
+        type: 'IMPL',
+        title: 'With body',
+        body: '## Описание\n\nПочинить разбор конфига.\n'
+      });
+
+      const content = readFileSync(result.path, 'utf8');
+      assert.match(content, /Починить разбор конфига\./, 'Body must reach the file');
+      assert.equal(
+        content.includes('## Критерии готовности (Definition of Done)'),
+        false,
+        'Given body replaces the empty template, not appended to it'
+      );
+    });
+
+    test('TC16: createTicket keeps the empty template when no body is given', async () => {
+      const result = await createTicket(projectRoot, {
+        type: 'IMPL',
+        title: 'No body'
+      });
+
+      const content = readFileSync(result.path, 'utf8');
+      assert.match(content, /## Описание/, 'Template section must stay');
+      assert.match(content, /## Критерии готовности \(Definition of Done\)/, 'DoD section must stay');
+    });
+
+    test('TC17: createTicket ignores a blank body', async () => {
+      const result = await createTicket(projectRoot, {
+        type: 'IMPL',
+        title: 'Blank body',
+        body: '   \n\n'
+      });
+
+      const content = readFileSync(result.path, 'utf8');
+      assert.match(content, /## Критерии готовности \(Definition of Done\)/, 'Blank body falls back to template');
+    });
+
+    test('TC18: createTicket records plan_id as parent_plan', async () => {
+      const result = await createTicket(projectRoot, {
+        type: 'IMPL',
+        title: 'Planned',
+        plan_id: 'PLAN-007'
+      });
+
+      const content = readFileSync(result.path, 'utf8');
+      assert.match(content, /parent_plan: PLAN-007/, 'plan_id must land in parent_plan');
+    });
+
+    test('TC19: explicit parent_plan wins over plan_id', async () => {
+      const result = await createTicket(projectRoot, {
+        type: 'IMPL',
+        title: 'Both fields',
+        parent_plan: 'PLAN-001',
+        plan_id: 'PLAN-007'
+      });
+
+      const content = readFileSync(result.path, 'utf8');
+      assert.match(content, /parent_plan: PLAN-001/, 'parent_plan is the primary field');
+    });
   });
 });

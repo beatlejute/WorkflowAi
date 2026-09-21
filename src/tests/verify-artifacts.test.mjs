@@ -589,3 +589,150 @@ test('verify-artifacts: D4 пропускает тикеты без UI/конт�
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Маркер призрачного выполнения.
+//
+// Детекторы workflow-mcp (`list_ghost_executions` и health-детектор
+// `ghost-execution`) ищут в логе пайплайна структурный токен
+// `[GHOST-EXECUTION]`. Писать его было некому: детекторы работали вхолостую с
+// самого начала. Теперь его печатает verify-artifacts — единственное место,
+// где призрак вообще обнаруживается механически.
+//
+// Токен обязан стоять обособленно: детектор намеренно не ловит прозаические
+// упоминания (тег тикета, commit message, имя файла) — на этом он уже обжёгся
+// двенадцатью ложными срабатываниями (FIX-001).
+// ---------------------------------------------------------------------------
+
+/** Полный stdout скрипта: маркер печатается вне RESULT-блока. */
+function runScriptRaw(ticketPath) {
+  return execFileSync('node', [SCRIPT, ticketPath], { encoding: 'utf8' });
+}
+
+/** Строка маркера, если она есть. */
+function ghostLine(stdout) {
+  return stdout.split('\n').find((line) => line.includes('[GHOST-EXECUTION]')) || null;
+}
+
+test('ghost-маркер: файл не трогали — маркер в stdout', () => {
+  const tmpDir = join(PROJECT_ROOT, '.tmp-ghost-marker-unchanged');
+  rmSync(tmpDir, { recursive: true, force: true });
+  mkdirSync(tmpDir, { recursive: true });
+
+  const deliverableRel = '.tmp-ghost-marker-unchanged/deliverable.txt';
+  const deliverableAbs = join(PROJECT_ROOT, deliverableRel);
+  writeFileSync(deliverableAbs, 'payload', 'utf8');
+
+  const fileMtime = new Date('2026-04-20T00:00:00Z');
+  utimesSync(deliverableAbs, fileMtime, fileMtime);
+
+  const ticketPath = makeTicket(tmpDir, {
+    id: 'QA-903',
+    createdAt: '2026-04-21T00:00:00Z',
+    updatedAt: '2026-04-21T10:00:00Z',
+    deliverablePath: deliverableRel,
+    dod: '- [x] deliverable создан',
+  });
+
+  try {
+    const line = ghostLine(runScriptRaw(ticketPath));
+
+    assert.ok(line, 'маркер не напечатан');
+    // Токен — первое слово строки и отделён пробелом: ровно то, что ищет
+    // детектор. Строка с `тут про [GHOST-EXECUTION]-гейт` ему не подойдёт.
+    assert.ok(line.startsWith('[GHOST-EXECUTION] '), line);
+    assert.match(line, /ticket=QA-903/);
+    assert.match(line, /reason=file_unchanged/);
+    assert.match(line, /unchanged_files=[^\s]*deliverable\.txt/);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ghost-маркер: заявленного метода нет — маркер с reason=assertion_failed', () => {
+  const tmpDir = join(PROJECT_ROOT, '.tmp-ghost-marker-assertion');
+  rmSync(tmpDir, { recursive: true, force: true });
+  mkdirSync(tmpDir, { recursive: true });
+
+  const modRel = '.tmp-ghost-marker-assertion/real-module.mjs';
+  writeFileSync(join(PROJECT_ROOT, modRel), `export class RealClass {
+  actuallyExistingMethod() { return 1; }
+}
+`, 'utf8');
+
+  const ticketPath = makeTicketWithAssertions(tmpDir, {
+    id: 'IMPL-993',
+    createdAt: '2026-04-21T00:00:00Z',
+    deliverablePath: modRel,
+    assertions: `- module: \`${modRel}\`, export: \`RealClass\`, method: \`neverImplemented\``,
+  });
+
+  try {
+    const line = ghostLine(runScriptRaw(ticketPath));
+
+    assert.ok(line, 'маркер не напечатан');
+    assert.match(line, /reason=assertion_failed/);
+    assert.match(line, /ghost_assertions=1/);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ghost-маркер: честно выполненный тикет маркера не даёт', () => {
+  const tmpDir = join(PROJECT_ROOT, '.tmp-ghost-marker-clean');
+  rmSync(tmpDir, { recursive: true, force: true });
+  mkdirSync(tmpDir, { recursive: true });
+
+  const deliverableRel = '.tmp-ghost-marker-clean/deliverable.txt';
+  const deliverableAbs = join(PROJECT_ROOT, deliverableRel);
+
+  const ticketPath = makeTicket(tmpDir, {
+    id: 'QA-904',
+    createdAt: '2026-04-21T00:00:00Z',
+    updatedAt: '2026-04-21T10:00:00Z',
+    deliverablePath: deliverableRel,
+    dod: '- [x] deliverable создан',
+  });
+  // Файл создан ПОСЛЕ created_at тикета — работа настоящая.
+  writeFileSync(deliverableAbs, 'payload', 'utf8');
+
+  try {
+    const stdout = runScriptRaw(ticketPath);
+
+    assert.equal(ghostLine(stdout), null, `лишний маркер:\n${stdout}`);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('ghost-маркер: сломанный импорт призраком не считается', () => {
+  // `module_not_found`, `import_failed`, `type_mismatch` говорят о сломанном
+  // окружении проверки или о неверно записанном assertion'е. Тикет валится,
+  // как и раньше, но `critical`-алерт в workflow-mcp по такому поводу звал бы
+  // человека на чужую беду.
+  const tmpDir = join(PROJECT_ROOT, '.tmp-ghost-marker-import');
+  rmSync(tmpDir, { recursive: true, force: true });
+  mkdirSync(tmpDir, { recursive: true });
+
+  const deliverableRel = '.tmp-ghost-marker-import/deliverable.mjs';
+  writeFileSync(join(PROJECT_ROOT, deliverableRel), 'export const x = 1;\n', 'utf8');
+
+  const ticketPath = makeTicketWithAssertions(tmpDir, {
+    id: 'IMPL-994',
+    createdAt: '2026-04-21T00:00:00Z',
+    deliverablePath: deliverableRel,
+    assertions: `- module: \`.tmp-ghost-marker-import/does-not-exist.mjs\`, export: \`foo\`, type: \`function\``,
+  });
+
+  try {
+    const stdout = runScriptRaw(ticketPath);
+
+    assert.equal(ghostLine(stdout), null, `лишний маркер:\n${stdout}`);
+    // Тикет всё равно не проходит — проверка не ослаблена.
+    const block = stdout.match(/---RESULT---([\s\S]*?)---RESULT---/)[1];
+    assert.match(block, /status: failed/);
+    assert.match(block, /module_not_found/);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

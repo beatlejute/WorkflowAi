@@ -1,39 +1,70 @@
 import { findProjectRoot } from '../find-root.mjs';
+import { getGlobalDir } from '../../global-dir.mjs';
 import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
  * Lists all available skills, distinguishing between shared and ejected ones.
- * 
+ *
+ * Общие скилы лежат в глобальной установке — `<WORKFLOW_HOME>/skills`, по
+ * умолчанию `~/.workflow/skills`; проекты ссылаются туда junction'ами. Именно
+ * этот каталог берёт `listSkillsWithStatus`, на котором построена команда
+ * `workflow list`.
+ *
+ * Раньше каталог считался как `<projectRoot>/../src/skills`, то есть проект
+ * должен был лежать внутри установки workflow-ai. Для обычной раскладки
+ * (проекты в одном каталоге, workflow-ai — зависимость) такого пути нет, и
+ * функция молча возвращала пустой список — независимо от того, сколько скилов
+ * реально подключено к проекту.
+ *
  * @param {string} [projectRoot] - Project root directory. If not provided, will be auto-detected.
+ * @param {Object} [options]
+ * @param {string} [options.globalSkillsDir] - Переопределение каталога общих скилов (для тестов).
  * @returns {Promise<Array<{name: string, path: string, source: 'shared' | 'ejected'}>>}
  */
-export async function listSkills(projectRoot) {
+export async function listSkills(projectRoot, options = {}) {
   // Auto-detect project root if not provided
   if (!projectRoot) {
     projectRoot = findProjectRoot();
   }
 
-  // Get global skills directory (from where this module is located)
-  // Assuming this file is in src/lib/operations/skills.mjs
-  // Global root is two levels up from src (since src is in project root)
-  const globalRoot = join(projectRoot, '..');
-  const globalSkillsDir = join(globalRoot, 'src', 'skills');
-  
+  const globalSkillsDir = options.globalSkillsDir ?? join(getGlobalDir(), 'skills');
+
   // Project skills directory
   const projectSkillsDir = join(projectRoot, '.workflow', 'src', 'skills');
 
   const result = [];
 
-  // Check if global skills directory exists
+  /**
+   * Скил — каталог со SKILL.md. Без этой проверки скилом считался любой
+   * подкаталог: в `.workflow/src/skills` проектов лежит, например, папка
+   * `shared` с общими документами, и она попадала в выдачу как `ejected`.
+   *
+   * @param {string} dir каталог со скилами
+   * @returns {string[]} имена скилов
+   */
+  const readSkillNames = (dir) => readdirSync(dir, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && existsSync(join(dir, entry.name, 'SKILL.md')))
+    .map(entry => entry.name);
+
+  // Каталога общих скилов может не быть вовсе — например, когда workflow-ai
+  // стоит зависимостью и `workflow init` не запускался. Скилы, скопированные
+  // в проект, от этого никуда не деваются, и раньше они терялись.
   if (!existsSync(globalSkillsDir)) {
+    if (existsSync(projectSkillsDir)) {
+      for (const skillName of readSkillNames(projectSkillsDir)) {
+        result.push({
+          name: skillName,
+          path: join(projectSkillsDir, skillName),
+          source: 'ejected'
+        });
+      }
+    }
     return result;
   }
 
   // Read global skills
-  const globalSkills = readdirSync(globalSkillsDir, { withFileTypes: true })
-    .filter(entry => entry.isDirectory())
-    .map(entry => entry.name);
+  const globalSkills = readSkillNames(globalSkillsDir);
 
   // Check if project skills directory exists
   if (existsSync(projectSkillsDir)) {
@@ -49,9 +80,7 @@ export async function listSkills(projectRoot) {
 
     if (isJunctionLink) {
       // If it's a junction, all skills in it are considered shared
-      const projectSkills = readdirSync(projectSkillsDir, { withFileTypes: true })
-        .filter(entry => entry.isDirectory())
-        .map(entry => entry.name);
+      const projectSkills = readSkillNames(projectSkillsDir);
 
       // Add all skills as shared (from junction)
       for (const skillName of [...new Set([...globalSkills, ...projectSkills])]) {
@@ -63,9 +92,7 @@ export async function listSkills(projectRoot) {
       }
     } else {
       // Not a junction - handle ejected skills
-      const projectSkills = readdirSync(projectSkillsDir, { withFileTypes: true })
-        .filter(entry => entry.isDirectory())
-        .map(entry => entry.name);
+      const projectSkills = readSkillNames(projectSkillsDir);
 
       // First, add all global skills as shared
       for (const skillName of globalSkills) {

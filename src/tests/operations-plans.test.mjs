@@ -10,8 +10,8 @@ describe('operations/plans.mjs', () => {
 
   beforeEach(() => {
     projectRoot = join(tmpdir(), `workflow-plans-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    mkdirSync(join(projectRoot, 'plans', 'current'), { recursive: true });
-    mkdirSync(join(projectRoot, 'plans', 'archive'), { recursive: true });
+    mkdirSync(join(projectRoot, '.workflow', 'plans', 'current'), { recursive: true });
+    mkdirSync(join(projectRoot, '.workflow', 'plans', 'archive'), { recursive: true });
   });
 
   afterEach(() => {
@@ -20,7 +20,7 @@ describe('operations/plans.mjs', () => {
 
   test('TC1: listPlans without filter returns plans from both current and archive', async () => {
     // Create test plans in current/
-    writeFileSync(join(projectRoot, 'plans', 'current', 'PLAN-001.md'), `---
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'PLAN-001.md'), `---
 id: PLAN-001
 title: Plan One
 status: active
@@ -28,7 +28,7 @@ status: active
 # Plan One
 Body content`);
 
-    writeFileSync(join(projectRoot, 'plans', 'current', 'PLAN-002.md'), `---
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'PLAN-002.md'), `---
 id: PLAN-002
 title: Plan Two
 status: draft
@@ -37,7 +37,7 @@ status: draft
 Body content`);
 
     // Create test plans in archive/
-    writeFileSync(join(projectRoot, 'plans', 'archive', 'PLAN-003.md'), `---
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'archive', 'PLAN-003.md'), `---
 id: PLAN-003
 title: Plan Three
 status: completed
@@ -45,7 +45,7 @@ status: completed
 # Plan Three
 Body content`);
 
-    writeFileSync(join(projectRoot, 'plans', 'archive', 'PLAN-004.md'), `---
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'archive', 'PLAN-004.md'), `---
 id: PLAN-004
 title: Plan Four
 status: draft
@@ -65,28 +65,28 @@ Body content`);
 
   test('TC2: listPlans with status filter returns only plans with matching status', async () => {
     // Create test plans with different statuses
-    writeFileSync(join(projectRoot, 'plans', 'current', 'PLAN-001.md'), `---
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'PLAN-001.md'), `---
 id: PLAN-001
 title: Plan One
 status: active
 ---
 # Plan One`);
 
-    writeFileSync(join(projectRoot, 'plans', 'current', 'PLAN-002.md'), `---
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'PLAN-002.md'), `---
 id: PLAN-002
 title: Plan Two
 status: draft
 ---
 # Plan Two`);
 
-    writeFileSync(join(projectRoot, 'plans', 'archive', 'PLAN-003.md'), `---
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'archive', 'PLAN-003.md'), `---
 id: PLAN-003
 title: Plan Three
 status: draft
 ---
 # Plan Three`);
 
-    writeFileSync(join(projectRoot, 'plans', 'archive', 'PLAN-004.md'), `---
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'archive', 'PLAN-004.md'), `---
 id: PLAN-004
 title: Plan Four
 status: completed
@@ -120,7 +120,7 @@ created_at: 2026-04-24T00:00:00Z
 ## Section 1
 This is the body content`;
 
-    writeFileSync(join(projectRoot, 'plans', 'current', 'PLAN-001.md'), planContent);
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'PLAN-001.md'), planContent);
 
     const plan = await getPlan(projectRoot, 'PLAN-001');
 
@@ -147,7 +147,7 @@ status: completed
 ---
 # Archived Plan`;
 
-    writeFileSync(join(projectRoot, 'plans', 'archive', 'PLAN-005.md'), planContent);
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'archive', 'PLAN-005.md'), planContent);
 
     const plan = await getPlan(projectRoot, 'PLAN-005');
 
@@ -157,7 +157,7 @@ status: completed
   });
 
   test('TC4: getPlan throws error with code PLAN_NOT_FOUND for non-existent plan', async () => {
-    writeFileSync(join(projectRoot, 'plans', 'current', 'PLAN-001.md'), `---
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'PLAN-001.md'), `---
 id: PLAN-001
 title: Plan One
 ---
@@ -175,7 +175,7 @@ title: Plan One
   });
 
   test('TC4b: getPlan is case-insensitive when matching plan IDs', async () => {
-    writeFileSync(join(projectRoot, 'plans', 'current', 'PLAN-001.md'), `---
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'PLAN-001.md'), `---
 id: PLAN-001
 title: Plan One
 ---
@@ -192,13 +192,13 @@ title: Plan One
   });
 
   test('TC6: listPlans ignores non-markdown files', async () => {
-    writeFileSync(join(projectRoot, 'plans', 'current', 'PLAN-001.md'), `---
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'PLAN-001.md'), `---
 id: PLAN-001
 title: Plan One
 ---`);
 
-    writeFileSync(join(projectRoot, 'plans', 'current', 'README.txt'), 'Not a plan');
-    writeFileSync(join(projectRoot, 'plans', 'current', 'config.json'), '{}');
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'README.txt'), 'Not a plan');
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'config.json'), '{}');
 
     const plans = await listPlans(projectRoot);
     assert.equal(plans.length, 1, 'Should only return .md files');
@@ -206,7 +206,7 @@ title: Plan One
   });
 
   test('TC7: listPlans handles plans without status in frontmatter', async () => {
-    writeFileSync(join(projectRoot, 'plans', 'current', 'PLAN-001.md'), `---
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'PLAN-001.md'), `---
 id: PLAN-001
 title: Plan One
 ---`);
@@ -217,7 +217,7 @@ title: Plan One
   });
 
   test('TC8: listPlans handles plans without id in frontmatter', async () => {
-    writeFileSync(join(projectRoot, 'plans', 'current', 'PLAN-001.md'), `---
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'PLAN-001.md'), `---
 title: Plan One
 status: active
 ---`);
@@ -228,7 +228,7 @@ status: active
   });
 
   test('TC9: getPlan returns correct path to file', async () => {
-    const planPath = join(projectRoot, 'plans', 'current', 'PLAN-TEST.md');
+    const planPath = join(projectRoot, '.workflow', 'plans', 'current', 'PLAN-TEST.md');
     writeFileSync(planPath, `---
 id: PLAN-TEST
 title: Test Plan
@@ -236,5 +236,26 @@ title: Test Plan
 
     const plan = await getPlan(projectRoot, 'PLAN-TEST');
     assert.equal(plan.path, planPath, 'Should return absolute path to plan file');
+  });
+
+  test('TC10: listPlans skips .gitkeep.md left by workflow init', async () => {
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', '.gitkeep.md'), `# Plans
+
+Описание каталога без frontmatter.`);
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'PLAN-001.md'), `---
+id: PLAN-001
+title: Real Plan
+status: active
+---`);
+
+    const plans = await listPlans(projectRoot);
+    assert.equal(plans.length, 1, '.gitkeep must not be listed as a plan');
+    assert.equal(plans[0].id, 'PLAN-001');
+  });
+
+  test('TC11: getPlan does not resolve .gitkeep', async () => {
+    writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', '.gitkeep.md'), `# Plans`);
+
+    await assert.rejects(() => getPlan(projectRoot, '.gitkeep'));
   });
 });

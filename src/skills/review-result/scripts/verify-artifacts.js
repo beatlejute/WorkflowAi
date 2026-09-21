@@ -505,6 +505,81 @@ function formatVerdict(result) {
   return { status, missingFiles, unchangedFiles, failReasons, humanIssues };
 }
 
+/**
+ * Маркер призрачного выполнения в лог пайплайна.
+ *
+ * Призрак — это когда стадия отчиталась об успехе, а работы нет: заявленные
+ * файлы не трогали после начала тикета, либо заявленный экспорт/метод в модуле
+ * отсутствует. Оба признака уже считает `formatVerdict`; здесь они только
+ * называются одним именем.
+ *
+ * Строка идёт в stdout, а раннер кладёт stdout агента в лог блоком `OUTPUT`,
+ * откуда её и читают детекторы workflow-mcp (`list_ghost_executions` и
+ * health-детектор `ghost-execution`). До этой строки маркер не писал никто:
+ * детекторы были на месте, искать им было нечего.
+ *
+ * Формат жёсткий — токен `[GHOST-EXECUTION]` отдельным словом в начале строки.
+ * Детектор ищет именно структурный токен: прозаическое упоминание в тексте
+ * тикета или в commit message срабатывания не даёт (FIX-001).
+ *
+ * @param {string} ticketId
+ * @param {{unchangedFiles: string[]}} verdict
+ * @param {number} assertionsFailed
+ */
+const GHOST_MARKER = '[GHOST-EXECUTION]';
+const GHOST_FILES_IN_LINE = 5;
+
+/**
+ * Провалы assertion'ов, которые действительно доказывают призрак: код на месте,
+ * а заявленного в тикете в нём нет.
+ *
+ * Остальные причины (`module_not_found`, `import_failed`, `type_mismatch`)
+ * говорят о сломанном окружении проверки или о неверно записанном assertion'е:
+ * нет зависимости, файл не импортируется, перепутан тип. Это честный `failed`,
+ * но не призрак, и поднимать по ним `critical`-алерт в workflow-mcp — значит
+ * звать человека на чужую беду.
+ */
+const GHOST_ASSERTION_REASONS = ['export_not_found', 'method_not_function'];
+
+/**
+ * @param {Array<{ok: boolean, reason?: string}>} assertionResults
+ * @returns {number} сколько провалов доказывают призрак
+ */
+function ghostAssertionCount(assertionResults) {
+  return (assertionResults || []).filter((r) => {
+    if (r.ok) return false;
+    const reason = typeof r.reason === 'string' ? r.reason : '';
+    return GHOST_ASSERTION_REASONS.some((prefix) => reason.startsWith(prefix));
+  }).length;
+}
+
+function emitGhostMarker(ticketId, verdict, assertionsFailed) {
+  const unchanged = verdict.unchangedFiles || [];
+  const reasons = [];
+  if (unchanged.length > 0) reasons.push('file_unchanged');
+  if (assertionsFailed > 0) reasons.push('assertion_failed');
+  if (reasons.length === 0) return;
+
+  // Список файлов режется: строка идёт в лог, а тикет может заявлять их сотню.
+  const shown = unchanged.slice(0, GHOST_FILES_IN_LINE).join(',');
+  const rest = unchanged.length > GHOST_FILES_IN_LINE
+    ? `+${unchanged.length - GHOST_FILES_IN_LINE}`
+    : '';
+
+  const parts = [
+    GHOST_MARKER,
+    `ticket=${ticketId || 'unknown'}`,
+    `reason=${reasons.join(',')}`
+  ];
+  if (unchanged.length > 0) parts.push(`unchanged_files=${shown}${rest}`);
+  // Имя отличается от `assertions_failed` в RESULT-блоке намеренно: там число
+  // всех провалов, здесь — только доказывающих призрак. Два разных числа под
+  // одним именем в одном логе читались бы как ошибка.
+  if (assertionsFailed > 0) parts.push(`ghost_assertions=${assertionsFailed}`);
+
+  console.log(parts.join(' '));
+}
+
 // IMPL-87: Replace manual review-section write with appendReviewEntry from review-section.mjs.
 // Idempotency: skip if last summary already matches.
 async function appendReviewNote(ticketPath, humanIssues) {
@@ -580,6 +655,8 @@ async function main() {
 
     const assertionsTotal = result.assertionResults.length;
     const assertionsFailed = result.assertionResults.filter(r => !r.ok).length;
+
+    emitGhostMarker(result.ticket_id, verdict, ghostAssertionCount(result.assertionResults));
 
     console.log('---RESULT---');
     console.log(`status: ${verdict.status}`);
