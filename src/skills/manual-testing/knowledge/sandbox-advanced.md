@@ -20,7 +20,10 @@
 </Configuration>
 ```
 
-Конкретные пути — см. `CLAUDE.md` и `.wsb`-файл в sandbox-директории. Офлайн-пакет содержит портативные Python, Node.js и wheels для `windows-mcp`. Копируй Python на `C:\sandbox\` (mapped folders могут быть read-only для pip).
+Пути — см. `knowledge/sandbox-core.md` → «Архитектура». Офлайн-пакет содержит портативные Python, Node.js и wheels для `windows-mcp`. Копируй Python на `C:\sandbox\` (mapped folders могут быть read-only для pip).
+
+**Установка windows-mcp:** Python 3.13+ + UV package manager (`pip install uv`).
+`.mcp.json` (Windows, враппер `cmd /c`): `{ "mcpServers": { "windows-mcp": { "command": "cmd", "args": ["/c", "uvx", "windows-mcp"] } } }`.
 
 ## Паттерны тестирования
 
@@ -29,16 +32,6 @@
 **Сравнение окружений:** один и тот же TC на хосте и в Sandbox — расхождения указывают на зависимость от окружения.
 
 **Регрессия двух версий:** Sandbox 1 (текущая) → скриншоты → закрыть → Sandbox 2 (новая) → те же TC → сравнить.
-
-## Приоритизация TC по длительности
-
-| Фаза | Тип TC | MCP-вызовов |
-|------|--------|-------------|
-| Сначала | Быстрые (Snapshot + визуальная верификация) | 2-3 |
-| Затем | Действие + проверка | 4-6 |
-| В конце | Длительные с ожиданием | 6-10 |
-
-Чем дольше TC — тем выше риск MCP disconnect. Быстрые TC первыми.
 
 ## MCP disconnect
 
@@ -56,11 +49,11 @@ MCP-инструменты возвращают «server not connected», но �
 2. Пометь оставшиеся TC как BLOCKED: «MCP proxy disconnected»
 3. Завершай тикет — следующая сессия продолжит
 
+2+ disconnect за сессию → экономный режим (→ `algorithms/mcp-budget.md` → «Экономный режим»).
+
 ## Управление контекстом и continuation
 
-### Планирование continuation
-
-Рассчитай `max_TC_per_session` по формуле из `algorithms/mcp-budget.md`. Если TC больше — запланируй разбивку по сессиям до начала тестирования.
+Планирование continuation и приоритизация TC по длительности — `algorithms/mcp-budget.md` → «Планирование continuation».
 
 ### Признаки context overflow
 
@@ -70,14 +63,10 @@ MCP-инструменты возвращают «server not connected», но �
 
 ### Действия при overflow
 
-1. Завершай текущий TC (PASS/FAIL/BLOCKED)
+1. Завершай текущий TC (статус — из канонического списка SKILL.md → «Формат вывода»)
 2. Запиши результаты, evidence paths, оставшиеся TC
 3. Заверши сессию — не пытайся «успеть ещё один TC»
 
 ### Антипаттерн: ожидание смены UI-состояния
 
-Не трать MCP-вызовы на цикл `Wait → Screenshot → «не сменилось»`. Запускай действие сразу:
-```
-# ❌ Wait(5) → Screenshot → "ещё Completed" → Wait(8) → Screenshot
-# ✅ Shortcut(ctrl+shift+p) → Type("<команда>") → Snapshot
-```
+Не трать MCP-вызовы на цикл `Wait → Screenshot → «не сменилось»` (❌ `Wait(5) → Screenshot → "ещё Completed" → Wait(8) → Screenshot`). Запускай действие сразу: ✅ `Shortcut(ctrl+shift+p) → Type("<команда>") → Snapshot`.

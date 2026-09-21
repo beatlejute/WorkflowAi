@@ -14,7 +14,7 @@
 
 1. Поиск по категории (G2, Capterra, Product Hunt)
 2. GitHub/npm/PyPI — open source альтернативы
-3. Обзорные статьи "Best {category} tools 2024/2025"
+3. Обзорные статьи "Best {category} tools {текущий год}"
 4. Reddit/HackerNews — что рекомендует сообщество
 
 ### 3. Отфильтруй до shortlist

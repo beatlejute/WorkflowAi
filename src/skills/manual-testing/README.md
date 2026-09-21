@@ -17,8 +17,7 @@ manual-testing/
 ├── knowledge/
 │   ├── testing-types.md                  # Типы и подходы к тестированию
 │   ├── browser-tools.md                  # Инструменты работы с браузером (Playwright MCP)
-│   ├── desktop-tools-core.md              # Desktop-инструменты: core (Click, Type, Screenshot, Scrape, навигация)
-│   ├── desktop-tools-advanced.md          # Desktop-инструменты: advanced (Snapshot, MultiEdit, Registry, Process)
+│   ├── desktop-tools.md                  # Desktop-инструменты: команды Windows-MCP, label-навигация, Snapshot budget, DevTools, ограничения
 │   ├── test-case-design.md              # Техники проектирования тест-кейсов
 │   ├── sandbox-core.md                 # Sandbox: quick-start, evidence persistence, ограничения
 │   └── sandbox-advanced.md             # Sandbox: .wsb конфиг, MCP disconnect, continuation

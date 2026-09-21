@@ -1,0 +1,36 @@
+id: TC-EXECUTE-TASK-010
+title: "Скил не хардкодит имена других скилов, проектные коды/ID и инструменты — переносится между проектами as-is"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит изоляции 2026-09-21: SKILL.md хардкодил проектный шаг работы с браузером (конкретные MCP-конфиги `.mcp.json`/`mcp-browser-auth.json`/`mcp-browser.json`, инструмент `browser_close`), имя скрипта чужого скила (`verify-artifacts`), QA-домена ID (`TC-001`) и закрытые списки инструментов верификации (Playwright screenshot, Percy); algorithms/execution-strategy.md дублировал тот же закрытый список инструментов (Playwright, Percy, BackstopJS, axe, Lighthouse); knowledge/ticket-structure.md хардкодил project-wide типы/префиксы тикетов (`impl`, `IMPL-*`, `FIX-*`) в примерах полей."
+  principle: "Изоляция скилов (coach/SKILL.md, принцип 8) и универсальность правок (принцип 9): скил не хардкодит имена других скилов, project-wide префиксы/ID, закрытые списки инструментов и проектно-специфичные инструменты/конфиги; инструменты и проектные знания — через `.workflow/src/skills/shared/` (см. индекс)."
+  backlog_sources: []
+tags: [isolation, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила. Негативный anchor выражен
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b|mcp-browser|\\.mcp\\.json|browser_close|verify-artifacts|\\bTC-[0-9]{1,3}\\b|Playwright|Percy|BackstopJS|Lighthouse))"
+      reason: "SKILL.md не содержит имён чужих скилов, проектных кодов ролей/проектов, project-wide тикет-ID с чужими префиксами, а также проектно-специфичных MCP-конфигов/инструментов и закрытых списков верификационных тулов."
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b|Playwright|Percy|BackstopJS|\\baxe\\b|Lighthouse))"
+      reason: "algorithms/execution-strategy.md не называет чужие скилы, не хардкодит project-wide тикет-ID и не дублирует закрытый список верификационных инструментов в примерах."
+    - kind: skill_contains
+      file: "knowledge/ticket-structure.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b|\\|\\s*`impl`\\s*\\|))"
+      reason: "knowledge/ticket-structure.md использует generic ID (XXX-NNN, PLAN-NNN) в примерах полей, а не project-wide префиксы с конкретными номерами, и не хардкодит технологически-специфичный тип задачи `impl` в таблице."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."

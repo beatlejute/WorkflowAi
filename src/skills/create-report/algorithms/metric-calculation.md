@@ -64,9 +64,9 @@ type_pct = count_by_type / total * 100%
 
 ### Пример
 
-15 тикетов: 6 impl, 4 fix, 3 coach, 2 docs.
+15 тикетов: 6 impl, 4 fix, 3 review, 2 docs.
 
-- impl: 6/15 = 40%, fix: 27%, coach: 20%, docs: 13%
+- impl: 6/15 = 40%, fix: 27%, review: 20%, docs: 13%
 
 ## 4. Обнаружение аномалий
 

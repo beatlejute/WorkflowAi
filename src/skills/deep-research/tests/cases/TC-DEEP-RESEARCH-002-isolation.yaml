@@ -1,0 +1,56 @@
+id: TC-DEEP-RESEARCH-002
+title: "Скил не хардкодит имена других скилов/ролей проекта и доменные вендор-примеры вместо критериев"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (deep-research-B-10, MEDIUM): workflows/benchmark.md, market.md, technology.md, knowledge/research-methodology.md, algorithms/source-scoring.md и synthesis.md хардкодили закрытые списки вендоров (Mixpanel, Amplitude, ChartMogul, ProfitWell, Statista, Grand View Research, Mordor Intelligence, SimilarWeb, Sensor Tower, App Annie, Gartner), доменные SaaS-метрики, год \"2024/2025\" и колонку \"Наш\"/\"Наш продукт\" вместо критериев принятия решения — скил переставал быть переносимым между доменами и проектами."
+  principle: "Принцип 9 (универсальность правок, чеклист 4 вопросов) и принцип 8 (изоляция скилов) coach/SKILL.md; common-antipatterns.md секции I и IC"
+  backlog_sources: []
+tags: [isolation, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила. Негативные anchor'ы
+    выражены через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "SKILL.md не должен называть другие скилы, чужие ticket-префиксы или проекты-потребители по имени."
+    - kind: skill_contains
+      file: "workflows/benchmark.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|ANL|RPT|CHG)-[0-9]{1,3}\\b|\\b(ARPU|Mixpanel|Amplitude|ChartMogul|ProfitWell)\\b|\\| Наш \\|))"
+      reason: "Приоритет источников и таблица бенчмарков — критерии, а не закрытый список SaaS-вендоров/метрик и не колонка \"Наш\"."
+    - kind: skill_contains
+      file: "workflows/market.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|ANL|RPT|CHG)-[0-9]{1,3}\\b|\\b(Statista|Grand View|Mordor|SimilarWeb|Sensor Tower)\\b))"
+      reason: "Источники данных о рынке — критерий (публичная методология), а не закрытый список конкретных отчётов/платформ."
+    - kind: skill_contains
+      file: "workflows/technology.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|ANL|RPT|CHG)-[0-9]{1,3}\\b|\\b(2024/2025)\\b))"
+      reason: "Год в поисковом запросе — плейсхолдер «текущий год», не захардкоженный 2024/2025."
+    - kind: skill_contains
+      file: "workflows/competitor.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|ANL|RPT|CHG)-[0-9]{1,3}\\b|Наш продукт))"
+      reason: "Comparison matrix использует «Заказчик», а не «Наш продукт» — исследование не предполагает, что заказчик всегда владеет продуктом."
+    - kind: skill_contains
+      file: "knowledge/research-methodology.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|ANL|RPT|CHG)-[0-9]{1,3}\\b|\\b(App Annie)\\b))"
+      reason: "Таблица приоритета источников — критерий (методология и источник данных), а не закрытый список вендоров."
+    - kind: skill_contains
+      file: "algorithms/source-scoring.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|ANL|RPT|CHG)-[0-9]{1,3}\\b|\\b(Gartner|VPN)\\b))"
+      reason: "Тип источника и пример скоринга — нейтральные, без конкретного вендора и без доменного примера (VPN)."
+    - kind: skill_contains
+      file: "algorithms/synthesis.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|ANL|RPT|CHG)-[0-9]{1,3}\\b|\\b(VPN|GrandViewResearch)\\b))"
+      reason: "Пример синтеза вывода — нейтральный плейсхолдер категории/года, без домена VPN и без конкретного вендора."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."

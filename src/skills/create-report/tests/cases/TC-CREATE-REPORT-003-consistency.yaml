@@ -1,0 +1,48 @@
+id: TC-CREATE-REPORT-003
+title: "Скил не содержит внутренних противоречий: plan health, охват директорий, шаблон отчёта, критерии аномалий"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (consistency): knowledge/report-metrics.md и algorithms/metric-calculation.md задавали разные пороги Plan health по `expected_by_time` (knowledge) vs `delta` (algorithm, реализован в scripts/calc-metrics.js) — оставлен один источник (algorithms); шаг 1 workflows/standard.md собирал тикеты только из done/blocked/in-progress, тогда как таблица статистики (knowledge:65-76) и scripts/calc-metrics.js:29 требуют ещё ready/backlog — добавлены обе директории; шаг 8 workflows/standard.md предписывал обязательный шаблон `.workflow/templates/report-template.md` с несовместимыми с ролью скила секциями (Распределение по ролям вместо типов; нет Аномалий/Прогресса по плану) — добавлена инструкция адаптации; шаг 6 workflows/standard.md ограничивал секцию «Аномалии» одним типом вместо всех 5 критериев algorithms/metric-calculation.md раздел 4."
+  principle: "Consistency (coach/SKILL.md, принцип 12) — одна версия правила, обновлена везде."
+  backlog_sources:
+    - ".workflow/coach-backlog.yaml"
+tags: [consistency, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "knowledge/report-metrics.md"
+      pattern: "Plan health[\\s\\S]{0,120}algorithms/metric-calculation\\.md"
+      reason: "Пороги Plan health — единственный источник algorithms/metric-calculation.md, knowledge не дублирует таблицу."
+    - kind: skill_contains
+      file: "knowledge/report-metrics.md"
+      pattern: "^(?![\\s\\S]*expected_by_time)"
+      reason: "Отвергнутая формулировка порогов (`expected_by_time`, отличная от `delta` в algorithms/calc-metrics.js) удалена, а не оставлена дублем."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: "\\.workflow/tickets/ready/`[\\s\\S]{0,60}\\.workflow/tickets/backlog/`"
+      reason: "Шаг 1 собирает тикеты из всех статусных директорий (ready, backlog), нужных для таблицы статистики и совпадающих с TICKET_DIRS в calc-metrics.js."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: "Распределение по ролям[\\s\\S]{0,10}Распределение по типам"
+      reason: "Шаг 8 явно указывает адаптировать секцию шаблона «по ролям» под фактическую терминологию скила «по типам» (knowledge/report-metrics.md)."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: "добавь секции[\\s\\S]{0,15}Аномалии[\\s\\S]{0,15}Прогресс по плану"
+      reason: "Шаг 8 требует включать в отчёт секции «Аномалии» и «Прогресс по плану», отсутствующие в обязательном шаблоне, но обязательные по принципу 3 SKILL.md."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: "Аномалии:\\*\\*\\s+все критерии `algorithms/metric-calculation\\.md`\\s+раздел 4"
+      reason: "Шаг 6 ссылается на полный набор критериев аномалий (5 типов) algorithms/metric-calculation.md раздел 4, а не только на in-progress-с-результатом."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: "^(?![\\s\\S]*Аномалии:\\*\\*\\r?\\n- In-progress тикеты с заполненным результатом \\(из шага 2\\))"
+      reason: "Отвергнутая формулировка (Аномалии = только in-progress с результатом, без остальных 4 критериев алгоритма) удалена, а не оставлена дублем рядом с новой."

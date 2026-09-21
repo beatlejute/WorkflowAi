@@ -20,8 +20,8 @@ create-report/
 
 1. Скил получает запрос на создание отчёта (итерация завершена, накопились задачи)
 2. Загружает воркфлоу `standard`
-3. Собирает данные из done/, blocked/, in-progress/ тикетов
-4. Проверяет аномалии (in-progress с заполненным результатом)
+3. Собирает данные из всех статусных директорий `.workflow/tickets/` (done/archive, blocked, in-progress, ready, backlog)
+4. Проверяет аномалии по критериям `algorithms/metric-calculation.md` §4
 5. Рассчитывает метрики (velocity, распределение, прогресс по плану)
 6. Формирует отчёт по шаблону `.workflow/templates/report-template.md`
 7. Сохраняет в `.workflow/reports/REPORT-{NNN}.md`

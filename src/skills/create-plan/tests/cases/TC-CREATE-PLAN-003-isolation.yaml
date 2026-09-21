@@ -1,0 +1,36 @@
+id: TC-CREATE-PLAN-003
+title: "Скил не хардкодит имена других скилов, проектные коды/ID и инструменты — переносится между проектами as-is"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит изоляции 2026-09-21: SKILL.md хардкодил конкретные инструменты агента (Playwright MCP-browser) и проектный пример ТЗ; knowledge/plan-lifecycle.md называл чужой скил `decompose-plan` и его путь к скрипту, а также VS Code-команду `workflow.archivePlan`; algorithms/risk-assessment.md ссылался на инциденты с ID `QA-*` — ticket_prefix чужого скила (manual-testing)."
+  principle: "Изоляция скилов (coach/SKILL.md, принцип 8) и универсальность правок (принцип 9): скил не хардкодит имена других скилов, project-wide префиксы/ID и проектно-специфичные инструменты/конфиги; инструменты и проектные знания — через `.workflow/src/skills/shared/` (см. индекс)."
+  backlog_sources: []
+tags: [isolation, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила. Негативный anchor выражен
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "SKILL.md не содержит имён чужих скилов, проектных кодов ролей/проектов и project-wide тикет-ID с чужими префиксами."
+    - kind: skill_contains
+      file: "knowledge/plan-lifecycle.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "knowledge/plan-lifecycle.md не называет чужой скил по имени и не хардкодит путь к его скрипту или проектную команду."
+    - kind: skill_contains
+      file: "algorithms/risk-assessment.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "algorithms/risk-assessment.md использует generic ID инцидентов (XXX-NNN), не ID чужого скила."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."

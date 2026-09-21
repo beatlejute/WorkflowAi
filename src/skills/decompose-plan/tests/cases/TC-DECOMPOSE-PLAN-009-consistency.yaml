@@ -1,0 +1,76 @@
+id: TC-DECOMPOSE-PLAN-009
+title: "Числа проверок и порогов в SKILL.md/README/knowledge совпадают с фактическими чеклистами и с verify-atomicity.js"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (consistency, HIGH/MEDIUM): SKILL.md:41 называл атомарность «6 проверок», а knowledge/atomicity-checklist.md фактически содержит 7 (Проверка 7 «Один исполнитель» добавлена позже без синхронизации счётчика). SKILL.md:42, README.md:15,26 и заголовок knowledge/scope-guard-checklist.md:5 называли scope-guard «4 проверки», тогда как чеклист содержит 5 (Проверка 5 «Не дублирует функцию пайплайна»). workflows/decompose.md:78 давал третье значение лимита времени «(максимум 4)» вместо единственного правила SKILL.md:63 и atomicity-checklist.md Проверка 5 «превышение 2 часов — только при доказанной неделимости». knowledge/atomicity-checklist.md декларировала синхронизацию с константами `verify-atomicity.js` только для DoD (Проверка 5), не упоминая `STEPS_THRESHOLD_FAIL`/`FILES_THRESHOLD_WARN` в Проверках 4 и 2."
+  principle: "Principle 12 (Consistency): число проверок и числовые пороги существуют в одной версии и совпадают во всех местах, включая машинные константы `scripts/verify-atomicity.js`."
+  backlog_sources: []
+tags: [consistency, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над рабочими файлами скила. Негативные anchor'ы выражены через
+    lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "atomicity-checklist\\.md`[^\\n]*7 проверок атомарности"
+      reason: "SKILL.md называет верное число проверок атомарности (7, по факту чеклиста)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*6 проверок атомарности)"
+      reason: "Отвергнутая формулировка «6 проверок атомарности» (устаревший счётчик до добавления Проверки 7) нигде не осталась."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "scope-guard-checklist\\.md`[^\\n]*5 проверок scope"
+      reason: "SKILL.md называет верное число проверок scope-guard (5, по факту чеклиста)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*4 проверки scope)"
+      reason: "Отвергнутая формулировка «4 проверки scope» (устаревший счётчик до добавления Проверки 5) нигде не осталась."
+    - kind: skill_contains
+      file: "knowledge/scope-guard-checklist.md"
+      pattern: "все 5 проверок — обязательны"
+      reason: "Заголовок чеклиста scope-guard называет фактическое число проверок (5)."
+    - kind: skill_contains
+      file: "knowledge/scope-guard-checklist.md"
+      pattern: "^(?![\\s\\S]*все 4 проверки)"
+      reason: "Заголовок чеклиста больше не занижает число проверок до 4."
+    - kind: skill_contains
+      file: "README.md"
+      pattern: "scope-guard-checklist\\.md[^\\n]*5 проверок"
+      reason: "README отражает фактическое число проверок scope-guard (5) в описании структуры."
+    - kind: skill_contains
+      file: "README.md"
+      pattern: "scope-guard \\(5 проверок\\)"
+      reason: "README отражает фактическое число проверок scope-guard (5) в разделе «Как это работает»."
+    - kind: skill_contains
+      file: "README.md"
+      pattern: "^(?![\\s\\S]*\\(4 проверки\\))"
+      reason: "README нигде не занижает число проверок scope-guard до 4."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "2 часа \\(превышение[^\\n]*доказанной неделимости"
+      reason: "Лимит времени в критериях хорошего тикета совпадает с единственным правилом SKILL.md принцип 2 и atomicity-checklist Проверка 5 — превышение только при доказанной неделимости, без отдельного числового потолка."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "^(?![\\s\\S]*максимум 4\\b)"
+      reason: "Третье, ослабленное значение лимита времени «(максимум 4)» из критериев хорошего тикета удалено."
+    - kind: skill_contains
+      file: "knowledge/atomicity-checklist.md"
+      pattern: "Число шагов[^\\n]*≤ 5[^\\n]*STEPS_THRESHOLD_FAIL"
+      reason: "Проверка 4 (скрытые подзадачи) фиксирует числовой hard-порог шагов (значение 5), синхронизированный с константой `verify-atomicity.js`."
+    - kind: skill_contains
+      file: "knowledge/atomicity-checklist.md"
+      pattern: "context\\.files[^\\n]*≤ 3[^\\n]*WARN[^\\n]*FILES_THRESHOLD_WARN"
+      reason: "Проверка 2 (один объект изменения) фиксирует числовой WARN-порог файлов (значение 3), синхронизированный с константой `verify-atomicity.js`."
+    - kind: skill_contains
+      file: "knowledge/atomicity-checklist.md"
+      pattern: "^(?![\\s\\S]*Разбиение по числу файлов требуется только если)"
+      reason: "Отвергнутая оговорка «разбиение по числу файлов требуется только если файлы принадлежат разным подсистемам» не должна вернуться рядом с WARN-порогом."

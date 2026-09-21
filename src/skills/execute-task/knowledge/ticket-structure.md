@@ -6,18 +6,18 @@
 
 | Поле | Тип | Описание | Пример |
 |------|-----|----------|--------|
-| `id` | string | Уникальный ID: `{PREFIX}-{NNN}` | `IMPL-001`, `FIX-015` |
+| `id` | string | Уникальный ID: `{PREFIX}-{NNN}` | `XXX-NNN`, `YYY-NNN` |
 | `title` | string | Краткое название задачи | `Добавить валидацию форм` |
 | `priority` | int 1-5 | 1=критический, 2=высокий, 3=средний, 4=низкий, 5=когда-нибудь | `3` |
-| `type` | string | Тип задачи (см. `knowledge/task-types.md`) | `impl` |
+| `type` | string | Тип задачи (значения — из `config.yaml → task_types` проекта) | `<project-type>` |
 | `required_capabilities` | list | Требования к исполнителю | `[code_generation, typescript]` |
 | `executor_type` | string | `agent` (AI) или `human` | `agent` |
 | `created_at` | ISO 8601 | Дата создания | `2026-03-20T12:00:00Z` |
 | `updated_at` | ISO 8601 | Дата последнего обновления | `2026-03-21T09:00:00Z` |
 | `completed_at` | ISO 8601 | Дата завершения (заполняется pipeline) | |
-| `parent_plan` | string | Путь к родительскому плану | `plans/current/PLAN-001.md` |
-| `parent_task` | string | ID родительской задачи (для подзадач) | `IMPL-010` |
-| `dependencies` | list | Задачи, которые должны быть выполнены ДО этой | `[IMPL-001, PLAN-002]` |
+| `parent_plan` | string | Путь к родительскому плану | `plans/current/PLAN-NNN.md` |
+| `parent_task` | string | ID родительской задачи (для подзадач) | `XXX-NNN` |
+| `dependencies` | list | Задачи, которые должны быть выполнены ДО этой | `[XXX-NNN, PLAN-NNN]` |
 | `conditions` | list | Условия для начала работы | см. ниже |
 | `context` | object | Информация для исполнителя | см. ниже |
 | `complexity` | string | `simple` / `medium` / `complex` | `medium` |
@@ -46,7 +46,7 @@
 |--------|------------|
 | `## Описание` | Что нужно сделать (кратко) |
 | `## Детали задачи` | Подробности, технические детали |
-| `## Критерии готовности` | Чеклист Definition of Done — все пункты должны быть выполнены |
+| `## Критерии готовности (Definition of Done)` | Чеклист DoD — все пункты должны быть выполнены |
 | `## Результат выполнения` | **Заполняется исполнителем** после выполнения |
 
 ## Секция Result (заполняется исполнителем)

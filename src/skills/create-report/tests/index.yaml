@@ -18,3 +18,15 @@ cases:
     origin_chg: [CHG-027]
     tags: [root-cause-attribution, log-analysis]
     severity: high
+
+  - id: TC-CREATE-REPORT-002
+    file: cases/TC-CREATE-REPORT-002-isolation.yaml
+    origin_chg: ["ad-hoc-2026-09-21-audit"]
+    tags: [isolation, regression-guard]
+    severity: high
+
+  - id: TC-CREATE-REPORT-003
+    file: cases/TC-CREATE-REPORT-003-consistency.yaml
+    origin_chg: ["ad-hoc-2026-09-21-audit"]
+    tags: [consistency, regression-guard]
+    severity: high

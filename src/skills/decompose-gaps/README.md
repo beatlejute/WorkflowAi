@@ -11,7 +11,7 @@ decompose-gaps/
 ├── workflows/
 │   └── decompose.md                # Пошаговый алгоритм декомпозиции gaps
 ├── knowledge/
-│   └── scope-validation.md         # 4 проверки scope, критерии валидности gap
+│   └── scope-validation.md         # 5 проверок scope, критерии валидности gap
 └── algorithms/
     └── scope-check.md              # Формализованный алгоритм проверки scope
 ```
@@ -21,7 +21,7 @@ decompose-gaps/
 1. Получает на вход `gaps`, `report_id`, `plan_id` из context
 2. Загружает knowledge/scope-validation.md и algorithms/scope-check.md
 3. Запускает workflows/decompose.md
-4. Для каждого gap выполняет 4 проверки scope (источник → принадлежность → статус плана → workflow-управление)
+4. Для каждого gap выполняет 5 проверок scope (источник → принадлежность → статус плана → workflow-управление → запрет организационных/процессных gaps)
 5. Gaps в scope → тикеты в `.workflow/tickets/backlog/`
 6. Gaps вне scope → секция «Новые требования (вне scope)»
 

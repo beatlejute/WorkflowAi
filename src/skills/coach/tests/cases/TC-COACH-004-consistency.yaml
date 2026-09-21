@@ -1,0 +1,72 @@
+id: TC-COACH-004
+title: "Coach не даёт взаимоисключающих инструкций по CHG-фиксации, target_agents, порядку REVIEW-теста и полномочиям эскалации"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (consistency, HIGH): SKILL.md:26,43 требовали «запиши CHG в бэклог», хотя applied_changes[] удалена из бэклога миграцией (commit d9c285e, 2026-04-19) и workflows/test.md:15 прямо запрещает CHG-запись в бэклоге — фиксация идёт через `origin.chg` тест-кейса."
+    - "Аудит 2026-09-21 (consistency, HIGH): workflows/test.md разрешал коучу самостоятельно сокращать `target_agents[]`, сверившись с pipeline.yaml, хотя knowledge/test-authorship.md §5 запрещает любое удаление модели без явного согласия стейкхолдера."
+    - "Аудит 2026-09-21 (consistency, HIGH): workflows/review.md требовал создать регрессионный тест ДО начала ревью (шаг 0), хотя workflows/test.md (шаг 4, фикстура) требует реальный артефакт инцидента, которого до ревью не существует."
+    - "Аудит 2026-09-21 (consistency, HIGH): SKILL.md:47 разрешает коучу только рекомендовать создание тикета (правит только `.workflow/src/skills/`), а SKILL.md принцип 1 (эскалация при повторном инциденте) требовал от коуча самому «обязательно создать тикет эскалации» — два разных уровня полномочий."
+  principle: "Consistency (#12) — скил не должен содержать взаимоисключающих инструкций; при правке обновляются все места."
+  backlog_sources: []
+tags: [consistency, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила. Негативный anchor выражен
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    # 1. CHG фиксируется тест-кейсом (origin.chg), не записью в бэклог
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Зафиксируй правку тест-кейсом регрессии \\(`workflows/test\\.md`\\), не записью в бэклог"
+      reason: "ГЛАВНОЕ ПРАВИЛО фиксирует правку тест-кейсом регрессии (workflows/test.md), а не записью в бэклог, которого для этого не существует (applied_changes[] удалена миграцией). Термин «CHG» убран из SKILL.md:26/:43 — механизма выдачи CHG-ID не существует (origin.chg тест-кейса — произвольный ID инцидента, не формальный CHG, см. workflows/test.md:42)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*[Зз]апиши CHG в бэклог)"
+      reason: "Не должно остаться инструкции «запиши CHG в бэклог» — противоречит workflows/test.md:15 и knowledge/backlog-management.md (applied_changes[] удалена)."
+
+    # 2. target_agents[] — сокращение только по согласию стейкхолдера
+    - kind: skill_contains
+      file: "workflows/test.md"
+      pattern: "[Уу]даление/сокращение[\\s\\S]{0,40}явному согласию стейкхолдера"
+      reason: "Шаг проверки target_agents[] в test.md должен требовать явного согласия стейкхолдера на любое сокращение, как того требует knowledge/test-authorship.md §5."
+    - kind: skill_contains
+      file: "workflows/test.md"
+      pattern: "^(?![\\s\\S]*обнови его, сверившись с)"
+      reason: "Не должно остаться разрешения коучу самостоятельно «обновить (сократить)» target_agents[] без согласия стейкхолдера."
+
+    # 3. REVIEW: тест — после ревью (если оно привело к правке), не до
+    - kind: skill_contains
+      file: "workflows/review.md"
+      pattern: "Если ревью привело к правке скила[\\s\\S]{0,40}создай регрессионный тест"
+      reason: "Создание регрессионного теста в REVIEW должно идти после формирования замечаний и быть условным (только если была правка скила) — фикстура требует реального инцидента."
+    - kind: skill_contains
+      file: "workflows/review.md"
+      pattern: "^(?![\\s\\S]*Перед началом ревью создай регрессионный тест)"
+      reason: "Не должно остаться требования создавать тест ДО начала ревью — до правки нет артефакта инцидента для фикстуры (test-authorship.md §3)."
+
+    # 4. Эскалационный тикет — коуч рекомендует, не создаёт (правит только .workflow/src/skills/)
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "рекомендуй[\\s\\S]{0,10}стейкхолдеру тикет эскалации"
+      reason: "Полномочия коуча в отношении тикета эскалации должны совпадать с общим правилом SKILL.md:47 (коуч рекомендует, не создаёт тикеты вне `.workflow/src/skills/`)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*обязательно создай тикет эскалации)"
+      reason: "Не должно остаться формулировки, обязывающей коуча самому создавать тикет эскалации — это противоречит границе «коуч правит только .workflow/src/skills/»."
+
+    # 5. Rubric root-cause-first: эскалация требует date-check, не просто факта повторения
+    - kind: skill_contains
+      file: "tests/rubrics/root-cause-first.md"
+      pattern: "без сравнения дат CHG и выполнения тикета"
+      reason: "Балл 1 в rubric должен штрафовать эскалацию в машинную защиту без сравнения дат CHG/тикета — согласовано с SKILL.md принцип 1 (date-check перед классификацией «повторный инцидент»)."
+    - kind: skill_contains
+      file: "tests/rubrics/root-cause-first.md"
+      pattern: "^(?![\\s\\S]*цепочка прослежена, повторный инцидент → эскалация в машинную защиту \\|)"
+      reason: "Балл 5 не должен награждать эскалацию по одному факту повторяемости без date-check."

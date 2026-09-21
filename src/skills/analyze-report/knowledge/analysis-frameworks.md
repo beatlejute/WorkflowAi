@@ -13,7 +13,7 @@
 | **Throughput** | done / time_elapsed | Скорость выполнения |
 | **Block Rate** | blocked / total × 100% | Доля заблокированных задач |
 | **Rework Rate** | reworked / done × 100% | Доля задач с переделками |
-| **First-Pass Rate** | passed_review_first / done × 100% | Качество выполнения с первого раза |
+| **First-Pass Rate** | формула — в `algorithms/progress-assessment.md` | Качество выполнения с первого раза |
 
 ### Качественные индикаторы
 

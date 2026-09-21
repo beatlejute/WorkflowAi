@@ -1,0 +1,96 @@
+id: TC-MANUAL-TESTING-012
+title: "Скил не содержит устаревших формулировок по 4 противоречиям consistency-аудита (создание тикетов, статусы TC, evidence по умолчанию, Budget Guard)"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит consistency 2026-09-21: SKILL.md:31 «Любой скил проекта может создать тикет QA-*» противоречил SKILL.md:33 «Создание тикетов — исключительная зона скилов декомпозиции» (manual-testing-B-5). SKILL.md называл 3 разных набора статусов TC (PASS/FAIL/BLOCKED/SKIPPED, PASS/FAIL/OBSERVATION, PASS/FAIL/BLOCKED/OBSERVATION) при том, что OBSERVATION фактически используется в workflows/smoke.md и в архивных QA-тикетах проектов PulseProxy/workflowAiVsCode наравне с остальными статусами (manual-testing-B-6). knowledge/browser-tools.md:108 «Всегда делай скриншот перед действием» и паттерны с browser_screenshot на каждом шаге противоречили принципу 6/8 SKILL.md (evidence по умолчанию = a11y/Snapshot, скриншот только при визуальном критерии или DoD) (manual-testing-B-4). workflows/smoke.md:70 «Budget Guard (ОБЯЗАТЕЛЬНО при наличии бюджета)» активировал контроль расхода только если context.notes явно задавал бюджет, тогда как algorithms/mcp-budget.md:7 задаёт дефолт 80 безусловно; фактическая практика (grep по .workflow/tickets/archive/QA-*.md проектов PulseProxy и workflowAiVsCode) показывает, что в workflowAiVsCode context.notes задаёт бюджет диапазоном (QA-001..010: «Бюджет: ~50-80 MCP-вызовов» и т.п.), а в PulseProxy — не задаёт вовсе; условный guard «при наличии бюджета» оставлял второй проект без контроля расхода, тогда как mcp-budget.md:7 задаёт дефолт 80 безусловно (manual-testing-B-7)."
+  principle: "Одна версия правила, применяемая везде: тикеты создают скилы декомпозиции, канонический список статусов TC — PASS/FAIL/BLOCKED/SKIPPED/OBSERVATION, evidence по умолчанию — Snapshot (скриншот только по DoD/визуальному критерию), Budget Guard активен всегда (дефолт 80 при отсутствии context.notes)."
+  backlog_sources: []
+tags: [consistency, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила. Негативные anchor'ы
+    выражены через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "QA-тикеты создаются скилами декомпозиции проекта"
+      reason: "Единственный источник создания QA-тикетов — скилы декомпозиции; manual-testing только исполняет."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*Любой скил проекта может создать тикет)"
+      reason: "Отвергнутая формулировка «любой скил может создать тикет QA-*» не должна остаться нигде в SKILL.md."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "SKIPPED\\s*/\\s*`?OBSERVATION"
+      reason: "Канонический список статусов TC включает OBSERVATION рядом со SKIPPED (формат вывода / self-check)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*FAIL/OBSERVATION\\b)"
+      reason: "Усечённый список «PASS/FAIL/OBSERVATION» (без BLOCKED/SKIPPED) не должен остаться в SKILL.md."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*(BLOCKED/OBSERVATION\\)|SKIPPED — все они|`SKIPPED`\\s*\\(OBSERVATION))"
+      reason: "Мутационный прогон (mut012.mjs): B-6 SKILL:33 — «SKIPPED — все они» без OBSERVATION перед тире; B-6 SKILL:161 — self-check список, усечённый до «...BLOCKED/OBSERVATION)» (потерян SKIPPED); B-6 SKILL:176 — «Формат вывода» список без «/ `OBSERVATION`» (после разрыва сразу следует определение «(OBSERVATION — ...)», распознаётся по `SKIPPED`\\s*\\(OBSERVATION). Ни один из этих 3 регрессов не покрывался ни одним прежним anchor'ом (все — FALSE-GREEN до этой правки)."
+    - kind: skill_contains
+      file: "knowledge/browser-tools.md"
+      pattern: "browser_screenshot`[^\\n]*[Тт]олько при визуальном критерии"
+      reason: "browser_screenshot ограничен визуальным критерием TC / требованием DoD, не «каждым значимым шагом» — привязка к строке таблицы (same-line), не к произвольной дистанции."
+    - kind: skill_contains
+      file: "knowledge/browser-tools.md"
+      pattern: "^(?![\\s\\S]*Всегда делай скриншот перед действием)"
+      reason: "Отвергнутый совет «всегда делай скриншот перед действием» противоречил evidence-by-default (Snapshot) и не должен остаться."
+    - kind: skill_contains
+      file: "knowledge/browser-tools.md"
+      pattern: "^(?![\\s\\S]*(browser_screenshot`[^\\n]*На каждом значимом шаге, при обнаружении бага|browser_screenshot\\s*→))"
+      reason: "Мутационный прогон (mut012.mjs, manual-testing-review-2026-09-21): B-4 bt:30 — строка таблицы browser_screenshot не должна вернуться к «на каждом значимом шаге» (эта формулировка легитимна для соседней строки browser_snapshot, поэтому anchor привязан к той же строке через backtick+[^\\n]*); B-4 bt patterns — browser_screenshot с безусловной стрелкой (→) не должен появиться ни в одном паттерне вместо browser_snapshot."
+    - kind: skill_contains
+      file: "workflows/smoke.md"
+      pattern: "Budget Guard \\(ОБЯЗАТЕЛЬНО\\)"
+      reason: "Budget Guard активен безусловно, не только «при наличии бюджета» в context.notes."
+    - kind: skill_contains
+      file: "workflows/smoke.md"
+      pattern: "^(?![\\s\\S]*ОБЯЗАТЕЛЬНО при наличии бюджета)"
+      reason: "Условная формулировка «ОБЯЗАТЕЛЬНО при наличии бюджета» не должна остаться — фактическая практика: workflowAiVsCode задаёт бюджет диапазоном в context.notes (QA-001..010: «Бюджет: ~50-80 MCP-вызовов»), PulseProxy не задаёт вовсе, guard «при наличии» оставлял бы второй проект без контроля."
+    - kind: skill_contains
+      file: "workflows/smoke.md"
+      pattern: "либо дефолт 80"
+      reason: "Дефолт 80 MCP-вызовов (algorithms/mcp-budget.md) применяется, если context.notes не задаёт бюджет явно."
+    - kind: skill_contains
+      file: "workflows/smoke.md"
+      pattern: "^(?![\\s\\S]*(Если в `context\\.notes` указан бюджет|Если бюджет указан))"
+      reason: "Мутационный прогон (mut012.mjs): B-7 smoke:72 и smoke:14 — условные формулировки «если бюджет указан» не должны вернуться ни в шаге 0, ни в Budget Guard; ни один прежний anchor их не ловил (FALSE-GREEN)."
+    - kind: skill_contains
+      file: "workflows/smoke.md"
+      pattern: "SKIPPED`?\\s*/?\\s*`?OBSERVATION"
+      reason: "Канонический список статусов в шаге «Выполни проверки» (:66) должен включать OBSERVATION рядом со SKIPPED — регресс до «PASS/FAIL/BLOCKED» (mut012.mjs B-6 smoke:66) не покрывался ни одним прежним anchor'ом."
+    - kind: skill_contains
+      file: "workflows/acceptance.md"
+      pattern: "SKIPPED`?\\s*/?\\s*`?OBSERVATION"
+      reason: "Канонический список статусов (:47) должен включать OBSERVATION рядом со SKIPPED (mut012.mjs B-6 acceptance:47 — прежде FALSE-GREEN)."
+    - kind: skill_contains
+      file: "workflows/regression.md"
+      pattern: "SKIPPED`?\\s*/?\\s*`?OBSERVATION"
+      reason: "Канонический список статусов (:42) должен включать OBSERVATION рядом со SKIPPED — регресс, оставляющий только SKIPPED без OBSERVATION, не покрывался ни одним прежним anchor'ом (mut012.mjs B-6 regression:42, FALSE-GREEN)."
+    - kind: skill_contains
+      file: "templates/test-session-report.md"
+      pattern: "\\(OBSERVATION\\)"
+      reason: "Строка статистики «Наблюдение (OBSERVATION)» не должна пропасть из шаблона отчёта (mut012.mjs B-6 template OBSERVATION row — прежде FALSE-GREEN, удаление строки не ловилось ни одним anchor'ом)."
+    - kind: skill_contains
+      file: "algorithms/blocked-tool-strategy.md"
+      pattern: "^(?![\\s\\S]*разрешают QA писать тесты)"
+      reason: "Ревью 2026-09-21 (manual-testing-B-2): гейт «shared разрешает → пиши; иначе BLOCKED» противоречил SKILL.md → «Легитимная работа QA» (не-UI инвариант можно тестировать независимо от наличия shared). Отвергнутая формулировка не должна вернуться."
+    - kind: skill_contains
+      file: "algorithms/blocked-tool-strategy.md"
+      pattern: "Легитимная работа QA"
+      reason: "Антипаттерн «писать автотесты без запуска» должен ссылаться на критерий SKILL.md → «Легитимная работа QA», а не задавать собственный (противоречащий) гейт по наличию shared."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Статус каждого тест-кейса:[^\\n]*`SKIPPED`\\s*/\\s*`OBSERVATION`"
+      reason: "Строка «Формат вывода» перечисляет все пять статусов TC, включая OBSERVATION — откат к усечённому списку PASS/FAIL/BLOCKED/SKIPPED ловится."

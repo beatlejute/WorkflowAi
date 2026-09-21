@@ -1,0 +1,69 @@
+id: TC-REVIEW-RESULT-010
+title: "Скил не содержит взаимоисключающих инструкций между SKILL.md, workflows/review.md и algorithms/verification.md"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents: ["Аудит coach 2026-09-21 (consistency, HIGH): порядок колонок таблицы ревью, путь тикета в pre-flight, диапазон шагов воркфлоу и пороги/правило вердикта в algorithms/verification.md противоречили друг другу между файлами скила."]
+  principle: "Скил не должен содержать взаимоисключающих или противоречащих друг другу инструкций (coach/SKILL.md, принцип 12 Consistency)."
+  backlog_sources: []
+tags: [consistency, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Дата\\s*→\\s*Статус\\s*→\\s*Самари\\s*→\\s*Агент"
+      reason: "Порядок колонок таблицы ревью описан один раз, канонически, в SKILL.md."
+    - kind: skill_contains
+      file: "workflows/review.md"
+      pattern: "^(?![\\s\\S]*\\{имя модели или 'unknown'\\}\\s*\\|\\s*\\{[✅❌])"
+      reason: "Воркфлоу больше не дублирует шаблон строки таблицы ревью в неверном порядке (Агент перед Статусом) — ссылается на формат из SKILL.md."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "tickets/review/\\{TICKET-ID\\}\\.md"
+      reason: "Pre-flight проверка frontmatter указывает на review/, где тикет реально лежит на стадии review-result (move-to-review переносит тикет в review/ до этой стадии — pipeline.yaml)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*tickets/in-progress/\\{TICKET-ID\\}\\.md)"
+      reason: "Pre-flight больше не указывает на in-progress/, где тикета на этой стадии уже нет."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "следуй шагам 1-7"
+      reason: "SKILL.md делегирует все 7 шагов воркфлоу, включая шаг 7 (пометка тикета секцией ревью — обязанность скила по строке 19)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*следуй шагам 1-6)"
+      reason: "SKILL.md больше не усекает делегирование до шага 6, исключая обязательный шаг 7."
+    - kind: skill_contains
+      file: "algorithms/verification.md"
+      pattern: "> 3 строки содержательного контента"
+      reason: "Единый порог «не пустого» файла — только в таблице «Пороги и правила»."
+    - kind: skill_contains
+      file: "algorithms/verification.md"
+      pattern: "^(?![\\s\\S]*> 0 строк)"
+      reason: "Шаг 2а алгоритма больше не задаёт второй, более низкий порог (> 0 строк), конфликтующий с таблицей порогов (> 3 строки)."
+    - kind: skill_contains
+      file: "algorithms/verification.md"
+      pattern: "шагов 1-4 этого алгоритма\\s*=\\s*`not_verified`"
+      reason: "Правило «любой issue → блокирующий вердикт» ограничено выходом самого алгоритма (not_verified из шагов 1-4), а не подменяет собой нюансы review.md (PARTIAL не блокирует, HIGH из 4.7.0 не авто-failed, LOW из dod-patterns → passed)."
+    - kind: skill_contains
+      file: "algorithms/verification.md"
+      pattern: "^(?![\\s\\S]*Любой issue = failed)"
+      reason: "Алгоритм больше не заявляет блокирующий `failed` для любого issue без исключений — это противоречило PARTIAL/HIGH/LOW градации в workflows/review.md и knowledge/dod-patterns.md."
+    - kind: skill_contains
+      file: "workflows/review.md"
+      pattern: "физически не существуют \\(шаг 4\\.7, основная проверка, шаг 1"
+      reason: "Случай «скриншот заявлен, но отсутствует физически» ссылается на верный шаг (основная проверка 4.7, шаг 1 — failed, файл не существует), а не на шаг 4.7.0 (который применяется только когда скриншот НЕ заявлен)."
+    - kind: skill_contains
+      file: "workflows/review.md"
+      pattern: "^(?![\\s\\S]*физически не существуют \\(HIGH issue из шага 4\\.7\\.0\\))"
+      reason: "Больше нет неоднозначной ссылки на шаг 4.7.0 (не блокирующий issue) для случая, который на самом деле обязан быть failed."
+
+execution:
+  timeout_s: 60

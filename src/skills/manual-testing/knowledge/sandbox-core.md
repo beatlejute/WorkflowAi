@@ -8,11 +8,11 @@
 ┌─────────────────────┐         ┌──────────────────────────┐
 │  Хост (Claude Code)  │  HTTP   │  Windows Sandbox          │
 │  MCP Client           │◄──────►│  windows-mcp (HTTP :8000) │
-│  (sandbox-desktop)    │        │  ↓ управляет UI            │
+│  (Sandbox MCP-сервер) │        │  ↓ управляет UI            │
 └─────────────────────┘         └──────────────────────────┘
 ```
 
-Инструменты: `mcp__sandbox-desktop__*` (screenshot, click, type, snapshot и т.д.). Подключение — `.mcp.json` → `"url": "http://<sandbox-ip>:8000/mcp"`. Пути и конфигурация .wsb — см. `CLAUDE.md` проекта. Расширенная настройка .wsb → `knowledge/sandbox-advanced.md`.
+Имя MCP-сервера и инструменты — из `.mcp.json` проекта (`mcp__<имя-сервера>__*`: screenshot, click, type, snapshot и т.д.). Подключение — `.mcp.json` → `"url": "http://<sandbox-ip>:8000/mcp"`. Пути и конфигурация .wsb — из `.workflow/src/skills/shared/` (см. индекс), если проект их там определяет; иначе из тикета/`context.notes`; иначе из `.wsb`-файла в sandbox-директории. Если ни один источник не дал путей — BLOCKED с причиной «Sandbox не сконфигурирован» (второй, независимый критерий BLOCKED для той же причины — отсутствие Sandbox-сервера в `.mcp.json`, см. `knowledge/desktop-tools.md` → «Выбор MCP-сервера»). Расширенная настройка .wsb → `knowledge/sandbox-advanced.md`.
 
 ## Quick-start checklist
 
@@ -20,9 +20,9 @@
 
 ```
 1. Screenshot → MCP работает, Sandbox активен
-2. PowerShell → Test-Path "<path-to-portable-vscode>"
+2. PowerShell → Test-Path "<path-to-app>"
 3. PowerShell → Test-Path "<path-to-test-workspace>"
-4. → Запускай VSCode и тест-кейсы
+4. → Запускай тестируемое приложение и тест-кейсы
 ```
 
 **⛔ Hard gate:** если к 5-му MCP-вызову не начал первый TC — СТОП, пересмотри план.

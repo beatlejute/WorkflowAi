@@ -1,0 +1,56 @@
+id: TC-MANUAL-TESTING-011
+title: "Рабочие файлы скила не хардкодят имена других скилов, префиксы проекта или проектные ID тикетов"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит изоляции 2026-09-21: SKILL.md:33/35 называл создателя тикетов по имени семейства чужих скилов (`decompose-*` / «decompose-зону»); knowledge/stateful-edge-cases.md:59-60 приписывал ответственность чужому скилу `create-plan` по имени. Оба нарушают принцип изоляции (скилы не знают друг друга по имени) и ломаются при переносе скила в проект без соответствующего скила декомпозиции/планирования."
+  principle: "Скилы, знания и алгоритмы manual-testing идентифицируют других участников пайплайна по роли (например, «скил декомпозиции», «соответствующий скил проекта»), а не по имени чужого скила, префиксу роли конкретного проекта или проектному ID тикета."
+  backlog_sources: []
+tags: [isolation, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила. Негативный anchor выражен
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose|deep-research|execute-task|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG|QA)-[0-9]{1,4}\\b))"
+      reason: "SKILL.md не должен называть другие скилы, проектные префиксы ролей или проектные ID тикетов по имени."
+    - kind: skill_contains
+      file: "knowledge/stateful-edge-cases.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose|deep-research|execute-task|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG|QA)-[0-9]{1,4}\\b))"
+      reason: "Модуль edge-cases не должен приписывать ответственность чужому скилу по имени."
+    - kind: skill_contains
+      file: "workflows/smoke.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose|deep-research|execute-task|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG|QA)-[0-9]{1,4}\\b|product-ui-map))"
+      reason: "Воркфлоу smoke не должен называть другие скилы, проектные префиксы ролей или проектные ID тикетов по имени."
+    - kind: skill_contains
+      file: "knowledge/sandbox-core.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose|deep-research|execute-task|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG|QA)-[0-9]{1,4}\\b|sandbox-desktop|CLAUDE\\.md))"
+      reason: "Sandbox core не должен называть другие скилы, проектные префиксы ролей или проектные ID тикетов по имени."
+    - kind: skill_contains
+      file: "knowledge/sandbox-advanced.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose|deep-research|execute-task|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG|QA)-[0-9]{1,4}\\b|CLAUDE\\.md))"
+      reason: "Sandbox advanced не должен называть другие скилы, проектные префиксы ролей или проектные ID тикетов по имени."
+    - kind: skill_contains
+      file: "knowledge/desktop-tools.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose|deep-research|execute-task|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG|QA)-[0-9]{1,4}\\b|sandbox-desktop))"
+      reason: "Desktop tools не должен называть другие скилы, проектные префиксы ролей или проектные ID тикетов по имени."
+    - kind: skill_contains
+      file: "algorithms/mcp-budget.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose|deep-research|execute-task|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG|QA)-[0-9]{1,4}\\b|по 11 QA-сесси))"
+      reason: "Алгоритм бюджетирования MCP не должен называть другие скилы, проектные префиксы ролей или проектные ID тикетов по имени."
+    - kind: skill_contains
+      file: "knowledge/browser-extension-testing.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose|deep-research|execute-task|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG|QA)-[0-9]{1,4}\\b|e2e/helpers))"
+      reason: "Модуль тестирования расширений не должен называть другие скилы, проектные префиксы ролей или проектные ID тикетов по имени."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."

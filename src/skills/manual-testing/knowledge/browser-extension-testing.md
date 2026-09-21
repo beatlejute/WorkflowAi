@@ -28,20 +28,13 @@ MCP-browser запускает браузер без флага `--load-extensio
 Используется в Playwright-тестах (не через MCP). Загрузка расширения при старте браузера:
 
 ```typescript
-// Запуск браузера с расширением
 const context = await chromium.launchPersistentContext('', {
-  headless: false,  // headless:true не поддерживается для расширений
-  args: [
-    `--disable-extensions-except=${pathToExtension}`,
-    `--load-extension=${pathToExtension}`,
-  ],
+  headless: false, // headless:true не поддерживается для расширений
+  args: [`--disable-extensions-except=${pathToExtension}`, `--load-extension=${pathToExtension}`],
 });
-// Extension ID получается из URL service worker
-const [background] = context.serviceWorkers();
-const extensionId = background.url().split('/')[2];
-// Popup открывается как обычная страница
+const extensionId = context.serviceWorkers()[0].url().split('/')[2]; // ID из URL service worker
 const popup = await context.newPage();
-await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+await popup.goto(`chrome-extension://${extensionId}/popup.html`); // popup как обычная страница
 ```
 
 **Возможности:** Весь функционал расширения включая API хранилища и service worker.
@@ -51,8 +44,6 @@ await popup.goto(`chrome-extension://${extensionId}/popup.html`);
 ### Стратегия 3: Документирование BLOCKED
 
 Если ни одна из стратегий недоступна — действуй по `algorithms/blocked-tool-strategy.md` (шаги 3–5): запиши TC как `BLOCKED` с причиной и шагами ручного воспроизведения **внутри текущего QA-тикета**. Новый тикет не создавай — эскалация это зона соответствующего скила проекта (см. SKILL.md → «Взаимодействие»).
-
-**⛔ НЕ переключайся на code review или генерацию тестовых данных как замену реального тестирования** — это не входит в скоуп manual-testing.
 
 ## Выбор стратегии
 
@@ -64,7 +55,7 @@ await popup.goto(`chrome-extension://${extensionId}/popup.html`);
 | Инструмент выполнения кода недоступен, но проект имеет тестовую HTML-страницу | Стратегия 1 → проверь shared knowledge проекта |
 | Оба варианта выше недоступны | Стратегия 3 |
 
-**⚠️ Наличие helper-модуля в проекте (`e2e/helpers/extension.ts` или аналог) = сигнал использовать Стратегию 2.** Проверь shared knowledge проекта на наличие готового helper перед выбором стратегии.
+**⚠️ Наличие в проекте helper-модуля, запускающего браузер с флагом `--load-extension` (ищи через индекс `.workflow/src/skills/shared/` или Grep по `--load-extension`/`launchPersistentContext` в тестовой инфраструктуре проекта), = сигнал использовать Стратегию 2.** Проверь shared knowledge проекта на наличие готового helper перед выбором стратегии.
 
 **⛔ Стратегия 1 (HTTP-сервер) не заменяет Стратегию 2** — chrome.storage и другие Extension API недоступны в HTTP-контексте. Используй Стратегию 1 только если Стратегия 2 технически невозможна.
 
@@ -72,20 +63,9 @@ await popup.goto(`chrome-extension://${extensionId}/popup.html`);
 
 При наличии доступа к extension-контексту:
 
-```typescript
-// Читать состояние хранилища
-const data = await popup.evaluate(() =>
-  chrome.storage.local.get(null)  // null = все ключи
-);
-
-// Подготовить тест-данные в хранилище
-await popup.evaluate((testData) =>
-  chrome.storage.local.set(testData), testData
-);
-
-// Сбросить состояние между тестами
-await popup.evaluate(() => chrome.storage.local.clear());
-```
+- `popup.evaluate(() => chrome.storage.local.get(null))` — читать состояние (`null` = все ключи)
+- `popup.evaluate((d) => chrome.storage.local.set(d), testData)` — подготовить тест-данные
+- `popup.evaluate(() => chrome.storage.local.clear())` — сбросить состояние между тестами
 
 ## Типичные артефакты тестирования расширений
 

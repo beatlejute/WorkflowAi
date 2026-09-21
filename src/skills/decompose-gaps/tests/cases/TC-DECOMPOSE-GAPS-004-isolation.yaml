@@ -1,0 +1,40 @@
+id: TC-DECOMPOSE-GAPS-004
+title: "Рабочие файлы скила не хардкодят имена других скилов, чужие ticket-префиксы/ID и проектные токены (изоляция)"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (коуч, блок «изоляция», HIGH): knowledge/scope-validation.md хардкодил имя другого скила (`coach`) как адресат процессных gaps и содержал прецедент с реальными ID тикетов/отчёта и именем проекта-потребителя (`REPORT-085`, `QA-57`, `HUMAN-6`, `PLAN-026`, `workflowAiVsCode`). Перенос скила в другой проект делал эти ссылки бессмысленными или вводящими в заблуждение."
+  principle: "Скил остаётся переносимым между проектами: рабочие файлы (SKILL.md, workflows/, knowledge/, algorithms/) не ссылаются на другие скилы по имени, не хардкодят чужие ticket-префиксы/ID, имена ролей и проектные токены (имя проекта-потребителя, общие MCP/скрипт-конфиги)."
+  backlog_sources: []
+tags: [isolation, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила. Негативный anchor выражен
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "В SKILL.md нет имён других скилов, чужих ticket-префиксов/ID, имён ролей проекта и проектных токенов."
+    - kind: skill_contains
+      file: "knowledge/scope-validation.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "В knowledge/scope-validation.md нет имён других скилов, чужих ticket-префиксов/ID, имён ролей проекта и проектных токенов."
+    - kind: skill_contains
+      file: "algorithms/scope-check.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "В algorithms/scope-check.md нет имён других скилов, чужих ticket-префиксов/ID, имён ролей проекта и проектных токенов."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "В workflows/decompose.md нет имён других скилов, чужих ticket-префиксов/ID, имён ролей проекта и проектных токенов."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."

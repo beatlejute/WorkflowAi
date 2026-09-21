@@ -1,6 +1,6 @@
 # Perplexity Research — конфигурация
 
-**Основной инструмент** для всех RSH-тикетов. Запрещено подменять web_search/web_fetch.
+**Основной инструмент** для всех RSH-тикетов. Fallback при сбое скрипта — см. раздел «Fallback» ниже.
 
 ## Вызов
 
@@ -23,7 +23,7 @@ node .workflow/src/skills/deep-research/scripts/perplexity-research.js "тема
 
 1. Сформируй запрос из тикета → запусти скрипт через bash → оформи отчёт в `reports/`
 2. В «Agent used» укажи `perplexity-research.js` + модель
-3. Требуется HTTPS_PROXY (настроен в env)
+3. Требуется Kilo OAuth-токен (`kilo auth login`); HTTPS_PROXY — опционально, используется автоматически если задан в env
 
 ## Fallback
 

@@ -4,7 +4,7 @@
 
 ## Вход
 
-- Список всех тикетов плана с их статусами (done, in-progress, ready, blocked, backlog)
+- Список всех тикетов плана с их статусами (done, archive, in-progress, ready, blocked, backlog); archive — завершённые тикеты закрытого плана, считаются как done
 - Сложность каждого тикета (simple, medium, complex)
 - Даты создания и завершения тикетов
 - Данные ревью (прошёл / не прошёл / пропущен)
@@ -15,7 +15,7 @@
 
 ```
 total = count(all tickets)
-done = count(status == done)
+done = count(status == done or status == archive)
 in_progress = count(status == in-progress)
 ready = count(status == ready)
 blocked = count(status == blocked)

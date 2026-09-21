@@ -29,15 +29,11 @@
 
 ## Распределение по типам
 
+Типы берутся из поля `type` в frontmatter тикетов. Группировка динамическая — перечисляются все встречающиеся типы (см. `algorithms/metric-calculation.md`, раздел 3).
+
 ```
 По типам:
-- IMPL: X (Y%)
-- FIX: X (Y%)
-- DOCS: X (Y%)
-- REVIEW: X (Y%)
-- ADMIN: X (Y%)
-- COACH: X (Y%)
-- RSH: X (Y%)
+- <type>: X (Y%)
 ```
 
 ## Пороговые значения
@@ -60,11 +56,7 @@
 
 ### Plan health
 
-| Статус | Условие | Описание |
-|--------|---------|----------|
-| ON_TRACK | completion >= expected_by_time | План идёт по графику |
-| AT_RISK | completion < expected_by_time на 10-25% | Риск отставания |
-| OFF_TRACK | completion < expected_by_time на 25%+ | План отстаёт |
+Пороги (ON_TRACK / AT_RISK / OFF_TRACK по `delta`) — единственный источник: `algorithms/metric-calculation.md`, раздел 2. Не дублируй здесь — цифры расходятся при правке в одном месте.
 
 ## Формат таблицы статистики
 

@@ -1,0 +1,72 @@
+id: TC-CREATE-PLAN-004
+title: "Скил не содержит противоречащих друг другу формулировок одного правила (риски, справочные данные, парные задачи верификации, приоритет)"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит consistency 2026-09-21 (cons.json, create-plan-A-6, create-plan-A-7, create-plan-B-1, create-plan-B-4, create-plan-B-7): algorithms/risk-assessment.md давал пересекающиеся пороги митигации (6 и 4 входили в два уровня одновременно) и требовал в выходной таблице колонки категория/уровень, которых нет в .workflow/templates/plan-template.md и в фактической практике планов (292 совпадения словесной 4-колоночной таблицы против 46 числовой в трёх проектах-потребителях); SKILL.md и knowledge/plan-completeness.md делали секцию \"Справочные данные\" условной (\"при создании из ТЗ\"), тогда как scripts/validate-completeness.js требует её безусловно (errors -> valid:false); knowledge/task-verification-pairs.md заявлял автотесты \"обязательны всегда\" в правиле, но в собственной таблице (строка \"нельзя покрыть тестом\") — \"Нет\"; workflows/create.md дублировал то же безусловное требование и отдельно задавал числовую шкалу приоритета (1-5), тогда как .workflow/templates/plan-template.md и фактическая практика (366 словесных против 83 с числом) используют словесную шкалу Критический/Высокий/Средний/Низкий."
+  principle: "Consistency (coach/SKILL.md, принцип 12): скил не должен содержать взаимоисключающих формулировок одного правила; при обнаружении — устранить, выбрав одну версию по фактической практике/контракту и обновив все места."
+  backlog_sources: []
+tags: [consistency, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила. Негативные anchors выражены
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "algorithms/risk-assessment.md"
+      pattern: "CRITICAL \\(9\\)[\\s\\S]{0,120}HIGH \\(6\\)[\\s\\S]{0,120}MEDIUM \\(3–4\\)"
+      reason: "Пороги стратегий митигации привязаны к точным значениям матрицы (CRITICAL=9, HIGH=6, MEDIUM=3-4), без пересечения диапазонов (create-plan-A-6)."
+    - kind: skill_contains
+      file: "algorithms/risk-assessment.md"
+      pattern: "^(?![\\s\\S]*(CRITICAL \\(6–9\\)|HIGH \\(4–6\\)))"
+      reason: "Старые пересекающиеся диапазоны CRITICAL (6-9) / HIGH (4-6) не встречаются (create-plan-A-6)."
+    - kind: skill_contains
+      file: "algorithms/risk-assessment.md"
+      pattern: "^(?![\\s\\S]*LOW \\(1–2\\) \\| Фиксируй только если влияние = 3)"
+      reason: "Невыполнимое условие LOW-строки таблицы митигации (влияние=3 по матрице никогда не даёт LOW) удалено — согласовано с матрицей на влияние=2 (create-plan-A-6)."
+    - kind: skill_contains
+      file: "algorithms/risk-assessment.md"
+      pattern: "риск, вероятность \\(словами[\\s\\S]{0,250}не выносятся"
+      reason: "Выход алгоритма ограничен словесной шкалой (риск/вероятность/влияние/митигация по формату plan-template.md); категория и числовой уровень — только внутренняя оценка (create-plan-A-7)."
+    - kind: skill_contains
+      file: "algorithms/risk-assessment.md"
+      pattern: "^(?![\\s\\S]*риск, категория, вероятность, влияние, уровень, митигация)"
+      reason: "Старый список колонок вывода (с категорией и уровнем), конфликтовавший с шаблоном плана и фактической практикой, удалён (create-plan-A-7)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*обязательна при создании из ТЗ)"
+      reason: "Старая условная формулировка секции \"Справочные данные\", противоречившая безусловной проверке scripts/validate-completeness.js, удалена (create-plan-B-1)."
+    - kind: skill_contains
+      file: "knowledge/plan-completeness.md"
+      pattern: "должен содержать\\*\\* секцию \"Справочные данные\"[\\s\\S]{0,60}безусловно"
+      reason: "Секция \"Справочные данные\" требуется безусловно, что совпадает с REQUIRED_SECTIONS в scripts/validate-completeness.js (create-plan-B-1)."
+    - kind: skill_contains
+      file: "knowledge/plan-completeness.md"
+      pattern: "^(?![\\s\\S]*основанный на внешнем ТЗ)"
+      reason: "Старая формулировка \"план, основанный на внешнем ТЗ, должен содержать\" удалена (create-plan-B-1)."
+    - kind: skill_contains
+      file: "knowledge/task-verification-pairs.md"
+      pattern: "Актуализация автотестов\\*\\* \\(если изменение можно покрыть автотестом"
+      reason: "Условие автотестов согласовано с таблицей выбора (строки 19-24): нужны, если изменение можно покрыть тестом, а не \"всегда\" (create-plan-B-4)."
+    - kind: skill_contains
+      file: "knowledge/task-verification-pairs.md"
+      pattern: "^(?![\\s\\S]*Актуализация автотестов\\*\\* \\(обязательна всегда\\))"
+      reason: "Старая формулировка \"обязательна всегда\", противоречившая собственной таблице файла (строка \"нельзя покрыть тестом\" -> \"Нет\"), удалена (create-plan-B-4)."
+    - kind: skill_contains
+      file: "workflows/create.md"
+      pattern: "^(?![\\s\\S]*обязательна для любого изменения кода)"
+      reason: "Дублирующая безусловная формулировка про автотесты в create.md заменена ссылкой на таблицу task-verification-pairs.md (create-plan-B-4)."
+    - kind: skill_contains
+      file: "workflows/create.md"
+      pattern: "Приоритет \\(Критический/Высокий/Средний/Низкий"
+      reason: "Шкала приоритета в create.md переведена на словесную (Критический/Высокий/Средний/Низкий), как в .workflow/templates/plan-template.md и в фактической практике (366 словесных vs 83 с числом в трёх проектах) (create-plan-B-7)."
+    - kind: skill_contains
+      file: "workflows/create.md"
+      pattern: "^(?![\\s\\S]*Приоритет \\(1-5, где 1 — критический\\))"
+      reason: "Старая числовая шкала приоритета (1-5, где 1 - критический), противоречившая шаблону плана, удалена (create-plan-B-7)."

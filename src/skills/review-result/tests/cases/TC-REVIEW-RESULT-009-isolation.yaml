@@ -1,0 +1,39 @@
+id: TC-REVIEW-RESULT-009
+title: "Скил не хардкодит имена других скилов, роли и project-wide ID тикетов"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents: ["Аудит coach 2026-09-21: рабочие файлы скила содержали хардкод имён чужих скилов, project-wide ID и упоминание чужого проекта."]
+  principle: "Скилы не должны знать о других скилах по имени и не должны хардкодить project-wide типы/префиксы тикетов — только критерий принятия решения и ссылка на конфиг проекта."
+  backlog_sources: []
+tags: [isolation, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила. Негативный anchor выражен
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing)\\b|decompose-\\*|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,4}\\b))"
+      reason: "SKILL.md не называет чужие скилы по имени (в т.ч. семейство decompose-*), не использует проектные роли/ID и не ссылается на project-wide префиксы тикетов."
+    - kind: skill_contains
+      file: "knowledge/dod-patterns.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing)\\b|decompose-\\*|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,4}\\b))"
+      reason: "Справочник паттернов DoD организован по generic-категориям задач, а не по именам чужих скилов или project-wide типам тикетов, и не ссылается на внутренний файл чужого скила."
+    - kind: skill_contains
+      file: "templates/verdict.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing)\\b|decompose-\\*|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,4}\\b))"
+      reason: "Примеры ticket_id в шаблоне вердикта generic (XXX/YYY), без ID-префиксов чужих скилов."
+    - kind: skill_contains
+      file: "workflows/review.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing)\\b|decompose-\\*|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,4}\\b))"
+      reason: "Пример вызова verify-artifacts.js использует generic ticket_id, без project-wide префикса."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."

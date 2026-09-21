@@ -23,3 +23,13 @@ cases:
     origin_chg: [CHG-107]
     tags: [granularity, plan-quality]
     severity: medium
+  - id: TC-CREATE-PLAN-003
+    file: cases/TC-CREATE-PLAN-003-isolation.yaml
+    origin_chg: [ad-hoc-2026-09-21-audit]
+    tags: [isolation, regression-guard]
+    severity: high
+  - id: TC-CREATE-PLAN-004
+    file: cases/TC-CREATE-PLAN-004-consistency.yaml
+    origin_chg: [ad-hoc-2026-09-21-audit]
+    tags: [consistency, regression-guard]
+    severity: high

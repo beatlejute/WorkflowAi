@@ -1,0 +1,62 @@
+id: TC-DEEP-RESEARCH-003
+title: "Скил не противоречит сам себе: perplexity fallback, предусловие скрипта, маркеры данных"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (deep-research-A-1/B-4, HIGH): SKILL.md:39 ⛔ «Запрещено подменять web_search/web_fetch» без исключений противоречило knowledge/perplexity-config.md:30 (fallback на WebSearch/WebFetch при сбое скрипта, сеть/403/таймаут) и собственной строке 3 того же файла. Фактическая практика (D:/Dev/documentaions/.workflow/reports/REPORT-020.md: RSH-001 выполнен через fallback web_search/web_fetch после 403 у perplexity-research.js, 'все RSH-задачи выполнены через fallback') подтверждает — fallback легитимен и был явно задокументирован в SKILL.md с момента создания скила (git commit b879d11), но потерял исключение при рефакторинге, сжавшем ⛔-абзац (git commit 8b992bd)."
+    - "Аудит 2026-09-21 (deep-research-B-12, MEDIUM): perplexity-config.md:26 утверждал «Требуется HTTPS_PROXY», хотя scripts/perplexity-research.js:133-137 (getProxyUrl) делает прокси опциональным (`|| null`), а реальная обязательная зависимость — Kilo OAuth-токен (scripts/perplexity-research.js:30-35 AUTH_FILE, :96-97 'Kilo auth file not found ... kilo auth login')."
+    - "Аудит 2026-09-21 (deep-research-A-5, HIGH): маркеры данных расходились между модулями — `[SINGLE SOURCE]` (SKILL.md) vs `[SINGLE SOURCE: {source}]` (data-validation.md); `[DATA: YYYY]` (research-methodology.md) vs `[OUTDATED: {year}]` (data-validation.md). knowledge/data-validation.md:33-42 «Шаблон маркировки данных» — единственный явно оформленный канонический словарь, остальные упоминания приведены к нему."
+  principle: "Принцип 12 (Consistency) coach/SKILL.md"
+  backlog_sources: []
+tags: [consistency, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила. Негативные anchor'ы
+    выражены через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "Запрещено подменять web_search/web_fetch, кроме документированного fallback \\(см\\. `knowledge/perplexity-config\\.md`, раздел «Fallback»\\)"
+      reason: "⛔ в SKILL.md должен явно допускать документированный fallback, а не запрещать web_search/web_fetch безусловно (deep-research-A-1/B-4)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*web_search/web_fetch\\. При работе)"
+      reason: "Старая безусловная формулировка ⛔ (запрет без исключения для fallback, сразу за которым шло «При работе») не должна вернуться."
+    - kind: skill_contains
+      file: "knowledge/perplexity-config.md"
+      pattern: "^(?![\\s\\S]*RSH-тикетов\\. Запрещено подменять web_search/web_fetch\\.)"
+      reason: "perplexity-config.md:3 не должен безусловно запрещать web_search/web_fetch — это противоречит собственному разделу «Fallback» 27 строками ниже (deep-research-A-1)."
+    - kind: skill_contains
+      file: "knowledge/perplexity-config.md"
+      pattern: "Если скрипт не работает \\(сеть, 403, таймаут\\) → зафиксируй ошибку, используй WebSearch/WebFetch, укажи причину\\."
+      reason: "Раздел «Fallback» — единственное место, разрешающее WebSearch/WebFetch при сбое скрипта; должен остаться нетронутым."
+    - kind: skill_contains
+      file: "knowledge/perplexity-config.md"
+      pattern: "Kilo OAuth-токен \\(`kilo auth login`\\); HTTPS_PROXY — опционально"
+      reason: "Предусловие должно соответствовать scripts/perplexity-research.js: Kilo OAuth обязателен, прокси опционален (deep-research-B-12)."
+    - kind: skill_contains
+      file: "knowledge/perplexity-config.md"
+      pattern: "^(?![\\s\\S]*Требуется HTTPS_PROXY \\(настроен в env\\))"
+      reason: "Старое неверное предусловие «Требуется HTTPS_PROXY» (не подтверждённое скриптом) не должно вернуться (deep-research-B-12)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "\\[SINGLE SOURCE: \\{source\\}\\]"
+      reason: "Маркер одиночного источника в SKILL.md должен совпадать с каноном knowledge/data-validation.md (deep-research-A-5)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*`\\[SINGLE SOURCE\\]`)"
+      reason: "Старый неполный маркер `[SINGLE SOURCE]` (без {source}) не должен вернуться в SKILL.md."
+    - kind: skill_contains
+      file: "knowledge/research-methodology.md"
+      pattern: "\\[OUTDATED: \\{year\\}\\]"
+      reason: "Маркер устаревших данных в research-methodology.md должен совпадать с каноном knowledge/data-validation.md (deep-research-A-5)."
+    - kind: skill_contains
+      file: "knowledge/research-methodology.md"
+      pattern: "^(?![\\s\\S]*`\\[DATA: YYYY\\]`)"
+      reason: "Старый маркер `[DATA: YYYY]` не должен вернуться в research-methodology.md."

@@ -26,7 +26,9 @@ scenario:
         Инцидент: execute-task агент (claude-sonnet) заявил ✅ в stdout,
         но в тикете Result пуст, DoD 0/5. Файл knowledge/test-authorship.md
         не создан. Инструкция против «призрачного выполнения» уже есть
-        в execution-strategy.md:59-88. Два агента её проигнорировали.
+        в execution-strategy.md — commit-дата этой правки (текстовое усиление):
+        2026-04-10. Тикет-нарушитель XXX-054: completed_at: 2026-04-17. Два
+        агента проигнорировали инструкцию.
 
 assertions:
   static:

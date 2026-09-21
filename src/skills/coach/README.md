@@ -9,7 +9,7 @@ coach/
 ├── SKILL.md                          # Ядро: роль, маршрутизация, принципы
 ├── workflows/                        # CREATE, AUDIT, ANALYZE, IMPROVE, RESEARCH, REVIEW
 ├── knowledge/                        # skill-anatomy, common-antipatterns, prompt-engineering,
-│                                     # backlog-management, shared-knowledge-guide
+│                                     # backlog-management, incident-analysis, test-authorship
 ├── algorithms/                       # skill-scoring, gap-analysis, improvement-prioritization
 ├── templates/                        # new-skill, audit-report, improvement-plan
 └── README.md

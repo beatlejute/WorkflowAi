@@ -1,0 +1,125 @@
+id: TC-EXECUTE-TASK-011
+title: "Скил не содержит внутренних противоречий: единый вход тикета, формат stdout, GATE-1, модель невыполнимого DoD, канон Result/DoD, единый источник соразмерности проверки"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит consistency 2026-09-21: SKILL.md/execute.md предписывали брать тикет из мёртвой ветки review/ (execute-task никогда туда не пишет — pipeline.yaml: execute-task всегда move-to-review; retry идёт review→ready→in-progress); SKILL.md секция «Формат вывода» противоречила строгому формату stdout шага 8; GATE-1 требовал ровно 2 вызова Edit (невыполнимо при continuation, где чекбоксы уже все [x]); execute.md GATE-2 допускал `[ ]` с пометкой при одновременном запрете `[ ]`; Result-секция называлась то `## Result`, то `## Результат выполнения`, DoD — то `## Definition of Done`, то `## Критерии готовности`, при каноне `templates/ticket-template.md`/`tickets.mjs`/`verify-artifacts.js` = `## Результат выполнения` + `## Критерии готовности (Definition of Done)`; правило «Соразмерность проверки критерию» дублировалось тремя разными формулировками в SKILL.md/execute.md/algorithms/execution-strategy.md; algorithms/execution-strategy.md ссылался на несуществующий «шаг 5»."
+  principle: "Consistency (coach/SKILL.md, принцип 12): одна версия правила/термина, обновить все места."
+  backlog_sources: []
+tags: [consistency, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила. Негативный anchor выражен
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    # B-1: единственный вход тикета — in-progress/, без мёртвой ветки review/
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "не найден в `in-progress/`[^\\n]*status: blocked"
+      reason: "Тикет не найден → status: blocked, а не чтение из review/ (execute-task туда никогда не попадает: pipeline.yaml execute-task.goto.default → move-to-review, retry идёт review→ready→in-progress)."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "^(?![\\s\\S]*review/`\\s*при повторном выполнении)"
+      reason: "workflows/execute.md не упоминает review/ как вход — мёртвая ветка убрана."
+
+    # B-2: секция «Формат вывода» не противоречит строгому stdout-формату шага 8
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*Структурированный результат с секциями)[\\s\\S]*шагу 8"
+      reason: "«Формат вывода» ссылается на строгий формат шага 8 (одна строка + RESULT), а не требует отдельного «структурированного результата с секциями» в stdout."
+
+    # B-10: GATE-1 — инвариант состояния файла, а не счётчик вызовов Edit
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*как минимум дважды)[\\s\\S]*должны быть зафиксированы: изменённые DoD-чекбоксы"
+      reason: "GATE-1 в SKILL.md требует инвариант (чекбоксы + непустой Result через Edit), а не фиксированное число вызовов Edit — выполнимо и при continuation, где чекбоксы уже все [x]."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "^(?![\\s\\S]*минимум дважды)[\\s\\S]*должны быть зафиксированы: изменённые чекбоксы DoD"
+      reason: "GATE-1 в workflows/execute.md использует тот же инвариант, что и SKILL.md, без счётчика «минимум дважды»."
+
+    # B-3: единая модель невыполнимого пункта DoD — [x] с причиной в строке
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "^(?![\\s\\S]*Все — `\\[x\\]` или с пометкой причины невыполнения\\.)[\\s\\S]*Все переведены в `\\[x\\]` или помечены причиной невыполнения"
+      reason: "GATE-2 в execute.md больше не допускает оставить `[ ]` «с пометкой» при одновременном запрете любого `[ ]` — модель невыполнимого пункта единая: `[x] Пункт — не применимо: <причина>`."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*невыполним — зафиксировать причину в заметках)"
+      reason: "SKILL.md нигде не возвращается к модели «невыполним → просто зафиксировать причину в заметках» без `[x]` в строке — единая модель B-3."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "^(?![\\s\\S]*невыполним — зафиксировать причину в заметках)"
+      reason: "workflows/execute.md нигде не возвращается к модели «невыполним → просто зафиксировать причину в заметках» без `[x]` в строке — единая модель B-3."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*или зафиксирована причина невыполнения)(?![\\s\\S]*или указана причина невыполнения)"
+      reason: "SKILL.md нигде не допускает формулировку «[x] или причина» (разрешающую оставить `[ ]` с пометкой) — ни в ограничении #9, ни в self-check."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "^(?![\\s\\S]*или зафиксирована причина невыполнения)"
+      reason: "workflows/execute.md (GATE-3 self-check) нигде не допускает формулировку «[x] или причина»."
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: "^(?![\\s\\S]*или зафиксирована причина невыполнения)"
+      reason: "algorithms/execution-strategy.md (чеклист раздела 4) нигде не допускает формулировку «[x] или причина»."
+
+    # A-9: канон секции Result/DoD — из templates/ticket-template.md, tickets.mjs, verify-artifacts.js
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*`## Result`)[\\s\\S]*## Результат выполнения"
+      reason: "SKILL.md использует единственный канон `## Результат выполнения` (templates/ticket-template.md:75, tickets.mjs, verify-artifacts.js), без альтернативы `## Result`."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "^(?![\\s\\S]*`## Result`)[\\s\\S]*## Результат выполнения"
+      reason: "workflows/execute.md использует тот же канон `## Результат выполнения`, без `## Result`."
+    - kind: skill_contains
+      file: "knowledge/ticket-structure.md"
+      pattern: "## Критерии готовности \\(Definition of Done\\)"
+      reason: "DoD-заголовок в справочнике — полная каноническая форма `## Критерии готовности (Definition of Done)` (совпадает с templates/ticket-template.md:67 и tickets.mjs:386, verify-artifacts.js:148 комментарий «канонический формат»)."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "^(?![\\s\\S]*## Result\\b)"
+      reason: "workflows/execute.md не содержит заголовок `## Result` ни в тексте, ни в code-block — только канон `## Результат выполнения` (anchor без обратных кавычек ловит и нетипизированное упоминание внутри code fence)."
+    - kind: skill_contains
+      file: "templates/result-template.md"
+      pattern: "^(?![\\s\\S]*## Result\\b)"
+      reason: "Шаблон результата использует только канон `## Результат выполнения`, без альтернативного заголовка `## Result`."
+    - kind: skill_contains
+      file: "knowledge/context-checkpoints.md"
+      pattern: "^(?![\\s\\S]*## Result\\b)"
+      reason: "Справочник по контрольным точкам ссылается только на канон `## Результат выполнения → ### Заметки`, без `## Result`."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*`## Definition of Done`)"
+      reason: "SKILL.md не упоминает голый бэктикованный `## Definition of Done` отдельно от канонической полной формы `## Критерии готовности (Definition of Done)`."
+
+    # A-2: единый источник правила «Соразмерность проверки критерию»
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: "Таксономия свойств, которые может описывать критерий"
+      reason: "algorithms/execution-strategy.md (загружается ВСЕГДА) — единственный источник таксономии и таблицы соразмерности проверки критерию."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "^(?![\\s\\S]*#### ⛔ Соразмерность проверки критерию)[\\s\\S]*Соразмерность проверки критерию"
+      reason: "workflows/execute.md больше не дублирует полный блок «Соразмерность проверки критерию» — только ссылка на algorithms/execution-strategy.md."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*Быстрые соответствия)"
+      reason: "SKILL.md не хранит собственную копию «Быстрые соответствия» — единственный источник таксономии и способов проверки остаётся algorithms/execution-strategy.md."
+
+    # A-8 / B-15: нет висячих ссылок на номер шага внутри algorithms/execution-strategy.md
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: "^(?![\\s\\S]*вернись к шагу 5)"
+      reason: "algorithms/execution-strategy.md ссылается на шаги по имени пункта («вернись к пункту «Изменяй»»), а не по номеру, которого нет на верхнем уровне файла (там только секции 1–4)."
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: "^(?![\\s\\S]*\\(шаг [0-9]\\))"
+      reason: "algorithms/execution-strategy.md нигде не ссылается на висячий номер шага в скобках вида «(шаг N)» — только на имена пунктов раздела 3 «Выполнение»."

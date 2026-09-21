@@ -12,7 +12,10 @@ decompose-plan/
 │   └── decompose.md                # Пошаговый алгоритм декомпозиции плана
 ├── knowledge/
 │   ├── human-task-rules.md         # Правила создания HUMAN-тикетов
-│   └── scope-guard-checklist.md    # Чеклист scope-guard (4 проверки)
+│   ├── scope-guard-checklist.md    # Чеклист scope-guard (5 проверок)
+│   ├── atomicity-checklist.md      # Чеклист атомарности (7 проверок)
+│   ├── capabilities.md             # required_capabilities: правила назначения
+│   └── stop-gate-rationale.md      # Обоснования стоп-гейтов (почему, не нормы)
 └── algorithms/
     └── deduplication.md            # Алгоритм проверки на дубликаты
 ```
@@ -23,7 +26,7 @@ decompose-plan/
 2. Загружает knowledge/scope-guard-checklist.md и algorithms/deduplication.md
 3. Запускает workflows/decompose.md
 4. Для каждой задачи плана: определяет тип по объекту работы, оценивает автономность (agent/human)
-5. Проходит scope-guard (4 проверки) и дедупликацию
+5. Проходит scope-guard (5 проверок) и дедупликацию
 6. Создаёт тикеты в `.workflow/tickets/backlog/`
 7. Обновляет план ссылками на тикеты
 

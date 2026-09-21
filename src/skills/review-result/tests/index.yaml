@@ -53,3 +53,13 @@ cases:
     origin_chg: [ad-hoc-2026-05-03]
     tags: [handoff-ban, ticket-creation-zone, delegation]
     severity: high
+  - id: TC-REVIEW-RESULT-009
+    file: cases/TC-REVIEW-RESULT-009-isolation.yaml
+    origin_chg: [ad-hoc-2026-09-21-audit]
+    tags: [isolation, regression-guard]
+    severity: high
+  - id: TC-REVIEW-RESULT-010
+    file: cases/TC-REVIEW-RESULT-010-consistency.yaml
+    origin_chg: [ad-hoc-2026-09-21-audit]
+    tags: [consistency, regression-guard]
+    severity: high

@@ -48,3 +48,13 @@ cases:
     origin_chg: [ad-hoc-2026-09-21-audit]
     tags: [id-generation, collision-prevention, stop-gate, atomicity-retry, regression-guard]
     severity: critical
+  - id: TC-DECOMPOSE-PLAN-008
+    file: cases/TC-DECOMPOSE-PLAN-008-isolation.yaml
+    origin_chg: [ad-hoc-2026-09-21-audit]
+    tags: [isolation, regression-guard]
+    severity: high
+  - id: TC-DECOMPOSE-PLAN-009
+    file: cases/TC-DECOMPOSE-PLAN-009-consistency.yaml
+    origin_chg: [ad-hoc-2026-09-21-audit]
+    tags: [consistency, regression-guard]
+    severity: high

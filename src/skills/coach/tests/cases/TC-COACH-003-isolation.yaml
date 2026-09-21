@@ -1,0 +1,48 @@
+id: TC-COACH-003
+title: "Coach не хардкодит имена/префиксы скилов и ролей проекта в собственных рабочих файлах"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (изоляция, HIGH): SKILL.md:142 и knowledge/common-antipatterns.md:46 хардкодили закрытый список префиксов ролей проекта (GML, PMA, CSM, CRO, PMK) вместо grep-критерия; knowledge/prompt-engineering.md:9 использовал конкретную роль проекта (Growth Marketing Lead) как пример; workflows/create.md:66 хардкодил имена файлов реестра конкретного проекта (CLAUDE.md/QWEN.md); knowledge/backlog-management.md и templates/coach-backlog-init.yaml использовали не project-relative путь `src/skills/...` вместо `.workflow/src/skills/...`."
+  principle: "Изоляция скилов (#8) + Универсальность правок (#9) — не хардкодить имена скилов/ролей проекта, project-wide файлы и non-project-relative пути."
+  backlog_sources: []
+tags: [isolation, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила. Негативный anchor выражен
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|Growth Marketing Lead|workflowAiVsCode|PulseProxy|documentaions|QWEN\\.md|(?<!\\.workflow/)src/skills|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|ADMIN|ARCH|RSH|ANL|RPT)-[0-9]{1,3}\\b))"
+      reason: "SKILL.md не должен содержать имена других скилов, префиксы ролей проекта, non-project-relative путь src/skills или чужие ticket-префиксы (COACH/CHG — свои, допустимы)."
+    - kind: skill_contains
+      file: "knowledge/common-antipatterns.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|Growth Marketing Lead|workflowAiVsCode|PulseProxy|documentaions|QWEN\\.md|(?<!\\.workflow/)src/skills|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|ADMIN|ARCH|RSH|ANL|RPT)-[0-9]{1,3}\\b))"
+      reason: "Проверка изоляции в common-antipatterns.md не должна сама хардкодить закрытый список префиксов ролей проекта или non-project-relative путь."
+    - kind: skill_contains
+      file: "knowledge/prompt-engineering.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|Growth Marketing Lead|workflowAiVsCode|PulseProxy|documentaions|QWEN\\.md|(?<!\\.workflow/)src/skills|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|ADMIN|ARCH|RSH|ANL|RPT)-[0-9]{1,3}\\b))"
+      reason: "Примеры формулировок не должны использовать конкретную роль проекта как образец."
+    - kind: skill_contains
+      file: "workflows/create.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|Growth Marketing Lead|workflowAiVsCode|PulseProxy|documentaions|QWEN\\.md|(?<!\\.workflow/)src/skills|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|ADMIN|ARCH|RSH|ANL|RPT)-[0-9]{1,3}\\b))"
+      reason: "Регистрация нового скила не должна ссылаться на project-wide файлы конкретного проекта (CLAUDE.md/QWEN.md)."
+    - kind: skill_contains
+      file: "knowledge/backlog-management.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|Growth Marketing Lead|workflowAiVsCode|PulseProxy|documentaions|QWEN\\.md|(?<!\\.workflow/)src/skills|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|ADMIN|ARCH|RSH|ANL|RPT)-[0-9]{1,3}\\b))"
+      reason: "Git-команды по истории скила не должны содержать имена других скилов/ролей, non-project-relative путь или чужие ticket-префиксы."
+    - kind: skill_contains
+      file: "templates/coach-backlog-init.yaml"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|Growth Marketing Lead|workflowAiVsCode|PulseProxy|documentaions|QWEN\\.md|(?<!\\.workflow/)src/skills|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|ADMIN|ARCH|RSH|ANL|RPT)-[0-9]{1,3}\\b))"
+      reason: "Шаблон инициализации бэклога не должен содержать имена других скилов/ролей проекта или non-project-relative путь."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."

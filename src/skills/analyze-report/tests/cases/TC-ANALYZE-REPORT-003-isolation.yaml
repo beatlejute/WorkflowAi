@@ -1,0 +1,37 @@
+id: TC-ANALYZE-REPORT-003
+title: "Скил не хардкодит имена других скилов, проектов и чужие ID тикетов/отчётов"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (изоляция, HIGH): workflows/progress.md ссылался на `create-report/workflows/standard.md` по пути и на `decompose-gaps`/`execute-task` по имени; workflows/retrospective.md называл воркфлоу `create-report` по имени; SKILL.md содержал прецедент с конкретными ID (REPORT-085, PLAN-026, QA-57, HUMAN-6), именем проекта-потребителя (workflowAiVsCode) и датированным «правилом стейкхолдера». Скил перестаёт быть переносимым между проектами, ссылки ломаются при переименовании/удалении смежного скила."
+    - "d:/Dev/workflowAi (iso.json): findings.analyze-report[A-1, A-2, A-3, A-4]"
+  principle: "Скилы не знают о других скилах по имени (принцип изоляции 8) и не хардкодят project-specific ID/проекты/даты в каноническом тексте (принцип универсальности 9)."
+  backlog_sources: []
+tags: [isolation, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила. Негативный anchor выражен
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*(\\b(coach|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "SKILL.md не должен называть другие скилы по имени и не должен содержать конкретные ID чужих тикетов/отчётов или имя проекта-потребителя."
+    - kind: skill_contains
+      file: "workflows/progress.md"
+      pattern: "^(?![\\s\\S]*(\\b(coach|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "workflows/progress.md не должен ссылаться на воркфлоу/скилы соседних стадий пайплайна по имени."
+    - kind: skill_contains
+      file: "workflows/retrospective.md"
+      pattern: "^(?![\\s\\S]*(\\b(coach|create-plan|create-report|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "workflows/retrospective.md не должен называть воркфлоу-источник отчётов по имени скила."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."

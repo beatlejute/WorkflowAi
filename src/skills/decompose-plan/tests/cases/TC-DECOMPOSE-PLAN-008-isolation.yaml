@@ -1,0 +1,60 @@
+id: TC-DECOMPOSE-PLAN-008
+title: "Скил не хардкодит имена других скилов, project-wide типы/префиксы тикетов и проектные роли — только критерии и config.yaml → task_types"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (HIGH, изоляция): SKILL.md:62 маршрутизация называла чужой скил по имени («скилы → coach») и project-wide тип («код → impl»); workflows/decompose.md:145-151 таблица маршрутизации хардкодила литералы impl/fix/admin/docs вместо описания типа из config.yaml, а строка 257 называла чужую стадию execute-task по имени; algorithms/deduplication.md:11,87-97 иллюстрировала префиксы примерами IMPL/COACH — COACH является ticket_prefix скила coach. Принцип 9 (чеклист из 4 вопросов) требует критерий вместо закрытого списка/имени; принцип 8 запрещает знать другие скилы по имени."
+  principle: "SKILL.md, workflows/, knowledge/, algorithms/ не называют другие скилы проекта по имени и не хардкодят project-wide типы/префиксы тикетов (impl/fix/admin/docs/human и т.п.) и проектные роли/ID — тип тикета определяется по `config.yaml → task_types` (по description), примеры используют generic-обозначения (XXX-NNN, {PREFIX})."
+  backlog_sources: []
+tags: [isolation, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над рабочими файлами скила. Негативный anchor выражен через
+    lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "SKILL.md не называет другие скилы проекта по имени, проектные роли и не использует чужие/project-wide ID тикетов как пример."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b|Префикс `HUMAN`))"
+      reason: "Воркфлоу декомпозиции не называет другие скилы/стадии по имени и не хардкодит project-wide типы/префиксы тикетов как литералы маршрутизации."
+    - kind: skill_contains
+      file: "algorithms/deduplication.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "Алгоритм дедупликации иллюстрирует префиксы generic-обозначениями, а не ticket_prefix чужого скила (например, COACH)."
+    - kind: skill_contains
+      file: "knowledge/human-task-rules.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b|`ADMIN` для задач))"
+      reason: "Правила HUMAN-тикетов не используют захардкоженный ID-пример с числовым префиксом другого проектного типа и не откатывают антипаттерн «ADMIN для executor_type: human»."
+    - kind: skill_contains
+      file: "README.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "README не называет другие скилы проекта по имени и не использует чужие/project-wide ID тикетов как пример."
+    - kind: skill_contains
+      file: "knowledge/atomicity-checklist.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "Чеклист атомарности не называет другие скилы проекта по имени и не использует чужие/project-wide ID тикетов как пример."
+    - kind: skill_contains
+      file: "knowledge/capabilities.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "Справочник возможностей не называет другие скилы проекта по имени и не использует чужие/project-wide ID тикетов как пример."
+    - kind: skill_contains
+      file: "knowledge/scope-guard-checklist.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "Чеклист scope-guard не называет другие скилы проекта по имени и не использует чужие/project-wide ID тикетов как пример."
+    - kind: skill_contains
+      file: "knowledge/stop-gate-rationale.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|create-report|decompose-gaps|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(REPORT|PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|RPT|CHG)-[0-9]{1,3}\\b))"
+      reason: "Обоснования стоп-гейтов не называют другие скилы проекта по имени и не используют чужие/project-wide ID тикетов как пример."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."

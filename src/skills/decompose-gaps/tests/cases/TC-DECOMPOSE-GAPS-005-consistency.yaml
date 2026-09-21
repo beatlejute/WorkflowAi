@@ -1,0 +1,52 @@
+id: TC-DECOMPOSE-GAPS-005
+title: "Декомпозитор использует непротиворечивые правила: 5 проверок scope, один тикет на gap, план — обязательный вход (consistency)"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (коуч, блок «consistency», HIGH decompose-gaps-A-4/A-5/B-1/B-2): SKILL.md и README.md утверждали «4 проверки scope», тогда как knowledge/scope-validation.md с commit e1bd65a (правило стейкхолдера 2026-08-07) вводит Проверку 5 — расхождение вело к пропуску 5-й проверки. workflows/decompose.md шаг 5 разрешал «gap → 1 или несколько тикетов», прямо противореча Принципу 2 SKILL.md «один gap = один тикет» и Граничным случаям algorithms/scope-check.md (везде — один тикет). workflows/decompose.md шаг 3 помечал чтение плана «(опционально)», хотя algorithms/scope-check.md задаёт plan как обязательный вход, без которого невыполним шаг 4."
+  principle: "Principle 12 (Consistency) коуча — одна версия правила, обновлена во всех местах"
+  backlog_sources: []
+tags: [consistency, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила. Негативные anchors выражены
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "5 проверок scope"
+      reason: "SKILL.md должен утверждать 5 проверок scope (согласовано с Проверкой 5 в knowledge/scope-validation.md), не 4."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*4 проверки scope)"
+      reason: "В SKILL.md не должно остаться устаревшей формулировки «4 проверки scope»."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "Каждый gap → один тикет"
+      reason: "Шаг 5 воркфлоу должен требовать один тикет на gap — согласовано с Принципом 2 «Атомарность» SKILL.md и Граничными случаями algorithms/scope-check.md."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "^(?![\\s\\S]*1 или несколько тикетов)"
+      reason: "В воркфлоу не должно остаться устаревшей формулировки «1 или несколько тикетов», разрешавшей дробить gap."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "Обязательный шаг.{0,80}невыполним шаг 4"
+      reason: "Шаг 3 (чтение плана) должен быть отмечен как обязательный — plan является обязательным входом algorithms/scope-check.md."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "^(?![\\s\\S]*Прочитать исходный план \\(опционально\\))"
+      reason: "В воркфлоу не должно остаться устаревшей пометки «Прочитать исходный план (опционально)»."
+    - kind: skill_contains
+      file: "README.md"
+      pattern: "5 проверок scope"
+      reason: "README.md должен утверждать 5 проверок scope (согласовано с Проверкой 5 в knowledge/scope-validation.md), не 4."
+    - kind: skill_contains
+      file: "README.md"
+      pattern: "^(?![\\s\\S]*4 проверки scope)"
+      reason: "В README.md не должно остаться устаревшей формулировки «4 проверки scope»."

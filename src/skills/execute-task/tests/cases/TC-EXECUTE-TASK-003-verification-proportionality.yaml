@@ -23,8 +23,8 @@ scenario:
 assertions:
   deterministic:
     - kind: output_does_not_contain
-      values: ["querySelector", "DOM", "exists"]
-      reason: "Структурная проверка не является достаточной для визуального критерия."
+      values: ["querySelector подтверждает", "DOM подтверждает", "DOM достаточ", "проверено через DOM"]
+      reason: "Структурная проверка не должна фигурировать как самостоятельное подтверждение визуального критерия (SKILL.md прямо требует упомянуть в обосновании, почему DOM/querySelector недостаточен — сам термин запрещать нельзя)."
     - kind: output_contains_all
       values: ["скриншот"]
       reason: "Визуальный критерий требует скриншота."

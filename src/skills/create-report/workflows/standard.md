@@ -7,9 +7,13 @@
 ### 1. Собрать информацию
 
 Прочитать все тикеты из:
-- `.workflow/tickets/done/` — выполненные
+- `.workflow/tickets/done/` (и `archive/` — считается выполненным) — выполненные
 - `.workflow/tickets/blocked/` — заблокированные
 - `.workflow/tickets/in-progress/` — в работе
+- `.workflow/tickets/ready/` — в очереди
+- `.workflow/tickets/backlog/` — бэклог
+
+Все статусы нужны для таблицы статистики (шаг 5) — total без ready/backlog занижает Done rate/Blocked rate.
 
 ### 2. Проверка аномалий: in-progress тикеты с заполненным результатом
 
@@ -24,7 +28,7 @@ node .workflow/src/scripts/check-anomalies.js
 ---RESULT---
 status: ok|anomalies_found|error
 anomalies_count: N
-anomalies: [{"id": "IMPL-001", "title": "...", "recommendation": "..."}]
+anomalies: [{"id": "XXX-NNN", "title": "...", "recommendation": "..."}]
 ---RESULT---
 ```
 
@@ -98,8 +102,7 @@ node .workflow/src/skills/create-report/scripts/calc-metrics.js <PLAN-NNN>
 - Для задач с problems: описание проблемы, как была решена
 - Для каждого пропущенного (`⏭ skipped`) тикета: **точная атрибуция root cause** (см. шаг 6.1)
 
-**Аномалии:**
-- In-progress тикеты с заполненным результатом (из шага 2)
+**Аномалии:** все критерии `algorithms/metric-calculation.md` раздел 4, не только результат шага 2. При автоматическом расчёте (шаг 5) — бери из поля `anomalies` результата скрипта. Скрипт не считает velocity drop — сравни velocity с предыдущим отчётом вручную (algorithms §4: `current < previous * 0.5`).
 
 ### 6.1. Атрибуция root cause проблем по логу пайплайна
 
@@ -120,7 +123,7 @@ node .workflow/src/skills/create-report/scripts/calc-metrics.js <PLAN-NNN>
    3. Извлеки **точное имя стейджа** из лога и его **точную причину** (как написано в OUTPUT).
 
 3. **Запиши в отчёт точную атрибуцию:**
-   - Имя стейджа из лога (например, `check-relevance` — это **скил**, исполняемый агентом; `check-conditions` — это **скрипт** `.workflow/src/scripts/check-conditions.js`). Не путай эти два класса компонентов.
+   - Имя стейджа из лога. Класс компонента определяй по конфигу пайплайна (`.workflow/config/pipeline.yaml`): `agent: script-*` — скрипт, `skill: <имя>` — скил, исполняемый агентом. Не путай эти два класса компонентов.
    - Номер строки лога, где принято решение.
    - Точную причину как процитировано в логе.
 
@@ -152,7 +155,12 @@ node .workflow/src/skills/create-report/scripts/calc-metrics.js <PLAN-NNN>
 
 ### 8. Сохранить отчёт
 
-1. Прочитай шаблон: `.workflow/templates/report-template.md`
+1. Прочитай шаблон: `.workflow/templates/report-template.md`. Адаптируй под факты этого скила:
+   - «Распределение по ролям» → «Распределение по типам» (`knowledge/report-metrics.md`).
+   - Добавь секции «Аномалии» и «Прогресс по плану», которых в шаблоне нет, но которые обязательны по принципу 3 SKILL.md.
+   - Из «Риски и проблемы» оставь только «Выявленные проблемы» — факты и атрибуция root cause (шаг 6.1).
+   - Секции шаблона с прогнозами и планированием («Потенциальные риски» с вероятностью/митигацией, «Готовность к следующему этапу», «План на следующий период») — заполняй только фактами из тикетов и лога пайплайна, без прогнозов и выводов для изменения плана (SKILL.md: решения и анализ — не в этой роли). Фактологические рекомендации (как разблокировать, что проверить) остаются. Пустую секцию — удали.
+   - Frontmatter `type` — одно из значений enum шаблона (`daily | sprint | milestone`), по периоду отчёта.
 2. Определи следующий ID — вызови скрипт генерации:
    ```bash
    node .workflow/src/scripts/get-next-id.js --prefix REPORT --dir .workflow/reports

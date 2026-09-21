@@ -32,7 +32,7 @@ assertions:
     - kind: skill_contains
       file: "SKILL.md"
       pattern: "Frontmatter не модифицирован"
-      reason: "SKILL.md шаг 9 должен явно требовать неизменность frontmatter."
+      reason: "SKILL.md шаг 8 должен явно требовать неизменность frontmatter."
 
   rubric:
     - kind: llm_judge

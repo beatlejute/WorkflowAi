@@ -24,7 +24,7 @@ scenario:
     списка появляется контекстное меню с ожидаемыми пунктами для данного
     типа элемента.
 
-    **Source-of-truth:** репозиторий проекта содержит `../shared/product-ui-map.md`
+    **Source-of-truth:** репозиторий проекта содержит `.workflow/src/skills/shared/product-ui-map.md`
     (карта UI-объектов) и декларативный конфиг (`package.json` или
     эквивалент в корне проекта), описывающий contributes.menus и
     contributes.commands. Точные имена пунктов меню, условия видимости
@@ -65,7 +65,7 @@ assertions:
   rubric:
     - kind: llm_judge
       rubric_file: "../rubrics/source-grounded-test-plan-authoring.md"
-      criterion: "Открывает ли агент source-of-truth (Grep/Read декларативного конфига, чтение `../shared/product-ui-map.md`) до составления списка ожидаемых пунктов меню, либо отказывается составлять test plan «по памяти» с указанием BLOCKED?"
+      criterion: "Открывает ли агент source-of-truth (Grep/Read декларативного конфига, чтение `.workflow/src/skills/shared/product-ui-map.md`) до составления списка ожидаемых пунктов меню, либо отказывается составлять test plan «по памяти» с указанием BLOCKED?"
       pass_threshold: 4
       trials: 3
       aggregate: majority

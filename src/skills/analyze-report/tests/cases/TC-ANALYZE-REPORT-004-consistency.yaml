@@ -1,0 +1,89 @@
+id: TC-ANALYZE-REPORT-004
+title: "Скил не дублирует и не противоречит алгоритму/скрипту/пайплайну по статусам, метрикам и владению frontmatter плана"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (consistency, HIGH/MEDIUM): workflows/progress.md шаг 6 вводил вторую, качественную шкалу статусов (Высокое/Нормальное, На финишной прямой/...), расходящуюся с числовой шкалой ON_TRACK/ATTENTION/AT_RISK/CRITICAL из algorithms/progress-assessment.md, которую используют SKILL.md и templates/analysis-report.md; шаг 6.5 в progress.md и pre-condition в retrospective.md сами редактировали frontmatter плана (status/completed_at/updated_at), нарушая границы SKILL.md («Ты НЕ делаешь: изменение кода или конфигурации», «Создание/изменение планов → соответствующий скил») и дублируя работу стадии пайплайна complete-plan (script-complete-plan → complete-plan.js), которая уже делает это сама через checkAndClosePlan; knowledge/analysis-frameworks.md задавал формулу First-Pass Rate (passed_review_first / done), отличную от algorithms/progress-assessment.md (passed_first / reviewed); retrospective.md читал тикеты плана только из tickets/done/, тогда как complete-plan.js переносит done-тикеты завершённого плана в tickets/archive/ (подтверждено чтением src/lib/utils.mjs:checkAndClosePlan)."
+    - "d:/Dev/workflowAi (cons.json): findings.analyze-report[A-6, A-8, B-1, B-5, B-8]"
+  principle: "Consistency (принцип 12): одна версия правила/формулы, обновить все места, где она встречается; приоритет — контракт пайплайна/скрипта, затем фактическая практика."
+  backlog_sources: []
+tags: [consistency, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила. Негативные anchors
+    выражены через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    # A-6: статус плана — только по шкале алгоритма (ON_TRACK/ATTENTION/AT_RISK/CRITICAL),
+    # без второй качественной шкалы в шаге 6.
+    - kind: skill_contains
+      file: "workflows/progress.md"
+      pattern: "алгоритма[\\s\\S]{0,20}progress-assessment\\.md[\\s\\S]{0,100}ON_TRACK[\\s\\S]{0,20}ATTENTION[\\s\\S]{0,20}AT_RISK[\\s\\S]{0,20}CRITICAL"
+      reason: "Шаг 6 берёт статус плана из шкалы algorithms/progress-assessment.md (ON_TRACK/ATTENTION/AT_RISK/CRITICAL), а не вводит собственную качественную шкалу."
+    - kind: skill_contains
+      file: "workflows/progress.md"
+      pattern: "^(?![\\s\\S]*(На финишной прямой|В рамках ожиданий|Критическое отставание))"
+      reason: "Отвергнутая качественная шкала статусов (Высокое/Нормальное, «На финишной прямой» и т.п.) из шага 6 удалена."
+
+    # B-1: единственный владелец frontmatter плана (status/completed_at/updated_at) — стадия
+    # complete-plan (complete-plan.js); analyze-report только возвращает status в ---RESULT---.
+    - kind: skill_contains
+      file: "workflows/progress.md"
+      pattern: "complete-plan`\\s*\\(`complete-plan\\.js`\\)[\\s\\S]{0,40}analyze-report frontmatter плана не редактирует"
+      reason: "progress.md фиксирует, что frontmatter плана обновляет стадия complete-plan (complete-plan.js), а не analyze-report."
+    - kind: skill_contains
+      file: "workflows/retrospective.md"
+      pattern: "устанавливает только стадия `complete-plan`\\s*\\(`complete-plan\\.js`\\)"
+      reason: "retrospective.md фиксирует, что status: completed во frontmatter плана устанавливает только стадия complete-plan, а не сама ретроспектива."
+    - kind: skill_contains
+      file: "workflows/progress.md"
+      pattern: "^(?![\\s\\S]*(обновить frontmatter плана: установить|вернись к шагу 6\\.5, выполни обновление))"
+      reason: "progress.md больше не инструктирует агента самостоятельно писать в frontmatter плана (ни в шаге 6.5, ни в STOP-GATE шага 8)."
+    - kind: skill_contains
+      file: "workflows/retrospective.md"
+      pattern: "^(?![\\s\\S]*обновить frontmatter плана: установить)"
+      reason: "retrospective.md больше не инструктирует агента самостоятельно писать в frontmatter плана в pre-condition шага 1."
+
+    # B-5: формула First-Pass Rate — единственный источник в algorithms/progress-assessment.md,
+    # knowledge/analysis-frameworks.md на неё ссылается, а не дублирует другим знаменателем.
+    - kind: skill_contains
+      file: "algorithms/progress-assessment.md"
+      pattern: "first_pass_rate = passed_first / reviewed"
+      reason: "Каноническая формула First-Pass Rate (знаменатель — reviewed) остаётся в algorithms/progress-assessment.md."
+    - kind: skill_contains
+      file: "knowledge/analysis-frameworks.md"
+      pattern: "^(?![\\s\\S]*passed_review_first)"
+      reason: "Дублирующая формула First-Pass Rate со знаменателем done (passed_review_first) удалена из knowledge/analysis-frameworks.md."
+    - kind: skill_contains
+      file: "knowledge/analysis-frameworks.md"
+      pattern: "First-Pass Rate\\*\\* \\| формула — в `algorithms/progress-assessment\\.md`"
+      reason: "analysis-frameworks.md ссылается на каноническую формулу в algorithms/progress-assessment.md, а не подставляет свой (даже эквивалентный по имени переменной, но с другим знаменателем) расчёт."
+
+    # B-8: тикеты завершённого плана ищутся и в done/, и в archive/ (complete-plan переносит
+    # done-тикеты в archive при закрытии плана).
+    - kind: skill_contains
+      file: "workflows/retrospective.md"
+      pattern: "тикеты плана из `\\.workflow/tickets/done/` и `\\.workflow/tickets/archive/`"
+      reason: "Ретроспектива читает тикеты завершённого плана из done/ и archive/, а не только из done/."
+    - kind: skill_contains
+      file: "workflows/progress.md"
+      pattern: "100% тикетов плана — в `done/` или `archive/`"
+      reason: "Критерий завершённости плана (шаг 6.5) считает archive эквивалентом done, как calc-plan-metrics.js:128 (calcCompletionPct) и calc-plan-metrics.js:30 (TICKET_DIRS) — регрессия к отвергнутой формулировке «100% тикетов плана находятся в директории `done/`» не проходит."
+
+    # A-8: скрипт calc-plan-metrics.js не считает Weighted Completion и First-Pass Rate —
+    # progress.md явно требует досчитать их вручную по алгоритму.
+    - kind: skill_contains
+      file: "workflows/progress.md"
+      pattern: "Weighted Completion и First-Pass Rate[\\s\\S]{0,30}вручную[\\s\\S]{0,30}algorithms/progress-assessment\\.md"
+      reason: "progress.md явно требует вручную досчитать Weighted Completion и First-Pass Rate, которые calc-plan-metrics.js не возвращает."
+
+    # B-8: алгоритм считает archive как done (как calc-plan-metrics.js:128).
+    - kind: skill_contains
+      file: "algorithms/progress-assessment.md"
+      pattern: "status == done[^\n]{0,40}archive"
+      reason: "Алгоритм расчёта считает тикеты в archive завершёнными наравне с done — иначе Weighted Completion ретроспективы закрытого плана = 0%."

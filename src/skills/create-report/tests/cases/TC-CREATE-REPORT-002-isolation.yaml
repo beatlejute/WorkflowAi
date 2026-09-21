@@ -1,0 +1,41 @@
+id: TC-CREATE-REPORT-002
+title: "Скил не хардкодит имена других скилов, роли, проекты и чужие ticket-префиксы"
+origin:
+  chg: ["ad-hoc-2026-09-21-audit"]
+  incidents:
+    - "Аудит 2026-09-21 (изоляция): report-metrics.md хардкодил закрытый список project-wide типов тикетов (IMPL/FIX/DOCS/.../COACH/RSH), где COACH и RSH — скрытые ticket_prefix чужих скилов; workflows/standard.md использовал имена стейджей конкретного пайплайна (check-relevance/check-conditions) с устаревшим и неверным фактом о их классе, и project-wide ID IMPL-001 вместо generic XXX-NNN; algorithms/metric-calculation.md использовал `coach` (имя чужого скила) как пример типа тикета в расчёте распределения."
+  principle: "Изоляция скилов (coach/SKILL.md, принципы 8-9) — скил не знает другие скилы и проекты по имени, не хардкодит закрытые списки project-wide типов/префиксов."
+  backlog_sources:
+    - ".workflow/coach-backlog.yaml"
+tags: [isolation, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила. Негативные anchor'ы
+    выражены через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|CHG)-[0-9]{1,3}\\b))"
+      reason: "SKILL.md не хардкодит имена других скилов, роли, проекты и чужие ticket-префиксы."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|CHG)-[0-9]{1,3}\\b))"
+      reason: "workflows/standard.md не хардкодит имена других скилов, project-wide ID и чужие ticket-префиксы."
+    - kind: skill_contains
+      file: "knowledge/report-metrics.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|CHG)-[0-9]{1,3}\\b))"
+      reason: "knowledge/report-metrics.md не хардкодит закрытый список project-wide типов тикетов с чужими ticket-префиксами (COACH, RSH)."
+    - kind: skill_contains
+      file: "algorithms/metric-calculation.md"
+      pattern: "^(?![\\s\\S]*(\\b(analyze-report|coach|create-plan|decompose-gaps|decompose-plan|deep-research|execute-task|manual-testing|review-result)\\b|\\b(GML|PMA|CSM|CRO|PMK)\\b|workflowAiVsCode|PulseProxy|documentaions|\\b(PLAN|QA|HUMAN|IMPL|FIX|COACH|ADMIN|ARCH|RSH|ANL|CHG)-[0-9]{1,3}\\b))"
+      reason: "algorithms/metric-calculation.md не использует имя чужого скила (coach) как пример типа тикета."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."
