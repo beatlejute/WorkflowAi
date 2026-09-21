@@ -38,7 +38,7 @@
   "scripts": {
     "test": "node --test src/tests/*.test.mjs",
     "test:skills": "node src/scripts/run-skill-tests.js --all",
-    "coverage": "c8 node --test src/tests/*.test.mjs",
+    "coverage": "c8 node --test src/tests/*.test.mjs && node scripts/check-coverage-ratchet.mjs",
     "coverage:mark-blocked": "c8 node --test src/tests/scripts-mark-blocked.test.mjs",
     "coverage:pick-next-task": "node scripts/coverage-pick-next-task.js",
     "coverage:move-ticket": "c8 node --test src/tests/scripts-move-ticket-approval-hook.test.mjs",

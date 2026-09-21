@@ -58,3 +58,8 @@ CLAUDE.md
 .kilocodemodes
 .mcp.json
 .claude/
+
+# Песочницы Stryker и черновики: попадали в покрытие c8 (`all: true`) как
+# файлы продукта с нулём процентов и роняли гейт.
+.stryker-tmp/
+test_snippet.mjs

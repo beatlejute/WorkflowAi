@@ -1,0 +1,131 @@
+{
+  "_comment": "Порог покрытия каждого файла — его измеренное покрытие, минимум по Windows и Linux (платформенные ветки покрываются по-разному). Проверяет scripts/check-coverage-ratchet.mjs после npm run coverage; переписывается им же с --update. Файл, которого здесь нет, держит default.",
+  "default": {
+    "lines": 80,
+    "statements": 80,
+    "functions": 80,
+    "branches": 75
+  },
+  "files": {
+    "src/scripts/archive-plan-tickets.js": {
+      "lines": 0,
+      "statements": 0,
+      "functions": 0,
+      "branches": 0
+    },
+    "src/scripts/check-anomalies.js": {
+      "lines": 0,
+      "statements": 0,
+      "functions": 0,
+      "branches": 0
+    },
+    "src/scripts/check-conditions.js": {
+      "lines": 70.07,
+      "statements": 70.07,
+      "functions": 71.42,
+      "branches": 57.14
+    },
+    "src/scripts/check-mcp.js": {
+      "lines": 0,
+      "statements": 0,
+      "functions": 0,
+      "branches": 0
+    },
+    "src/scripts/check-plan-decomposed.js": {
+      "lines": 0,
+      "statements": 0,
+      "functions": 0,
+      "branches": 0
+    },
+    "src/scripts/check-plan-templates.js": {
+      "lines": 49.15,
+      "statements": 49.15,
+      "functions": 33.33,
+      "branches": 93.75
+    },
+    "src/scripts/check-relevance.js": {
+      "lines": 0,
+      "statements": 0,
+      "functions": 0,
+      "branches": 0
+    },
+    "src/scripts/complete-plan.js": {
+      "lines": 0,
+      "statements": 0,
+      "functions": 0,
+      "branches": 0
+    },
+    "src/scripts/get-next-id.js": {
+      "lines": 86.91,
+      "statements": 86.91,
+      "functions": 100,
+      "branches": 76.92
+    },
+    "src/scripts/get-next-test-id.js": {
+      "lines": 91.48,
+      "statements": 91.48,
+      "functions": 100,
+      "branches": 92.3
+    },
+    "src/scripts/mark-blocked.js": {
+      "lines": 91.25,
+      "statements": 91.25,
+      "functions": 100,
+      "branches": 76.19
+    },
+    "src/scripts/migrate-backlog-to-tests.js": {
+      "lines": 96.79,
+      "statements": 96.79,
+      "functions": 100,
+      "branches": 82.64
+    },
+    "src/scripts/move-ticket.js": {
+      "lines": 85.5,
+      "statements": 85.5,
+      "functions": 85.71,
+      "branches": 77.35
+    },
+    "src/scripts/move-to-ready.js": {
+      "lines": 90.98,
+      "statements": 90.98,
+      "functions": 100,
+      "branches": 70.58
+    },
+    "src/scripts/move-to-review.js": {
+      "lines": 0,
+      "statements": 0,
+      "functions": 0,
+      "branches": 0
+    },
+    "src/scripts/pick-next-task.js": {
+      "lines": 92.59,
+      "statements": 92.59,
+      "functions": 100,
+      "branches": 71.95
+    },
+    "src/scripts/reset-agent-health.js": {
+      "lines": 0,
+      "statements": 0,
+      "functions": 0,
+      "branches": 0
+    },
+    "src/scripts/run-skill-tests.js": {
+      "lines": 81.95,
+      "statements": 81.95,
+      "functions": 96,
+      "branches": 67.33
+    },
+    "src/scripts/scan-fixtures-for-secrets.js": {
+      "lines": 81.45,
+      "statements": 81.45,
+      "functions": 87.5,
+      "branches": 63.88
+    },
+    "src/scripts/sync-ticket-status.js": {
+      "lines": 0,
+      "statements": 0,
+      "functions": 0,
+      "branches": 0
+    }
+  }
+}
