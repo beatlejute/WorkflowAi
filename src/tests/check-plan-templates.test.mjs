@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { evaluateTrigger, generateNextPlanId } from '../../.workflow/src/scripts/check-plan-templates.js';
+import { evaluateTrigger, generateNextPlanId } from '../scripts/check-plan-templates.js';
 
 // ============ evaluateTrigger tests ============
 
