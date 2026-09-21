@@ -8,9 +8,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # Node 22, а не 20: `npm test` — это `node --test src/tests/*.test.mjs`,
+      # и на Windows глоб раскрывает сам node, а не оболочка. Node 20 этого
+      # не умеет — `Could not find '…\src	ests\*.test.mjs'` за секунду, и
+      # задание на Windows падало, не запустив ни одного теста. Node 20 к тому
+      # же снят с поддержки (EOL 2026-04-30).
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
       - run: npm install
       - run: npm test
       - run: npm run coverage
