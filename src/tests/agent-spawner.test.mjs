@@ -143,11 +143,15 @@ describe('spawnAgent — Timeout', () => {
 describe('spawnAgent — Передача prompt через stdin', () => {
   it('должен передавать многострочный prompt через stdin на Windows', async () => {
     // Тест проверяет логику useStdin = useShell && finalPrompt.includes('\\n')
+    // `more`, а не `powershell -Command $input`: на раннере GitHub Windows
+    // PowerShell 5.1 не успевал стартовать за 5 с — `Stage "unknown" timed out
+    // after 5s`, хотя локально тот же вызов занимает ~250 мс. Путь через stdin
+    // от команды не зависит: он включается для любой не-`node` команды на
+    // Windows, если в prompt есть перевод строки (`useStdin` в
+    // agent-spawner.mjs). `more` печатает stdin как есть, замер — ~50 мс.
     const agentConfig = {
-      command: process.platform === 'win32' ? 'powershell' : 'cat',
-      args: process.platform === 'win32'
-        ? ['-NoProfile', '-Command', '$input']
-        : []
+      command: process.platform === 'win32' ? 'more' : 'cat',
+      args: []
     };
     const multilinePrompt = 'line1\nline2\nline3';
 
@@ -155,8 +159,11 @@ describe('spawnAgent — Передача prompt через stdin', () => {
     if (process.platform === 'win32') {
       const result = await spawnAgent(agentConfig, multilinePrompt, { timeout: 5 });
       assert.strictEqual(result.exitCode, 0);
-      // Проверяем что prompt был передан
-      assert(result.output.length > 0);
+      // Прежде проверялось только `output.length > 0`. Теперь — что дошли все
+      // три строки, то есть prompt не обрезан на первом переводе строки.
+      for (const line of ['line1', 'line2', 'line3']) {
+        assert(result.output.includes(line), `нет "${line}" в выводе: ${JSON.stringify(result.output)}`);
+      }
     } else {
       // На non-Windows системах используется argv
       const agentConfig = {

@@ -17,7 +17,32 @@ jobs:
         with:
           node-version: '22'
       - run: npm install
-      - run: npm test
+      # Вывод теста сохраняется в файл, а при падении каждый `not ok`
+      # становится аннотацией `::error::` с местом и причиной. Лог задания
+      # без авторизации не отдаётся, а аннотации видны и в интерфейсе, и через
+      # API — иначе разбор падения начинался с просьбы прислать лог.
+      - name: npm test
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test-output.log
+      - name: Report failing tests
+        if: failure()
+        shell: bash
+        run: |
+          # Многострочная ошибка в TAP записана как `error: |-` — тогда
+          # причиной берётся следующая строка.
+          awk '
+            pending { line = $0; sub(/^[[:space:]]+/, "", line); print "::error::" msg " | error: " line; msg = ""; pending = 0; next }
+            /^[[:space:]]*not ok/ { if (msg != "") print "::error::" msg; msg = $0; sub(/^[[:space:]]+/, "", msg); next }
+            msg != "" && /^[[:space:]]+location:/ { loc = $0; sub(/^[[:space:]]+/, "", loc); msg = msg " | " loc; next }
+            msg != "" && /^[[:space:]]+error:/ {
+              err = $0; sub(/^[[:space:]]+/, "", err)
+              if (err ~ /\|-$/) { pending = 1; next }
+              print "::error::" msg " | " err; msg = ""; next
+            }
+            END { if (msg != "") print "::error::" msg }
+          ' test-output.log
       # Бенчмарк отдельно от параллельного `npm test`: там он мерил
       # конкуренцию соседних файлов, а не сам snapshot.
       - run: npm run bench
