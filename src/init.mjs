@@ -134,36 +134,19 @@ function generateClaudeMd(workflowRoot, projectRoot, packageRoot) {
     // Default template
     content = `# Инструкции для Claude Code
 
-Этот проект использует систему координации AI-агентов через файловую канбан-доску.
-
-## Структура проекта
-
-- \`.workflow/\` — канбан-доска с тикетами
-- \`.workflow/src/skills/\` — инструкции для выполнения задач
+Проект ведёт workflow-ai: канбан, планы и отчёты — в \`.workflow/\`, настройки — \`.workflow/config/config.yaml\`.
 
 ## Доступные Skills
 
 {{SKILLS_TABLE}}
 
-## Workflow
+## Тикеты
 
-1. **Планирование**: Создай план в \`.workflow/plans/current/\`
-2. **Декомпозиция**: Разбей план на тикеты в \`.workflow/tickets/backlog/\`
-3. **Выполнение**: Бери задачи из \`ready/\`, выполняй, перемещай в \`done/\`
-4. **Отчётность**: Создавай отчёты в \`.workflow/reports/\`
+Декомпозицию, выполнение и перенос тикетов между колонками делает пайплайн (\`workflow run\`); вне его стадий — только составлять планы в \`.workflow/plans/current/\`. Тикет, выполненный человеком, — в \`review/\`, не в \`done/\`: ревью делает пайплайн.
 
-## Шаблоны
+## Код
 
-- \`.workflow/templates/ticket-template.md\` — шаблон тикета
-- \`.workflow/templates/plan-template.md\` — шаблон плана
-- \`.workflow/templates/report-template.md\` — шаблон отчёта
-
-## Конфигурация
-
-Настройки в \`.workflow/config/config.yaml\`
-
-## Правила написания кода
-При написании кода использовать методологии TDD, SOLID, DRY
+Код — по TDD, SOLID, DRY.
 `;
   }
   
