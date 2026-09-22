@@ -1,9 +1,8 @@
 {
-  "date": "2026-04-20T12:21:11.683Z",
-  "skill_sha": "7d62ab4",
-  "status": "passed",
-  "duration_ms": 471969,
-  "l1_skipped": true,
+  "date": "2026-09-21T16:48:13.518Z",
+  "skill_sha": "1a1239a",
+  "status": "failed",
+  "duration_ms": 226633,
   "per_model": {
     "claude-sonnet": {
       "passed": true,
@@ -14,32 +13,95 @@
       "threshold": 2
     },
     "kilo-glm": {
-      "passed": true,
-      "errored": false,
-      "pass_count": 3,
-      "error_count": 0,
+      "passed": false,
+      "errored": true,
+      "pass_count": 0,
+      "error_count": 3,
       "total": 3,
       "threshold": 2
     },
     "kilo-minimax": {
-      "passed": true,
-      "errored": false,
-      "pass_count": 3,
-      "error_count": 0,
+      "passed": false,
+      "errored": true,
+      "pass_count": 0,
+      "error_count": 3,
       "total": 3,
       "threshold": 2
     },
     "kilo-deepseek": {
-      "passed": true,
-      "errored": false,
-      "pass_count": 2,
-      "error_count": 0,
+      "passed": false,
+      "errored": true,
+      "pass_count": 0,
+      "error_count": 3,
       "total": 3,
       "threshold": 2
     }
   },
   "rubric_scores": [
     {
+      "agentId": "kilo-deepseek",
+      "trial": 1,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "kilo-deepseek",
+      "trial": 2,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "kilo-deepseek",
+      "trial": 3,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "kilo-glm",
+      "trial": 1,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "kilo-glm",
+      "trial": 2,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "kilo-glm",
+      "trial": 3,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "kilo-minimax",
+      "trial": 1,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "kilo-minimax",
+      "trial": 2,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "kilo-minimax",
+      "trial": 3,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
       "agentId": "claude-sonnet",
       "trial": 1,
       "score": 5,
@@ -53,60 +115,6 @@
     },
     {
       "agentId": "claude-sonnet",
-      "trial": 3,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-deepseek",
-      "trial": 1,
-      "score": 1,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-deepseek",
-      "trial": 2,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-deepseek",
-      "trial": 3,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-glm",
-      "trial": 1,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-glm",
-      "trial": 2,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-glm",
-      "trial": 3,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-minimax",
-      "trial": 1,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-minimax",
-      "trial": 2,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-minimax",
       "trial": 3,
       "score": 5,
       "errored": false

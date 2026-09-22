@@ -1,28 +1,17 @@
-Я прочитал рубрику (`root-cause-attribution.md`) и алгоритм шага 6.1 из `workflows/standard.md`. Теперь у меня есть всё для точной атрибуции.
+## Проблемы
 
----
+### ⏭ QA-001 — пропущен в итерации
 
-## Фрагмент секции «Проблемы» — тикет QA-001
+**Статус:** `skipped`
+**Root cause:** стейдж `check-relevance` вернул `status="irrelevant"`, `reason="dependencies_inactive"`
 
-```markdown
-### Пропущенные тикеты (⏭ skipped)
-
-- Тикет QA-001: ⏭ skipped стейджем `check-relevance` в строке лога 2166
-  с причиной `dependencies_inactive`.
-  Лог: `pipeline_2026-04-06_12-00-00.log:2166`
+**Источник:** `.workflow/logs/pipeline_2026-04-06_12-00-00.log`, строка 2166:
+```
+[check-relevance] COMPLETE stage="check-relevance" ticket_id="QA-001" status="irrelevant" reason="dependencies_inactive"
 ```
 
----
+**Атрибуция:** стейдж `check-relevance` — зависимости тикета неактивны на момент прогона пайплайна.
 
-**Пояснение атрибуции:**
+> ⚠️ **Корректировка:** в REPORT-002 root cause QA-001 ошибочно приписан стейджу `check-conditions`. Текущий лог однозначно указывает на `check-relevance`. Данные REPORT-002 по этому тикету считать недостоверными.
 
-Строка лога 2166 явно идентифицирует виновника:
-
-```
-[check-relevance] COMPLETE stage="check-relevance" ticket_id="QA-001"
-                  status="irrelevant" reason="dependencies_inactive"
-```
-
-- **Стейдж-виновник:** `check-relevance` — это **скил**, исполняемый агентом (не путать с `check-conditions`, который является **скриптом** `.workflow/src/scripts/check-conditions.js`).
-- **Причина:** `dependencies_inactive` — зависимости тикета неактивны в момент запуска пайплайна.
-- **Атрибуция из REPORT-002 (`check-conditions`) — неверна** и в текущий отчёт не переносится. Текущий лог однозначно указывает на `check-relevance`. Согласно правилу шага 6.1: каждый инцидент верифицируется по своему логу независимо.
+**Рекомендация аналитику:** проверить состояние зависимостей QA-001 перед следующей итерацией.

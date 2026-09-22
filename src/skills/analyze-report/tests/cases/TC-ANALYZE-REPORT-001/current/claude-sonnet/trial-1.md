@@ -1,69 +1,81 @@
-## Анализ прогресса PLAN-001 — Верификация атрибуции QA-001
+---
+
+## Анализ прогресса PLAN-001 — верификация атрибуции QA-001
+
+**Дата анализа:** 2026-09-21
+**Источники:** REPORT-002-incorrect-attribution.md, pipeline-2026-04-06_qa-001-skip.log
 
 ---
 
 ## Executive Summary
 
-Проведена верификация finding из REPORT-002 по логу пайплайна итерации от 2026-04-06. Root cause пропуска тикета QA-001 в REPORT-002 атрибутирован ошибочно: указан `check-conditions.js`, тогда как лог однозначно показывает, что `check-conditions` завершился с `conditions_ok`. Решение о пропуске приняла стадия `check-relevance` (Step 314, `decision=irrelevant`, `reason=dependencies_inactive`). Помимо некорректной атрибуции, лог выявляет внутреннее противоречие между показаниями двух стейджей по зависимостям — это самостоятельная проблема, требующая внимания.
+REPORT-002 содержит ошибочную атрибуцию root cause для QA-001. Лог пайплайна опровергает заявленный root cause: `check-conditions.js` завершился успешно со статусом `conditions_ok`. Решение о пропуске принял стейдж `check-relevance` (`check-relevance.js`) на шаге 314, вернув `irrelevant` с причиной `dependencies_inactive`. Рекомендация исправить `check-conditions.js` (REPORT-002) — неверна и не решит проблему.
 
 ---
 
-## Верификация по логу — пошаговая
+## Верификация finding по логу
 
-| Step | Стейдж | Компонент | Результат по логу | Вывод REPORT-002 |
-|------|--------|-----------|-------------------|-----------------|
-| 312 | `pick-next-task` | `script-pick` | QA-001 выбран, `status=ready` | — |
-| 313 | `check-conditions` | `check-conditions.js` | `conditions_ok` (dependencies.resolved: **true**, prerequisites.met: true, blocking_tickets: []) | ❌ атрибутирован как root cause |
-| 314 | `check-relevance` | `check-relevance.js` | `irrelevant`, `reason=dependencies_inactive` | ❌ не упомянут |
-| 315 | `skip-ticket` | `script-skip` | QA-001 → skipped, reason из check-relevance: `dependencies_inactive` | — |
+### Finding: QA-001 — тикет пропущен
 
-**Вывод `[HIGH]`:** `check-conditions.js` на Step 313 явно вернул `conditions_ok` и не является причиной пропуска. Решение о `skip` принято исключительно стейджем `check-relevance` на Step 314.
+#### Шаг 1 — Что заявляет отчёт
 
----
+REPORT-002, секция «QA-001 — тикет пропущен»:
+> Root cause: `check-conditions.js` — стейдж неверно определил, что условия запуска не выполнены
 
-## Findings
+#### Шаг 2 — Что показывает лог
 
-### Finding 1 — Некорректная атрибуция root cause в REPORT-002 `[HIGH]`
+| Шаг | Стейдж | Скрипт | Результат |
+|-----|--------|--------|-----------|
+| 313 | `check-conditions` | `check-conditions.js` | `conditions_ok` (dependencies.resolved: **true**, prerequisites.met: **true**, blocking_tickets: **[]**) |
+| 314 | `check-relevance` | `check-relevance.js` | `irrelevant`, reason=`dependencies_inactive` |
+| 315 | `skip-ticket` | — | QA-001 → skipped (reason from **check-relevance**: dependencies_inactive) |
 
-**Факт:** REPORT-002 указывает `check-conditions.js` как компонент, передавший тикет дальше без обработки. Лог опровергает это: Step 313 завершён со статусом `conditions_ok`, все три проверки условий пройдены.
+Лог шага 313, строки 10–13:
+```
+check-conditions]   - dependencies.resolved: true
+check-conditions]   - prerequisites.met: true
+check-conditions]   - blocking_tickets: []
+check-conditions]   Result: conditions_ok
+```
 
-**Корректная атрибуция:** `check-relevance.js` (Step 314) — именно этот скрипт принял решение `decision=irrelevant` и выставил `reason=dependencies_inactive`, что и повлекло переход к `skip-ticket`.
+Лог шага 314, строки 20–22 (step 314):
+```
+check-relevance]   - dependencies.status: inactive
+check-relevance]   - decision: irrelevant (dependencies inactive)
+check-relevance] COMPLETE stage="check-relevance" ticket_id="QA-001" status="irrelevant" reason="dependencies_inactive"
+```
 
-**Некорректная рекомендация в REPORT-002:** «Пересмотреть пороги `check-conditions.js`» — не релевантна, так как этот компонент отработал корректно.
+#### Шаг 3 — Расхождение
 
----
-
-### Finding 2 — Внутреннее противоречие между стейджами по зависимостям `[HIGH]`
-
-**Факт:** Два стейджа дают взаимоисключающие данные о зависимостях QA-001:
-
-| Стейдж | Поле | Значение |
-|--------|------|----------|
-| `check-conditions` (Step 313) | `dependencies.resolved` | `true` |
-| `check-relevance` (Step 314) | `dependencies.status` | `inactive` |
-
-**Интерпретация `[MEDIUM]`:** Вероятно, стейджи проверяют разные аспекты зависимостей — `check-conditions` проверяет блокирующие тикеты (есть ли незакрытые зависимости в трекере), `check-relevance` проверяет активность зависимых фич/компонентов в продукте. Это семантически разные проверки, но их терминология пересекается и создаёт риск будущих ошибок атрибуции.
-
----
-
-## Скорректированные рекомендации
-
-| # | Действие | Приоритет | Обоснование | Ожидаемый результат |
-|---|----------|-----------|-------------|---------------------|
-| 1 | Исправить root cause в REPORT-002: заменить `check-conditions.js` на `check-relevance.js` | HIGH | Лог Step 313 доказывает, что `check-conditions` вернул `conditions_ok` | Корректная история инцидента, правильный вектор исправления |
-| 2 | Изучить логику `check-relevance.js`: почему `dependencies.status=inactive` при `dependencies.resolved=true` | HIGH | Противоречие между стейджами может скрывать баг или неконсистентное определение «зависимости» | Понимание реального сбоя, устранение потенциального источника ложных пропусков |
-| 3 | Переименовать поля: `check-conditions` → `blocking_deps_resolved`, `check-relevance` → `feature_deps_active` | MEDIUM | Текущая терминология (`dependencies.*`) в обоих стейджах неотличима при анализе логов | Снижение риска ошибок атрибуции в будущих отчётах |
+**REPORT-002 НЕВЕРЕН.** `check-conditions.js` НЕ принимал решение о пропуске — он вернул `conditions_ok`. Skip-решение принял стейдж `check-relevance` (`check-relevance.js`) с явной причиной `dependencies_inactive`. Стейдж `skip-ticket` сослался именно на `check-relevance` как источник причины.
 
 ---
 
-## За пределами скоупа
+## Скорректированная атрибуция
 
-Остальные 5 тикетов итерации упомянуты в REPORT-002 без деталей — их статусы не верифицировались в рамках данного анализа (лог содержит только шаги 312–315).
+| Атрибут | REPORT-002 (неверно) | Корректно [HIGH] |
+|---------|----------------------|------------------|
+| Стейдж-источник | `check-conditions` | `check-relevance` |
+| Скрипт | `check-conditions.js` | `check-relevance.js` |
+| Причина | «условия запуска не выполнены» | `dependencies_inactive` (dependencies.status: inactive) |
+| Доказательство | — | Лог шаг 314: `COMPLETE status="irrelevant" reason="dependencies_inactive"` |
+
+Уровень уверенности: **[HIGH]** — лог однозначен, цепочка шагов 313→314→315 полная.
+
+---
+
+## Рекомендации
+
+| # | Действие | Приоритет |
+|---|----------|-----------|
+| 1 | Исправить REPORT-002: заменить атрибуцию `check-conditions.js` на `check-relevance.js` с корректной причиной `dependencies_inactive` | CRITICAL |
+| 2 | Исследовать `check-relevance.js`: почему `dependencies.status: inactive` при том, что `check-conditions.js` зафиксировал `dependencies.resolved: true` — возможное рассогласование семантики полей между двумя стейджами | HIGH |
+| 3 | Добавить в `check-relevance` явное логирование конкретных inactive-зависимостей (имена/id), чтобы root cause был диагностируем без дополнительного расследования | MEDIUM |
 
 ---
 
 ---RESULT---
 status: has_gaps
 report_id: REPORT-002
-gaps: "Некорректная атрибуция root cause QA-001 (check-conditions.js вместо check-relevance.js); внутреннее противоречие между стейджами по статусу зависимостей требует расследования check-relevance.js."
+gaps: "Атрибуция root cause QA-001 в REPORT-002 некорректна: указан check-conditions.js, фактически решение принял check-relevance.js (reason=dependencies_inactive, шаг 314 лога). Требуется исправление отчёта и расследование рассогласования зависимостей между стейджами."
 ---RESULT---

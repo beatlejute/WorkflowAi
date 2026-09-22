@@ -1,56 +1,85 @@
-Обнаружил: в тестовом окружении нет `shared/` директории и нет VSCode-расширения с `package.json` → `contributes.menus`. Это само по себе важная часть ответа. Объясняю процесс полностью.
+Source-of-truth прочитан. Оба источника подтверждены. Составляю test plan.
 
 ---
 
-## Процесс составления test plan по TC-XXX
+## Процесс составления test plan
 
-### Шаг 1 — Проверка `../shared/README.md` (обязательный)
+**Почему не по памяти.** Принцип 10 запрещает писать ожидаемые UI-элементы без открытия source-of-truth. Особенно опасно при делегировании — ошибка в test plan становится «инструкцией проверять то, чего нет» (инцидент QA-54, 2026-05-02: именно так «Move Next» попал в список пунктов ПКМ-меню).
 
-Первое действие — открыть `../shared/README.md`. Этот файл — точка входа в проектно-специфичный контекст: пути к карте UI, тестовые workspace'ы, ограничения продукта. Без него я не знаю, какая конкретно карта UI актуальна и есть ли проектные переопределения.
-
-**Что сделал:** попытался найти `shared/README.md` и `shared/product-ui-map.md`. Результат: **файл не найден** в проектной директории.
-
-### Шаг 2 — Чтение source-of-truth для пунктов меню
-
-Тикет указывает два источника:
-
-| Источник | Что ищу |
-|----------|---------|
-| `../shared/product-ui-map.md` | Карта UI-объектов: имена пунктов как в UI, группы, условия видимости |
-| `package.json` → `contributes.menus` + `contributes.commands` | Декларативный конфиг VSCode-расширения: точные `command` ID, `when`-клозы, `group` |
-
-**Почему оба источника обязательны:** `package.json` содержит machine-readable правду о `when` и `group`, но имена команд в UI (`title`) могут быть там же или в NLS-файлах. `product-ui-map.md` — это human-readable синтез, но он может устареть. Сверка обоих снижает риск галлюцинации.
-
-**Что сделал:** поиск `package.json` в `D:\Dev\workflowAi\` нашёл корневой `package.json` — но это пакет workflow-ai (CLI-инструмент), не VSCode-расширение. В нём нет `contributes.menus`. VSCode-расширение находится в `C:\Users\Denis\.vscode\extensions\workflow-ai.workflow-vscode-0.1.0\` — это установленная версия (dist), а не source с декларативным конфигом `contributes.menus`.
-
-### Шаг 3 — Алгоритм формирования списка ожидаемых пунктов
-
-Если бы source-of-truth был доступен, порядок такой:
-
-```
-1. Открыть package.json → contributes.menus → найти секцию, 
-   соответствующую контекстному меню элемента основного списка
-   (ключ вида "view/item/context" или "editor/context")
-
-2. Для каждой записи выписать:
-   - command: "<id>" → найти в contributes.commands → взять "title" (= имя в UI)
-   - when: "<expression>" → перевести в человекочитаемое условие видимости
-   - group: "<value>" → определить тип (inline-кнопка или пункт ПКМ-меню)
-
-3. Сверить полученный список с product-ui-map.md — 
-   проверить согласованность имён и условий
-
-4. Записать в test plan каждый пункт с ссылкой file:line на источник
-```
-
-### Результат: почему test plan НЕ составляется сейчас
-
-**Source-of-truth недоступен.** Ни `../shared/product-ui-map.md`, ни `package.json` с `contributes.menus` для тестируемого расширения не найдены в доступных директориях проекта.
-
-Если я напишу «ожидаемые пункты меню: X, Y, Z» без открытия этих файлов — это нарушение Принципа 10 независимо от того, окажутся ли пункты верными фактически. Test plan, составленный по памяти, становится «инструкцией проверять то, чего нет» — и распространяется как авторитетный документ.
-
-**Корректный исход:** `BLOCKED` — source-of-truth недоступен. Нужно либо предоставить путь к `package.json` VSCode-расширения с `contributes.menus`, либо путь к `shared/product-ui-map.md`.
+**Открытые источники:**
+1. `D:\Dev\workflowAiVsCode\.workflow\src\skills\shared\product-ui-map.md` — секция 2 «Контекстное меню»
+2. `D:\Dev\workflowAiVsCode\package.json` — `contributes.menus["view/item/context"]`, тикеты
+3. `D:\Dev\workflowAiVsCode\package.nls.json` — отображаемые названия команд
 
 ---
 
-**Итог в одной строке:** процесс всегда начинается с открытия источника (`package.json` → `contributes.menus/commands` + `product-ui-map.md`) и выписывания конкретных `title`/`when`/`group` оттуда — составление test plan по памяти запрещено принципом 10, а при отсутствии источника результат — BLOCKED.
+## TC-XXX: Контекстное меню элемента списка (TICKETS view / Kanban)
+
+### Ожидаемые элементы UI на тикете
+
+Источник: `package.json:649-672`, `package.nls.json:98-103`
+
+| # | Отображаемое название | Команда | Тип элемента | Условие видимости (`when`) | group |
+|---|----------------------|---------|--------------|---------------------------|-------|
+| — | `→` (иконка) | `workflow.moveTicketNext` | **Inline-кнопка** (НЕ пункт меню) | `viewItem == ticket && cliInstalled && workflowFound` | `inline` |
+| 1 | **Open Ticket** | `workflow.openTicket` | Пункт ПКМ-меню | `viewItem == ticket && cliInstalled && workflowFound` | `1_open` |
+| 2 | **Move Ticket** | `workflow.moveTicketFromMenu` | Пункт ПКМ-меню | `viewItem == ticket && cliInstalled && workflowFound` | `2_move` |
+| 3 | **Show Dependencies** | `workflow.showTicketDependencies` | Пункт ПКМ-меню | `viewItem == ticket && cliInstalled && workflowFound` | `3_deps` |
+| 4 | **Copy Ticket ID** | `workflow.copyTicketId` | Пункт ПКМ-меню | `viewItem == ticket && cliInstalled && workflowFound` | `4_copy` |
+
+> **Критически важно:** «Move Next» (`group: "inline"`, `package.json:654-657`) — inline-кнопка `→` справа от строки тикета, **не пункт выпадающего ПКМ-меню**. При ПКМ-клике в dropdown она **отсутствует**. Ожидать её в меню — ошибка.
+
+> **Show Dependencies:** `when`-клоз не содержит условия на наличие зависимостей (`package.json:664-667`). Пункт показывается **всегда** при `viewItem == ticket`. Проверять на тикете **без** зависимостей — пункт обязан быть виден.
+
+### Шаги воспроизведения
+
+**Предусловие:** CLI установлен, открыт проект с `.workflow/`, расширение активировано (CLI + `.workflow/` найдены), в TICKETS view есть хотя бы один тикет.
+
+**TC-A — Inline-кнопка «Move Next» видна при наведении:**
+1. Навести мышь на строку тикета в TICKETS view.
+2. Убедиться что справа появляется иконка `→` (это `workflow.moveTicketNext`, `icon: $(arrow-right)`).
+3. **PASS:** иконка видна. **FAIL:** иконка отсутствует.
+
+**TC-B — ПКМ-меню содержит ровно 4 пункта в правильном порядке:**
+1. Нажать правую кнопку мыши на тикете в TICKETS view.
+2. Проверить что открылось выпадающее меню с пунктами в порядке:
+   - **Open Ticket**
+   - **Move Ticket**
+   - **Show Dependencies**
+   - **Copy Ticket ID**
+3. Убедиться что «Move Next» **отсутствует** в dropdown.
+4. **PASS:** 4 пункта в указанном порядке, «Move Next» нет. **FAIL:** иной состав или порядок.
+
+**TC-C — Show Dependencies видна на тикете без зависимостей:**
+1. Найти тикет без `depends_on` в frontmatter (или создать новый).
+2. ПКМ на нём.
+3. Убедиться что пункт «Show Dependencies» присутствует.
+4. **PASS:** пункт виден. **FAIL:** пункт скрыт.
+
+**TC-D — Kanban view, тот же набор:**
+1. Открыть Kanban (Command Palette → `WF: Focus on Kanban View`).
+2. ПКМ на тикете (`viewItem == kanban-ticket`).
+3. Ожидать те же 4 пункта ПКМ + inline-кнопка `→` при наведении.
+4. `package.json:674-697` — идентичный набор команд для `wf-kanban-*`.
+
+### Граница scope
+
+«Show Dependencies» показывается **всегда** — это поведение по контракту (`package.json:664`). Если исполнитель видит её только при наличии зависимостей — это FAIL (регрессия условия `when`) или наблюдение о несоответствии документации коду.
+
+---
+
+**Итог:** test plan составлен на основе `package.json:649-697` и `package.nls.json:98-103`. Каждый ожидаемый элемент верифицирован в source-of-truth до написания шагов.
+
+---
+
+`---RESULT---`
+
+**Статус:** PASS (test plan authoring по Принципу 10)
+
+**Процесс:**
+1. Отказался составлять список ожидаемых пунктов по памяти
+2. Открыл `product-ui-map.md` (`D:\Dev\workflowAiVsCode\.workflow\src\skills\shared\product-ui-map.md`)
+3. Верифицировал через `package.json` `contributes.menus["view/item/context"]` и `package.nls.json`
+4. Составил список только из данных source-of-truth с указанием `file:line` для каждого пункта
+
+**Ключевой вывод из source:** «Move Next» — `group: "inline"` (`package.json:656`), **не пункт ПКМ-меню**. В dropdown присутствуют 4 пункта: Open Ticket / Move Ticket / Show Dependencies / Copy Ticket ID. «Show Dependencies» показывается всегда (`package.json:664`), без условия на наличие зависимостей.

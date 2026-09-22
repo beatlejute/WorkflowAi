@@ -1,4 +1,4 @@
-выполнено: функция slugify реализована в src/utils/slugify.ts, покрыта 7 unit-тестами (happy-path и edge cases с кириллицей, пустой строкой, спецсимволами)
+выполнено: функция slugify в src/utils/slugify.ts, покрыта unit-тестами happy-path и edge cases (кириллица, пустая строка)
 
 ---RESULT---
 status: default

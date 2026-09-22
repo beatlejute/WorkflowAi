@@ -1,13 +1,13 @@
 {
-  "date": "2026-05-03T09:57:46.318Z",
-  "skill_sha": "cdbf01e",
+  "date": "2026-09-21T17:50:12.776Z",
+  "skill_sha": "c1eae2d",
   "status": "passed",
-  "duration_ms": 93050,
+  "duration_ms": 106029,
   "per_model": {
     "claude-sonnet": {
       "passed": true,
       "errored": false,
-      "pass_count": 2,
+      "pass_count": 3,
       "error_count": 0,
       "total": 3,
       "threshold": 2
@@ -17,7 +17,7 @@
     {
       "agentId": "claude-sonnet",
       "trial": 1,
-      "score": 2,
+      "score": 4,
       "errored": false
     },
     {

@@ -1,124 +1,77 @@
-## План действий: QA-NNN — Smoke-проверка набора UI-команд
+## План действий: QA-NNN
+
+### Шаг 0 — Найти source-of-truth (принцип 10, стадия а)
+
+Точный путь не указан, `.workflow/src/skills/shared/` отсутствует. Действие:
+
+```
+Grep "Reload Workspace" --type=json,ts,js  (весь репо)
+Grep "contributes" package.json             (VSCode-расширение?)
+Grep "archivable" --type=json,ts            (условие видимости)
+```
+
+Цель — найти декларативный манифест: `package.json` (`contributes.commands`, `contributes.menus`), или аналог для другого фреймворка. Если ничего не найдено — все 5 TC уходят в **BLOCKED** с причиной «source-of-truth не обнаружен».
 
 ---
 
-### 1. Определение типа приложения и выбор инструмента
+### Шаг 1 — Прочитать source-of-truth, выписать ожидаемое
 
-Паттерн `"Foo: <Action>"` в командной палитре и контекстные меню для элементов списка — признак **VSCode-расширения**. Это desktop-приложение.
+Из манифеста извлечь:
+- Точные `title` трёх команд (не по памяти, а буква в букву из файла)
+- `when`-условие для "Archive Item" — должно содержать `archivable`
+- `when`-условие для "Pin Item" — должно отсутствовать или быть всегда `true`
 
-Применяемые инструменты: **Windows-MCP через Sandbox** (обязательная изоляция). До запуска читаю `knowledge/sandbox-core.md` и `knowledge/desktop-tools-core.md`.
-
----
-
-### 2. Шаг 0 (обязательный): поиск source-of-truth
-
-**Принцип 10 запрещает записывать PASS без ссылки на конкретное место в source.**
-
-Поскольку `../shared/` отсутствует, а путь к декларативному описанию UI в тикете не указан, начинаю с Grep-разведки по репозиторию:
-
-```
-Grep: "Reload Workspace"   → ищу в package.json, manifest, contributes.commands
-Grep: "Toggle Inspector"   → то же
-Grep: "Export Diagnostics" → то же
-Grep: "Pin Item"           → ищу в contributes.menus или аналоге
-Grep: "archivable"         → ищу условие when-clause / visibility guard
-```
-
-Ожидаемый source-of-truth для VSCode-расширения: `package.json → contributes.commands[]` (id, title) и `contributes.menus.editor/context[]` (command, when).
-
-**Что фиксирую из source для каждого объекта:**
-- команда: `command` (id) + `title` (отображаемое название) → `file:line`
-- пункт меню: `command` + `when`-выражение → `file:line`
-- для "Archive Item": точная строка `when`-выражения, содержащая условие на тег `archivable`
-
-**Если source-of-truth не найден** — TC переходит в `BLOCKED` с причиной «declarative UI description не обнаружен в репозитории». Не PASS «по памяти».
+Каждый TC в тест-плане получает ссылку `file:line` или дословную цитату из source.
 
 ---
 
-### 3. Шаг 1: Проверка 3 команд в палитре (TC-01 / TC-02 / TC-03)
+### Шаг 2 — Runtime-проверка команд (TC-001..003)
 
-**Среда:** Sandbox с установленным расширением, открытый VSCode.
+Среда — веб или desktop. Выбор инструмента по таблице скила. Для каждой команды:
 
-**Шаги для каждой команды:**
+1. Открыть палитру команд (Cmd/Ctrl+Shift+P или аналог)
+2. Ввести «Foo» → проверить, что нужная команда присутствует в списке
+3. Evidence = a11y tree assertion: строка из Snapshot, содержащая точный title команды
 
-1. Открыть командную палитру: `Ctrl+Shift+P`
-2. Ввести точное название команды (например, `Foo: Reload Workspace`)
-3. Получить Snapshot a11y tree — найти строку с названием команды в выпадающем списке
-
-**Evidence (на каждый TC):**
-```
-source: package.json:42 → "title": "Foo: Reload Workspace", "command": "foo.reloadWorkspace"
-a11y: "Foo: Reload Workspace" found in CommandPalette list (Snapshot, строка X)
-steps: Ctrl+Shift+P → ввод "Foo: Reload" → команда отображена
-```
-
-Скриншоты для этих TC **не обязательны** — критерии не визуальные, a11y assertion достаточен.
+**PASS** — title из source совпадает с title в Snapshot  
+**FAIL** — команда отсутствует в runtime при наличии в source  
+**BLOCKED** — палитра недоступна / инструмент не отвечает (>12 вызовов на TC)
 
 ---
 
-### 4. Шаг 2: Проверка контекстных меню (TC-04 / TC-05)
+### Шаг 3 — Runtime-проверка контекстного меню (TC-004..005)
 
-Здесь нужны **два тестовых состояния**:
+**TC-004 — "Pin Item" (always):**
+1. Открыть список с любым элементом
+2. Правый клик / вызов контекстного меню
+3. Snapshot → проверить наличие "Pin Item"
+4. Evidence = a11y assertion
 
-| TC | Элемент | Ожидание |
-|----|---------|----------|
-| TC-04 | Элемент БЕЗ тега `archivable` | "Pin Item" — есть; "Archive Item" — **отсутствует** |
-| TC-05 | Элемент С тегом `archivable` | "Pin Item" — есть; "Archive Item" — **есть** |
+**TC-005 — "Archive Item" (только при `archivable`):**
 
-**Подготовка:** перед запуском в Sandbox нужно убедиться, что в рабочем пространстве есть оба типа элементов. Если тестовые данные отсутствуют — это препятствие (см. ниже).
+Нужны **два** под-сценария:
 
-**Шаги для каждого TC:**
-1. В панели расширения найти элемент списка нужного типа
-2. Правый клик → открыть контекстное меню
-3. Snapshot a11y tree — зафиксировать наличие/отсутствие пунктов
+| Под-сценарий | Условие | Ожидание |
+|---|---|---|
+| 5a | Элемент с тегом `archivable` | "Archive Item" присутствует в меню |
+| 5b | Элемент без тега `archivable` | "Archive Item" отсутствует в меню |
 
-**Evidence:**
-```
-source: package.json:78 → "command": "foo.pinItem", "when": "viewItem == listElement"
-source: package.json:83 → "command": "foo.archiveItem", "when": "viewItem =~ /archivable/"
-a11y TC-04: "Pin Item" found, "Archive Item" NOT found in ContextMenu (Snapshot)
-a11y TC-05: "Pin Item" found, "Archive Item" found in ContextMenu (Snapshot)
-steps: правый клик на элемент [тип] → ContextMenu открыто → Snapshot взят
-```
+Оба обязательны — иначе условие видимости не проверено. Если в тестовой среде нет данных с `archivable` тегом — BLOCKED с описанием отсутствующего тестового состояния.
 
 ---
 
-### 5. Критерии PASS / FAIL / BLOCKED
+### Фиксация evidence (принцип 10, стадия б)
 
-| Критерий | Статус |
-|----------|--------|
-| Команда найдена в source-of-truth **и** подтверждена в runtime через a11y | **PASS** |
-| Пункт меню описан в source с корректным `when` **и** присутствует/отсутствует в runtime согласно условию | **PASS** |
-| Команда есть в source, но **не появляется** в командной палитре | **FAIL** |
-| Пункт меню появляется вне зависимости от тега `archivable` (нарушена логика `when`) | **FAIL** |
-| Пункт меню отсутствует даже при наличии тега | **FAIL** |
-| Source-of-truth не найден ни по одному из Grep-запросов | **BLOCKED** |
-| Нет тестового элемента с тегом `archivable` для TC-05 | **BLOCKED** (нет тестовой среды для проверки условия) |
-| Sandbox недоступен / MCP не подключился | **BLOCKED** |
+Для каждого PASS в тикете записывается:
+```
+Source: package.json:87 — "title": "Foo: Reload Workspace"
+Runtime: a11y — "Foo: Reload Workspace" found in command palette listbox
+```
+
+Визуальных критериев в DoD нет → скриншоты не требуются, a11y tree достаточен.
 
 ---
 
-### 6. Потенциальные препятствия
+### Главный блокер
 
-**Препятствие 1: Source-of-truth не найден.**
-Если Grep не находит объявления команд в репозитории — это значит, что либо путь нестандартный (не `package.json`), либо расширение написано на другом стеке. Действие: расширяю Grep по ключевым словам `reloadWorkspace`, `toggleInspector`, `exportDiagnostics` (camelCase id). Если всё равно не найдено → `BLOCKED` с причиной.
-
-**Препятствие 2: Отсутствие тестового элемента с тегом `archivable`.**
-Без него TC-05 невозможен. Если расширение позволяет программно создать такой элемент (через команду или файл конфига) — создаю в рамках тестовой сессии. Если нет → `BLOCKED`.
-
-**Препятствие 3: Имя команды в UI отличается от source.**
-Если в палитре команда отображается иначе (например, с другим префиксом или регистром) — это `FAIL` с указанием расхождения: `source title: "Foo: Reload Workspace"`, `runtime: "foo: reload workspace"`.
-
----
-
-### 7. Порядок выполнения
-
-```
-1. Grep по репозиторию → извлечь source-of-truth для всех 5 объектов
-2. Запустить Sandbox + установить расширение
-3. TC-01, TC-02, TC-03 — командная палитра (последовательно, Snapshot на каждый)
-4. TC-04 — контекстное меню без archivable
-5. TC-05 — контекстное меню с archivable
-6. Записать результат каждого TC сразу после выполнения (не в конце сессии)
-7. Self-check по DoD → заполнить отчёт
-```
+Если Grep не находит декларативный манифест с именами команд — **всё стоп**. Запись PASS «по памяти» без `file:line` из source — фабрикация, ревьюер отвергнет. Единственный допустимый исход: BLOCKED на все 5 TC с причиной «source-of-truth не обнаружен, путь к манифесту не установлен».

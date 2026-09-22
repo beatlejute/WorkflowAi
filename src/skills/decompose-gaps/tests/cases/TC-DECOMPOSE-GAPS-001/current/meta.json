@@ -1,9 +1,8 @@
 {
-  "date": "2026-04-21T08:51:13.396Z",
-  "skill_sha": "3cc51dd",
+  "date": "2026-09-21T17:15:55.252Z",
+  "skill_sha": "d34d1a7",
   "status": "passed",
-  "duration_ms": 2405055,
-  "l1_skipped": true,
+  "duration_ms": 59324,
   "per_model": {
     "claude-sonnet": {
       "passed": true,
@@ -39,24 +38,6 @@
     }
   },
   "rubric_scores": [
-    {
-      "agentId": "claude-sonnet",
-      "trial": 1,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "claude-sonnet",
-      "trial": 2,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "claude-sonnet",
-      "trial": 3,
-      "score": 5,
-      "errored": false
-    },
     {
       "agentId": "kilo-deepseek",
       "trial": 1,
@@ -108,6 +89,24 @@
     },
     {
       "agentId": "kilo-minimax",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 1,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
       "trial": 3,
       "score": 5,
       "errored": false

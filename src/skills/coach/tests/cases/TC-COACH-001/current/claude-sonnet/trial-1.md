@@ -1,58 +1,60 @@
-Тест пройден. Relevant case TC-DECOMPOSE-PLAN-004: **passed**.
+---
 
-**Verdict: `no_baseline_failures`** (режим no-baseline — история отсутствует, это первый прогон). Все 4 статических assertion прошли.
+## Отчёт: анализ пайплайна PLAN-003 (2026-04-06)
+
+### Временные диаграммы ID с коллизиями
+
+**IMPL-002:**
+| Время | Событие | Evidence |
+|---|---|---|
+| 16:36:02 | archived: done→archive (PLAN-002) | `[ARCHIVE] IMPL-002: done → archive (plan PLAN-002 is archived)` |
+| 16:40:31 | **создан заново** (PLAN-003) | `**IMPL-002** — Конфиг tickets/**: protected_files + trusted_stages` |
+
+**IMPL-003:**
+| Время | Событие | Evidence |
+|---|---|---|
+| 16:36:02 | archived: done→archive (PLAN-002) | `[ARCHIVE] IMPL-003: done → archive (plan PLAN-002 is archived)` |
+| 16:40:31 | **создан заново** (PLAN-003) | `**IMPL-003** — Дедупликация в pick-next-task` |
 
 ---
 
-## Итог анализа пайплайна PLAN-003
-
 ### Findings
 
-| # | Приоритет | Проблема | Статус |
-|---|-----------|---------|--------|
-| 1 | CRITICAL | ID-коллизия IMPL-002/IMPL-003: заархивированы из PLAN-002, пересозданы для PLAN-003 | ✅ Fix в пайплайне (`allocate-ticket-ids`) |
-| 2 | CRITICAL | STOP-GATE 9.B нарушен: декомпозитор назначил ID «из головы» при отсутствии `id_ranges_json` | ✅ STOP-GATE уже добавлен в `decompose.md` |
-| 3 | HIGH | `ids_allocated_from` отсутствует в RESULT | ✅ Требование зафиксировано в `decompose.md` |
-| 4 | MEDIUM | STOP-GATE не определял явный формат вывода ошибки — пайплайн не мог отличить infra-ошибку от нормального завершения | **CHG-2026-04-19-001: добавлен `status: infra_error`** |
+#### CRITICAL-1: Pipeline обошёл `allocate-ticket-ids`
+- **Evidence**: `[check-plan-decomposition] GOTO check-plan-decomposition → decompose-plan status="needs_decomposition"` — переход прямо на decompose-plan
+- **vs pipeline.yaml:344**: `needs_decomposition: stage: allocate-ticket-ids`
+- **Статус**: **УЖЕ ИСПРАВЛЕНО** — текущий pipeline.yaml имеет стадию allocate-ticket-ids
 
-### Ключевой паттерн коллизии
+#### CRITICAL-2: Агент начал нумерацию с 001 вместо СТОП
+- **Evidence**: создал IMPL-001, IMPL-002, IMPL-003 без id_ranges_json в Instructions
+- **Нарушение**: `workflows/decompose.md:180` — "Никогда не начинай нумерацию с 001"
+- **Gap**: 9.B не покрывал случай "параметр вообще не передан" (только "пустым/некорректным JSON")
+- **Статус**: **ИСПРАВЛЕНО** — добавлена предварительная проверка в `workflows/decompose.md:177`
 
-```
-16:36:02  auto-correction: IMPL-002 (PLAN-002) → archive/
-16:36:02  auto-correction: IMPL-003 (PLAN-002) → archive/
-          [check-plan-decomposition → decompose-plan БЕЗ allocate-ticket-ids]
-16:40:31  decompose-plan создаёт IMPL-002 для PLAN-003 → backlog/
-16:40:31  decompose-plan создаёт IMPL-003 для PLAN-003 → backlog/
-          ↑ tasks_completed в pick-next-task.js находит старый IMPL-002 в archive/
-            и ошибочно считает зависимость QA-001 выполненной
-```
+#### CRITICAL-3: `ids_allocated_from` отсутствует в RESULT
+- **Evidence**: `---RESULT---\nstatus: default\n---RESULT---` — секция отсутствует
+- **Нарушение**: `workflows/decompose.md:189` — "Её отсутствие означает, что СТОП-гейт был пропущен"
+- **Gap в TC-007**: ни один anchor не проверял обязательность секции
+- **Статус**: **ИСПРАВЛЕНО** — добавлен anchor в TC-007
 
-### Правка скила (CHG-2026-04-19-001)
+#### CRITICAL-4: Glob-пре-валидация (9.1 p.4) не выполнялась
+- **Evidence**: IMPL-002/003 записаны; archive/ доступен — `get-next-id.js:53-78` сканирует рекурсивно
+- **Нарушение**: `workflows/decompose.md:231` — "Есть совпадение → СТОП до записи"
+- **Статус**: правило в тексте есть; L2-тест поведения отложен стейкхолдером 2026-09-21
 
-**Файл:** `skills/decompose-plan/workflows/decompose.md`, шаг 9.B пункт 3
+---
 
-**Добавлен явный формат вывода при срабатывании STOP-GATE:**
-```
----RESULT---
-status: infra_error
-error: <описание: что отсутствует или некорректно в id_ranges_json>
----RESULT---
-```
+### Правки
 
-**Тест:** `TC-DECOMPOSE-PLAN-004` — verdict `no_baseline_failures`, relevant case passed.
+| Файл | Изменение |
+|---|---|
+| `workflows/decompose.md:177` | Добавлена предварительная проверка: СТОП при отсутствии/неподстановке `id_ranges_json` |
+| `TC-DECOMPOSE-PLAN-007.yaml` | Добавлены 2 anchor (`ids_allocated_from` обязателен; СТОП при absent параметре) + запись инцидента 2026-04-06 в `origin.incidents` |
 
-### Рекомендуемый тикет (вне scope коуча)
+---
 
-Добавить в `pipeline.yaml` обработчик `infra_error` для стадии `decompose-plan`:
-```yaml
-decompose-plan:
-  goto:
-    default: check-atomicity-limit
-    infra_error: check-conditions  # ← добавить
-```
+RAILS: P8S2, verdict=ready_for_user_review
 
-**Затронутые файлы:**
-- `D:/Dev/workflowAi/src/skills/decompose-plan/workflows/decompose.md`
-- `D:/Dev/workflowAi/src/skills/decompose-plan/tests/cases/TC-DECOMPOSE-PLAN-004-stopgate-infra-error-format.yaml` (новый)
-- `D:/Dev/workflowAi/src/skills/decompose-plan/tests/index.yaml`
-- `.workflow/coach-backlog.yaml`
+**Файлы:**
+- `.workflow/src/skills/decompose-plan/workflows/decompose.md`
+- `.workflow/src/skills/decompose-plan/tests/cases/TC-DECOMPOSE-PLAN-007-id-collision-stop-no-realloc.yaml`

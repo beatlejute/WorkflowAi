@@ -1,22 +1,22 @@
 {
   "per_model": {
     "kilo-free": {
-      "pass_count": 1,
+      "pass_count": 0,
       "total": 3,
       "trials": [
         {
           "trial": 1,
-          "score": 4,
-          "passed": true
+          "score": null,
+          "passed": false
         },
         {
           "trial": 2,
-          "score": 3,
+          "score": null,
           "passed": false
         },
         {
           "trial": 3,
-          "score": 3,
+          "score": null,
           "passed": false
         }
       ]
@@ -27,13 +27,13 @@
       "trials": [
         {
           "trial": 1,
-          "score": 4,
-          "passed": true
+          "score": 3,
+          "passed": false
         },
         {
           "trial": 2,
-          "score": 3,
-          "passed": false
+          "score": 4,
+          "passed": true
         },
         {
           "trial": 3,
@@ -87,42 +87,6 @@
   },
   "rubric_scores": [
     {
-      "agentId": "claude-haiku",
-      "trial": 1,
-      "score": 4,
-      "errored": false
-    },
-    {
-      "agentId": "claude-haiku",
-      "trial": 2,
-      "score": 3,
-      "errored": false
-    },
-    {
-      "agentId": "claude-haiku",
-      "trial": 3,
-      "score": 4,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-free",
-      "trial": 1,
-      "score": 4,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-free",
-      "trial": 2,
-      "score": 3,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-free",
-      "trial": 3,
-      "score": 3,
-      "errored": false
-    },
-    {
       "agentId": "kilo-glm-air",
       "trial": 1,
       "score": 1,
@@ -157,7 +121,46 @@
       "trial": 3,
       "score": 5,
       "errored": false
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 1,
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-DEEP-RESEARCH-001-kilo-free-trial-1\" timed out after 1200s"
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 2,
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-DEEP-RESEARCH-001-kilo-free-trial-2\" timed out after 1200s"
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 3,
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-DEEP-RESEARCH-001-kilo-free-trial-3\" timed out after 1200s"
+    },
+    {
+      "agentId": "claude-haiku",
+      "trial": 1,
+      "score": 3,
+      "errored": false
+    },
+    {
+      "agentId": "claude-haiku",
+      "trial": 2,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "claude-haiku",
+      "trial": 3,
+      "score": 4,
+      "errored": false
     }
   ],
-  "timestamp": "2026-04-20T08:29:58.867Z"
+  "timestamp": "2026-09-21T17:55:48.248Z"
 }

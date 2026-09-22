@@ -1,12 +1,14 @@
 {
-  "date": "2026-09-18T12:29:06.789Z",
-  "skill_sha": "410ebe5",
+  "date": "2026-09-22T05:32:43.735Z",
+  "skill_sha": "d7badfe",
   "status": "passed",
-  "duration_ms": 1,
+  "duration_ms": 1202735,
   "per_model": {
     "claude-sonnet": {
       "passed": true,
-      "pass_count": 3,
+      "errored": false,
+      "pass_count": 2,
+      "error_count": 1,
       "total": 3,
       "threshold": 2
     },
@@ -30,21 +32,6 @@
     }
   },
   "rubric_scores": [
-    {
-      "agentId": "claude-sonnet",
-      "trial": 1,
-      "score": 5
-    },
-    {
-      "agentId": "claude-sonnet",
-      "trial": 2,
-      "score": 5
-    },
-    {
-      "agentId": "claude-sonnet",
-      "trial": 3,
-      "score": 5
-    },
     {
       "agentId": "kilo-deepseek",
       "trial": 1,
@@ -89,6 +76,25 @@
       "agentId": "kilo-minimax",
       "trial": 3,
       "score": 5
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 1,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 2,
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-COACH-001-claude-sonnet-trial-2\" timed out after 1200s"
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 3,
+      "score": 5,
+      "errored": false
     }
   ]
 }

@@ -1,15 +1,11 @@
-Согласно таблице инструментов в скиле:
+VSCode-расширение — desktop-приложение. По таблице выбора инструмента:
 
-**Инструмент:** Windows-MCP
-**Среда:** Windows Sandbox (изолированная)
+**Инструмент:** Windows-MCP  
+**Среда:** Windows Sandbox (обязательно — прямое тестирование на хосте запрещено)
 
-**Обоснование:**
-- VSCode-расширение — desktop-приложение, поэтому Playwright MCP не подходит
-- ⛔ Прямое тестирование на хосте **запрещено** — загрязняет рабочую среду и не воспроизводит чистое состояние
-- Sandbox обеспечивает изоляцию и воспроизводимость
-
-**Следующие шаги:**
-1. Загрузить `knowledge/desktop-tools-core.md` — команды Windows-MCP, навигация, бюджет Snapshot
-2. Загрузить `knowledge/sandbox-core.md` — настройка Sandbox, quick-start, персистенция evidence
-3. Проверить наличие `../shared/README.md` — если есть, загрузить проектные правила (пути, тестовые workspace'ы, конфигурация)
-4. Определить тип тикета (SMOKE / REGRESSION / ACCEPTANCE / ...) и загрузить соответствующий workflow
+Следующие шаги:
+1. Загрузить `knowledge/sandbox-core.md` — настройка Sandbox, quick-start
+2. Загрузить `knowledge/desktop-tools.md` — команды Windows-MCP, label-навигация, Snapshot budget
+3. Настроить `.wsb`-конфиг, смонтировать расширение в Sandbox
+4. Установить VSCode внутри Sandbox, установить `.vsix`
+5. Тестировать через Windows-MCP: открывать команды, проверять a11y tree (Snapshot), фиксировать evidence

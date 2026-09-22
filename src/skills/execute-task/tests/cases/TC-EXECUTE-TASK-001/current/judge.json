@@ -1,7 +1,7 @@
 {
   "per_model": {
     "claude-haiku": {
-      "pass_count": 3,
+      "pass_count": 2,
       "total": 3,
       "trials": [
         {
@@ -11,8 +11,8 @@
         },
         {
           "trial": 2,
-          "score": 4,
-          "passed": true
+          "score": 2,
+          "passed": false
         },
         {
           "trial": 3,
@@ -66,24 +66,6 @@
   },
   "rubric_scores": [
     {
-      "agentId": "claude-haiku",
-      "trial": 1,
-      "score": 4,
-      "errored": false
-    },
-    {
-      "agentId": "claude-haiku",
-      "trial": 2,
-      "score": 4,
-      "errored": false
-    },
-    {
-      "agentId": "claude-haiku",
-      "trial": 3,
-      "score": 4,
-      "errored": false
-    },
-    {
       "agentId": "kilo-free",
       "trial": 1,
       "score": 4,
@@ -115,10 +97,28 @@
     },
     {
       "agentId": "kilo-glm-air",
+      "trial": 3,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "claude-haiku",
+      "trial": 1,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "claude-haiku",
+      "trial": 2,
+      "score": 2,
+      "errored": false
+    },
+    {
+      "agentId": "claude-haiku",
       "trial": 3,
       "score": 4,
       "errored": false
     }
   ],
-  "timestamp": "2026-04-19T18:01:41.819Z"
+  "timestamp": "2026-09-21T17:57:11.228Z"
 }

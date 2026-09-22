@@ -1,58 +1,75 @@
-Тест прошёл. Финальный вывод:
+---
+
+RAILS: P8S2, verdict=ready_for_user_review
 
 ---
 
-## Результат анализа
+## Findings по пайплайну PLAN-003
 
-### Временны́е диаграммы — ID с коллизиями
+### Временные диаграммы по ID с повторными упоминаниями
 
-**IMPL-002:**
-| 16:36:02 | done → archive (PLAN-002 archived) | pick-next-task auto-correction |
-| 16:40:31 | **CREATED NEW** для PLAN-003 | decompose-plan |
-→ **Коллизия**: два разных тикета с одним ID в разных планах.
+**IMPL-002 — КОЛЛИЗИЯ (CRITICAL)**
 
-**IMPL-003:**
-| 16:36:02 | done → archive (PLAN-002 archived) | pick-next-task auto-correction |
-| 16:40:31 | **CREATED NEW** для PLAN-003 | decompose-plan |
-→ **Коллизия**.
+| Строка | Время | Событие |
+|--------|-------|---------|
+| :28 | 16:36:02 | `[ARCHIVE] IMPL-002: done → archive (plan PLAN-002 is archived)` |
+| :35 | 16:36:02 | Сводная архивация: `Archived 13 ticket(s)... IMPL-002...` |
+| :58 | 16:40:31 | Декомпозитор создаёт **новый** `IMPL-002 — Конфиг tickets/**` для PLAN-003 |
 
-**Ключевое доказательство из лога:** контекст, переданный в `decompose-plan` на шаге 4, содержал только `plan_id` и `plan_file`. `id_ranges_json` — отсутствует. Стадии `allocate-ticket-ids` в пайплайне на тот момент не было.
+**IMPL-003 — КОЛЛИЗИЯ (CRITICAL)**
+
+| Строка | Время | Событие |
+|--------|-------|---------|
+| :29 | 16:36:02 | `[ARCHIVE] IMPL-003: done → archive (plan PLAN-002 is archived)` |
+| :35 | 16:36:02 | Сводная архивация: `Archived 13 ticket(s)... IMPL-003...` |
+| :57 | 16:40:31 | Декомпозитор создаёт **новый** `IMPL-003 — Дедупликация в pick-next-task` для PLAN-003 |
+
+**IMPL-001 — пробел нумерации**
+
+| Строка | Время | Событие |
+|--------|-------|---------|
+| :22–:35 | 16:36:02 | IMPL-001 **отсутствует** в архивации PLAN-002 (архивированы IMPL-002..008) |
+| :56 | 16:40:31 | Декомпозитор создаёт `IMPL-001 — FileGuard: режим protect_structure` |
 
 ---
 
 ### Findings
 
-| # | Severity | Описание | Статус |
-|---|----------|---------|--------|
-| F1 | CRITICAL | Стадия `allocate-ticket-ids` отсутствовала → `decompose-plan` не получил `id_ranges_json` → нумерация с 001 → коллизия с архивными IMPL-002, IMPL-003 | **Уже исправлено** (pipeline.yaml + шаг 9.B decompose.md) |
-| F2 | CRITICAL | Агент не остановился при отсутствии `id_ranges_json` (нарушение шаг 9.B) + output без `ids_allocated_from` | **Уже исправлено** (стоп-гейт 9.B, инцидент 2026-04-08/PLAN-008) |
-| F3 | HIGH | **TC-DECOMPOSE-PLAN-002 инвертирован:** assertion `output_contains_all:["get-next-id"]` проваливал правильно работающего агента | **ИСПРАВЛЕНО CHG-079** |
-| F4 | MEDIUM | `verify-atomicity.js` не проверяет наличие `ids_allocated_from` в выводе декомпозитора — нет машинного гейта | Зафиксировано, инфраструктура |
+| # | Severity | Finding | Evidence |
+|---|----------|---------|---------|
+| F-1 | **CRITICAL** | ID collision: IMPL-002 и IMPL-003 существуют дважды (archive PLAN-002 + new PLAN-003) | лог :28-29 vs :57-58 |
+| F-2 | **CRITICAL** | 9.B СТОП-ГЕЙТ нарушен: агент `decompose-plan` не получил `id_ranges_json` (лог :47), но не остановился | `decompose.md:179`: "⛔ Не изобретай N_start самостоятельно"; RESULT :50-52 без `ids_allocated_from` |
+| F-3 | **HIGH** | Пайплайн не передал `id_ranges_json` в стадию `decompose-plan` — missing `allocate-ticket-ids` stage | лог :43-47: в Instructions только путь к плану |
+| F-4 | **MEDIUM** | IMPL-001 отсутствует в архивации PLAN-002 — пробел нумерации, возможна третья коллизия | лог :22-35 |
 
 ---
 
-### CHG-079: правка TC-DECOMPOSE-PLAN-002
+### Root Cause
 
-**Проблема:** тест тестировал старый контракт (агент *должен* вызывать `get-next-id.js`), тогда как с момента введения `allocate-ticket-ids` стадии контракт противоположен (агент *не должен* вызывать скрипт — получает готовые диапазоны через `id_ranges_json`).
+**Причина первого порядка:** агент `decompose-plan` (стадия 16:36:18–16:40:31) не выполнил физическое действие — не остановился при отсутствии `id_ranges_json` на входе, нарушив `decompose.md:179`.
 
-**Изменения:**
-- Заменён `output_contains_all: ["get-next-id"]` → `output_contains_all: ["ids_allocated_from"]`
-- Заменены static assertions: проверяют `id_ranges_json`, `не вызывает.*get-next-id`, `ids_allocated_from`
-- Добавлен `output_does_not_contain` на прямой вызов скрипта
-- Обновлён сценарий: теперь предоставляет `id_ranges_json` на входе + минимальный план
+**Скил-источник (физический автор):** `decompose-plan` — он записывал файлы IMPL-001.md, IMPL-002.md, IMPL-003.md.
+
+**Цепочка вверх:** пайплайн не запустил стадию `allocate-ticket-ids` перед декомпозицией (F-3 — инфраструктурный сбой вне компетенции коуча).
 
 ---
 
-### Verdict теста
+### Применённая правка
 
-```
-status: passed
-skill: decompose-plan
-total: 1
-current_run.passed: 1
-verdict: no_baseline_failures
-```
+**`decompose-plan/workflows/decompose.md`** — добавлена секция «Пред-проверка входных данных» перед Шагом 1: при отсутствии `id_ranges_json` → немедленный вывод `status: error` и остановка без чтения плана и создания тикетов.
 
-**Затронутые файлы:**
-- `src/skills/decompose-plan/tests/cases/TC-DECOMPOSE-PLAN-002-get-next-id-mandatory.yaml`
-- `src/skills/decompose-plan/tests/cases/TC-DECOMPOSE-PLAN-002/current/meta.json`
+**`decompose-plan/SKILL.md`** — параметр `id_ranges_json` помечен как `**Обязателен.**` с явным указанием СТОП при отсутствии.
+
+**Тест-кейс:** `TC-DECOMPOSE-PLAN-010-preflight-id-ranges.yaml` (L0, severity: critical) — 5 static anchors + 1 в SKILL.md. Verdict: `ready_for_user_review`.
+
+**⚠️ Рекомендация стейкхолдеру (F-3):** добавить стадию `allocate-ticket-ids` перед `decompose-plan` в pipeline.yaml — инфраструктурная защита, не зависящая от дисциплины агента.
+
+**⚠️ Примечание:** `get-next-test-id.js` вернул `TC-DECOMPOSE-PLAN-001` (баг: regex `^TC-NNN.yaml$` не матчит файлы вида `TC-NNN-description.yaml`, путь поиска без `.workflow/`). Использован TC-DECOMPOSE-PLAN-010 как правильный следующий ID.
+
+---
+
+**Файлы:**
+- `.workflow/src/skills/decompose-plan/workflows/decompose.md`
+- `.workflow/src/skills/decompose-plan/SKILL.md`
+- `.workflow/src/skills/decompose-plan/tests/cases/TC-DECOMPOSE-PLAN-010-preflight-id-ranges.yaml`
+- `.workflow/src/skills/decompose-plan/tests/index.yaml`

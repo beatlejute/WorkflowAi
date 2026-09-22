@@ -87,24 +87,6 @@
   },
   "rubric_scores": [
     {
-      "agentId": "claude-sonnet",
-      "trial": 1,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "claude-sonnet",
-      "trial": 2,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "claude-sonnet",
-      "trial": 3,
-      "score": 5,
-      "errored": false
-    },
-    {
       "agentId": "kilo-deepseek",
       "trial": 1,
       "score": 5,
@@ -158,7 +140,25 @@
       "trial": 3,
       "score": 5,
       "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 1,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 3,
+      "score": 5,
+      "errored": false
     }
   ],
-  "timestamp": "2026-04-21T08:51:13.394Z"
+  "timestamp": "2026-09-21T17:15:55.242Z"
 }

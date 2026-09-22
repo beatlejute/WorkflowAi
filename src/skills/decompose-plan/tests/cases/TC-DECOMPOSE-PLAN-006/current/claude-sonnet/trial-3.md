@@ -1,36 +1,43 @@
-По одному совпадению для каждого тикета — коллизий нет. ✅
+Создано 3 тикета в backlog:
 
 ---
 
-## Итог декомпозиции
+**IMPL-112** — Обновить select-default-proxy-modal: i18n заголовок + флаг страны *(перезаписан pipeline-хуком)*
+- Зависит от IMPL-83 (in-progress, меняет `src/types/index.ts`)
+- Покрывает: добавление `countryCode?` в `ProxyServer`, `selectDefaultProxyTitle` в `I18nKey`, переводы en+ru, замену хардкода на `I18n.getMessage`, флаг страны в `createProxyItem`
+- DoD: 5 пунктов ✓
 
-Исходная задача содержала **8 пунктов DoD** — превышение hard-порога `verify-atomicity.js` (`DOD_THRESHOLD_FAIL = 7`). Проверка 5 (Оценка размера) → **FAIL**. Задача разбита на 2 тикета по группам независимых DoD-пунктов:
+**IMPL-113** — Добавить перевод selectDefaultProxyTitle в 6 оставшихся локалей (de/fr/es/zh/ja/pt)
+- Зависит от IMPL-112
+- Покрывает: ключ `selectDefaultProxyTitle` в de, fr, es, zh, ja, pt
+- DoD: 2 пункта ✓
 
-| ID | Тип | Название | DoD (пунктов) | Зависимости |
-|----|-----|----------|---------------|-------------|
-| IMPL-1 | impl | Создать scaffold select-default-proxy-modal.ts с контрактом функции | **5** | — |
-| IMPL-2 | impl | Реализовать рендеринг списка прокси и обработку закрытия в select-default-proxy-modal | **3** | IMPL-1 |
-
-**Шов разбиения:** IMPL-1 — scaffold и контрактные ограничения (создание файла, экспорт функции, I18n-заголовок, запреты на Storage); IMPL-2 — поведение UI в runtime (рендеринг элементов, обработка закрытия, guard на пустой список). Оба тикета проходят все 7 проверок атомарности.
-
-### Рекомендации для следующего плана (вне scope)
-
-- Автотесты для `showSelectDefaultProxyModal` (happy path, пустой список, закрытие через Esc) — отдельный QA-тикет после завершения IMPL-2.
+**QA-161** — Тесты на i18n-заголовок и флаг страны
+- Зависит от IMPL-112
+- TC-Modal-5/6/7: проверка `I18n.getMessage('selectDefaultProxyTitle')`, наличие/отсутствие `.proxy-item-flag`
+- DoD: 4 пункта ✓
 
 ---
+
+**Рекомендации для следующего плана (вне scope)**
+
+DoD 1–4, 6–7 из исходного плана уже реализованы в архивных тикетах IMPL-043 и IMPL-047 — повторно не создавались.
+
+---
+
+**---RESULT---**
 
 ```
----RESULT---
-status: default
-tickets_created:
-  - .workflow/tickets/backlog/IMPL-1.md
-  - .workflow/tickets/backlog/IMPL-2.md
-decomposition_summary:
-  plan_tasks: 1
-  tickets_created: 2
-  breakdown:
-    Задача 1 → [IMPL-1, IMPL-2] (разбита: DoD содержит 8 пунктов, порог 7 — FAIL на Проверке 5)
-ids_allocated_from:
-  IMPL: 1
----RESULT---
+created:
+  - IMPL-112  # pipeline-хук перезаписал в лучший вид: types+locales(en/ru)+modal = 1 тикет
+  - IMPL-113  # 6 оставшихся локалей (de/fr/es/zh/ja/pt)
+  - QA-161    # тесты TC-Modal-5/6/7
+
+skipped:
+  - DoD 1 (file created)         → IMPL-043 archived ✅
+  - DoD 2 (function resolves id) → IMPL-043 archived ✅
+  - DoD 3 (Esc/X → null)        → IMPL-043 archived ✅
+  - DoD 4 (empty list guard)     → IMPL-047 archived ✅
+  - DoD 6 (no Storage calls)     → IMPL-043 archived ✅
+  - DoD 7 (no storage read)      → IMPL-043 archived ✅
 ```

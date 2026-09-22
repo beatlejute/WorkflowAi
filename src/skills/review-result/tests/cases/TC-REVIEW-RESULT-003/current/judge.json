@@ -11,7 +11,7 @@
         },
         {
           "trial": 2,
-          "score": 5,
+          "score": 4,
           "passed": true
         },
         {
@@ -149,7 +149,7 @@
     {
       "agentId": "claude-sonnet",
       "trial": 2,
-      "score": 5,
+      "score": 4,
       "errored": false
     },
     {
@@ -159,5 +159,5 @@
       "errored": false
     }
   ],
-  "timestamp": "2026-05-03T09:51:40.992Z"
+  "timestamp": "2026-09-21T17:52:57.580Z"
 }

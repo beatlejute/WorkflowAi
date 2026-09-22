@@ -1,15 +1,14 @@
 {
-  "date": "2026-04-20T12:04:59.083Z",
-  "skill_sha": "f1d5604",
+  "date": "2026-09-21T17:11:17.961Z",
+  "skill_sha": "12552c2",
   "status": "failed",
-  "duration_ms": 1225326,
-  "l1_skipped": true,
+  "duration_ms": 157169,
   "per_model": {
     "claude-sonnet": {
-      "passed": false,
+      "passed": true,
       "errored": false,
-      "pass_count": 0,
-      "error_count": 1,
+      "pass_count": 2,
+      "error_count": 0,
       "total": 3,
       "threshold": 2
     },
@@ -39,25 +38,6 @@
     }
   },
   "rubric_scores": [
-    {
-      "agentId": "claude-sonnet",
-      "trial": 1,
-      "score": null,
-      "errored": true,
-      "error": "Stage \"TC-CREATE-PLAN-001-claude-sonnet-trial-1\" timed out after 1200s"
-    },
-    {
-      "agentId": "claude-sonnet",
-      "trial": 2,
-      "score": 2,
-      "errored": false
-    },
-    {
-      "agentId": "claude-sonnet",
-      "trial": 3,
-      "score": 3,
-      "errored": false
-    },
     {
       "agentId": "kilo-deepseek",
       "trial": 1,
@@ -113,6 +93,24 @@
       "agentId": "kilo-minimax",
       "trial": 3,
       "score": 3,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 1,
+      "score": 3,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 3,
+      "score": 4,
       "errored": false
     }
   ]
