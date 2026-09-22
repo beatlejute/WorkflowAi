@@ -10,9 +10,10 @@
  * - Счётчики попыток (counter, max, on_max)
  */
 
-import { describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, beforeEach, afterEach, after } from 'node:test';
 import assert from 'node:assert';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import yaml from '../lib/js-yaml.mjs';
@@ -701,7 +702,11 @@ describe('PipelineRunner — FileGuard Trusted Agents', () => {
 // Test: FileGuard protect_structure mode
 // ============================================================================
 describe('FileGuard — protect_structure mode', () => {
-  const PROJECT_ROOT = path.resolve(__dirname, '..');
+  // Корень — временный каталог, не src/: тесты создавали src/.workflow/temp_test_*,
+  // убирали подкаталог, а пустой src/.workflow оставался — и findProjectRoot из любого
+  // подкаталога src/ находил «проект» src/ (проверка покрытия из каталога скила падала, 2026-09-22).
+  const PROJECT_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'fileguard-structure-'));
+  after(() => fs.rmSync(PROJECT_ROOT, { recursive: true, force: true }));
   const TEST_BASE = '.workflow';
 
   function createTestDir() {
@@ -880,7 +885,9 @@ describe('FileGuard — isTrusted with stageId', () => {
 // из скилов вне decompose-зоны (execute-task, manual-testing, review-result).
 // ============================================================================
 describe('FileGuard — D1+D2: tickets/** protection (COACH-37)', () => {
-  const PROJECT_ROOT = path.resolve(__dirname, '..');
+  // Временный корень вместо src/ — см. блок «protect_structure mode» выше.
+  const PROJECT_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'fileguard-d1d2-'));
+  after(() => fs.rmSync(PROJECT_ROOT, { recursive: true, force: true }));
   // Паттерн из configs/pipeline.yaml
   const TICKETS_PATTERN = { pattern: '.workflow/tickets/**', mode: 'structure' };
   // Trusted stages из configs/pipeline.yaml

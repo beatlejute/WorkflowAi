@@ -1,0 +1,45 @@
+# Конфиг гардов rails для скила analyze-report. Машинный конфиг хука, не проза.
+# Схема — .workflow/src/rails/README.md §4. Гарды — только по инцидентам, у каждого тест
+# в tests/rails/. Ослабляет или усиливает гарды человек (принцип 17 концепции).
+version: 1
+skill: analyze-report
+entry: P0E1
+terminal: [P6S3]
+pause_nodes: []
+fragments: ["workflows/*.md"]
+quote_min: 25
+canary: "echo RAILS_CANARY"
+
+# H1 — запись. Внутри проекта ограничений по области нет (инцидентов не было), кроме планов:
+# аудит 2026-09-21 — шаги скила сами писали status, completed_at и updated_at во frontmatter
+# плана в обход стадии пайплайна, закрывающей план (узел P0R3, кейс TC-ANALYZE-REPORT-004).
+# Собственные гарды и ядро рельс скил не правит (принцип 17).
+write_scope:
+  - "**"
+allow_temp: true
+write_deny:
+  - ".workflow/plans/**"
+  - ".workflow/src/skills/analyze-report/rails.yaml"
+  - ".workflow/src/skills/analyze-report/tests/rails/**"
+  - ".workflow/src/rails/**"
+
+# H4 — потолки. from == to — возврат из гейта к шагу своего этапа.
+cycles:
+  - { from: 5, to: 5, max: 3, reason: "Самопроверка перед завершением тикета не проходит трижды — заверши со status has_gaps и перечисли непройденные пункты в gaps" }
+  - { from: 10, to: 10, max: 3, reason: "Валидация PROGRESS не проходит трижды — перечисли непройденные пункты в отчёте и заверши со status has_gaps" }
+  - { from: 20, to: 20, max: 3, reason: "Валидация RETROSPECTIVE не проходит трижды — перечисли непройденные пункты в отчёте и заверши со status has_gaps" }
+
+# H5 — выходной слой: финальный ответ только в терминальном узле и кончается блоком
+# ---RESULT--- со status completed или has_gaps. Инцидент 2026-04-03: агент завершал работу
+# без блока, раннер получал status default и завершал пайплайн вместо декомпозиции пробелов
+# (узел P6R1, кейс TC-ANALYZE-REPORT-002). Инцидент 2026-09-22 (прогон после конверсии):
+# в четырёх финальных ответах из шести остался один блок ---RESULT--- без отчёта — отчёт
+# анализа обязан быть в финальном ответе, начиная с Executive Summary (узел P3S1).
+output:
+  final_requires:
+    - "Executive Summary"
+    # Закрывающий ``` после блока допустим: парсер раннера ищет маркеры на отдельных строках,
+    # и блок в code fence он разбирает (ответ 2026-09-22, TC-ANALYZE-REPORT-001 trial 1).
+    - "---RESULT---\\s*\\n\\s*status:\\s*(completed|has_gaps)\\b[\\s\\S]*---RESULT---\\s*(```\\s*)?$"
+  pause_requires: []
+  max_stop_blocks: 2

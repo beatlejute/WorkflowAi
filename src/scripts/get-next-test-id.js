@@ -32,14 +32,22 @@ function parseArgs() {
   return skill;
 }
 
+// Кейсы называются `TC-<SKILL>-NNN-<slug>.yaml`, артефакты прогонов лежат в каталоге
+// `TC-<SKILL>-NNN/`. Прежний шаблон `^TC-<SKILL>-NNN\.yaml$` не видел ни того, ни другого:
+// на скиле с кейсами 001–004 скрипт вернул TC-ANALYZE-REPORT-001 (2026-09-22) — занятый ID.
 function findMaxNumber(skillLower, skillUpper) {
   let maxNum = 0;
-  const regex = new RegExp(`^TC-${skillUpper}-(\\d+)\\.yaml$`, "i");
+  const fileRegex = new RegExp(`^TC-${skillUpper}-(\\d+)(?:-[^/\\\\]*)?\\.yaml$`, "i");
+  const dirRegex = new RegExp(`^TC-${skillUpper}-(\\d+)$`, "i");
 
-  const source1 = path.join(PROJECT_DIR, "src", "skills", skillLower, "tests", "cases");
-  const source2 = path.join(PROJECT_DIR, ".workflow", "tests", "skills", skillLower, "cases");
-
-  const dirs = [source1, source2];
+  const dirs = [
+    // канон пакета (репозиторий workflow-ai)
+    path.join(PROJECT_DIR, "src", "skills", skillLower, "tests", "cases"),
+    // проект-потребитель: скилы подключены junction'ами в .workflow/src/skills
+    path.join(PROJECT_DIR, ".workflow", "src", "skills", skillLower, "tests", "cases"),
+    // прежнее расположение тестов проекта
+    path.join(PROJECT_DIR, ".workflow", "tests", "skills", skillLower, "cases"),
+  ];
 
   for (const dir of dirs) {
     if (!fs.existsSync(dir)) {
@@ -49,13 +57,12 @@ function findMaxNumber(skillLower, skillUpper) {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
-      if (entry.isFile()) {
-        const match = entry.name.match(regex);
-        if (match) {
-          const num = parseInt(match[1], 10);
-          if (num > maxNum) {
-            maxNum = num;
-          }
+      const regex = entry.isFile() ? fileRegex : entry.isDirectory() ? dirRegex : null;
+      const match = regex && entry.name.match(regex);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        if (num > maxNum) {
+          maxNum = num;
         }
       }
     }

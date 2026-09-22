@@ -1,8 +1,8 @@
 {
-  "date": "2026-09-21T16:46:33.852Z",
-  "skill_sha": "1a1239a",
+  "date": "2026-09-22T08:05:41.760Z",
+  "skill_sha": "d517689",
   "status": "failed",
-  "duration_ms": 129877,
+  "duration_ms": 295166,
   "per_model": {
     "claude-sonnet": {
       "passed": true,

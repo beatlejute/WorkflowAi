@@ -260,3 +260,47 @@ describe('get-next-test-id — Uppercase имя скила', () => {
 });
 
 console.log('Running get-next-test-id tests...\n');
+
+// ============================================================================
+// Реальные имена кейсов — `TC-<SKILL>-NNN-<slug>.yaml`, артефакты — каталоги `TC-<SKILL>-NNN/`.
+// Прежний шаблон видел только `TC-<SKILL>-NNN.yaml` и на analyze-report (кейсы 001–004)
+// вернул занятый TC-ANALYZE-REPORT-001 (2026-09-22).
+describe('get-next-test-id — имена со slug, каталоги артефактов, раскладка проекта-потребителя', () => {
+  let tmpDir = null;
+
+  beforeEach(() => { tmpDir = createTempProject(); });
+  afterEach(() => { if (tmpDir && fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true }); });
+
+  it('кейсы со slug 001–004 → TC-ANALYZE-REPORT-005', async () => {
+    const dir = createCasesDir(tmpDir, 'package', 'analyze-report');
+    for (const [n, slug] of [[1, 'evidence-from-log'], [2, 'result-block-format'], [3, 'isolation'], [4, 'consistency']]) {
+      fs.writeFileSync(path.join(dir, `TC-ANALYZE-REPORT-00${n}-${slug}.yaml`), `id: TC-ANALYZE-REPORT-00${n}\n`);
+    }
+    const data = parseResult((await runScript(tmpDir, ['--skill', 'analyze-report'])).stdout);
+    assert.strictEqual(data.next_id, 'TC-ANALYZE-REPORT-005');
+  });
+
+  it('каталог артефактов TC-…-007/ без YAML тоже занимает номер', async () => {
+    const dir = createCasesDir(tmpDir, 'package', 'coach');
+    createCaseFile(dir, 'COACH', 2);
+    fs.mkdirSync(path.join(dir, 'TC-COACH-007', 'current'), { recursive: true });
+    const data = parseResult((await runScript(tmpDir, ['--skill', 'coach'])).stdout);
+    assert.strictEqual(data.next_id, 'TC-COACH-008');
+  });
+
+  it('проект-потребитель: кейсы в .workflow/src/skills/<skill>/tests/cases', async () => {
+    const dir = path.join(tmpDir, '.workflow', 'src', 'skills', 'coach', 'tests', 'cases');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'TC-COACH-012-rails.yaml'), 'id: TC-COACH-012\n');
+    const data = parseResult((await runScript(tmpDir, ['--skill', 'coach'])).stdout);
+    assert.strictEqual(data.next_id, 'TC-COACH-013');
+  });
+
+  it('чужой скил с общим префиксом не считается: TC-COACH-EXTRA-050 не влияет на coach', async () => {
+    const dir = createCasesDir(tmpDir, 'package', 'coach');
+    createCaseFile(dir, 'COACH', 1);
+    fs.writeFileSync(path.join(dir, 'TC-COACH-EXTRA-050.yaml'), 'id: x\n');
+    const data = parseResult((await runScript(tmpDir, ['--skill', 'coach'])).stdout);
+    assert.strictEqual(data.next_id, 'TC-COACH-002');
+  });
+});

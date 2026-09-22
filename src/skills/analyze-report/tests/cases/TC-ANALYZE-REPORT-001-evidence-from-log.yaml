@@ -44,9 +44,13 @@ assertions:
   deterministic:
     - kind: output_contains_all
       values: ["---RESULT---"]
-    - kind: output_does_not_contain
-      values: ["check-conditions"]
-      reason: "Не должен копировать неверную атрибуцию."
+    # Прежний якорь output_does_not_contain ["check-conditions"] противоречил скилу: узел
+    # P10S8 требует назвать в CRITICAL-finding и компонент из отчёта, и компонент из лога,
+    # а строки лога сами содержат стейдж check-conditions (три ответа claude-sonnet 2026-09-21 —
+    # 13, 7 и 6 упоминаний, якорь красный на каждом). Инвариант — атрибуция по логу названа.
+    - kind: output_matches
+      regex: "check-relevance"
+      reason: "Решение о пропуске принял компонент из лога (check-relevance), а не компонент, на который указал отчёт-источник."
 
   rubric:
     - kind: llm_judge

@@ -1,0 +1,92 @@
+id: TC-ANALYZE-REPORT-005
+title: "analyze-report на рельсах: граф ядра и веток, гарды по инцидентам, выходной слой ---RESULT---"
+origin:
+  chg: ["convert-2026-09-22"]
+  incidents:
+    - "Решение стейкхолдера 2026-09-21: единый подход «Рельсы для агента» — все скилы переводятся на граф + хуки-отказы через коуча (CONVERT). analyze-report — первый скил пайплайна после коуча."
+    - "workflowAiVsCode: CHG-070 (2026-04-03) — агент завершал работу без ---RESULT---, раннер получал status default и завершал пайплайн вместо декомпозиции пробелов. Теперь — гард выходного слоя."
+    - "Аудит 2026-09-21 (consistency): шаги скила сами писали status во frontmatter плана в обход стадии закрытия плана. Теперь — write_deny на .workflow/plans/**."
+  principle: "Концепция рельс: принцип 1 (граф — единственный источник процедуры), 6 и 9 (отказ инструмента и выходной слой), 10 (потолки циклов), 11 (дата и цена у гарда), 15 (гард доказан тестом, канарейка)."
+  backlog_sources: []
+tags: [rails, anatomy, regression-guard]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    # 1. Ядро — граф с входом, маршрутизацией по веткам и терминалом
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "rails: rails\\.yaml"
+      reason: "Frontmatter объявляет конфиг гардов — признак скила на рельсах."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "```mermaid[\\s\\S]*graph TD[\\s\\S]*P0E1\\[\"П0 ВХОД"
+      reason: "Процедура записана mermaid-графом с входным узлом этапа 0."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0Q1 -->\\|\"PROGRESS\"\\| P10E1[\\s\\S]*P0Q1 -->\\|\"RETROSPECTIVE\"\\| P20E1"
+      reason: "Маршрутизация — Q-узел с рёбрами на входы веток, а не таблица прозы."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0S1\\[\"П0 ШАГ: Канарейка живости[^\\n]*echo RAILS_CANARY"
+      reason: "Проверка живости рельс — узел графа (принцип 15)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P3Q1 -->\\|\"PROGRESS\"\\| P10G1[\\s\\S]*P3Q1 -->\\|\"RETROSPECTIVE\"\\| P20G1"
+      reason: "Отчёт ядра уходит в валидацию своей ветки — мимо неё в самопроверку не пройти."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P6S1 --> P6S3[\\s\\S]*P6S2 --> P6S3"
+      reason: "Оба статуса ---RESULT--- сходятся в терминальный узел остановки."
+    # 2. Гарды с датой инцидента в лейбле узла
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P6R1\\[\"[^\\n]*ТОЛЬКО значения `completed` или `has_gaps`[^\\n]*инцидент 2026-04-03"
+      reason: "Правило статусов несёт дату и цену инцидента CHG-070 (принцип 11)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R3\\[\"[^\\n]*запись в `\\.workflow/plans/` отклоняется[^\\n]*аудит 2026-09-21"
+      reason: "Запрет правки плана — узел с датой аудита, а не проза."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "terminal: \\[P6S3\\][\\s\\S]*write_deny:[\\s\\S]*\\.workflow/plans/\\*\\*"
+      reason: "Гард записи плана и терминальный узел заданы конфигом хука."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "final_requires:[\\s\\S]*---RESULT---[^\\n]*status:[^\\n]*\\(completed\\|has_gaps\\)[^\\n]*---RESULT---[^\\n]*\\$"
+      reason: "Выходной слой требует блок ---RESULT--- со status completed или has_gaps в конце ответа."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "cycles:[\\s\\S]*from: 5, to: 5, max: 3[\\s\\S]*from: 10, to: 10, max: 3[\\s\\S]*from: 20, to: 20, max: 3"
+      reason: "У каждого возврата из гейта есть потолок (принцип 10)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P3S1\\[\"[^\\n]*Отчёт — это текст финального ответа[^\\n]*Executive Summary[^\\n]*2026-09-22"
+      reason: "Отчёт анализа — в финальном ответе, а не в промежуточных сообщениях (инцидент 2026-09-22: 4 ответа из 6 — один блок ---RESULT---)."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "final_requires:\\s*\\n\\s*- \"Executive Summary\""
+      reason: "Выходной слой требует отчёт (Executive Summary) в финальном ответе."
+    # 3. Ветки — фрагменты графа с выходом в самопроверку ядра
+    - kind: skill_contains
+      file: "workflows/progress.md"
+      pattern: "P10E1\\[\"П10 ВХОД: PROGRESS[\\s\\S]*P10G1 -->\\|\"да\"\\| P5E1"
+      reason: "Ветка PROGRESS — фрагмент графа, выход через гейт валидации в самопроверку."
+    - kind: skill_contains
+      file: "workflows/retrospective.md"
+      pattern: "P20E1\\[\"П20 ВХОД: RETROSPECTIVE[\\s\\S]*P20G1 -->\\|\"да\"\\| P5E1"
+      reason: "Ветка RETROSPECTIVE — фрагмент графа, выход через гейт валидации в самопроверку."
+    # 4. Прозы, дублирующей граф, в ядре нет
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*## (Принципы|Маршрутизация тикетов|Self-check перед завершением тикета))"
+      reason: "Прежние секции прозы не возвращаются рядом с графом (принцип 1)."
+
+execution:
+  timeout_s: 60
