@@ -237,9 +237,13 @@ export function checkActionLimit(state, ruleName, max) {
  *
  * @param {string} normQuote нормализованная цитата
  * @param {string} normLabel нормализованный лейбл цели
+ * @param {string} [rawLabel] СЫРОЙ (не нормализованный) лейбл цели — normalizeLabel
+ *   (graph.mjs) снимает бэктики, поэтому подсказку про `` ` `` по normLabel дать
+ *   нельзя (2026-09-22: лейблы коуча содержат `` `.workflow/reports/` ``, порча
+ *   цитаты shell'ом через бэктики оставалась без подсказки); ищем в сыром.
  * @returns {string} фрагмент причины отказа, оканчивается на "; " или пустой
  */
-function describeQuoteMismatch(normQuote, normLabel) {
+function describeQuoteMismatch(normQuote, normLabel, rawLabel) {
   if (!normLabel) return '';
   let lo = 0;
   let hi = normQuote.length;
@@ -248,16 +252,19 @@ function describeQuoteMismatch(normQuote, normLabel) {
     if (normLabel.includes(normQuote.slice(0, mid))) lo = mid;
     else hi = mid - 1;
   }
-  if (lo < 10) return 'с лейблом не совпадает даже начало цитаты; ';
+  // Один общий признак вместо отдельных проверок на "`" и "$" — иначе при обоих
+  // символах сразу в сыром лейбле подсказка задваивалась бы. Подсказка идёт и на ветку
+  // «не совпадает даже начало» (ревью 2026-09-22): когда `$X`/бэктик стоит в первых
+  // ~10 символах лейбла, порча shell'ом даёт расхождение сразу в начале.
+  const hint = /[`$]/.test(String(rawLabel ?? ''))
+    ? ' (в лейбле цели есть ` или $: shell раскрывает их в двойных кавычках — возьми цитату в одинарные кавычки)'
+    : '';
+  if (lo < 10) return `с лейблом не совпадает даже начало цитаты${hint}; `;
   const pos = normLabel.indexOf(normQuote.slice(0, lo)) + lo;
   const matchedTail = normQuote.slice(Math.max(0, lo - 30), lo);
   const quoteNext = normQuote.slice(lo, lo + 30);
   const labelNext = normLabel.slice(pos, pos + 30);
-  let text = `совпадает до «…${matchedTail}», дальше в цитате «${quoteNext}», в лейбле «${labelNext}»`;
-  if (normLabel[pos] === '$') {
-    text += ' (в лейбле «$»: в двойных кавычках shell раскрывает $X в пустоту — возьми цитату в одинарные кавычки)';
-  }
-  return `${text}; `;
+  return `совпадает до «…${matchedTail}», дальше в цитате «${quoteNext}», в лейбле «${labelNext}»${hint}; `;
 }
 
 /**
@@ -321,7 +328,7 @@ export function applyGoto(state, graph, config, { node, quote } = {}) {
   const targetNode = graph?.node(node);
   const targetLabel = targetNode ? normalizeLabel(targetNode.label) : '';
   if (!targetNode || !targetLabel.includes(normQuote)) {
-    return deny('quote-mismatch', `цитата «${shownQuote}» не найдена в лейбле узла ${node} — ${describeQuoteMismatch(normQuote, targetLabel)}нужна дословная подстрока лейбла`);
+    return deny('quote-mismatch', `цитата «${shownQuote}» не найдена в лейбле узла ${node} — ${describeQuoteMismatch(normQuote, targetLabel, targetNode?.label)}нужна дословная подстрока лейбла`);
   }
 
   const fromInfo = parseNodeId(current);

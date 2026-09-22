@@ -3,6 +3,7 @@ import { strict as assert } from 'node:assert';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseMermaidBlocks, normalizeLabel, loadSkillGraph } from '../rails/graph.mjs';
+import { applyGoto } from '../rails/state.mjs';
 
 const FIXTURES = join(fileURLToPath(new URL('.', import.meta.url)), 'fixtures', 'rails', 'graph');
 
@@ -148,6 +149,51 @@ test('normalizeLabel: схлопывает пробелы/переносы, уб
   assert.equal(normalizeLabel('.workflow/src/skills/shared/ — Перед началом работы'), '.workflow/src/skills/shared/ — перед началом работы');
   assert.equal(normalizeLabel(null), '');
   assert.equal(normalizeLabel(undefined), '');
+});
+
+// Инцидент analyze-report 2026-09-22: лейблы узлов содержат пиктограммы
+// (⛔⚠️✅🟢…), агент при цитировании их опускает — 4 отказа quote-mismatch
+// на узлах P10R2/P6R2. Коды строятся через String.fromCodePoint, а не
+// вставкой символа в исходник, — однозначно и без риска порчи кодировкой.
+test('normalizeLabel: убирает пиктограммы (Extended_Pictographic), вариационный селектор U+FE0F и ZWJ U+200D', () => {
+  const PROHIBIT = String.fromCodePoint(0x26d4); // ⛔
+  const WARNING = String.fromCodePoint(0x26a0, 0xfe0f); // ⚠️ (знак + вариационный селектор)
+  const CHECK = String.fromCodePoint(0x2705); // ✅
+  const GREEN = String.fromCodePoint(0x1f7e2); // 🟢
+  assert.equal(normalizeLabel(`П10 ПРАВИЛО: ${PROHIBIT} Запрет угадывания`), 'п10 правило: запрет угадывания');
+  assert.equal(normalizeLabel(`${WARNING} Предупреждение`), 'предупреждение');
+  assert.equal(normalizeLabel(`Готово ${CHECK} ${GREEN}`), 'готово');
+  // «голый» ZWJ и «голый» вариационный селектор (не только внутри пиктограммы) — тоже удаляются
+  assert.equal(normalizeLabel(`сло${String.fromCodePoint(0x200d)}во`), 'слово');
+  assert.equal(normalizeLabel(`а${String.fromCodePoint(0xfe0f)}б`), 'аб');
+});
+
+// © (U+00A9) формально входит в \p{Extended_Pictographic} (юникодная квирка
+// emoji-data.txt — проверено запуском, не совпадает с догадкой), но это
+// обычный текстовый символ, не статусный значок из инцидента — не должен теряться.
+test('normalizeLabel: не трогает «©», «→», кириллицу и цифры', () => {
+  assert.equal(normalizeLabel('© 2026'), '© 2026');
+  assert.equal(normalizeLabel('шаг 1 → шаг 2'), 'шаг 1 → шаг 2');
+  assert.equal(normalizeLabel('этап 10, узел P10R2'), 'этап 10, узел p10r2');
+});
+
+// Нормализация симметрична (§3, §5, §12): applyGoto (state.mjs) сверяет
+// нормализованную цитату с нормализованным лейблом ЧЕРЕЗ ТУ ЖЕ normalizeLabel
+// из graph.mjs — цитата без пиктограммы обязана приниматься для лейбла с ней.
+test('applyGoto (../rails/state.mjs): цитата без эмодзи принимается для лейбла узла с эмодзи', () => {
+  const PROHIBIT = String.fromCodePoint(0x26d4); // ⛔, как в инциденте P10R2/P6R2
+  const label = `П10 ПРАВИЛО: ${PROHIBIT} Запрет угадывания без факта — цитата подтверждается кодом`;
+  const graph = {
+    node: (id) => (id === 'P10R2' ? { id: 'P10R2', label } : undefined),
+    outgoing: (id) => (id === 'P10E1' ? [{ to: 'P10R2', label: null }] : []),
+  };
+  const state = { node: 'P10E1', history: [], counters: {}, denials: {} };
+  const r = applyGoto(state, graph, { quote_min: 25 }, {
+    node: 'P10R2',
+    quote: 'П10 ПРАВИЛО: Запрет угадывания без факта',
+  });
+  assert.equal(r.ok, true);
+  assert.equal(state.node, 'P10R2');
 });
 
 // --- loadSkillGraph + validate: валидный граф со склейкой фрагментов ------

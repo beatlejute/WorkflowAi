@@ -39,6 +39,13 @@ export function normalizeLabel(text) {
   s = s.replace(/[`*]/g, '');
   s = s.replace(/[«»“”]/g, '"'); // «»""
   s = s.replace(/[’‘']/g, "'"); // ’‘'
+  // Пиктограммы (⛔⚠️✅🟢…), вариационный селектор U+FE0F и ZWJ U+200D агент
+  // при цитировании лейбла опускает — прогоны analyze-report 2026-09-22:
+  // 4 отказа quote-mismatch на P10R2/P6R2 из-за «⛔»/«✅» в лейбле узла.
+  // U+00A9 (©) в \p{Extended_Pictographic} формально попадает (юникодная
+  // квирка emoji-data — не статусный значок), но это обычный текстовый
+  // символ — проверено запуском, не удаляем, иначе ломаем реальный текст.
+  s = s.replace(/(?!\u00A9)[\p{Extended_Pictographic}\uFE0F\u200D]/gu, '');
   s = s.replace(/\s+/g, ' ').trim();
   s = s.toLowerCase();
   return s;

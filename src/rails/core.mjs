@@ -13,9 +13,9 @@
  * stderr и (если корень проекта уже известен) записью `type: "error"` в журнал.
  */
 
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve as resolvePathAbs } from 'node:path';
+import { dirname, isAbsolute, join, parse as parsePath, resolve as resolvePathAbs } from 'node:path';
 
 import { findProjectRoot } from '../lib/find-root.mjs';
 import { rememberSessionRoot, recallSessionRoot } from './session-memo.mjs';
@@ -32,125 +32,523 @@ import {
 import { appendDenial, appendEvent } from './journal.mjs';
 import { realpathDeep, isInside, matchesGlob } from './paths.mjs';
 import { detectShellWrites } from './actions.mjs';
+import { scanCommand, toSingleQuoted } from './shell-scan.mjs';
 
 // --- cli.mjs: узнаём вызов служебной команды (§7.4.1) -----------------------
+//
+// Разбор строки команды — только через shell-scan.mjs (2026-09-22, ЗАДАЧА B2): три
+// наивных трекера кавычек и регулярка для `--quote` не знали `\"` внутри "…", `'\''`
+// и подстановок — ревью показало ложный allow, при котором хук сам создавал инъекцию
+// (`--quote '… --quote "$(touch PWNED)"'` переписывался так, что shell выполнял $(…)).
+//
+// «Команда — вызов cli.mjs» — это ВСЯ команда целиком, не подстрока: каждый сегмент
+// (между `&&`, `||`, `;`, переводом строки) — простая команда
+// `[ИМЯ=литерал …] [node] …rails/cli.mjs <подкоманда> …`, не более одного пайпа на сегмент
+// и только в фильтр-читатель (`| head -3`), с необязательным первым сегментом `cd <dir>`
+// с литеральным каталогом и `&&`/`;`/переводом строки после него (раннер и агенты
+// префиксуют `cd "<workdir>" &&`, а цитата P0R4 содержит «git commit» — без этого вызов
+// уходил в deny_shell по тексту цитаты). Путь cli.mjs и каталог cd — литералы
+// (literalPath), интерпретатор — `node` без каталога, под PowerShell в команде нет `--%`
+// (ЗАДАЧА B3, 2026-09-22); если после cd есть не только `&&`, путь обязан вести к cli.mjs
+// проекта и от каталога cd, и от ctx.cwd (cliBaseDirs); `..` под POSIX — только если логический
+// и физический подъём ведут в один каталог (dotDotClimbsReal). Иначе `cli.mjs status && git commit`
+// проходил бы коротким замыканием мимо deny_shell. Всё, что shell выполнил бы помимо
+// cli.mjs — подстановки $(…) `…` <(…) ${…}, heredoc, редиректы в файл, `&` (в том числе
+// хвостовой), `(…)` (в том числе после `&&`), незакрытые кавычки, слишком глубокая
+// вложенность — делает команду НЕ cli-вызовом: она идёт по общим правилам
+// (canary/deny_shell/write_scope/stage_actions). Ложный отказ здесь допустим, ложное
+// разрешение — нет. Под PowerShell кавычками считаются и типографские ‘ ’ ‚ ‛ “ ” „
+// (ревью B2, раунд 2: `--quote 'лейбл с ’; git commit …'` проходил одним токеном).
+// CR (ревью B2, раунд 3, 2026-09-22): сканер считал `\r` пробелом — `status<CR>git commit
+// <CR>ni PWNED` под PowerShell был одним cli-сегментом, а PowerShell выполнял все четыре
+// statement'а; под bash `>&1<CR>PWNED` проходил как безвредный `>&1`, а bash создавал
+// файл. Теперь CR под PowerShell — разделитель, под bash — символ слова, и любой токен
+// с CR/LF вне кавычек не инертен (см. tokenIsInert).
 
-// Регулярка якорится на `rails/cli.mjs` (`rails\cli.mjs` на Windows), а не на
-// любой `cli.mjs` — в репозитории есть свой `src/cli.mjs`, который не имеет
-// отношения к рельсам и не должен получать инъекцию `--session`.
 const CLI_SUBCOMMANDS = ['start', 'goto', 'status', 'reset', 'report', 'check', 'coverage', 'selfcheck'];
-const CLI_COMMAND_RE = new RegExp(`(?:^|[\\\\/])rails[\\\\/]cli\\.mjs["']?\\s+(${CLI_SUBCOMMANDS.join('|')})\\b`);
-const SESSION_FLAG_RE = /--session\b/;
+// Якорь — `rails/cli.mjs` (`rails\cli.mjs` на Windows), а не любой `cli.mjs`: в
+// репозитории есть свой `src/cli.mjs`, не имеющий отношения к рельсам.
+const CLI_PATH_RE = /(?:^|[\\/])rails[\\/]cli\.mjs$/;
+// Интерпретатор перед путём — только node: `rm rails/cli.mjs status` — тоже «путь +
+// подкоманда», но это rm. Только имя без каталога (поиск по PATH): ЗАДАЧА B3, 2026-09-22 —
+// якорь `…/node` пропускал `.workflow/work/node .workflow/src/rails/cli.mjs status`, и bash
+// запускал скрипт агента из write_scope коротким замыканием (проверено запуском).
+const NODE_NAME_RE = /^node(?:\.exe)?$/i;
+// Префикс присваивания окружения перед node (POSIX; ЗАДАЧА B3, 2026-09-22): только переменные,
+// которые читает cli.mjs и которые не меняют, какой код выполнится и куда он пишет (не
+// NODE_OPTIONS/PATH/WORKFLOW_HOME), значение — литерал без `/`, `~`, шаблонов.
+const ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
+const CLI_ENV_NAMES = new Set(['WORKFLOW_RAILS_SKILL', 'WORKFLOW_RAILS_SESSION', 'WORKFLOW_RAILS_RUN']);
+const CLI_ENV_VALUE_RE = /^[A-Za-z0-9._:-]*$/;
+// Файл cli.mjs — только из этого проекта (ревью B2, раунд 3, 2026-09-22, pre-existing):
+// якорь `rails/cli.mjs` принимал любой каталог, и `node .workflow/work/rails/cli.mjs
+// status` — файл, который агент вправе создать внутри write_scope, — получал allow как
+// cli-вызов (произвольный JS в обход всех правил). Путь (от cwd или от каталога
+// `cd`-префикса) обязан лексически указывать на `<root>/.workflow/src/rails/cli.mjs`
+// либо совпадать с ним по realpath (junction-цепочка `.workflow/src/rails` → `~/.workflow/rails`).
+// Без `root` (прямой вызов analyzeCliCommand из тестов) остаётся только лексический якорь.
+// `<root>/src/rails/cli.mjs` больше не канон (ревью B3, раунд 1, 2026-09-22): он принимался
+// лексически в любом проекте и без проверки существования, а у analyze-report write_scope "**" —
+// агент кладёт свой src/rails/cli.mjs и получает короткое замыкание. В самом workflowAi
+// `.workflow/src/rails` — junction на `src/rails`, и `node src/rails/cli.mjs` проходит по realpath.
+const CLI_CANONICAL = [['.workflow', 'src', 'rails', 'cli.mjs']];
+// Компонент `..` в пути (оба разделителя).
+const DOT_DOT_RE = /(^|[\\/])\.\.(?:[\\/]|$)/;
 
-// «Команда — вызов cli.mjs» (§7.4.1) — это ВСЯ команда целиком, не подстрока
-// внутри составной команды: иначе `cli.mjs status && git commit` проходит
-// коротким замыканием мимо deny_shell (запрещённая команда стоит в тексте
-// открытым текстом — не косвенность, которую §14 оговаривает как границу), а
-// инъекция `--session` в `cli.mjs status | tail -5` уезжает в конец пайпа и
-// ломает `tail`. Простое детерминированное решение: если в команде есть
-// операторы, соединяющие несколько командных сегментов (`;`, `&`, `|`, перевод
-// строки) вне кавычек — это уже не «просто cli.mjs», короткое замыкание не
-// применяется, команда идёт по общим правилам (canary/deny_shell/…).
-function hasShellSeparatorsOutsideQuotes(command) {
-  const s = String(command ?? '');
-  let quote = null;
-  for (let i = 0; i < s.length; i += 1) {
-    const ch = s[i];
-    if (quote) {
-      if (ch === quote) quote = null;
-      continue;
+// Регистр на win32 сворачивается только у ASCII (ревью B3 r2, 2026-09-22, проверено запуском):
+// JS toLowerCase сводит KELVIN SIGN U+212A к `k`, а NTFS считает `.wor\u212Aflow` отдельным
+// именем — копия cli.mjs в `.wor\u212Aflow/src/rails` лексически совпадала с каноном и
+// запускалась коротким замыканием. Прочие совпадения имён, которые знает NTFS, сверяются по
+// realpath (он возвращает имя с диска).
+function samePathText(a, b) {
+  const norm = (p) => {
+    const s = String(p).replace(/\\/g, '/').replace(/\/+$/, '');
+    return process.platform === 'win32' ? s.replace(/[A-Z]+/g, (c) => c.toLowerCase()) : s;
+  };
+  return norm(a) === norm(b);
+}
+
+const PATH_PARTS_RE = process.platform === 'win32' ? /[\\/]+/ : /\/+/;
+
+// true — каждый `..` в rels (по очереди от start) ведёт в один каталог и логически (текст пути),
+// и физически: каталог, из которого поднимаемся, сам не ссылка (lstat), и родитель его realpath —
+// realpath его текстового родителя. Ревью B3 r2 (2026-09-22, MEDIUM, проверено запуском Git
+// Bash): после `cd` в junction msys отдаёт node.exe ФИЗИЧЕСКИЙ каталог (цель ссылки; `pwd` — lnk,
+// `pwd -P` и process.cwd() — цель), node сворачивает `..` от него, и `cd ./.workflow/work/lnk &&
+// node ../../../.workflow/src/rails/cli.mjs status` запускал копию из цели, а хук сворачивал `..`
+// от логического lnk. Linux-ядро тоже даёт физический cwd (не проверено: Linux не запускался).
+// Не текстовое «realpath(cur) === cur»: короткие имена 8.3 (TEMP раннера GitHub) и /var →
+// /private/var (macOS) не ссылки на пути подъёма, а realpath их переписывает — был бы ложный отказ.
+// Ревью B3 r3 (2026-09-22, MEDIUM, проверено запуском): msys-ссылка Git Bash для Windows не
+// симлинк — при MSYS=winsymlinks:sys это обычный файл с атрибутом System, при winsymlinks:lnk —
+// файл `.lnk`. lstat видит файл, а bash через такую ссылку переходит, и `..` ведёт в родителя
+// ЦЕЛИ. Поэтому «не каталог» (stat) тоже считается ссылкой. Любая ошибка lstat/stat, включая
+// ENOENT несуществующего компонента, — неизвестность: подъём не подтверждён, команда не
+// cli-вызов (ложный отказ; bash на `cd nope/../..` и сам отказывает).
+function isLinkOrUnknown(p) {
+  try {
+    return lstatSync(p).isSymbolicLink() || !statSync(p).isDirectory();
+  } catch {
+    return true;
+  }
+}
+
+function dotDotClimbsReal(start, rels) {
+  let cur = resolvePathAbs(start);
+  for (const rel of rels) {
+    if (!rel) continue;
+    let rest = rel;
+    if (isAbsolute(rel)) {
+      const { root } = parsePath(rel);
+      cur = resolvePathAbs(cur, root);
+      rest = rel.slice(root.length);
     }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      continue;
-    }
-    // `2>&1`, `>&2`, `&>file` — редиректы, не разделители команд (прогоны 2026-09-22:
-    // цепочка `cli.mjs goto … 2>&1 && cli.mjs goto …` отклонялась как не-cli).
-    if (ch === '&' && (s[i - 1] === '>' || s[i + 1] === '>')) continue;
-    if (ch === ';' || ch === '\n' || ch === '|' || ch === '&') {
-      return true;
+    for (const part of rest.split(PATH_PARTS_RE)) {
+      if (part === '' || part === '.') continue;
+      if (part !== '..') {
+        cur = join(cur, part);
+        continue;
+      }
+      const parent = dirname(cur);
+      const real = safeRealpath(cur);
+      const realParent = safeRealpath(parent);
+      if (isLinkOrUnknown(cur) || real === null || realParent === null || !samePathText(dirname(real), realParent)) return false;
+      cur = parent;
     }
   }
-  return false;
+  return true;
 }
 
-// Разбивает команду на сегменты по `&&`, `;` и переводу строки вне кавычек
-// (одиночные `|`/`&` остаются внутри сегмента).
-function splitTopLevelSegments(command) {
-  const s = String(command ?? '');
-  const segments = [];
-  let current = '';
-  let quote = null;
-  for (let i = 0; i < s.length; i += 1) {
-    const ch = s[i];
-    if (quote) {
-      current += ch;
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      current += ch;
-      continue;
-    }
-    if (ch === '\n' || ch === ';' || (ch === '&' && s[i + 1] === '&') || (ch === '|' && s[i + 1] === '|')) {
-      segments.push(current);
-      current = '';
-      if (ch === '&' || ch === '|') i += 1;
-      continue;
-    }
-    current += ch;
+// Проверка «путь — это cli.mjs проекта» для classifyCli: (pathValue, cdDir) → boolean.
+// Под PowerShell на win32 Set-Location и запущенный из него node поднимаются по `..` логически
+// (проверено запуском ревью B3 r2: node получает каталог junction, не цель) — там `..`
+// проверяется только по realpath свёрнутого пути; под POSIX — ещё и dotDotClimbsReal. pwsh вне
+// Windows (дочерний процесс получает каталог через chdir) не проверен — как POSIX (2026-09-22).
+function makeCliPathCheck(scope, dialect) {
+  if (!scope || !scope.root) return () => true;
+  const cwd = scope.cwd || scope.root;
+  const canonical = CLI_CANONICAL.map((parts) => join(scope.root, ...parts));
+  const logicalDotDot = dialect === 'powershell' && process.platform === 'win32';
+  return (pathValue, cdDir) => {
+    const base = cdDir ? resolvePathAbs(cwd, cdDir) : cwd;
+    const abs = resolvePathAbs(base, pathValue);
+    // `..` лексически не сворачиваем: за junction'ом внутри write_scope `link/../x` ведёт
+    // не туда, куда указывает текст — такой путь принимается только по realpath.
+    const hasDotDot = [pathValue, cdDir ?? ''].some((p) => DOT_DOT_RE.test(p));
+    if (hasDotDot && !logicalDotDot && !dotDotClimbsReal(cwd, [cdDir, pathValue])) return false;
+    if (!hasDotDot && canonical.some((c) => samePathText(c, abs))) return true;
+    const real = safeRealpath(abs);
+    if (real === null) return false;
+    return canonical.some((c) => {
+      const r = safeRealpath(c);
+      return r !== null && samePathText(r, real);
+    });
+  };
+}
+// Справа от `|` в cli-сегменте допустимы только фильтры, которые читают stdout и ни при
+// каких аргументах не пишут в файл и не выполняют команд (tee/sed/awk/xargs/
+// ForEach-Object — не сюда). Ревью B2, раунд 2 (2026-09-22): `sort -o FILE`, `uniq IN OUT`
+// и `less -o FILE` создают файл по любому пути — короткое замыкание обходило write_scope
+// (проверено запуском: маркер создавался); исключены. Под PowerShell `sort` — Sort-Object,
+// но uniq.exe из Git — писатель; в PS-список — только Sort-Object по полному имени.
+const PIPE_FILTERS = new Set(['head', 'tail', 'cat', 'grep', 'wc', 'cut', 'tr', 'more', 'findstr']);
+const PIPE_FILTERS_PS = new Set(['select-object', 'select-string', 'sort-object', 'out-string', 'format-table', 'format-list', 'out-host']);
+// Редиректы, безвредные в cli-сегменте: дублирование дескрипторов (`2>&1`, `>&2`) и
+// сброс в /dev/null ($null в PowerShell). Запись в файл — по общим правилам (write_scope).
+const SAFE_REDIRECT_RE = /^(?:\d*|&|\*)>>?(?:&\d+|\/dev\/null|\$null)$|^\d*<(?:&\d+|\/dev\/null)$/;
+const BARE_REDIRECT_RE = /^(?:\d*|&|\*)>>?$|^\d*<$/;
+const NULL_TARGETS = new Set(['/dev/null', '$null']);
+const SEGMENT_SEPARATORS = new Set(['&&', '||', ';', '\n']);
+// Кавычки PowerShell (ASCII и типографские, как в shell-scan.mjs) и бэктик — снимаются перед
+// поиском `--%` в тексте команды (analyzeCliCommand).
+const PS_STOP_PARSING_STRIP_RE = /['"‘’‚‛“”„`]/g;
+// Идентификатор сессии вставляется в команду как есть — только если он не может ничего
+// сломать или добавить в shell (uuid Claude, `ses_…` Kilo, `sess-1` тестов).
+const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+
+// Путь (каталог `cd` или путь к cli.mjs), который shell передаст как написано, — или null.
+// ЗАДАЧА B3, 2026-09-22 (ревью B2 r3, MEDIUM): `cd $PWD/.workflow/work/copy && node
+// .workflow/src/rails/cli.mjs status` давал cdDir = null, путь резолвился от ctx.cwd, а shell
+// запускал копию cli.mjs из write_scope. Не литерал (проверено запуском bash 5.2 msys и
+// powershell.exe 5.1): раскрытия и подстановки; `~` в начале (bash — $HOME, `~+` — $PWD;
+// Set-Location — домашний каталог даже для '~'); `~` после `=`/`:` в незакавыченном тексте
+// (bash раскрывает в словах вида `a=~`, `a=x:~/y`); `*?[]` (bash — шаблон без кавычек,
+// Set-Location — wildcard даже в '…': `cd 'cop?'`, `cd '[c]opy'` переходят в copy) и `{}`
+// (brace expansion); `-` в начале (`cd -` — $OLDPWD, опции); `:` не после буквы диска
+// (`env:`, диско-относительное `C:x` — у PowerShell свой текущий каталог на каждом диске).
+// msys-путь Git Bash `/c/…` на win32 под POSIX — только каталог cd (cdDir): его переводит в
+// `C:/…` сам msys (builtin cd). Аргумент node.exe msys переводит, лишь пока не заданы
+// MSYS_NO_PATHCONV/MSYS2_ARG_CONV_EXCL (ревью B3 r2, 2026-09-22, проверено запуском: с
+// MSYS_NO_PATHCONV=1 node получает `/c/Windows` и открывает `C:\c\Windows`, а `cd /c/Windows`
+// по-прежнему в C:/Windows) — путь cli.mjs вида `/…` неоднозначен. Прочие `/…` под msys
+// (`/tmp`, `/usr` — каталоги Git) неоднозначны. Под PowerShell `/c/…` не переводится — путь от
+// корня диска.
+// Ревью B3, раунд 1 (2026-09-22, проверено запуском): бэктик — escape-символ wildcard'ов
+// Set-Location даже в '…' (`cd 'j``k'` переходит в j`k, а хук резолвил j``k — junction на
+// .workflow/src — и признавал копию cli.mjs «своей»), поэтому бэктик в пути не литерал (в обоих
+// диалектах, для каталога cd и пути cli.mjs). msys-путь с `..` — не литерал: Git Bash
+// понимает `/c/..` как корень Git, а `/c/../tmp` — как %TEMP% (`pwd -W`), path.win32 — как C:\tmp.
+function literalPath(token, dialect, { cdDir = false } = {}) {
+  if (!token || token.kind !== 'word' || token.redirect || token.value === null || token.value === '') return null;
+  const v = token.value;
+  if (/[\r\n*?[\]{}`]/.test(v) || v.startsWith('~') || v.startsWith('-')) return null;
+  const posix = dialect !== 'powershell';
+  if (posix && token.parts.some((p) => p.kind === 'bare' && /[=:]~/.test(p.raw))) return null;
+  const drive = /^[A-Za-z]:[\\/]/.test(v);
+  if ((drive ? v.slice(2) : v).includes(':')) return null;
+  if (posix && process.platform === 'win32' && /^[\\/]/.test(v)) {
+    if (!cdDir) return null;
+    const m = /^\/([A-Za-z])(\/.*)?$/.exec(v);
+    if (!m || DOT_DOT_RE.test(v)) return null;
+    return `${m[1].toUpperCase()}:${m[2] ?? '/'}`;
   }
-  segments.push(current);
-  return segments.map((x) => x.trim()).filter((x) => x.length > 0);
+  return v;
 }
 
-const CD_PREFIX_RE = /^cd\s+("[^"]*"|'[^']*'|\S+)$/;
-
-// Команда — вызов cli.mjs (§7.4.1): один или несколько сегментов, КАЖДЫЙ из которых —
-// вызов rails/cli.mjs (пайп вида `| head` внутри сегмента допустим), с необязательным
-// первым сегментом `cd <dir>`. Прогоны 2026-09-22: раннер и агенты префиксуют
-// `cd "<workdir>" &&`, а цитата P0R4 содержит «git commit» — без этого разбора вызов
-// cli.mjs уходил в deny_shell и отклонялся по тексту цитаты. `cli.mjs status && git commit`
-// сюда не попадает: второй сегмент не cli.mjs.
-function isCliCommand(command) {
-  if (typeof command !== 'string') return false;
-  const segments = splitTopLevelSegments(command);
-  if (segments.length === 0) return false;
-  if (segments.length > 1 && CD_PREFIX_RE.test(segments[0])) segments.shift();
-  return segments.every((seg) => CLI_COMMAND_RE.test(seg) && !hasShellSeparatorsOutsideQuotes(seg.replace(/\|[^|]*$/g, '')));
+// Префикс `ИМЯ=значение` перед командой (POSIX): true — допустимый (CLI_ENV_NAMES,
+// литерал); false — присваивание, но не допустимое; null — не присваивание.
+function cliAssignment(token) {
+  if (!token || token.kind !== 'word' || token.parts.length === 0 || token.parts[0].kind !== 'bare') return null;
+  const m = ASSIGNMENT_RE.exec(token.parts[0].raw);
+  if (!m) return null;
+  const name = m[0].slice(0, -1);
+  if (!CLI_ENV_NAMES.has(name) || token.value === null) return false;
+  return CLI_ENV_VALUE_RE.test(token.value.slice(m[0].length));
 }
 
-// Инъекция `--session` в каждый cli-сегмент без него — перед первым `|` вне кавычек
-// (иначе флаг уезжает в хвост пайпа и ломает `head`/`tail`).
-function injectSession(command, sessionId) {
-  const segments = splitTopLevelSegments(command);
+// Индекс токена-пути cli.mjs в простой команде (`node <путь> <подкоманда>` → 1,
+// `<путь> <подкоманда>` → 0, со сдвигом на префиксы присваивания под POSIX); -1 — не вызов
+// cli.mjs. `pathOk(path)` — путь ведёт к cli.mjs проекта из каждого каталога, где shell может
+// его запустить (classifyCli).
+function cliPathIndex(command, pathOk, dialect) {
+  const t = command.tokens;
+  let a = 0;
+  if (dialect !== 'powershell') {
+    for (let ok = cliAssignment(t[a]); ok !== null; ok = cliAssignment(t[a])) {
+      if (!ok) return -1;
+      a += 1;
+    }
+  }
+  for (let k = a; k <= a + 1 && k + 1 < t.length; k += 1) {
+    const path = literalPath(t[k], dialect);
+    if (path === null || !CLI_PATH_RE.test(path)) continue;
+    if (t[k + 1].value === null || !CLI_SUBCOMMANDS.includes(t[k + 1].value)) return -1;
+    if (k === a + 1 && (t[a].value === null || !NODE_NAME_RE.test(t[a].value))) return -1;
+    if (!pathOk(path)) return -1;
+    return k;
+  }
+  return -1;
+}
+
+// Токен не даёт shell'у сделать ничего, кроме передачи аргумента cli.mjs: без
+// подстановок, не heredoc, редирект — только из безвредного списка. CR/LF в
+// незакавыченной части (ревью B2, раунд 3): под PowerShell приклеенный `\`<CR>` —
+// буквальный CR в слове, а LF за ним — новый statement; под msys-bash CR удаляется
+// (`>&1<CR>X` → `>&1X`, файл). Что shell сделает с таким словом — зависит от сборки
+// shell'а, поэтому оно не инертно: ложный отказ допустим, ложное разрешение — нет.
+function tokenIsInert(token, next) {
+  if (token.kind !== 'word' || token.hasSubstitution) return false;
+  if (token.parts.some((p) => p.kind === 'bare' && /[\r\n]/.test(p.raw))) return false;
+  if (!token.redirect) return true;
+  if (token.quote !== 'none') return false;
+  if (BARE_REDIRECT_RE.test(token.text)) return Boolean(next) && NULL_TARGETS.has(next.text);
+  return SAFE_REDIRECT_RE.test(token.text);
+}
+
+function isPipeFilter(token, dialect) {
+  if (!token || token.value === null) return false;
+  if (PIPE_FILTERS.has(token.value)) return true;
+  return dialect === 'powershell' && PIPE_FILTERS_PS.has(token.value.toLowerCase());
+}
+
+// Каталог первого сегмента `cd <dir>` или null: ровно два токена, каталог — литерал
+// (literalPath; ЗАДАЧА B3, 2026-09-22 — раньше годился любой инертный токен, в том числе
+// `$PWD/…`, и путь cli.mjs резолвился не от того каталога, куда перейдёт shell).
+// POSIX: относительный каталог, не начинающийся с `./`/`../`, bash ищет по CDPATH (ревью B3,
+// раунд 1, 2026-09-22, проверено запуском: `CDPATH=../other bash -c 'cd src'` переходит в
+// ../other/src) — CDPATH shell'а агента хуку не известен, такой каталог не литерал.
+function cdTarget(segment, dialect) {
+  if (segment.commands.length !== 1) return null;
+  const c = segment.commands[0];
+  if (c.tokens.length !== 2 || c.tokens[0].value !== 'cd' || c.heredocs.length !== 0) return null;
+  if (!tokenIsInert(c.tokens[0]) || !tokenIsInert(c.tokens[1])) return null;
+  const dir = literalPath(c.tokens[1], dialect, { cdDir: true });
+  if (dir !== null && dialect !== 'powershell' && !isAbsolute(dir) && !/^\.\.?(?:[\\/]|$)/.test(dir)) return null;
+  return dir;
+}
+
+// После cd-префикса — только `&&`, `;` или перевод строки: за `||` следующий сегмент
+// выполняется, лишь если cd НЕ удался, то есть в прежнем каталоге (ЗАДАЧА B3, 2026-09-22).
+const CD_SEPARATORS = new Set(['&&', ';', '\n']);
+
+// Каталоги, от которых резолвится путь cli.mjs (null — ctx.cwd). cd может не удаться, а
+// следующий сегмент — выполниться в прежнем каталоге: после `;`/перевода строки (bash и
+// PowerShell) и за `||` дальше по цепочке (`cd X && A || B`: B — в прежнем каталоге, если cd
+// упал). Ревью B3, раунд 1 (2026-09-22, проверено запуском): `cd nope/../..; node
+// src/rails/cli.mjs status` — хук резолвил путь от свёрнутого `nope/../..`, bash же отказывал
+// в cd («No such file or directory») и запускал копию из write_scope в прежнем каталоге;
+// PowerShell `cd src; …` без src/ — то же (Set-Location PathNotFound). Поэтому каталог cd
+// один — только если все разделители после cd `&&` (cd упал — не выполнится ничего); иначе
+// путь обязан вести к cli.mjs проекта и от каталога cd, и от ctx.cwd.
+function cliBaseDirs(segs, cdDir) {
+  if (cdDir === null) return [null];
+  return segs.slice(1).every((s) => s.sepBefore === '&&') ? [cdDir] : [cdDir, null];
+}
+
+// Cli-сегменты команды (`{ segment, main, k, hasSession }`) или null, если команда —
+// не «просто вызов cli.mjs». strict=false — только структура (пути, подкоманды,
+// разделители, cd-префикс): так ищутся сегменты для переписывания `--quote`, чьи
+// подстановки ещё предстоит нейтрализовать. strict=true — плюс ни одного токена,
+// дающего shell'у что-то выполнить, и допустимый фильтр справа от пайпа.
+// scope — `{ root, cwd }` для проверки, что путь ведёт к cli.mjs проекта (makeCliPathCheck).
+function classifyCli(scan, dialect, { strict, scope }) {
+  if (!scan.ok || scan.segments.length === 0) return null;
+  const segs = scan.segments;
+  if (segs[0].sepBefore !== null) return null;
+  for (let i = 1; i < segs.length; i += 1) {
+    if (!SEGMENT_SEPARATORS.has(segs[i].sepBefore)) return null;
+  }
+  // Хвостовой `&` (фон), `)` — не «просто список cli-вызовов» (ревью B2, раунд 2).
+  if (scan.trailingSep !== null && !SEGMENT_SEPARATORS.has(scan.trailingSep)) return null;
+  // Первый сегмент `cd …` без литерального каталога не пропускается: он проверяется как
+  // cli-сегмент и отклоняет команду целиком.
+  const cdDir = segs.length > 1 && CD_SEPARATORS.has(segs[1].sepBefore) ? cdTarget(segs[0], dialect) : null;
+  const first = cdDir === null ? 0 : 1;
+  const check = makeCliPathCheck(scope, dialect);
+  const bases = cliBaseDirs(segs, cdDir);
+  const pathOk = (p) => bases.every((b) => check(p, b));
   const out = [];
-  for (const seg of segments) {
-    if (!CLI_COMMAND_RE.test(seg) || SESSION_FLAG_RE.test(seg)) {
-      out.push(seg);
-      continue;
+  for (let i = first; i < segs.length; i += 1) {
+    const seg = segs[i];
+    if (seg.commands.length < 1 || seg.commands.length > 2) return null;
+    const main = seg.commands[0];
+    const k = cliPathIndex(main, pathOk, dialect);
+    if (k < 0) return null;
+    if (strict) {
+      for (const c of seg.commands) {
+        if (c.heredocs.length > 0) return null;
+        for (let j = 0; j < c.tokens.length; j += 1) {
+          if (!tokenIsInert(c.tokens[j], c.tokens[j + 1])) return null;
+        }
+      }
+      if (seg.commands[1] && !isPipeFilter(seg.commands[1].tokens[0], dialect)) return null;
     }
-    let quote = null;
-    let cut = -1;
-    for (let i = 0; i < seg.length; i += 1) {
-      const ch = seg[i];
-      if (quote) {
-        if (ch === quote) quote = null;
-        continue;
-      }
-      if (ch === '"' || ch === "'") {
-        quote = ch;
-        continue;
-      }
-      if (ch === '|') {
-        cut = i;
-        break;
-      }
-    }
-    out.push(cut === -1 ? `${seg} --session ${sessionId}` : `${seg.slice(0, cut).trimEnd()} --session ${sessionId} ${seg.slice(cut)}`);
+    const hasSession = main.tokens.slice(k + 2).some((t) => t.value === '--session' || (t.quote === 'none' && t.text.startsWith('--session=')));
+    out.push({ segment: seg, main, k, hasSession });
   }
-  return out.join(' && ');
+  return out;
+}
+
+// Одинаковая структура двух разборов: сегменты, разделители, команды, heredoc'и и
+// попарно токены (сравнение токенов — через `tokenEq(old, new)`).
+function sameShape(a, b, tokenEq) {
+  if (!a.ok || !b.ok || a.segments.length !== b.segments.length) return false;
+  for (let i = 0; i < a.segments.length; i += 1) {
+    const sa = a.segments[i];
+    const sb = b.segments[i];
+    if (sa.sepBefore !== sb.sepBefore || sa.commands.length !== sb.commands.length) return false;
+    for (let j = 0; j < sa.commands.length; j += 1) {
+      const ca = sa.commands[j];
+      const cb = sb.commands[j];
+      if (ca.tokens.length !== cb.tokens.length || ca.heredocs.length !== cb.heredocs.length) return false;
+      for (let k = 0; k < ca.tokens.length; k += 1) {
+        if (!tokenEq(ca.tokens[k], cb.tokens[k])) return false;
+      }
+    }
+  }
+  return true;
+}
+
+// Инъекция `--session` в каждый cli-сегмент без него — в конец его первой простой
+// команды, то есть перед `|` (иначе флаг уезжает в хвост пайпа и ломает `head`/`tail`).
+// Результат проверяется повторным разбором: те же сегменты и команды, в каждом
+// дополненном сегменте — ровно два новых токена в конце первой команды, и команда
+// по-прежнему cli-вызов; иначе команда остаётся без инъекции (cli.mjs возьмёт
+// самую свежую сессию по своей эвристике).
+function injectSession(command, scan, cli, sessionId, dialect, scope) {
+  const id = String(sessionId);
+  if (!SESSION_ID_RE.test(id)) return command;
+  const targets = cli.filter((e) => !e.hasSession);
+  if (targets.length === 0) return command;
+  const injected = new Set(targets.map((e) => e.main));
+  let out = command;
+  for (const pos of targets.map((e) => e.main.end).sort((x, y) => y - x)) {
+    out = `${out.slice(0, pos)} --session ${id}${out.slice(pos)}`;
+  }
+  const rescanned = scanCommand(out, dialect);
+  if (!rescanned.ok || rescanned.segments.length !== scan.segments.length) return command;
+  for (let i = 0; i < scan.segments.length; i += 1) {
+    const sa = scan.segments[i];
+    const sb = rescanned.segments[i];
+    if (sa.sepBefore !== sb.sepBefore || sa.commands.length !== sb.commands.length) return command;
+    for (let j = 0; j < sa.commands.length; j += 1) {
+      const ca = sa.commands[j];
+      const cb = sb.commands[j];
+      const extra = injected.has(ca) ? 2 : 0;
+      if (cb.tokens.length !== ca.tokens.length + extra || ca.heredocs.length !== cb.heredocs.length) return command;
+      for (let k = 0; k < ca.tokens.length; k += 1) {
+        if (ca.tokens[k].text !== cb.tokens[k].text) return command;
+      }
+      if (extra && (cb.tokens[ca.tokens.length].text !== '--session' || cb.tokens[ca.tokens.length + 1].text !== id)) return command;
+    }
+  }
+  if (!classifyCli(rescanned, dialect, { strict: true, scope })) return command;
+  return out;
+}
+
+// --- переписывание `--quote "…"` при бэктиках/$ в ДВОЙНЫХ кавычках (инцидент 2026-09-22) --
+//
+// Лейблы узлов содержат бэктики (`` `.workflow/reports/` ``) и «$X». Агент печатает
+// `--quote "…из `.workflow/reports/`, оценку…"` — в bash ` … ` внутри двойных кавычек
+// выполняется как подкоманда, а `$X` раскрывается в пустоту: до cli.mjs долетает
+// испорченная цитата, goto отклоняется quote-mismatch. Хук видит команду ДО shell
+// (PreToolUse/tool.execute.before) — переписывает такие аргументы в одинарные кавычки
+// с тем же буквальным текстом, какой агент напечатал. Условия (ЗАДАЧА B2, 2026-09-22,
+// после ревью первой версии — она искала `--quote` регуляркой без контекста кавычек и
+// переписывала совпадение ВНУТРИ '…', открывая внешнюю кавычку и отдавая shell'у $(…)):
+//  - только токен `--quote "…"` / `--quote="…"` ВЕРХНЕГО уровня cli-сегмента (не внутри
+//    '…', $'…', подстановок — там это текст, его не трогаем);
+//  - значение — одна часть в двойных кавычках с неэкранированными ` или $ (POSIX);
+//    PowerShell — с неэкранированным $ либо бэктик-escape, который PowerShell съел бы
+//    (`x → x); известные escape'ы (`n `t …) и ${…} неоднозначны — не переписываем;
+//  - снимаются только экранирования, допустимые в "…" (POSIX: \$ \` \" \\ и перевод
+//    строки; PowerShell: `" `$ `` и "" → "), подстановки копируются как текст;
+//  - переписанная команда обязана разбираться тем же сканером так же, как исходная
+//    (сегменты, команды, токены — кроме заменённых, чьё буквальное значение равно
+//    задуманному), и оставаться cli-вызовом; иначе команда остаётся как была (goto
+//    откажет с подсказкой про одинарные кавычки).
+// Диалект — `action.shell` ('posix' | 'powershell'); отсутствует — 'posix'.
+function rewriteQuoteArgs(command, scan, dialect, scope) {
+  const cli = classifyCli(scan, dialect, { strict: false, scope });
+  if (!cli) return { command, scan };
+  const edits = [];
+  for (const { main, k } of cli) {
+    const t = main.tokens;
+    for (let j = k + 2; j < t.length; j += 1) {
+      let target = null;
+      let part = null;
+      let expected = null;
+      if (t[j].value === '--quote' && t[j + 1] && t[j + 1].quote === 'double') {
+        target = t[j + 1];
+        part = target.parts[0];
+        expected = part.value;
+      } else if (t[j].parts.length === 2 && t[j].parts[0].kind === 'bare' && t[j].parts[0].value === '--quote=' && t[j].parts[1].kind === 'double') {
+        target = t[j];
+        part = target.parts[1];
+        expected = `--quote=${part.value}`;
+      }
+      if (!part || !part.hasUnescapedSpecial || part.ambiguous) continue;
+      edits.push({ start: part.start, end: part.end, replacement: toSingleQuoted(part.value, dialect), target, expected });
+    }
+  }
+  if (edits.length === 0) return { command, scan };
+  let out = command;
+  for (const e of [...edits].sort((x, y) => y.start - x.start)) {
+    out = out.slice(0, e.start) + e.replacement + out.slice(e.end);
+  }
+  const rescanned = scanCommand(out, dialect);
+  const expectedByToken = new Map(edits.map((e) => [e.target, e.expected]));
+  const same = sameShape(scan, rescanned, (oldTok, newTok) => (
+    expectedByToken.has(oldTok)
+      ? !newTok.hasSubstitution && !newTok.hasExpansion && newTok.value === expectedByToken.get(oldTok)
+      : oldTok.text === newTok.text
+  ));
+  if (!same || !classifyCli(rescanned, dialect, { strict: true, scope })) return { command, scan };
+  return { command: out, scan: rescanned };
+}
+
+/**
+ * Разбор shell-команды как вызова cli.mjs (§7.4.1). Возвращает `isCli` и команду к
+ * выполнению: с переписанными `--quote "…"` (бэктики/$ → одинарные кавычки) и
+ * вставленным `--session <id>` (если `sessionId` задан и безопасен для shell).
+ * Не cli — `command` возвращается как есть. Экспортируется ради тестов.
+ *
+ * @param {string} command
+ * @param {'posix'|'powershell'|undefined} shell диалект (`action.shell`); отсутствует — posix
+ * @param {string} [sessionId]
+ * @param {{root?: string, cwd?: string}} [scope] корень проекта и cwd вызова: с `root`
+ *   путь cli.mjs обязан вести к файлу этого проекта (см. CLI_CANONICAL); без него —
+ *   только лексический якорь `rails/cli.mjs`
+ * @returns {{isCli: boolean, command: string}}
+ */
+export function analyzeCliCommand(command, shell, sessionId, scope) {
+  if (typeof command !== 'string') return { isCli: false, command };
+  const dialect = shell === 'powershell' ? 'powershell' : 'posix';
+  // PowerShell `--%` (stop-parsing; ЗАДАЧА B3, 2026-09-22, проверено запуском powershell.exe
+  // 5.1): дальше PowerShell не разбирает кавычки ('…' уходят в argv буквально — переписанная
+  // --quote рассыпалась), но `|` внутри '…' делит конвейер, а бэктик вне кавычек экранирует:
+  // `--% --quote 'a | ni PWNED | echo `'` сканер видит одним литералом, PowerShell выполняет
+  // `ni`. `'--%'`, `"--%"` и `` `--% `` 5.1 тоже обрабатывает особо. Сканер этой модели не
+  // знает — любой `--%` в тексте команды под PowerShell делает её не cli-вызовом.
+  // Ревью B3, раунд 1 (2026-09-22, HIGH, проверено запуском powershell.exe 5.1): stop-parsing
+  // включают и токены, чей текст не содержит `--%`, — -'-%', -"-%", -`-%, --`%, --'%', -"-"%,
+  // `-`-%, -''-%, -""-% (значение токена после снятия кавычек и бэктиков равно `--%`); сканер
+  // видел в них инертные слова, и `status -'-%' 'x | ni PWNED | echo `'` проходил коротким
+  // замыканием. Проверяем текст без кавычек (и типографских) и бэктиков — ложный отказ для
+  // цитаты с `--%` допустим. Значение `--%` из переменной ($x) stop-parsing не включает, а
+  // лишь склеивает argv (проверено: `$x='--%'; node argv.js a $x 'b | c'` → a, b, |, c) —
+  // ничего не выполняется. `` `u{…} `` (escape PowerShell 7 в "…", 5.1 его не знает) мог бы дать
+  // `-` внутри токена — pwsh 7 на машине нет, не проверено: консервативно не cli.
+  if (dialect === 'powershell' && (command.replace(PS_STOP_PARSING_STRIP_RE, '').includes('--%') || /`u\{/i.test(command))) {
+    return { isCli: false, command };
+  }
+  try {
+    const rewritten = rewriteQuoteArgs(command, scanCommand(command, dialect), dialect, scope);
+    const cli = classifyCli(rewritten.scan, dialect, { strict: true, scope });
+    if (!cli) return { isCli: false, command };
+    const out = sessionId ? injectSession(rewritten.command, rewritten.scan, cli, sessionId, dialect, scope) : rewritten.command;
+    return { isCli: true, command: out };
+  } catch (err) {
+    // Ревью B2, раунд 2 (2026-09-22): исключение разбора (RangeError на строке из тысяч
+    // `"$(`) доезжало до catch-all в decide() и превращалось в allow всей команды —
+    // вместе с `git commit` в её начале. Не разобрали — значит не cli: общие правила.
+    try {
+      process.stderr.write(`rails: разбор команды как cli-вызова не удался, идёт по общим правилам: ${err && err.message ? err.message : err}\n`);
+    } catch {
+      // stderr недоступен — не наша забота.
+    }
+    return { isCli: false, command };
+  }
 }
 
 // --- loadSkillRuntime: кэш графа/конфига по mtime (§7.4, "хук никогда не падает" не
@@ -250,7 +648,17 @@ function collectWriteTargets(action, ctx) {
     return [{ real, display: action.path }];
   }
   if (action.kind === 'shell') {
-    const writes = detectShellWrites(action.command);
+    // ЗАДАЧА C2 (2026-09-22): cwd/dialect — detectShellWrites сама отслеживает cd,
+    // переменные и диалект и отдаёт пути абсолютными (от каталога после cd); без
+    // ctx.cwd — относительными, их разрешает resolveMaybeRelative ниже.
+    // Объединение по вариантам текста (с CR и без — commandTextVariants): цели только
+    // добавляются, отказов от этого больше, разрешений — нет.
+    const writes = [];
+    for (const text of commandTextVariants(action.command)) {
+      for (const w of detectShellWrites(text, { cwd: ctx?.cwd, dialect: action.shell })) {
+        if (!writes.includes(w)) writes.push(w);
+      }
+    }
     return writes.map((w) => {
       if (w === '?') return { marker: true, display: '?' };
       const real = safeRealpath(resolveMaybeRelative(w, ctx?.cwd));
@@ -301,6 +709,18 @@ function sameCanary(command, canary) {
   return String(command ?? '').trim() === String(canary ?? '').trim();
 }
 
+// Тексты команды для общих правил (canary, deny_shell, stage_actions, detectShellWrites):
+// как написано и без CR. Ревью B2, раунд 3 (2026-09-22): msys-bash (Git for Windows)
+// молча удаляет CR из текста `-c` — `gi<CR>t commit` выполняет `git commit`, `tou<CR>ch X`
+// создаёт файл (проверено запуском обоих бинарников), а регулярки по сырому тексту этого
+// не видят. Под Linux-bash CR — символ слова (`gi<CR>t` — «команда не найдена»), под
+// PowerShell — перевод строки; там вариант без CR может дать только лишний отказ.
+function commandTextVariants(command) {
+  const raw = String(command ?? '');
+  const stripped = raw.replace(/\r/g, '');
+  return stripped === raw ? [raw] : [raw, stripped];
+}
+
 function matchesDenyShell(command, rule) {
   if (!rule || typeof rule.pattern !== 'string') return false;
   let re;
@@ -328,7 +748,7 @@ function ruleMatches(action, rule, root, editRealPath) {
     } catch {
       return false;
     }
-    return re.test(action.command ?? '');
+    return commandTextVariants(action.command).some((text) => re.test(text));
   }
   if (action.kind === 'edit' || action.kind === 'write') {
     if (!editRealPath) return false;
@@ -403,28 +823,31 @@ function denyAndLog({ root, ctx, state, action, what, why, allowedText }) {
 // --- режим скила (§7.4) --------------------------------------------------------
 
 function decideSkillMode({ root, action, ctx, state, config, graph }) {
-  // 1. cli.mjs — служебная команда: allow, при отсутствии --session — инъекция.
-  if (action?.kind === 'shell' && isCliCommand(action.command)) {
-    const result = { decision: 'allow' };
-    if (ctx?.sessionId) {
-      const injected = injectSession(action.command, ctx.sessionId);
-      if (injected !== action.command) result.updatedCommand = injected;
+  // 1. cli.mjs — служебная команда: allow; испорченные shell'ом ` / $ в `--quote "…"`
+  // переписаны в одинарные кавычки (2026-09-22), при отсутствии --session он вставлен —
+  // обе правки в одном updatedCommand (analyzeCliCommand, разбор — shell-scan.mjs).
+  if (action?.kind === 'shell') {
+    const cli = analyzeCliCommand(action.command, action.shell, ctx?.sessionId, { root, cwd: ctx?.cwd });
+    if (cli.isCli) {
+      const result = { decision: 'allow' };
+      if (cli.command !== action.command) result.updatedCommand = cli.command;
+      return result;
     }
-    return result;
   }
 
   const deny = (what, why) =>
     denyAndLog({ root, ctx, state, action, what, why, allowedText: describeAllowed(state, graph, config) });
+  const shellTexts = action?.kind === 'shell' ? commandTextVariants(action.command) : [];
 
   // 2. Канарейка.
-  if (action?.kind === 'shell' && config.canary && sameCanary(action.command, config.canary)) {
+  if (action?.kind === 'shell' && config.canary && shellTexts.some((text) => sameCanary(text, config.canary))) {
     return deny(describeWhat(action), `RAILS_CANARY: рельсы активны, узел ${state.node}`);
   }
 
   // 3. deny_shell.
   if (action?.kind === 'shell' && Array.isArray(config.deny_shell)) {
     for (const rule of config.deny_shell) {
-      if (matchesDenyShell(action.command, rule)) {
+      if (shellTexts.some((text) => matchesDenyShell(text, rule))) {
         const why = rule.incident ? `${rule.reason ?? 'запрещённая команда'} (${rule.incident})` : (rule.reason ?? 'запрещённая команда');
         return deny(describeWhat(action), why);
       }

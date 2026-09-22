@@ -1,12 +1,23 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve as resolvePathAbs } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { fromClaude, fromKilo, detectShellWrites } from '../rails/actions.mjs';
 
 // --- fromClaude (таблица §6) ------------------------------------------------
 
-test('fromClaude: Bash -> shell с command', () => {
+test('fromClaude: Bash -> shell с command, shell: posix', () => {
   const a = fromClaude({ tool_name: 'Bash', tool_input: { command: 'ls -la' } });
-  assert.deepEqual(a, { tool: 'Bash', kind: 'shell', command: 'ls -la' });
+  assert.deepEqual(a, { tool: 'Bash', kind: 'shell', command: 'ls -la', shell: 'posix' });
+});
+
+// ЗАДАЧА C (2026-09-22): PowerShell раньше маппился в kind 'other' — вся
+// shell-защита (канарейка/deny_shell/stage_actions/write_scope) его не видела.
+test('fromClaude: PowerShell -> shell с command, shell: powershell', () => {
+  const a = fromClaude({ tool_name: 'PowerShell', tool_input: { command: 'git commit -m x' } });
+  assert.deepEqual(a, { tool: 'PowerShell', kind: 'shell', command: 'git commit -m x', shell: 'powershell' });
 });
 
 test('fromClaude: Edit -> edit с path из file_path', () => {
@@ -70,9 +81,9 @@ test('fromClaude: пустой вход не падает', () => {
 
 // --- fromKilo ----------------------------------------------------------------
 
-test('fromKilo: bash -> shell', () => {
+test('fromKilo: bash -> shell, shell: posix', () => {
   const a = fromKilo({ tool: 'bash' }, { args: { command: 'echo hi' } });
-  assert.deepEqual(a, { tool: 'bash', kind: 'shell', command: 'echo hi' });
+  assert.deepEqual(a, { tool: 'bash', kind: 'shell', command: 'echo hi', shell: 'posix' });
 });
 
 test('fromKilo: edit/patch/multiedit -> edit c filePath', () => {
@@ -149,15 +160,17 @@ test('detectShellWrites: rm извлекает путь(и)', () => {
   assert.deepEqual(new Set(r), new Set(['a.txt', 'b.txt']));
 });
 
-test('detectShellWrites: mv/cp — путь записи только последний аргумент (назначение), не источник', () => {
-  assert.deepEqual(detectShellWrites('mv a.txt b.txt'), ['b.txt']);
+test('detectShellWrites: cp — путь записи только последний аргумент (назначение); mv — назначение и источник (удаляется)', () => {
+  // ЗАДАЧА C2 (2026-09-22): `mv <вне>/f <scope>/f` уносит файл извне — источник mv тоже запись.
+  assert.deepEqual(detectShellWrites('mv a.txt b.txt'), ['b.txt', 'a.txt']);
   assert.deepEqual(detectShellWrites('cp a.txt b.txt c.txt dest.txt'), ['dest.txt']);
 });
 
 test('detectShellWrites: cp с источником вне scope не ловит источник как запись (regression)', () => {
   // Раньше `cp /etc/x <scope>/y` давал ложный отказ «запись вне области»
-  // из-за источника /etc/x — писать нужно только в <scope>/y.
-  assert.deepEqual(detectShellWrites('cp /etc/x /scope/y'), ['/scope/y']);
+  // из-за источника /etc/x — писать нужно только в <scope>/y. (ЗАДАЧА C2: назначение
+  // относительное — `/scope/y` под Git Bash неоднозначен, это каталог Git, не корень диска.)
+  assert.deepEqual(detectShellWrites('cp /etc/x scope/y'), ['scope/y']);
 });
 
 test('detectShellWrites: mkdir/touch извлекают путь', () => {
@@ -253,7 +266,595 @@ test('detectShellWrites: маркер "?" не теряется, когда в �
   // Раньше `?` добавлялся только при пустом found — здесь found уже
   // содержит "/scope/a" (от touch), а вторая, нераспознанная запись (rm без
   // аргумента после отбрасывания флагов) молча терялась.
-  const r = detectShellWrites('touch /scope/a; rm -rf');
-  assert.ok(r.includes('/scope/a'));
+  const r = detectShellWrites('touch scope/a; rm -rf');
+  assert.ok(r.includes('scope/a'));
   assert.ok(r.includes('?'));
+});
+
+// --- detectShellWrites(command, {cwd, env, dialect}) — ЗАДАЧА C2 (2026-09-22) -----------
+// Инциденты коуча на рельсах: `cd <skillDir> && sed -i … SKILL.md` проверялся от cwd сессии,
+// `S="…"; sed -i … "$S/файл"` брался буквально. Первая версия исправления (ЗАДАЧА C)
+// отклонена ревью — ложные разрешения; ниже — repro каждого high/medium замечания
+// (round1-shell-writes.json, round3-writes-routed.json): ожидается '?' или путь вне области.
+// Пути фикстуры на диске не создаются (кроме теста с junction).
+
+const BASE = join(tmpdir(), 'rails-c2-probe');
+const SCOPE = join(BASE, 'scope');
+const OUT = join(BASE, 'outside');
+const ROOT = join(BASE, 'root');
+const fwd = (p) => p.replace(/\\/g, '/');
+const S = fwd(SCOPE);
+const O = fwd(OUT);
+const writes = (command, opts = {}) => detectShellWrites(command, { cwd: SCOPE, env: {}, ...opts });
+const psWrites = (command, opts = {}) => writes(command, { dialect: 'powershell', ...opts });
+const at = (...p) => resolvePathAbs(...p);
+
+// «Поймано»: запись вне области видна ядру — путь снаружи или маркер '?'.
+function assertCaught(result, outsidePath, label) {
+  const caught = result.includes('?') || result.some((p) => p !== '?' && resolvePathAbs(p).toLowerCase() === resolvePathAbs(outsidePath).toLowerCase());
+  assert.ok(caught, `${label}: запись вне области не видна — ${JSON.stringify(result)}`);
+}
+
+test('detectShellWrites (C2, bypass HIGH #1): присваивание не прячет команду и редирект — X=$(touch …), FOO=bar > f, $x = (Remove-Item …)', () => {
+  assert.deepEqual(writes(`X=$(touch ${O}/x.txt)`), [`${O}/x.txt`]);
+  assert.deepEqual(writes(`FOO=bar > ${O}/x.txt`), [`${O}/x.txt`]);
+  assert.deepEqual(psWrites(`$x = (Remove-Item ${O}/x.txt)`), [`${O}/x.txt`]);
+  assert.deepEqual(psWrites(`$null = Remove-Item ${O}/x.txt`), [`${O}/x.txt`]);
+});
+
+test('detectShellWrites (C2, correctness HIGH #1): env-префикс `NAME=v cmd > f` и `$x = cmd > f` — редирект виден', () => {
+  assert.deepEqual(writes(`X=1 cat a > ${O}/file`), [`${O}/file`]);
+  assert.deepEqual(psWrites(`$x = Get-Content a > ${O}/f`), [`${O}/f`]);
+  assert.deepEqual(writes(`X=1 touch ${O}/x.txt`), [`${O}/x.txt`], 'LOW: команда после env-префикса');
+});
+
+test('detectShellWrites (C2, bypass HIGH #2): cd не съедает остаток сегмента — `&`, `|`, $(…) после каталога', () => {
+  assertCaught(writes(`cd ${S} & touch ${O}/x.txt`), `${O}/x.txt`, 'cd X & touch');
+  assertCaught(writes(`cd ${S} | tee ${O}/x.txt`), `${O}/x.txt`, 'cd X | tee');
+  assertCaught(writes(`cd ${S} $(touch ${O}/x.txt)`), `${O}/x.txt`, 'cd X $(touch)');
+});
+
+test('detectShellWrites (C2, bypass HIGH #3 / correctness #5): popd и `cd -` — каталог неизвестен, относительная запись → "?"', () => {
+  const o = { cwd: ROOT };
+  assert.deepEqual(writes(`pushd ${S} && popd && touch x.txt`, o), ['?']);
+  assert.deepEqual(writes(`cd ${S}/inner && cd - && touch x.txt`, o), ['?']);
+  assert.deepEqual(writes(`pushd ${O} && touch x && popd && touch y`), [at(OUT, 'x'), '?']);
+});
+
+test('detectShellWrites (C2, bypass MEDIUM #4): PowerShell Push-Location, chdir, Set-Location -Path/-LiteralPath меняют каталог', () => {
+  for (const form of ['Push-Location', 'chdir', 'Set-Location -Path', 'Set-Location -LiteralPath', 'sl', 'cd']) {
+    const r = psWrites(`${form} ${O}; Remove-Item x.txt`);
+    // после `;` запись выполнится и при неудачной смене каталога — в прежнем (проверено запуском PS 5.1)
+    assert.deepEqual(r, [at(OUT, 'x.txt'), at(SCOPE, 'x.txt')], form);
+  }
+});
+
+test('detectShellWrites (C2, bypass MEDIUM #5): cd с флагами и редиректами — не трекается (кроме `--`)', () => {
+  assert.deepEqual(writes(`cd -- ${O} && touch x.txt`), [at(OUT, 'x.txt')]);
+  assert.deepEqual(writes(`cd -P ${O} && touch x.txt`), ['?']);
+  assert.deepEqual(writes(`cd "${O}" 2>&1 && touch x.txt`), ['?']);
+  assert.deepEqual(writes(`cd ${O} 2>/dev/null && touch x.txt`), ['?']);
+});
+
+test('detectShellWrites (C2, bypass MEDIUM #6 / correctness #3): нераскрываемый аргумент cd — каталог неизвестен', () => {
+  assert.deepEqual(writes('cd $UNSET_VAR_XYZ_123 && touch x.txt'), ['?']);
+  assert.deepEqual(writes('cd "$(dirname "$PWD")" && touch x.txt'), ['?']);
+  assert.deepEqual(writes('cd "$MISSING" && touch x'), ['?']);
+  assert.deepEqual(writes('cd $(mktemp -d) && touch x'), ['?']);
+  // $PWD — отслеживаемый каталог, не переменная окружения процесса хука
+  assert.deepEqual(writes('cd "$PWD/.." && touch outside.txt'), [at(SCOPE, '..', 'outside.txt')]);
+  assert.deepEqual(writes('touch "$PWD/../outside.txt"'), [`${SCOPE}/../outside.txt`]);
+});
+
+test('detectShellWrites (C2, bypass MEDIUM #7): остаточные $, ${env:…}, бэктики, $x.Path в пути — не буква пути', () => {
+  assert.deepEqual(psWrites('Remove-Item "${env:ZZ_T}/x.txt"', { env: { ZZ_T: O } }), [`${O}/x.txt`]);
+  assert.deepEqual(writes('touch `pwd`/../x.txt'), ['?']);
+  assert.deepEqual(writes('S=$(dirname "$PWD"); touch "$S/x.txt"'), ['?']);
+  assert.deepEqual(psWrites('Remove-Item "$x.Path/x.txt"', { env: { x: O } }), ['?']);
+  assert.deepEqual(psWrites('Remove-Item $x.Path'), ['?']);
+});
+
+test('detectShellWrites (C2, correctness HIGH #2): значение переменной с нераскрываемой частью — "?"', () => {
+  assert.deepEqual(writes('S="$NOPE/outside"; touch "$S/x"'), ['?']);
+  assert.deepEqual(writes('S=$(pwd); touch "$S/x"'), ['?']);
+});
+
+test('detectShellWrites (C2, correctness MEDIUM #6): тело heredoc не исполняется — cd/mkdir в нём не считаются', () => {
+  assert.deepEqual(writes(`cat > ${S}/a.md <<'EOF'\n# notes\nmkdir build\nEOF`), [`${S}/a.md`]);
+  assert.deepEqual(writes(`cat > ${S}/s.sh <<'EOF'\ncd ${S}\nEOF\ntouch after.txt`, { cwd: OUT }), [`${S}/s.sh`, at(OUT, 'after.txt')]);
+  // незакавыченный разделитель: $(…) в теле выполняется
+  assert.deepEqual(writes(`cat > f <<EOF\n$(touch ${O}/h.txt)\nEOF`), [`${O}/h.txt`, at(SCOPE, 'f')]);
+  // cd после heredoc — каталог неизвестен
+  assert.deepEqual(writes(`cat <<'EOF'\nx\nEOF\ncd ${S} && touch y`), ['?']);
+});
+
+test('detectShellWrites (C2, LOW): cd внутри (…), for, if — каталог неизвестен; `\\"` в "…" не прячет запись', () => {
+  assert.deepEqual(writes(`(cd ${O} && touch x.txt)`), ['?']);
+  assert.deepEqual(writes(`for d in ${O}; do cd $d; touch x.txt; done`), ['?']);
+  assert.deepEqual(writes(`if true; then cd ${O}; touch x.txt; fi`), ['?']);
+  assert.deepEqual(writes(`echo \\" ; cd ${O}; touch ${O}/x.txt`), [`${O}/x.txt`]);
+  // цикл: смена каталога ниже по тексту действует на запись выше (вторая итерация)
+  assert.deepEqual(writes(`while true; do touch x.txt; cd ${O}; done`), ['?']);
+});
+
+test('detectShellWrites (C2, round3 MEDIUM a): `\\"` внутри "…" не открывает кавычку — редирект после `;` виден', () => {
+  const r = writes(`node .workflow/src/rails/cli.mjs goto P5E1 --quote "a \\" b" ; echo INJECTED > ${fwd(ROOT)}/PWNED.txt ; echo "x"`);
+  assert.deepEqual(r, [`${fwd(ROOT)}/PWNED.txt`]);
+});
+
+test('detectShellWrites (C2, round3 MEDIUM b): `>&файл` (не число и не -) — запись stdout+stderr в файл', () => {
+  assert.deepEqual(writes(`node .workflow/src/rails/cli.mjs status >&${fwd(ROOT)}/PWNED.txt`), [`${fwd(ROOT)}/PWNED.txt`]);
+  assert.deepEqual(writes(`echo x 1>&${O}/f6.txt`), [`${O}/f6.txt`], 'N>&файл — bash тоже создаёт файл (проверено запуском)');
+  assert.deepEqual(writes('cmd >&2 2>&1 >&-'), [], 'дескрипторы — не запись');
+});
+
+test('detectShellWrites (C2): все формы редиректа в файл — >|, &>, &>>, <>, оператор внутри слова; PowerShell *>, N>', () => {
+  assert.deepEqual(writes(`echo a >| ${O}/c.txt`), [`${O}/c.txt`]);
+  assert.deepEqual(writes(`echo a &> ${O}/c.txt`), [`${O}/c.txt`]);
+  assert.deepEqual(writes(`echo a &>> ${O}/c.txt`), [`${O}/c.txt`]);
+  assert.deepEqual(writes(`exec 3<>${O}/rw.txt`), [`${O}/rw.txt`]);
+  assert.deepEqual(writes(`echo x>${O}/mid.txt`), [`${O}/mid.txt`], 'bash делит слово на `>` (проверено запуском)');
+  assert.deepEqual(writes(`echo \\>& touch ${O}/amp.txt`), [`${O}/amp.txt`], '`\\>` — литерал, `&` — фон: touch выполняется');
+  assert.deepEqual(psWrites(`Write-Output x *> ${O}/s.txt`), [`${O}/s.txt`]);
+  assert.deepEqual(psWrites(`Write-Output x 3>> ${O}/s.txt`), [`${O}/s.txt`]);
+  assert.deepEqual(psWrites('Write-Output x 2>$null > $null'), []);
+  assert.deepEqual(writes('cmd 2>/dev/null >NUL'), []);
+});
+
+test('detectShellWrites (C2): сканер не разобрал команду (незакрытая кавычка/heredoc) — "?"', () => {
+  assert.deepEqual(writes('echo "unclosed'), ['?']);
+  assert.deepEqual(writes('cat <<EOF\nno end'), ['?']);
+  assert.deepEqual(psWrites("Write-Output 'open"), ['?']);
+});
+
+test('detectShellWrites (C2, инцидент): cd <skillDir> && sed -i … SKILL.md — путь от каталога после cd', () => {
+  const skillDir = join(ROOT, 'src', 'skills', 'analyze-report');
+  assert.deepEqual(writes(`cd ${fwd(skillDir)} && sed -i 's/a/b/' SKILL.md`, { cwd: ROOT }), [at(skillDir, 'SKILL.md')]);
+  // относительный cd без ./ — от каталога, если CDPATH не задан (раунд 2: см. тест ниже)
+  assert.deepEqual(writes('cd ./a && cd ./b && touch c.txt'), [at(SCOPE, 'a', 'b', 'c.txt')]);
+  assert.deepEqual(writes('cd a && touch c.txt'), [at(SCOPE, 'a', 'c.txt')]);
+  assert.deepEqual(psWrites('Set-Location src\\skills; Remove-Item plan.md'), [at(SCOPE, 'src', 'skills', 'plan.md'), at(SCOPE, 'plan.md')]);
+});
+
+test('detectShellWrites (C2, инцидент): S=<abs>; sed -i … "$S/f" — переменная раскрывается; одинарные кавычки — литерал', () => {
+  assert.deepEqual(writes(`S="${S}"; sed -i "s/a/b/" "$S/rails-trials-report.mjs"`), [`${S}/rails-trials-report.mjs`]);
+  assert.deepEqual(writes(`export S="${S}"; touch "\${S}/a.txt"`), [`${S}/a.txt`]);
+  assert.deepEqual(writes(`declare A=${O} B="${S}"; touch "$B/x"`), [`${S}/x`]);
+  assert.deepEqual(writes(`touch '$FOO/x'`, { env: { FOO: O } }), [at(SCOPE, '$FOO', 'x')]);
+  assert.deepEqual(writes('touch "$FOO/x"', { env: { FOO: O } }), [`${O}/x`]);
+  assert.deepEqual(writes('touch "$MISSING/file.txt"'), ['?']);
+  // `local` вне функции — ошибка bash, присваивания нет (проверено запуском)
+  assert.deepEqual(writes(`local S=${O}; touch "$S/x.txt"`), ['?']);
+});
+
+test('detectShellWrites (C2): PowerShell — $x = \'…\', $env:X, $HOME; $X без присваивания — не переменная окружения', () => {
+  assert.deepEqual(psWrites(`$D = '${S}'; Remove-Item "$D\\a.txt"`), [`${S}\\a.txt`]);
+  assert.deepEqual(psWrites(`$env:D = '${S}'; Remove-Item "$env:D\\a.txt"`), [`${S}\\a.txt`]);
+  assert.deepEqual(psWrites('Remove-Item "$env:MYROOT\\a.txt"', { env: { MYROOT: S } }), [`${S}\\a.txt`]);
+  assert.deepEqual(psWrites('Remove-Item "$HOME\\a"'), [`${homedir()}\\a`]);
+  assert.deepEqual(psWrites('Remove-Item "$MYROOT\\a.txt"', { env: { MYROOT: S } }), ['?'], '$MYROOT в PowerShell пуста (проверено запуском)');
+  assert.deepEqual(psWrites('Remove-Item "$env:MISSING\\a.txt"'), ['?']);
+});
+
+test('detectShellWrites (C2): переменная, которой где-либо присваивают нетрекаемо, неизвестна везде', () => {
+  assert.deepEqual(writes(`S=${S}; read S; touch "$S/f"`), ['?']);
+  assert.deepEqual(writes(`S=${S}; for S in ${O}; do :; done; touch "$S/f"`), ['?']);
+  assert.deepEqual(writes(`echo $((S=5)); S=${S}; touch "$S/f"`), ['?']);
+  assert.deepEqual(writes(`S=${S}; : \${S:=x}; touch "$S/f"`), ['?']);
+  assert.deepEqual(writes(`readonly S=${S}; S=${O}; touch "$S/f"`), ['?']);
+  assert.deepEqual(writes(`S=${S}; eval "S=${O}"; touch "$S/f"`), ['?']);
+  assert.deepEqual(psWrites(`$S = '${S}'; foreach ($S in '${O}') {}; Remove-Item "$S\\f"`), ['?'], 'переменная foreach сохраняется (проверено запуском)');
+  assert.deepEqual(psWrites(`$S = '${S}'; Get-Item x -OutVariable S; Remove-Item "$S\\f"`), ['?']);
+  // верхний уровень плоский, цикл — внутри $(…): переменная цикла всё равно неизвестна
+  assert.deepEqual(psWrites(`$S = '${S}'; $null = $(foreach ($S in '${O}') {}); Remove-Item "$S\\f"`), ['?']);
+  assert.deepEqual(psWrites(`$S = '${S}'; $PSDefaultParameterValues['*:OutVariable'] = 'S'; Get-Item x; Remove-Item "$S\\f"`), ['?']);
+});
+
+test('detectShellWrites (C2): "~" — домашний каталог (POSIX вне кавычек, PowerShell в любых кавычках)', () => {
+  assert.deepEqual(writes('touch ~/scratch.txt'), [`${homedir()}/scratch.txt`]);
+  assert.deepEqual(writes('cd ~/proj && touch a.txt'), [at(homedir(), 'proj', 'a.txt')]);
+  assert.deepEqual(writes('touch "~/x"'), [at(SCOPE, '~', 'x')], 'в кавычках bash не раскрывает ~ (проверено запуском)');
+  assert.deepEqual(psWrites("Set-Content -LiteralPath '~\\x' -Value 1"), [`${homedir()}\\x`]);
+  assert.deepEqual(writes('touch ~other/x'), ['?']);
+});
+
+test('detectShellWrites (C2): `;`/`||` после cd — запись и в прежнем каталоге; `&&` — только в новом', () => {
+  const o = { cwd: ROOT };
+  assert.deepEqual(writes(`cd ${S}/sub; touch x`, o), [at(SCOPE, 'sub', 'x'), at(ROOT, 'x')]);
+  assert.deepEqual(writes(`cd ${S}/sub || touch x`, o), [at(ROOT, 'x')]);
+  assert.deepEqual(writes(`cd ${S}/sub && touch x`, o), [at(SCOPE, 'sub', 'x')]);
+  assert.deepEqual(writes(`cd ${S}/sub && touch a; touch b`, o), [at(SCOPE, 'sub', 'a'), at(SCOPE, 'sub', 'b'), at(ROOT, 'b')]);
+});
+
+test('detectShellWrites (C2): команды записи — mv (источник), cp -t, sed -i нескольких файлов, find -delete/-exec, xargs, имя в другом регистре', () => {
+  assert.deepEqual(writes(`mv ${O}/secret ${S}/x`), [`${S}/x`, `${O}/secret`]);
+  assert.deepEqual(writes(`cp -t ${O} a b`), [O]);
+  assert.deepEqual(writes(`cp -vt ${O} a b`), [O]);
+  assert.deepEqual(writes('sed -i s/a/b/ f1 f2'), [at(SCOPE, 'f1'), at(SCOPE, 'f2')]);
+  assert.deepEqual(writes('sed -ni -e s/a/b/ f1'), [at(SCOPE, 'f1')]);
+  assert.deepEqual(writes(`find ${O} -delete`), [O]);
+  assert.deepEqual(writes('find . -name "*.tmp" -exec rm {} \\;'), [SCOPE]);
+  assert.deepEqual(writes(`find . -exec mv {} ${O} \\;`), [O, SCOPE]);
+  assert.deepEqual(writes(`ls | xargs rm ${S}/a`), [`${S}/a`, '?']);
+  assert.deepEqual(writes(`for f in a; do rm ${O}/x; done`), [`${O}/x`], 'команда после do');
+  assert.deepEqual(writes(`git -C ${O} rm x`), ['?']);
+  assert.deepEqual(writes(`eval "touch ${O}/e.txt"`), [`${O}/e.txt`]);
+  assert.deepEqual(writes('$CMD x'), ['?'], 'имя команды не литерал');
+  if (process.platform === 'win32') {
+    assert.deepEqual(writes(`TOUCH ${O}/u.txt`), [`${O}/u.txt`], 'Git Bash: TOUCH/Touch.exe создают файл (проверено запуском)');
+  }
+});
+
+test('detectShellWrites (C2): PowerShell-командлеты и алиасы — New-Item/ni, Copy-Item, Move-Item, Add-Content, iex', () => {
+  assert.deepEqual(psWrites(`New-Item -ItemType File ${O}/n.txt`), [`${O}/n.txt`]);
+  assert.deepEqual(psWrites(`ni ${O}/n.txt`), [`${O}/n.txt`]);
+  assert.deepEqual(psWrites(`Copy-Item a ${O}/c.txt`), [`${O}/c.txt`]);
+  assert.deepEqual(psWrites(`Move-Item -Path ${O}/m.txt -Destination b`), [at(SCOPE, 'b'), `${O}/m.txt`]);
+  assert.deepEqual(psWrites(`Add-Content -Path:${O}/a.txt -Value 1`), [`${O}/a.txt`]);
+  assert.deepEqual(psWrites(`iex "Remove-Item ${O}/e.txt"`), [`${O}/e.txt`]);
+  assert.deepEqual(psWrites(`touch ${O}/t.txt`), [`${O}/t.txt`], 'touch.exe из Git в PATH PowerShell (проверено запуском)');
+  assert.deepEqual(psWrites(`Remove-Item ${O}/a,${O}/b`), ['?'], 'a,b — массив путей');
+  assert.deepEqual(psWrites('Get-ChildItem | Select-Object Name'), []);
+});
+
+test('detectShellWrites (C2): шаблоны и brace expansion — "?" кроме удаления по шаблону в последнем компоненте', () => {
+  assert.deepEqual(writes(`rm -rf ${S}/*.tmp`), [`${S}/*.tmp`]);
+  assert.deepEqual(writes(`touch ${S}/*.tmp`), ['?'], 'запись по шаблону может пройти через ссылку');
+  assert.deepEqual(writes(`rm -rf ${S}/*/x`), ['?']);
+  assert.deepEqual(writes('rm -rf .*'), ['?']);
+  assert.deepEqual(writes('touch {a,../../x}'), ['?']);
+  assert.deepEqual(writes('touch "*.tmp"'), [at(SCOPE, '*.tmp')], 'в кавычках — литерал');
+});
+
+test('detectShellWrites (C2): без cwd пути остаются относительными, cd в абсолютный каталог — абсолютными', () => {
+  assert.deepEqual(detectShellWrites('touch rel.txt', { env: {} }), ['rel.txt']);
+  assert.deepEqual(detectShellWrites(`cd ${O} && touch rel.txt`, { env: {} }), [at(OUT, 'rel.txt')]);
+  assert.deepEqual(detectShellWrites('cd ./a && touch rel.txt', { env: {} }), [join('a', 'rel.txt')]);
+});
+
+test('detectShellWrites (C2): исключение внутри разбора — "?", а не пустой результат', () => {
+  // ctx.env с геттером-ловушкой: разбор падает, decide иначе превратил бы исключение в allow
+  const env = new Proxy({}, { ownKeys() { throw new Error('boom'); } });
+  assert.deepEqual(detectShellWrites('touch "$X/a"', { cwd: SCOPE, env }), ['?']);
+});
+
+test('detectShellWrites (C2): Git Bash — /c/… это диск C:, прочие /… (каталоги Git) — "?"', { skip: process.platform !== 'win32' ? 'msys-пути — только Git for Windows' : false }, () => {
+  assert.deepEqual(writes('touch /d/tmp/x'), ['D:/tmp/x']);
+  assert.deepEqual(writes('S=/d/abs; sed -i "s/a/b/" "$S/f"'), ['D:/abs/f']);
+  assert.deepEqual(writes('touch /tmp/x'), ['?'], '/tmp под Git Bash — %TEMP%, не корень диска (cygpath -w)');
+  assert.deepEqual(writes('touch /c/../x'), ['?']);
+  assert.deepEqual(psWrites('Remove-Item \\x'), [at(SCOPE, '\\x')], 'PowerShell: от корня диска текущего каталога');
+});
+
+test('detectShellWrites (C2): `..` после cd в junction — Git Bash пишет рядом с целью ссылки, путь проверяется в обоих вариантах', () => {
+  const base = mkdtempSync(join(tmpdir(), 'rails-c2-junction-'));
+  try {
+    const scope = join(base, 'scope');
+    const far = join(base, 'far');
+    mkdirSync(scope, { recursive: true });
+    mkdirSync(join(far, 'target'), { recursive: true });
+    symlinkSync(join(far, 'target'), join(scope, 'lnk'), 'junction');
+    const r = detectShellWrites(`cd ${fwd(join(scope, 'lnk'))} && touch ../x.txt`, { cwd: scope, env: {} });
+    assert.deepEqual(r, [join(scope, 'x.txt'), join(realpathSync.native(far), 'x.txt')]);
+    // PowerShell разрешает `..` от строки каталога (логически) — один путь
+    const p = detectShellWrites(`Set-Location ${fwd(join(scope, 'lnk'))}; Remove-Item ..\\x.txt`, { cwd: scope, env: {}, dialect: 'powershell' });
+    assert.deepEqual(p, [join(scope, 'x.txt'), join(base, 'x.txt')]);
+    if (process.platform === 'win32') {
+      // сверка с настоящим Git Bash: файл появляется рядом с целью junction
+      execFileSync('bash', ['-c', `cd '${fwd(join(scope, 'lnk'))}' && touch ../x.txt`]);
+      assert.equal(existsSync(join(far, 'x.txt')), true);
+      assert.equal(existsSync(join(scope, 'x.txt')), false);
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// --- ЗАДАЧА C2, раунд 2 (2026-09-22): дефекты ревью второй версии ------------------------------
+// Каждый repro high/medium: для ложного разрешения — '?' или путь вне области; для ложного отказа
+// (`cd skills/coach && …`) — путь в каталоге после cd. Поведение shell'ов проверено запуском.
+
+test('detectShellWrites (C2 r2, MEDIUM): PowerShell — массив через запятую отдельным словом и сплаттинг @p дают "?"', () => {
+  assertCaught(psWrites(`Remove-Item f1 ,${O}/f2`), `${O}/f2`, 'a ,b');
+  assertCaught(psWrites(`Remove-Item f1 , ${O}/f2`), `${O}/f2`, 'a , b');
+  assertCaught(psWrites(`$p = @{ LiteralPath = "${O}/f4" }; Remove-Item @p`), `${O}/f4`, 'Remove-Item @p');
+  assertCaught(psWrites(`$p = @{ Path = "${O}/f" }; Set-Content @p -Value x`), `${O}/f`, 'Set-Content @p');
+  // LOW: `-Path a ,b` — второй элемент массива
+  assertCaught(psWrites(`Remove-Item -Path ${S}/a ,${O}/b`), `${O}/b`, '-Path a ,b');
+  // `-Path:a,b` — массив (HEAD давал '?', первая версия раунда — литерал «a,b»)
+  assert.deepEqual(psWrites(`Remove-Item -Path:${S}/a,${O}/b`), ['?']);
+  assert.ok(psWrites('cd @p; Remove-Item x').includes('?'), 'cd @p — каталог из хэш-таблицы неизвестен');
+});
+
+test('detectShellWrites (C2 r2, MEDIUM): POSIX — присваивание с динамическим именем или элементу массива делает переменные неизвестными', () => {
+  const env = { S }; // даже если одноимённая переменная есть в окружении хука
+  for (const command of [
+    `S=${S}; n=S; declare "$n=${O}"; touch "$S/x1"`,
+    `S=${S}; S[0]=${O}; touch "$S/x2"`,
+    `S=${S}; n=S; printf -v "$n" %s ${O}; touch "$S/x3"`,
+    `S=${S}; n=S; export "$n=${O}"; touch "$S/x4"`,
+    `S=${S}; n=S; read -r "$n" < <(echo ${O}); touch "$S/x5"`,
+    `S=${S}; n=S; unset "$n"; touch "$S/x6"`,
+    `S=${S}; n=S; (( x = 1, $n = 5 )); touch "$S/x7"`,
+    `S=${S}; n=S; echo $(( x = 1, $n = 5 )); touch "$S/x8"`,
+    `S=${S}; n=S; let "x=1, $n=2"; touch "$S/x9"`,
+  ]) {
+    assert.deepEqual(writes(command, { env }), ['?'], command);
+  }
+  // `NAME[i]=v cmd` — префикс-присваивание, команда выполняется (проверено запуском: bash пишет
+  // «not a valid identifier», но touch создаёт файл); env: присваивание — любое слово с `=`
+  assert.deepEqual(writes(`S[0]=x touch ${O}/f`), [`${O}/f`]);
+  assert.deepEqual(writes(`env ./x=y touch ${O}/f`), [`${O}/f`]);
+  // контроль: сравнение в [ ] и литеральные имена не делают неизвестными все переменные
+  assert.deepEqual(writes(`S=${S}; [ $x = y ]; printf -v out '%s' "$x"; touch "$S/ok"`), [`${S}/ok`]);
+});
+
+test('detectShellWrites (C2 r2, MEDIUM): cp/mv/sed/touch/mkdir — однозначный префикс длинного флага GNU', () => {
+  assert.deepEqual(writes(`cp --target ${O} ${S}/a.txt`), [O]);
+  assert.deepEqual(writes(`cp --t=${O} a.txt`), [O]);
+  assert.deepEqual(writes(`cp --targ ${O} a.txt`), [O]);
+  assert.deepEqual(writes(`mv --t ${O} a.txt`), [O, at(SCOPE, 'a.txt')]);
+  assert.deepEqual(writes(`sed --in s/a/b/ ${O}/f`), [`${O}/f`]);
+  assert.deepEqual(writes(`sed --in-pl=.bak --expr=s/a/b/ ${O}/f`), [`${O}/f`]);
+  assert.deepEqual(writes(`cp a ${O}/f --sparse always`), [`${O}/f`], '--sparse WHEN — значение, не назначение');
+  assert.deepEqual(writes(`mkdir --m 700 ${O}/d`), [`${O}/d`]);
+  assert.deepEqual(writes(`touch --d 2020-01-01 ${O}/t`), [`${O}/t`]);
+});
+
+test('detectShellWrites (C2 r2): невычисленное слово, которое может быть флагом, у cp/mv/sed/find — "?"', () => {
+  assertCaught(writes(`cp "$o" a ${S}/b`), O, 'cp "$o" (o=--target-directory=…)');
+  assert.deepEqual(writes('sed "$o" s/a/b/ f'), ['?'], 'sed "$o" (o=-i)');
+  assert.deepEqual(writes('find "$X" -name y'), ['?'], 'find "$X" (X=-delete)');
+  assert.deepEqual(writes(`o=-t; cp $o ${O} a`), [O], 'известное значение классифицируется как флаг');
+  // контроль: литеральное начало слова — не флаг
+  assert.deepEqual(writes('sed -n "s/$x/y/p" f'), []);
+  assert.deepEqual(writes('find . -name "*.$ext"'), []);
+  assert.deepEqual(writes('find . -name -delete'), [], 'значение -name — не действие');
+});
+
+test('detectShellWrites (C2 r2, MEDIUM): `cd <относительный без ./> && …` — от каталога, пока CDPATH/cdable_vars не могут вмешаться', () => {
+  assert.deepEqual(writes('cd skills/coach && sed -i s/a/b/ SKILL.md'), [at(SCOPE, 'skills', 'coach', 'SKILL.md')]);
+  assert.deepEqual(writes('set -e; cd skills && touch x'), [at(SCOPE, 'skills', 'x')]);
+  assert.deepEqual(writes('cd skills/coach && touch x', { env: { CDPATH: O } }), ['?']);
+  assert.deepEqual(writes(`CDPATH=${O}; cd skills && touch x`), ['?']);
+  assert.deepEqual(writes(`export CDPATH=${O}; cd skills && touch x`), ['?']);
+  assert.deepEqual(writes('shopt -s cdable_vars; cd skills && touch x'), ['?']);
+  assert.deepEqual(writes('cd skills && touch x', { env: { BASHOPTS: 'cdable_vars:checkwinsize' } }), ['?']);
+  assert.deepEqual(writes('cd skills && touch x', { env: { CDPATH: '' } }), [at(SCOPE, 'skills', 'x')], 'пустой CDPATH = не задан (проверено запуском)');
+});
+
+test('detectShellWrites (C2 r2, LOW): PowerShell — тире – — ― как префикс параметра, префиксы имён, `--`, кавычки', () => {
+  assert.deepEqual(psWrites(`Set-Content –Path ${O}/en1.txt –Value x`), [`${O}/en1.txt`]);
+  assert.deepEqual(psWrites(`Set-Content —Path ${O}/em.txt —Value x`), [`${O}/em.txt`]);
+  assert.deepEqual(psWrites(`Set-Content ―Path ${O}/hb.txt`), [`${O}/hb.txt`]);
+  assert.deepEqual(psWrites(`Remove-Item –Recurse ${O}/r`), [`${O}/r`]);
+  // префикс переключателя (`-Fo` = -Force) не забирает следующий путь
+  assert.deepEqual(psWrites(`Set-Content -Fo ${O}/x y`), [`${O}/x`]);
+  // неизвестный параметр: значение или переключатель — целью считается каждое позиционное слово
+  assertCaught(psWrites(`Set-Content -Foo x ${O}/b`), `${O}/b`, 'неизвестный параметр');
+  // значение-массив параметра не сдвигает позиционный путь
+  assert.deepEqual(psWrites(`Remove-Item -Include a, b ${O}/x`), [`${O}/x`]);
+  // `--` — конец параметров; '-Path' в кавычках — позиционное значение (проверено запуском)
+  assert.deepEqual(psWrites(`Remove-Item -- ${O}/x`), [`${O}/x`]);
+  assert.deepEqual(psWrites("Set-Content '-Path' x"), [at(SCOPE, '-Path')]);
+  assert.deepEqual(psWrites(`Set-Content -Pa'th' ${O}/v`), [at(SCOPE, '-Path')], "-Pa'th' — позиционное значение");
+  assert.deepEqual(psWrites(`Set-Content --Path ${O}/v`), [at(SCOPE, '--Path')], '--Path — позиционное значение');
+  // -OutVariable по префиксу имени присваивает переменной
+  assert.deepEqual(psWrites(`$S = '${S}'; Get-Item x -OutVar S; Remove-Item "$S\\f"`), ['?']);
+  // внешней программе PowerShell передаёт слово как есть: `–x` для touch.exe — имя файла
+  assert.ok(psWrites(`touch –x ${S}/y`).includes(at(SCOPE, '–x')));
+});
+
+test('detectShellWrites (C2 r2, LOW): `..` в cd — логический и физический (`set -P`) каталоги, запись проверяется в обоих', () => {
+  const base = mkdtempSync(join(tmpdir(), 'rails-c2r2-physical-'));
+  try {
+    const work = join(base, 'work');
+    const outside = join(base, 'outside');
+    mkdirSync(work, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    symlinkSync(outside, join(work, 'lnk'), 'junction');
+    const realBase = realpathSync.native(base);
+    const r = detectShellWrites('set -P; cd ./lnk/.. && touch x6', { cwd: work, env: {} });
+    assert.deepEqual(r, [join(work, 'x6'), join(realBase, 'x6')]);
+    // без ссылки варианты совпадают — один путь
+    mkdirSync(join(work, 'sub'));
+    assert.deepEqual(detectShellWrites('cd ./sub/.. && touch x7', { cwd: work, env: {} }), [join(work, 'x7')]);
+    if (process.platform === 'win32') {
+      // сверка с Git Bash: после set -P файл появляется у родителя ЦЕЛИ ссылки
+      execFileSync('bash', ['-c', 'set -P; cd ./lnk/.. && touch x6'], { cwd: work });
+      assert.equal(existsSync(join(base, 'x6')), true);
+      assert.equal(existsSync(join(work, 'x6')), false);
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('detectShellWrites (C2 r2, LOW): вложенный интерпретатор — bash -c, powershell -Command/-EncodedCommand, cmd /c, скрипт из stdin', () => {
+  assert.deepEqual(writes(`bash -c 'rm -rf ${O}/x'`), [`${O}/x`]);
+  assert.deepEqual(writes(`bash -o pipefail -lc 'cd ./sub && touch f'`), [at(SCOPE, 'sub', 'f')]);
+  assert.deepEqual(writes(`find . -exec sh -c "rm ${O}/fx" \\;`), [`${O}/fx`]);
+  assert.deepEqual(psWrites(`bash -c 'rm ${O}/q'`), [`${O}/q`]);
+  assert.deepEqual(writes(`powershell.exe -NoProfile -Command "Remove-Item ${O}/z"`), [`${O}/z`]);
+  const b64 = Buffer.from(`Remove-Item ${O}/enc.txt`, 'utf16le').toString('base64');
+  assert.deepEqual(writes(`powershell -e ${b64}`), [`${O}/enc.txt`]);
+  assert.deepEqual(writes(`powershell -EncodedCommand ${b64}`), [`${O}/enc.txt`]);
+  assert.deepEqual(writes(`bash <<'EOF'\nrm -rf ${O}/h\nEOF`), [`${O}/h`]);
+  // дочернему процессу переменные родителя видны, только если экспортированы, — неизвестны
+  assert.deepEqual(writes(`D=${S}; bash -c 'touch "$D/x"'`, { env: { D: S } }), ['?']);
+  assert.deepEqual(writes('bash -c "touch $D/f"', { env: { D: O } }), [`${O}/f`], 'раскрыто внешним shell\'ом');
+  assert.deepEqual(writes('cd skills && bash -c "cd sub && touch f"', { env: { CDPATH: O } }), ['?']);
+  for (const command of ['sh -c "$CMD"', 'echo "rm x" | bash', 'powershell -Command -', 'powershell -NoProfile', `cmd //c del ${O.replace(/\//g, '\\\\')}\\\\x`, 'cmd //c mklink //J a b', 'cmd /c "echo x > f"']) {
+    assert.deepEqual(writes(command), ['?'], command);
+  }
+  // контроль: без записи внутри — пусто; файл скрипта не разбирается (как до ЗАДАЧИ C2)
+  for (const command of ['bash --version', "powershell -c 'Get-ChildItem'", 'cmd //c dir', 'bash script.sh', 'pwsh -File x.ps1']) {
+    assert.deepEqual(writes(command), [], command);
+  }
+});
+
+test('detectShellWrites (C2 r2, LOW): косвенные писатели — .NET в PowerShell, dd of=, truncate, ln, install', () => {
+  assert.deepEqual(psWrites(`[IO.File]::WriteAllText('${O}/w.txt', 'x')`), ['?']);
+  assert.deepEqual(psWrites(`(Get-Item ${O}/x).Delete()`), ['?']);
+  assert.deepEqual(psWrites(`$w = New-Object System.IO.StreamWriter('${O}/s.txt')`), ['?']);
+  assert.deepEqual(psWrites(`[IO.File]::ReadAllText('${O}/w.txt')`), []);
+  assert.deepEqual(writes(`dd if=a of=${O}/dd.img`), [`${O}/dd.img`]);
+  assert.deepEqual(writes('dd if="$src" of=out.img'), [at(SCOPE, 'out.img')]);
+  assert.deepEqual(writes('dd "$x"'), ['?'], 'операнд из переменной может быть of=');
+  assert.deepEqual(writes(`truncate -s 0 ${O}/t`), [`${O}/t`]);
+  assert.deepEqual(writes(`ln -s a ${O}/l`), [`${O}/l`]);
+  assert.deepEqual(writes(`ln -s ${O}/y`), ['?'], 'ссылка в текущем каталоге под именем цели');
+  assert.deepEqual(writes(`install -m 644 a ${O}/i`), [`${O}/i`]);
+  assert.deepEqual(writes(`install -d ${O}/d1 ${O}/d2`), [`${O}/d1`, `${O}/d2`]);
+});
+
+test('detectShellWrites (C2 r2): вложенные интерпретаторы — общий бюджет на команду; `cp -- "$f"` — источник после `--` не флаг', () => {
+  let command = `touch ${O}/deep`;
+  for (let i = 0; i < 12; i += 1) command = `cd ./a; cd ./b; cd ./c; cd ./d; bash -c ${JSON.stringify(command)}`;
+  const started = Date.now();
+  assert.deepEqual(writes(command), ['?']);
+  assert.ok(Date.now() - started < 5000, 'миры × уровни вложенности не растут экспоненциально');
+  assert.deepEqual(writes('cp -- "$f" dest/'), [at(SCOPE, 'dest')]);
+  assert.ok(writes('cp "$f" dest/').includes('?'));
+});
+
+// --- раунд 3 ревью C2 (2026-09-22) ------------------------------------------------------
+
+// bash 5.2 (проверено запуском): `pushd +N` не идёт в каталог с именем `+N`, а вращает стек
+// каталогов — после `pushd <область> && pushd +1` shell снова в исходном cwd. Трекер считал
+// каталогом `<область>/+1`, и относительная запись «попадала» в область — регресс deny→allow.
+test('detectShellWrites (C2 r3, HIGH): `pushd +N`/`-N` — запись стека, а не каталог: каталог после неё неизвестен', () => {
+  assert.deepEqual(writes(`pushd ${S}/sub && pushd +1 && echo hi > PWNED.txt`), ['?']);
+  assert.deepEqual(writes('pushd sub && pushd +1 && touch p1.txt'), ['?']);
+  assert.deepEqual(writes('pushd -- +1 && touch p2.txt'), ['?']);
+  assert.deepEqual(writes('pushd sub && pushd -0 && touch p3.txt'), ['?']);
+  assert.deepEqual(writes('X=+1; pushd $X && touch p4.txt'), ['?'], 'значение после раскрытия');
+  assert.ok(psWrites('Push-Location +1; Set-Content p5.txt x').includes('?'), 'PowerShell: каталог после `Push-Location +1` тоже неизвестен');
+  // контроль: обычный pushd в каталог трекается, как cd
+  assert.deepEqual(writes('pushd sub && touch p6.txt'), [at(SCOPE, 'sub', 'p6.txt')]);
+  assert.deepEqual(writes(`pushd ${S}/sub && touch p7.txt`), [at(SCOPE, 'sub', 'p7.txt')]);
+});
+
+// Разделитель heredoc bash берёт со снятием кавычек (`<<E"O"F` кончается на строке `EOF`), а
+// `<<<` — here-string, не heredoc. Сканер расходился с bash: команды после настоящего конца
+// тела попадали в тело и пропадали из разбора — ложное разрешение (обход области записи).
+test('detectShellWrites (C2 r3, HIGH): разделитель heredoc с кавычками по частям, here-string `<<<`, `<<` в `(( ))`', () => {
+  assert.deepEqual(writes(`cat <<E"O"F\nhello\nEOF\ntouch ${O}/h1.txt\nE"O"F`), [`${O}/h1.txt`]);
+  assert.deepEqual(writes(`cat <<E\\OF\nhello\nEOF\ntouch ${O}/h2.txt\nE\\OF`), [`${O}/h2.txt`]);
+  assert.deepEqual(writes(`cat <<< EOF\ntouch ${O}/h3.txt\nEOF`), [`${O}/h3.txt`]);
+  assert.deepEqual(writes(`cat <<< $(touch ${O}/h4.txt)`), [`${O}/h4.txt`]);
+  assert.deepEqual(writes(`cat <<< hi > ${O}/h5.txt`), [`${O}/h5.txt`]);
+  // `(( … ))` — арифметика, `<<` в ней сдвиг: разбор с bash расходится, значит '?'
+  assert.deepEqual(writes(`(( x = 1 << 2 ))\ntouch ${O}/h6.txt\n2`), ['?']);
+  assert.deepEqual(writes(`for (( i=0; i < 1<<1; i++ )); do :; done\ntouch ${O}/h7.txt\n1`), ['?']);
+  // контроль: обычные heredoc и here-string в области — не ложный отказ
+  assert.deepEqual(writes(`cat <<'EOF' > note.md\ntouch ${O}/no.txt\nEOF`), [at(SCOPE, 'note.md')]);
+  assert.deepEqual(writes('cat <<< hi'), []);
+  assert.deepEqual(writes('grep x <<< "$var"'), []);
+});
+
+// coproc/function/trap: bash выполняет команду, а разбор её не видел (проверено запуском —
+// файл создаётся во всех трёх формах).
+test('detectShellWrites (C2 r3, MEDIUM): coproc, function и trap — запись в теле видна, cd в теле делает каталог неизвестным', () => {
+  assert.deepEqual(writes(`coproc touch ${O}/c1.txt`), [`${O}/c1.txt`]);
+  assert.deepEqual(writes(`coproc CO { touch ${O}/c2.txt; }`), [`${O}/c2.txt`]);
+  assert.deepEqual(writes(`coproc CO ( touch ${O}/c3.txt )`), [`${O}/c3.txt`]);
+  assert.deepEqual(writes(`coproc mkdir ${O}/c4`), [`${O}/c4`]);
+  assert.deepEqual(writes(`coproc $x touch ${O}/c5.txt`), ['?'], 'имя корутины не литерал');
+  assert.deepEqual(writes(`function f { touch ${O}/f1.txt; }; f`), [`${O}/f1.txt`]);
+  assert.deepEqual(writes(`function my-fn { rm -rf ${O}/f2; }; my-fn`), [`${O}/f2`]);
+  assert.deepEqual(writes(`function f() { touch ${O}/f3.txt; }; f`), [`${O}/f3.txt`]);
+  assert.deepEqual(writes(`function f { cd ${O}; }; f; touch f4.txt`), ['?'], 'cd в теле функции — каталог неизвестен');
+  assert.deepEqual(writes(`trap 'touch ${O}/t1.txt' EXIT`), [`${O}/t1.txt`]);
+  assert.deepEqual(writes(`trap "touch ${O}/t2.txt" EXIT`), [`${O}/t2.txt`]);
+  assert.deepEqual(writes(`trap 'cd ${O}' DEBUG; touch t3.txt`), ['?']);
+  assert.deepEqual(writes('trap "$CMD" EXIT'), ['?'], 'текст ловушки не литерал');
+  assert.deepEqual(writes("trap 'touch t4.txt' EXIT"), ['?'], 'ловушка срабатывает позже — каталог неизвестен');
+  // того же вида обёртки (в Git Bash этой машины утилит нет — правило из их формы)
+  assert.deepEqual(writes(`setsid touch ${O}/g1.txt`), [`${O}/g1.txt`]);
+  assert.deepEqual(writes(`flock -n /tmp/l touch ${O}/g2.txt`), [`${O}/g2.txt`]);
+  assert.deepEqual(writes(`flock -w 5 /tmp/l rm -rf ${O}/g3`), [`${O}/g3`]);
+  // контроль: формы без записи не дают ни путей, ни маркера
+  assert.deepEqual(writes('function f { echo hi; }; f'), []);
+  assert.deepEqual(writes('trap - EXIT'), []);
+  assert.deepEqual(writes('trap -p'), []);
+  assert.deepEqual(writes('coproc cat'), []);
+});
+
+test('detectShellWrites (C2 r3): поведение bash, на которое опираются правила pushd/coproc/function/trap', () => {
+  if (process.platform !== 'win32') return;
+  const base = mkdtempSync(join(tmpdir(), 'rails-c2r3-'));
+  const sh = (script) => {
+    try {
+      execFileSync('bash', ['-c', script], { cwd: base, stdio: 'ignore' });
+    } catch {
+      /* ненулевой код (`EOF: command not found`, coproc) не важен — важны созданные файлы */
+    }
+  };
+  try {
+    mkdirSync(join(base, 'w'));
+    sh('pushd w >/dev/null && pushd +1 >/dev/null && touch stack.txt');
+    assert.equal(existsSync(join(base, 'stack.txt')), true, 'pushd +1 вернул в исходный каталог');
+    assert.equal(existsSync(join(base, 'w', 'stack.txt')), false, 'а не в w/+1');
+    sh('coproc touch co.txt\nsleep 1');
+    sh('function fn { touch fn.txt; }; fn');
+    sh("trap 'touch tr.txt' EXIT");
+    for (const f of ['co.txt', 'fn.txt', 'tr.txt']) assert.equal(existsSync(join(base, f)), true, `bash выполнил запись: ${f}`);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// --- раунд 4 (ревью раунда 3 C2, 2026-09-22) --------------------------------------------
+
+// HIGH: `a=(<<E)` для bash — синтаксическая ошибка: heredoc в очередь НЕ ставится, bash
+// ресинхронизируется на переводе строки и ВЫПОЛНЯЕТ следующие строки (проверено запуском).
+// Сканер уводил их в тело heredoc, запись оттуда пропадала — регресс deny→allow против HEAD.
+test('detectShellWrites (C2 r4, HIGH): heredoc в списке присваивания массива `a=( … )` — строки после него bash выполняет: "?"', () => {
+  const tail = `\ntouch ${O}/arr.txt\nE`;
+  for (const head of ['a=(<<E)', 'a+=(<<E)', 'a=(1<<E)', 'a=(x y <<E)', 'a=([0]=<<E)', 'a[0]=(<<E)', 'declare -a a=(<<E)', 'local a=(<<E)', 'export a=(<<E)', 'readonly a=(<<E)', 'typeset a=(<<E)', "arr=(x <<'E')", 'a=(<<-E)', 'time a=(<<E)', 'coproc a=(<<E)', '( a=(<<E) )', '{ a=(<<E); }', 'f() { a=(<<E); }', 'a=(<<E)&', 'a=(<<E) || true', 'if true; then a=(<<E); fi', 'while false; do a=(<<E); done']) {
+    assert.deepEqual(writes(head + tail), ['?'], head);
+  }
+  // контроль: heredoc в подоболочке и обычное присваивание массива разбираются как раньше
+  assert.deepEqual(writes(`( cat <<E > note.md\nbody\nE\n)`), [at(SCOPE, 'note.md')]);
+  assert.deepEqual(writes(`a=(x y); touch ${O}/plain.txt`), [`${O}/plain.txt`]);
+  assert.deepEqual(writes(`a=$(cat <<E\nbody\nE\n); touch ${O}/sub.txt`), [`${O}/sub.txt`]);
+});
+
+// HIGH: время разбора задаёт текст агента. ASSIGNISH_RE/ARRAY_REF_RE без границы имени давали
+// O(n^2) на одном длинном слове (24 000 букв — 4 с, 96 000 — 64 с), хук висел на каждом вызове
+// инструмента, а убитый по таймауту хук = allow. Порог с большим запасом: после правки — 30 мс.
+test('detectShellWrites (C2 r4, HIGH): длинное слово разбирается линейно, а не за O(n^2)', () => {
+  for (const word of ['a'.repeat(96000), 'a1'.repeat(48000), `_${'x'.repeat(95999)}`]) {
+    const command = `echo hi > ${O}/perf.txt; : ${word}`;
+    const started = Date.now();
+    assert.deepEqual(writes(command), [`${O}/perf.txt`]);
+    const spent = Date.now() - started;
+    assert.ok(spent < 2000, `разбор слова из ${word.length} символов занял ${spent} мс`);
+  }
+  // граница имени сохранена: присваивание внутри слова по-прежнему делает значение неизвестным
+  assert.deepEqual(writes('S=out; (( S = 1 )); touch "$S/f.txt"'), ['?']);
+  assert.deepEqual(writes('S=out; S[0]=x; touch "$S/f.txt"'), ['?']);
+  assert.deepEqual(writes('S=out; S++; touch "$S/f.txt"'), ['?']);
+  assert.deepEqual(writes('S=out; a[S=1]=y; touch "$S/f.txt"'), ['?']);
+  assert.deepEqual(writes('S=out; echo $((S++)); touch "$S/f.txt"'), ['?']);
+  // литеральное значение известно и после правки — не ложный отказ
+  assert.deepEqual(writes('S=out; touch "$S/f.txt"'), [at(SCOPE, 'out', 'f.txt')]);
+});
+
+test('bash (C2 r4): `a=(<<E)` — синтаксическая ошибка, heredoc не ставится, следующие строки выполняются', () => {
+  if (process.platform !== 'win32') return;
+  const base = mkdtempSync(join(tmpdir(), 'rails-c2r4-'));
+  try {
+    for (const [script, file] of [['a=(<<E)\ntouch arr1.txt\nE', 'arr1.txt'], ['arr=(1<<2)\ntouch arr2.txt\n2', 'arr2.txt']]) {
+      try {
+        execFileSync('bash', ['-c', script], { cwd: base, stdio: 'ignore' });
+      } catch {
+        /* syntax error — ненулевой код; важно, что следующая строка выполнена */
+      }
+      assert.equal(existsSync(join(base, file)), true, `bash выполнил строку после ошибочного heredoc: ${file}`);
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });

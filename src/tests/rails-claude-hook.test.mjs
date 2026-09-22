@@ -158,6 +158,47 @@ test('PreToolUse: cli.mjs без --session -> updatedInput с добавленн
   });
 });
 
+// ЗАДАЧА B, 2026-09-22: --quote с бэктиками в двойных кавычках — переписывание в
+// одинарные (core.mjs) должно дойти до updatedInput.command так же, как инъекция
+// --session (тот же result.updatedCommand, тот же путь передачи).
+test('PreToolUse: --quote с бэктиками в двойных кавычках -> updatedInput.command переписан в одинарные + --session', () => {
+  withProject(({ root }) => {
+    const sessionId = makeState(root, 'P4S1');
+    const rawQuote = 'из `.workflow/reports/`, оценку записать в план текущего этапа';
+    const r = handleHookInput(
+      {
+        hook_event_name: 'PreToolUse',
+        session_id: sessionId,
+        cwd: root,
+        tool_name: 'Bash',
+        tool_input: { command: `node .workflow/src/rails/cli.mjs goto P5E1 --quote "${rawQuote}"` },
+      },
+      {}
+    );
+    assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+    assert.equal(
+      r.hookSpecificOutput.updatedInput.command,
+      `node .workflow/src/rails/cli.mjs goto P5E1 --quote '${rawQuote}' --session ${sessionId}`
+    );
+  });
+});
+
+// ЗАДАЧА B2 (2026-09-22, ревью HIGH): `--quote '…'` с вложенным `--quote "$(…)"` внутри
+// одинарных кавычек — это текст цитаты; первая версия переписывала его и отдавала shell'у
+// $(…). Через адаптер updatedInput.command должен получить только --session.
+test('PreToolUse: --quote \'…\' с вложенным --quote "$(touch PWNED)" -> updatedInput.command не переписан (только --session)', () => {
+  withProject(({ root }) => {
+    const sessionId = makeState(root, 'P4S1');
+    const command = `node .workflow/src/rails/cli.mjs goto P5E1 --quote 'x --quote "$(touch PWNED) y"'`;
+    const r = handleHookInput(
+      { hook_event_name: 'PreToolUse', session_id: sessionId, cwd: root, tool_name: 'Bash', tool_input: { command } },
+      {}
+    );
+    assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+    assert.equal(r.hookSpecificOutput.updatedInput.command, `${command} --session ${sessionId}`);
+  });
+});
+
 test('PreToolUse: agent_id во входе -> роль executor -> allow (null) даже для канарейки', () => {
   withProject(({ root }) => {
     const sessionId = makeState(root, 'P4S1');

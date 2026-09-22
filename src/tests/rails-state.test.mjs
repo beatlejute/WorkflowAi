@@ -391,6 +391,49 @@ test('applyGoto: quote-mismatch на «$» в лейбле -> подсказка
   assert.match(r.reason, /одинарные кавычки/);
 });
 
+// ЗАДАЧА B, 2026-09-22: normalizeLabel (graph.mjs) снимает бэктики из лейбла ДО сверки
+// цитаты — старая подсказка смотрела на normLabel в точке расхождения и там бэктика
+// никогда нет (он уже вырезан), поэтому про порчу бэктиком подсказка не срабатывала.
+test('applyGoto: quote-mismatch на бэктике в лейбле -> подсказка про одинарные кавычки (подсказка идёт по СЫРОМУ лейблу, не по нормализованному)', () => {
+  const graph = makeGraph(
+    [
+      { id: 'P5S2', type: 'S', stage: 5, label: 'П5 ШАГ: подготовить черновик отчёта' },
+      { id: 'P5R3', type: 'R', stage: 5, label: 'П5 ПРАВИЛО: собрать отчёт из `.workflow/reports/`, оценку записать в план' },
+    ],
+    [{ from: 'P5S2', to: 'P5R3' }]
+  );
+  const state = { node: 'P5S2', history: [], counters: {}, denials: {} };
+  // так цитата доходит до cli.mjs после `--quote "…из `.workflow/reports/`, оценку…"`:
+  // bash выполнил `.workflow/reports/` как подкоманду, содержимое между бэктиками пропало.
+  const r = applyGoto(state, graph, { quote_min: 25 }, { node: 'P5R3', quote: 'П5 ПРАВИЛО: собрать отчёт из , оценку записать в план' });
+  assert.equal(r.code, 'quote-mismatch');
+  assert.match(r.reason, /одинарные кавычки/);
+});
+
+// ЗАДАЧА B2 (2026-09-22, ревью LOW): подсказка про одинарные кавычки — и на ветке «не
+// совпадает даже начало»: когда `$X`/бэктик стоит в первых ~10 символах лейбла, порча
+// shell'ом даёт расхождение сразу в начале цитаты, а подсказка выдавалась только после lo >= 10.
+test('applyGoto: quote-mismatch «даже начало» при `$`/бэктике в сыром лейбле -> подсказка про одинарные кавычки; без них — нет', () => {
+  const graph = makeGraph(
+    [
+      { id: 'P5S2', type: 'S', stage: 5, label: 'П5 ШАГ: подготовить черновик отчёта' },
+      { id: 'P5R3', type: 'R', stage: 5, label: 'П5 ПРАВИЛО: стоит $X, а `$Y` минут — подтверждение агента обязательно перед стартом' },
+    ],
+    [{ from: 'P5S2', to: 'P5R3' }]
+  );
+  const state = { node: 'P5S2', history: [], counters: {}, denials: {} };
+  // так цитата доходит до cli.mjs: $X и `$Y` раскрылись в пустоту — расхождение в первых 10 символах
+  const r = applyGoto(state, graph, { quote_min: 25 }, { node: 'P5R3', quote: 'стоит ,  а  минут — подтверждение агента обязательно перед стартом' });
+  assert.equal(r.code, 'quote-mismatch');
+  assert.match(r.reason, /не совпадает даже начало/);
+  assert.match(r.reason, /одинарные кавычки/);
+  assert.equal((r.reason.match(/одинарные кавычки/g) || []).length, 1, 'подсказка одна, без дублей');
+
+  const plain = applyGoto({ node: 'P4E1', history: [], counters: {}, denials: {} }, GRAPH, CONFIG, { node: 'P4R1', quote: 'это правило совсем про другое и звучит иначе' });
+  assert.match(plain.reason, /не совпадает даже начало/);
+  assert.doesNotMatch(plain.reason, /одинарные кавычки/, 'в лейбле без ` и $ подсказки нет');
+});
+
 test('applyGoto: quote-mismatch без общего начала -> «не совпадает даже начало»', () => {
   const state = { node: 'P4E1', history: [], counters: {}, denials: {} };
   const r = applyGoto(state, GRAPH, CONFIG, { node: 'P4R1', quote: 'это правило совсем про другое и звучит иначе' });

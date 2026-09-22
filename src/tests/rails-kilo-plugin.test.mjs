@@ -137,6 +137,38 @@ test('tool.execute.before: инъекция --session мутирует output.ar
   });
 });
 
+// ЗАДАЧА B, 2026-09-22: --quote с $ в двойных кавычках — переписывание в одинарные
+// (core.mjs) должно дойти до output.args.command так же, как инъекция --session.
+test('tool.execute.before: --quote с $ в двойных кавычках -> output.args.command переписан в одинарные + --session', async () => {
+  await withProject(async ({ root }) => {
+    const sessionID = makeState(root, 'P4S1');
+    const hooks = createHooks(root, {});
+    const input = { tool: 'bash', sessionID, callID: 'c1' };
+    const rawQuote = 'прогон runner платный (~$X, ~Y минут) — нужно подтверждение агента';
+    const output = { args: { command: `node .workflow/src/rails/cli.mjs goto P5E1 --quote "${rawQuote}"` } };
+    await hooks['tool.execute.before'](input, output);
+    assert.equal(
+      output.args.command,
+      `node .workflow/src/rails/cli.mjs goto P5E1 --quote '${rawQuote}' --session ${sessionID}`
+    );
+  });
+});
+
+// ЗАДАЧА B2 (2026-09-22, ревью HIGH): `--quote '…'` с вложенным `--quote "$X; touch …"`
+// внутри одинарных кавычек — текст цитаты; первая версия переписывала его, открывая
+// внешнюю кавычку. Через адаптер output.args.command получает только --session.
+test('tool.execute.before: --quote \'…\' с вложенным --quote "$X; touch PWNED" -> output.args.command не переписан (только --session)', async () => {
+  await withProject(async ({ root }) => {
+    const sessionID = makeState(root, 'P4S1');
+    const hooks = createHooks(root, {});
+    const input = { tool: 'bash', sessionID, callID: 'c1' };
+    const command = `node .workflow/src/rails/cli.mjs goto P5E1 --quote 'x --quote "$X; touch PWNED; echo "'`;
+    const output = { args: { command } };
+    await hooks['tool.execute.before'](input, output);
+    assert.equal(output.args.command, `${command} --session ${sessionID}`);
+  });
+});
+
 test('tool.execute.before: stage_actions max_per_session=1 -> второй edit бросает', async () => {
   await withProject(async ({ root }) => {
     const sessionID = makeState(root, 'P4S1');
