@@ -1,0 +1,22 @@
+version: 2
+entry: 42
+terminal: "P8S3"
+quote_min: -5
+allow_temp: "yes"
+deny_shell:
+  - pattern: "[unclosed"
+    reason: 7
+stage_actions:
+  edit_skill:
+    kind: []
+    match: 123
+    stages: ["4"]
+    max_per_session: -1
+cycles:
+  - from: "5"
+    to: 4
+    max: -1
+output:
+  final_requires:
+    - "[unclosed"
+  max_stop_blocks: -2

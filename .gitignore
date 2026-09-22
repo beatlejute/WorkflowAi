@@ -63,3 +63,4 @@ CLAUDE.md
 # файлы продукта с нулём процентов и роняли гейт.
 .stryker-tmp/
 test_snippet.mjs
+.workflow/state/

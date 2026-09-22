@@ -8,6 +8,9 @@ import { spawn } from 'child_process';
 import YAML from '../lib/js-yaml.mjs';
 import { findProjectRoot } from '../lib/find-root.mjs';
 import { spawnAgent } from '../lib/agent-spawner.mjs';
+import { writeClaudeHooks, writeKiloPluginLoader, userHasRailsHooks } from '../init.mjs';
+import { loadRailsConfig } from '../rails/rails-config.mjs';
+import { check as checkRailsOutput } from '../rails/output-check.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,6 +48,99 @@ function resolveAgentScriptArgs(agentConfig) {
   return { ...agentConfig, args };
 }
 
+// ============================================================================
+// Rails integration (src/rails/README.md §11) — окружение целевого агента и
+// output-check по завершении. Ядро rails — отдельный пакет работ; здесь
+// только интеграция раннера тестов скилов (wp5).
+// ============================================================================
+
+// Таймаут судьи (сек): `execution.judge_timeout_s` в tests/index.yaml скила, иначе 180.
+// Был жёстко 60 с — на длинных ответах коуча судья не успевал (TC-COACH-001/002, 2026-09-21/22),
+// trial оставался без оценки.
+let JUDGE_TIMEOUT_S = 180;
+
+function railsYamlExists(root, skill) {
+  if (!skill) return false;
+  try {
+    return fs.existsSync(path.join(root, '.workflow', 'src', 'skills', skill, 'rails.yaml'));
+  } catch {
+    return false;
+  }
+}
+
+/** Файл состояния сессии rails с данным `run` (§5: поле `run`), или null. */
+function findRailsStateByRun(root, run) {
+  if (!run) return null;
+  const dir = path.join(root, '.workflow', 'state', 'rails');
+  let entries;
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return null;
+  }
+  for (const name of entries) {
+    if (!name.endsWith('.json') || name.startsWith('.')) continue;
+    try {
+      const state = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+      if (state && state.run === run) return state;
+    } catch {
+      // повреждённый/недописанный файл состояния — пропускаем.
+    }
+  }
+  return null;
+}
+
+/**
+ * Вызывает целевого агента (`WORKFLOW_RAILS_ROLE=coordinator`) и, если у
+ * скила есть `rails.yaml`, проверяет финальный ответ через output-check по
+ * состоянию с этим `run`; при нарушении — один повтор с вердиктом в начале
+ * промпта (§8, §11). Без rails.yaml у скила или без найденного состояния
+ * (рельсы не были задействованы в этом запуске) — поведение как раньше.
+ *
+ * Открытый вопрос (спецификация не уточняет): отсутствие состояния при
+ * наличии rails.yaml трактуется как «рельсы не зацепились» и check не
+ * запускается — простое решение без риска ложных повторов, когда хуки в
+ * workdir по какой-то причине не сработали.
+ *
+ * @returns {Promise<object>} результат spawnAgent (плюс railsRetried/railsVerdict при повторе)
+ */
+async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, root, skill) {
+  const hasRails = railsYamlExists(root, skill);
+  const runId = crypto.randomUUID();
+  const railsOpts = hasRails
+    ? { railsRole: 'coordinator', railsSkill: skill, railsRun: runId }
+    : {};
+
+  const result = await spawnAgent(agentConfig, prompt, { ...spawnOpts, ...railsOpts });
+  if (!hasRails) return result;
+
+  let config;
+  try {
+    config = loadRailsConfig(path.join(root, '.workflow', 'src', 'skills', skill));
+  } catch {
+    return result;
+  }
+
+  const state = findRailsStateByRun(root, runId);
+  if (!state) return result;
+
+  const verdict = checkRailsOutput(result.output || '', config, state);
+  if (verdict.ok) return result;
+
+  console.log(`[Runner] rails: output-check нарушен для ${skill}, повтор с вердиктом — отсутствует: ${verdict.missing.join('; ')}`);
+
+  const verdictText = `RAILS: предыдущий ответ отклонён output-check — отсутствует: ${verdict.missing.join('; ')}. Исправь и ответь заново.\n\n`;
+  const retryResult = await spawnAgent(agentConfig, verdictText + prompt, {
+    ...spawnOpts,
+    railsRole: 'coordinator',
+    railsSkill: skill,
+    railsRun: crypto.randomUUID()
+  });
+  retryResult.railsRetried = true;
+  retryResult.railsVerdict = verdict;
+  return retryResult;
+}
+
 function createTestWorkdir(skillName, suffix = '') {
   const prefix = suffix ? `wf-test-${skillName}-${suffix}-` : `wf-test-${skillName}-`;
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -59,21 +155,45 @@ function createTestWorkdir(skillName, suffix = '') {
   fs.mkdirSync(srcDir, { recursive: true });
   const realSkills = path.join(projectRoot, 'src', 'skills');
   const realScripts = path.join(projectRoot, 'src', 'scripts');
+  const realRails = path.join(projectRoot, 'src', 'rails');
   const linkSkills = path.join(srcDir, 'skills');
   const linkScripts = path.join(srcDir, 'scripts');
+  const linkRails = path.join(srcDir, 'rails');
   const configDir = path.join(workflowDir, 'config');
   const realConfigs = path.join(projectRoot, 'configs');
 
   // Skills are COPIED (not junctioned) so that agents cannot write to real source files.
   fs.cpSync(realSkills, linkSkills, { recursive: true, dereference: true });
 
-  // Scripts and configs are junctioned — read-only for agents in practice.
+  // Scripts, configs and rails are junctioned — read-only for agents in practice.
   if (process.platform === 'win32') {
     try { execSync(`mklink /J "${linkScripts}" "${realScripts}"`, { stdio: 'pipe', shell: true }); } catch {}
     try { execSync(`mklink /J "${configDir}" "${realConfigs}"`, { stdio: 'pipe', shell: true }); } catch {}
+    if (fs.existsSync(realRails)) {
+      try { execSync(`mklink /J "${linkRails}" "${realRails}"`, { stdio: 'pipe', shell: true }); } catch {}
+    }
   } else {
     try { fs.symlinkSync(realScripts, linkScripts, 'dir'); } catch {}
     try { fs.symlinkSync(realConfigs, configDir, 'dir'); } catch {}
+    if (fs.existsSync(realRails)) {
+      try { fs.symlinkSync(realRails, linkRails, 'dir'); } catch {}
+    }
+  }
+
+  // rails/README.md §11: те же хуки/загрузчик, что `workflow init` пишет в
+  // реальном проекте — судья/целевой агент в изолированном workdir видит
+  // тот же rails, что и на настоящем проекте.
+  if (fs.existsSync(realRails)) {
+    // Хуки Claude уже у пользователя (~/.claude/settings.json, register-rails.js --user) —
+    // workdir-копия не нужна: тот же вызов пришёл бы дважды (core дедуплицирует, но
+    // второй процесс хука всё равно платится). Kilo-плагин — только проектный.
+    // WORKFLOW_RAILS_WORKDIR_HOOKS: always | never | auto (по умолчанию — писать, если
+    // у пользователя хуков rails нет).
+    const mode = process.env.WORKFLOW_RAILS_WORKDIR_HOOKS || 'auto';
+    if (mode === 'always' || (mode !== 'never' && !userHasRailsHooks())) {
+      try { writeClaudeHooks(tmpRoot); } catch {}
+    }
+    try { writeKiloPluginLoader(tmpRoot); } catch {}
   }
 
   return tmpRoot;
@@ -82,8 +202,9 @@ function createTestWorkdir(skillName, suffix = '') {
 function cleanupTestWorkdir(tmpRoot) {
   if (!tmpRoot || !fs.existsSync(tmpRoot)) return;
   // Remove junctions first so that their targets are not touched by rmSync.
+  // src/rails снимается первым (rails/README.md §11).
   if (process.platform === 'win32') {
-    for (const link of ['src/scripts', 'config']) {
+    for (const link of ['src/rails', 'src/scripts', 'config']) {
       const p = path.join(tmpRoot, '.workflow', link);
       try { execSync(`rmdir "${p}"`, { stdio: 'pipe', shell: true }); } catch {}
     }
@@ -726,8 +847,8 @@ reason: <brief explanation>
   const badOutput = extractGoodResponse(badContent);
 
   const [goodResult, badResult] = await Promise.all([
-    spawnAgent(judgeAgentConfig, judgePrompt(goodOutput, 'Evaluate the good response'), { timeout: 60 }),
-    spawnAgent(judgeAgentConfig, judgePrompt(badOutput, 'Evaluate the bad response'), { timeout: 60 })
+    spawnAgent(judgeAgentConfig, judgePrompt(goodOutput, 'Evaluate the good response'), { timeout: JUDGE_TIMEOUT_S, railsRole: 'executor' }),
+    spawnAgent(judgeAgentConfig, judgePrompt(badOutput, 'Evaluate the bad response'), { timeout: JUDGE_TIMEOUT_S, railsRole: 'executor' })
   ]);
 
   const goodScore = parseJudgeResult(goodResult.output)?.score || 3;
@@ -800,6 +921,36 @@ async function writeTrialOutput(skillName, caseId, agentId, trialNum, output) {
   
   fs.writeFileSync(trialFile, output, 'utf8');
   return trialFile;
+}
+
+/**
+ * Сохраняет улики rails из изолированного workdir до его удаления
+ * (rails/README.md §10, §12 концепции — журнал отказов как обратная связь для
+ * правки графа): журнал `rails-denials.jsonl` → `current/<agent>/rails-trial-N.jsonl`,
+ * состояние сессии → `current/<agent>/rails-state-trial-N.json`. Без них workdir
+ * уносил с собой всю историю отказов прогона.
+ */
+function persistRailsArtifacts(taskWorkdir, skillName, caseId, agentId, trialNum) {
+  try {
+    const skillsDir = findSkillsDir();
+    const agentDir = path.join(skillsDir, skillName, 'tests', 'cases', caseId, 'current', agentId);
+    const journal = path.join(taskWorkdir, '.workflow', 'logs', 'rails-denials.jsonl');
+    const stateDir = path.join(taskWorkdir, '.workflow', 'state', 'rails');
+    const hasJournal = fs.existsSync(journal);
+    const states = fs.existsSync(stateDir) ? fs.readdirSync(stateDir).filter((f) => f.endsWith('.json')) : [];
+    if (!hasJournal && states.length === 0) return;
+    ensureDir(agentDir);
+    if (hasJournal) fs.copyFileSync(journal, path.join(agentDir, `rails-trial-${trialNum}.jsonl`));
+    if (states.length > 0) {
+      // Один прогон — одна сессия целевого агента; при нескольких берём самую свежую.
+      const newest = states
+        .map((f) => ({ f, m: fs.statSync(path.join(stateDir, f)).mtimeMs }))
+        .sort((a, b) => b.m - a.m)[0].f;
+      fs.copyFileSync(path.join(stateDir, newest), path.join(agentDir, `rails-state-trial-${trialNum}.json`));
+    }
+  } catch (err) {
+    console.log(`[Runner] rails: не удалось сохранить улики workdir (${err.message})`);
+  }
 }
 
 async function writeJudgeResults(skillName, caseId, results) {
@@ -981,11 +1132,11 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
       try {
         taskWorkdir = createTestWorkdir(skillName, taskSuffix);
         const targetPrompt = buildTargetPrompt(taskWorkdir);
-        const targetOutput = await spawnAgent(task.agentConfig, targetPrompt, {
+        const targetOutput = await spawnTargetAgentWithRailsCheck(task.agentConfig, targetPrompt, {
           timeout,
           stageId: `${caseId}-${task.agentId}-trial-${task.trial}`,
           projectRoot: taskWorkdir
-        });
+        }, taskWorkdir, skillName);
 
         // Snapshot ticket files after target-run (for judge to inspect actual file state).
         let ticketFilesSection = '';
@@ -1024,8 +1175,9 @@ reason: <brief explanation>
 ---RESULT---`;
 
         const judgeResult = await spawnAgent(task.judgeAgentConfig, judgePrompt, {
-          timeout: 60,
-          stageId: `${caseId}-judge-${task.agentId}-trial-${task.trial}`
+          timeout: JUDGE_TIMEOUT_S,
+          stageId: `${caseId}-judge-${task.agentId}-trial-${task.trial}`,
+          railsRole: 'executor'
         });
 
         let score = 3;
@@ -1067,6 +1219,7 @@ reason: <brief explanation>
         };
       } finally {
         if (taskWorkdir) {
+          persistRailsArtifacts(taskWorkdir, skillName, caseId, task.agentId, task.trial);
           cleanupTestWorkdir(taskWorkdir);
         }
       }
@@ -1319,6 +1472,7 @@ async function runTestsForSkill(skillName, opts) {
 
     const defaultTargetAgents = index.execution?.target_agents || [];
     const judgeAgent = index.execution?.judge_agent || null;
+    JUDGE_TIMEOUT_S = Number(index.execution?.judge_timeout_s) || 180;
 
     if (defaultTargetAgents.length > 0) {
       validateAgents(defaultTargetAgents, pipelineConfig);

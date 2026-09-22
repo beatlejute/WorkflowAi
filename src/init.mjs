@@ -1,9 +1,10 @@
 import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, appendFileSync, symlinkSync, statSync, readdirSync, unlinkSync } from 'node:fs';
 import { join, resolve, dirname, basename } from 'node:path';
+import { homedir } from 'node:os';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getGlobalDir, ensureGlobalDir } from './global-dir.mjs';
-import { createSkillJunctions, createScriptJunction, createConfigJunction } from './junction-manager.mjs';
+import { createSkillJunctions, createScriptJunction, createConfigJunction, createRailsJunction } from './junction-manager.mjs';
 
 /**
  * Возвращает абсолютный путь к корню npm-пакета через import.meta.url.
@@ -257,6 +258,7 @@ function updateGitignore(projectRoot) {
     '.workflow-state/',
     '.cache/',
     '.workflow/',
+    '.workflow/state/',
     '',
     '# AI',
     'QWEN.md',
@@ -276,6 +278,179 @@ function updateGitignore(projectRoot) {
   if (newLines.some(line => line !== '')) {
     appendFileSync(gitignorePath, newLines.join('\n') + '\n');
   }
+}
+
+function isPlainObject(v) {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Убирает из массива matcher-групп `hooks[event]` записи, добавленные rails
+ * (`_workflow_rails: true`), не трогая чужие. Группа, целиком состоявшая из
+ * наших записей, удаляется полностью; группа с чужими записями сохраняется
+ * без наших. Так повторный `writeClaudeHooks` идемпотентен и не накапливает
+ * дубликаты (rails/README.md §11: «повторный init заменяет только их»).
+ *
+ * @param {Array<object>} groups
+ * @returns {Array<object>}
+ */
+function stripRailsHookGroups(groups) {
+  const out = [];
+  for (const group of groups) {
+    if (!isPlainObject(group)) {
+      out.push(group);
+      continue;
+    }
+    const list = Array.isArray(group.hooks) ? group.hooks : [];
+    const wasOnlyOurs = list.length > 0 && list.every((h) => isPlainObject(h) && h._workflow_rails === true);
+    if (wasOnlyOurs) {
+      continue;
+    }
+    const filtered = list.filter((h) => !(isPlainObject(h) && h._workflow_rails === true));
+    out.push(filtered.length === list.length ? group : { ...group, hooks: filtered });
+  }
+  return out;
+}
+
+/**
+ * Регистрирует хуки rails в `<projectRoot>/.claude/settings.local.json`
+ * (rails/README.md §9.1, §11). Сливает ключ `hooks`: свои записи помечает
+ * `_workflow_rails: true` и на повторном вызове заменяет только их — чужие
+ * хуки и остальные ключи settings не трогает. Путь к хуку — абсолютный,
+ * `node "<projectRoot>/.workflow/src/rails/claude-hook.mjs"`.
+ *
+ * Идемпотентна: повторный вызов с тем же `projectRoot` даёт тот же результат.
+ *
+ * @param {string} projectRoot
+ * @returns {string} путь к обновлённому settings.local.json
+ */
+export function writeClaudeHooks(projectRoot, { hookScript: hookScriptOverride = null, settingsPath: settingsPathOverride = null } = {}) {
+  // settingsPath по умолчанию — проектный settings.local.json; override — пользовательский
+  // `~/.claude/settings.json` (одна регистрация на машину, register-rails.js --user).
+  const settingsPath = settingsPathOverride || join(projectRoot, '.claude', 'settings.local.json');
+  ensureDir(dirname(settingsPath));
+
+  let settings = {};
+  if (existsSync(settingsPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+      if (isPlainObject(parsed)) settings = parsed;
+    } catch {
+      // Битый JSON — не наш файл. §11 запрещает трогать чужие ключи, а начать
+      // с пустого объекта значит их стереть (перезаписать поверх невалидного
+      // содержимого своим). Ничего не пишем и возвращаем null — вызывающий
+      // код (initProject) обязан не считать шаг успешным и не звать
+      // writeKiloPluginLoader молча следом.
+      return null;
+    }
+  }
+
+  if (settings.hooks !== undefined && !isPlainObject(settings.hooks)) {
+    // Чужой settings.hooks не объект (массив/строка/число) — та же защита,
+    // что для битого JSON: подменить его пустым объектом значит стереть
+    // чужое значение (§11 «чужие ключи не трогать»). Ничего не пишем.
+    return null;
+  }
+
+  // hookScript по умолчанию — ядро rails проекта через junction; override — для
+  // регистрации на уровне каталога-зонтика над проектами (путь к ~/.workflow/rails).
+  const hookScript = hookScriptOverride || join(projectRoot, '.workflow', 'src', 'rails', 'claude-hook.mjs');
+  const command = `node "${hookScript}"`;
+  // PreToolUse/PostToolUse — matcher это имя инструмента (Bash, Edit, …), '*'
+  // документированно означает «все». Для Stop/UserPromptSubmit/SessionStart
+  // matcher — не имя инструмента (для SessionStart это source: startup|resume|
+  // clear), приём '*' там канарейкой не проверен (rails/README.md §9.1) —
+  // группа пишется без поля matcher вовсе.
+  const matcherEvents = new Set(['PreToolUse', 'PostToolUse']);
+  const events = ['PreToolUse', 'PostToolUse', 'Stop', 'UserPromptSubmit', 'SessionStart'];
+
+  const hooks = isPlainObject(settings.hooks) ? { ...settings.hooks } : {};
+  for (const event of events) {
+    const existingValue = hooks[event];
+    if (existingValue !== undefined && !Array.isArray(existingValue)) {
+      // Чужой формат этого события (не массив matcher-групп) — не трогаем,
+      // пропускаем событие целиком, значение остаётся как было.
+      continue;
+    }
+    const kept = stripRailsHookGroups(existingValue || []);
+    const ourHooks = [{ type: 'command', command, _workflow_rails: true }];
+    kept.push(matcherEvents.has(event) ? { matcher: '*', hooks: ourHooks } : { hooks: ourHooks });
+    hooks[event] = kept;
+  }
+
+  settings.hooks = hooks;
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+  return settingsPath;
+}
+
+/**
+ * Есть ли уже хуки rails в пользовательском `~/.claude/settings.json` (одна регистрация
+ * на машину, `register-rails.js --user`). Тогда проектные/workdir-хуки лишние: тот же вызов
+ * пришёл бы дважды (core дедуплицирует по tool_use_id, но процесс хука всё равно платится).
+ *
+ * @param {string} [settingsPath]
+ * @returns {boolean}
+ */
+export function userHasRailsHooks(settingsPath = join(homedir(), '.claude', 'settings.json')) {
+  try {
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    const hooks = isPlainObject(parsed) && isPlainObject(parsed.hooks) ? parsed.hooks : {};
+    return Object.values(hooks).some((groups) => Array.isArray(groups)
+      && groups.some((g) => isPlainObject(g) && Array.isArray(g.hooks) && g.hooks.some((h) => isPlainObject(h) && h._workflow_rails === true)));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Снимает записи rails (`_workflow_rails: true`) из settings; чужие хуки и ключи не трогает.
+ * Событие без оставшихся групп удаляется, пустой `hooks` — тоже. Возвращает путь или null
+ * (файла нет, битый JSON, чужой формат `hooks` — ничего не пишем).
+ *
+ * @param {string} projectRoot
+ * @param {{settingsPath?: string}} [options]
+ * @returns {string|null}
+ */
+export function removeClaudeHooks(projectRoot, { settingsPath: settingsPathOverride = null } = {}) {
+  const settingsPath = settingsPathOverride || join(projectRoot, '.claude', 'settings.local.json');
+  if (!existsSync(settingsPath)) return null;
+  let settings;
+  try {
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    if (!isPlainObject(parsed)) return null;
+    settings = parsed;
+  } catch {
+    return null;
+  }
+  if (!isPlainObject(settings.hooks)) return null;
+  const hooks = { ...settings.hooks };
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    const kept = stripRailsHookGroups(groups);
+    if (kept.length === 0) delete hooks[event];
+    else hooks[event] = kept;
+  }
+  if (Object.keys(hooks).length === 0) delete settings.hooks;
+  else settings.hooks = hooks;
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+  return settingsPath;
+}
+
+/**
+ * Пишет загрузчик Kilo-плагина rails: `<projectRoot>/.kilo/plugin/workflow-rails.js`
+ * (rails/README.md §9.2, §11). Содержимое фиксированное — повторный вызов
+ * идемпотентен (перезаписывает тем же текстом).
+ *
+ * @param {string} projectRoot
+ * @returns {string} путь к загрузчику
+ */
+export function writeKiloPluginLoader(projectRoot) {
+  const pluginDir = join(projectRoot, '.kilo', 'plugin');
+  ensureDir(pluginDir);
+  const loaderPath = join(pluginDir, 'workflow-rails.js');
+  const content = 'export { WorkflowRails } from "../../.workflow/src/rails/kilo-plugin.mjs";\n';
+  writeFileSync(loaderPath, content, 'utf-8');
+  return loaderPath;
 }
 
 /**
@@ -398,6 +573,39 @@ export function initProject(targetPath = process.cwd(), options = {}) {
   const srcScriptsDest = join(workflowRoot, 'src', 'scripts');
   createScriptJunction(globalDir, srcScriptsDest);
   result.steps.push('Created script junction from global dir → .workflow/src/scripts/');
+
+  // Step 4: rails (rails/README.md §11) — junction ядра + регистрация хуков.
+  // Регистрацию хуков выполняет только человек командой `workflow init`
+  // (принцип 17 концепции «Рельсы для агента») — initProject() сам по себе
+  // ничего не запускает и не отправляет, только пишет конфиги на диск.
+  const srcRailsDest = join(workflowRoot, 'src', 'rails');
+  createRailsJunction(globalDir, srcRailsDest);
+  // Хуки регистрируем только когда ядро rails реально доступно по этому
+  // пути (через junction на globalDir/rails, эжектнутую копию или уже
+  // существующий каталог) — иначе settings.local.json получит команду на
+  // несуществующий адаптер (claude-hook.mjs ещё не реализован в этом WP —
+  // README §1), и каждый tool-call начнёт падать. Проверяем не конкретный
+  // файл, а что каталог вообще не пуст — createRailsJunction молча выходит
+  // без источника (пустой ~/.workflow/rails или его отсутствие).
+  let railsCoreAvailable = false;
+  try {
+    railsCoreAvailable = existsSync(srcRailsDest) && readdirSync(srcRailsDest).length > 0;
+  } catch {
+    railsCoreAvailable = false;
+  }
+  if (railsCoreAvailable) {
+    result.steps.push('Created rails junction from global dir → .workflow/src/rails/');
+    const hooksPath = writeClaudeHooks(projectRoot);
+    if (hooksPath) {
+      result.steps.push('Registered rails hooks in .claude/settings.local.json');
+    } else {
+      result.errors.push('.claude/settings.local.json не изменён (невалидный JSON либо settings.hooks не объект) — хуки rails не зарегистрированы');
+    }
+    writeKiloPluginLoader(projectRoot);
+    result.steps.push('Wrote rails plugin loader → .kilo/plugin/workflow-rails.js');
+  } else {
+    result.steps.push('Skipped rails hooks: ядро rails недоступно в .workflow/src/rails/ (нет в глобальной установке ~/.workflow/rails — обновите пакет/глобальную установку и повторите workflow init)');
+  }
 
   // Step 5: Copy templates (3 templates)
   const templatesSrc = join(packageRoot, 'templates');

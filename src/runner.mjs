@@ -15,6 +15,8 @@ import { readPauseRequest, RUNNER_CAPABILITIES } from './lib/pause-request.mjs';
 import { packageVersion as pipelineVersion } from './lib/package-version.mjs';
 import { appendAgentRun, classifyAgentResult } from './lib/agent-history.mjs';
 import { incrementMetrics } from './lib/metrics-incremental.mjs';
+import { loadRailsConfig } from './rails/rails-config.mjs';
+import { check as checkRailsOutput } from './rails/output-check.mjs';
 
 // ============================================================================
 // Audit-log helpers (used by executeWithFallback hook — IMPL-83)
@@ -23,6 +25,44 @@ import { incrementMetrics } from './lib/metrics-incremental.mjs';
 function formatLocalDateTime(d) {
   const pad = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+// ============================================================================
+// Rails integration (src/rails/README.md §11) — окружение целевого агента
+// стадии и output-check по завершении. Ядро rails (граф/состояние/хуки) —
+// отдельный пакет работ; здесь только интеграция раннера (wp5).
+// ============================================================================
+
+function railsYamlExists(root, skill) {
+  if (!skill) return false;
+  try {
+    return fs.existsSync(path.join(root, '.workflow', 'src', 'skills', skill, 'rails.yaml'));
+  } catch {
+    return false;
+  }
+}
+
+/** Файл состояния сессии rails с данным `run` (§5: поле `run`), или null. */
+function findRailsStateByRun(root, run) {
+  if (!run) return null;
+  const dir = path.join(root, '.workflow', 'state', 'rails');
+  let entries;
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return null;
+  }
+  for (const name of entries) {
+    if (!name.endsWith('.json') || name.startsWith('.')) continue;
+    try {
+      const state = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+      if (state && state.run === run) return state;
+    } catch {
+      // повреждённый/недописанный файл состояния — пропускаем, как и
+      // остальные читатели rails (journal.mjs, state.mjs).
+    }
+  }
+  return null;
 }
 
 function findTicketPathForId(ticketId, projectRoot) {
@@ -1351,9 +1391,11 @@ class StageExecutor {
   }
 
   /**
-   * Вызывает CLI-агента через child_process
+   * Вызывает CLI-агента через child_process ровно один раз (без rails-ретрая).
+   * `railsEnv` — переменные окружения WORKFLOW_RAILS_* дочернего процесса
+   * (src/rails/README.md §11); вызывающий код — `callAgent` ниже.
    */
-  callAgent(agent, prompt, stageId, skillId, agentId = null) {
+  _callAgentOnce(agent, prompt, stageId, skillId, agentId = null, railsEnv = {}) {
     return new Promise((resolve, reject) => {
       const timeout = this.pipeline.execution?.timeout_per_stage || 300;
       const healthRules = agentId ? this._getHealthRules() : null;
@@ -1393,7 +1435,8 @@ class StageExecutor {
         cwd: path.resolve(this.projectRoot, agent.workdir || '.'),
         stdio: ['pipe', 'pipe', 'pipe'],
         shell: useShell,
-        windowsHide: true
+        windowsHide: true,
+        env: { ...process.env, ...railsEnv }
       });
       this.currentChild = child;
 
@@ -1639,6 +1682,65 @@ class StageExecutor {
         }
       });
     });
+  }
+
+  /**
+   * Вызывает CLI-агента через child_process (rails/README.md §11).
+   *
+   * Целевой агент стадии — всегда `WORKFLOW_RAILS_ROLE=coordinator` (раннер
+   * не различает судью и целевого агента внутри обычного pipeline — судья
+   * есть только в run-skill-tests.js). После успешного завершения, если у
+   * скила стадии есть `rails.yaml`, ищем состояние сессии по `run` и гоним
+   * его через `output-check`; при нарушении — один повтор с вердиктом в
+   * начале промпта (§8). Ошибка/таймаут агента rails не касаются — пробрасываются
+   * как есть, ретрая на них нет.
+   *
+   * Открытый вопрос (спецификация не уточняет): если `rails.yaml` у скила
+   * есть, а состояние с этим `run` не найдено (хуки не зарегистрированы в
+   * проекте, либо агент не выполнил ни одного отслеживаемого действия) —
+   * output-check пропускается молча, как если бы rails.yaml не было. Другого
+   * детерминированного поведения без риска ложных повторов на пустом месте
+   * не просматривается.
+   *
+   * @returns {Promise<{status: string, output: string, stderr: string, result: object, exitCode: number, parsed: boolean}>}
+   */
+  async callAgent(agent, prompt, stageId, skillId, agentId = null) {
+    const runId = crypto.randomUUID();
+    const railsEnv = { WORKFLOW_RAILS_ROLE: 'coordinator', WORKFLOW_RAILS_RUN: runId };
+    if (skillId) railsEnv.WORKFLOW_RAILS_SKILL = skillId;
+
+    const result = await this._callAgentOnce(agent, prompt, stageId, skillId, agentId, railsEnv);
+
+    if (!railsYamlExists(this.projectRoot, skillId)) return result;
+
+    let config;
+    try {
+      config = loadRailsConfig(path.join(this.projectRoot, '.workflow', 'src', 'skills', skillId));
+    } catch (err) {
+      if (this.logger) this.logger.warn(`rails: rails.yaml скила «${skillId}» не читается: ${err.message}`, stageId);
+      return result;
+    }
+
+    const state = findRailsStateByRun(this.projectRoot, runId);
+    if (!state) return result;
+
+    const verdict = checkRailsOutput(result.output || '', config, state);
+    if (verdict.ok) return result;
+
+    if (this.logger) {
+      this.logger.warn(`rails: output-check нарушен, повтор с вердиктом — отсутствует: ${verdict.missing.join('; ')}`, stageId);
+    }
+
+    const verdictText = `RAILS: предыдущий ответ отклонён output-check — отсутствует: ${verdict.missing.join('; ')}. Исправь и ответь заново.\n\n`;
+    const retryEnv = {
+      WORKFLOW_RAILS_ROLE: 'coordinator',
+      WORKFLOW_RAILS_RUN: crypto.randomUUID(),
+      WORKFLOW_RAILS_SKILL: skillId
+    };
+    const retryResult = await this._callAgentOnce(agent, verdictText + prompt, stageId, skillId, agentId, retryEnv);
+    retryResult.railsRetried = true;
+    retryResult.railsVerdict = verdict;
+    return retryResult;
   }
 
 }

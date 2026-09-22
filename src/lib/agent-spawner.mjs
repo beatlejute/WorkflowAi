@@ -152,7 +152,17 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
     projectRoot = process.cwd(),
     currentChildRef = null,
     agentId = null,
-    healthRules = null
+    healthRules = null,
+    // rails (src/rails/README.md §11): переменные окружения дочернего
+    // процесса. `env` — произвольная доплата к process.env; `railsRole` /
+    // `railsSkill` / `railsRun` — точечные поля WORKFLOW_RAILS_* (ставит
+    // вызывающий код — run-skill-tests.js, runner.mjs), выставляются только
+    // когда заданы, чтобы не гасить чужой WORKFLOW_RAILS_* из окружения
+    // процесса-раннера при их отсутствии.
+    env: extraEnv = null,
+    railsRole = null,
+    railsSkill = null,
+    railsRun = null
   } = options;
 
   return new Promise((resolve, reject) => {
@@ -185,13 +195,20 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
 
     const startTime = Date.now();
 
+    // rails: env дочернего процесса, только заданные поля.
+    const childEnv = { ...process.env, ...(extraEnv || {}) };
+    if (railsRole) childEnv.WORKFLOW_RAILS_ROLE = railsRole;
+    if (railsSkill) childEnv.WORKFLOW_RAILS_SKILL = railsSkill;
+    if (railsRun) childEnv.WORKFLOW_RAILS_RUN = railsRun;
+
     // windowsHide: без него у раннера без консоли (запуск из MCP) каждый
     // агент открывает своё окно терминала — см. callAgent в runner.mjs.
     const child = spawn(agentConfig.command, args, {
       cwd: path.resolve(projectRoot, agentConfig.workdir || '.'),
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: useShell,
-      windowsHide: true
+      windowsHide: true,
+      env: childEnv
     });
 
     if (currentChildRef) {

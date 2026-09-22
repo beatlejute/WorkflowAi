@@ -137,6 +137,29 @@ export function createConfigJunction(globalDir, projectConfigDir) {
   createJunction(globalConfigDir, projectConfigDir);
 }
 
+/**
+ * Junction на ядро rails (rails/README.md §11): `<globalDir>/rails` →
+ * `projectRailsDir` (обычно `<root>/.workflow/src/rails`). Тот же контракт,
+ * что у createScriptJunction/createConfigJunction: нет источника в глобальной
+ * установке — тихо выходим; локальный (не-junction) каталог в проекте не
+ * трогаем (ejected-режим).
+ *
+ * @param {string} globalDir
+ * @param {string} projectRailsDir
+ */
+export function createRailsJunction(globalDir, projectRailsDir) {
+  const globalRailsDir = join(globalDir, 'rails');
+  if (!existsSync(globalRailsDir)) {
+    return;
+  }
+
+  if (existsSync(projectRailsDir) && !isJunction(projectRailsDir)) {
+    return;
+  }
+
+  createJunction(globalRailsDir, projectRailsDir);
+}
+
 export function ejectConfigs(globalDir, projectConfigDir) {
   const globalConfigDir = join(globalDir, 'configs');
 

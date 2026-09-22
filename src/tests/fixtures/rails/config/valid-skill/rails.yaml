@@ -1,0 +1,57 @@
+version: 1
+skill: coach
+entry: P0E1
+terminal: [P8S3]
+pause_nodes: [P3Q1, P7S2]
+fragments: ["workflows/*.md"]
+quote_min: 25
+canary: "echo RAILS_CANARY"
+
+write_scope:
+  - ".workflow/src/skills/**"
+  - ".workflow/coach-backlog.yaml"
+allow_temp: true
+write_deny:
+  - ".workflow/src/skills/coach/rails.yaml"
+  - ".workflow/src/rails/**"
+
+deny_shell:
+  - pattern: "\\bgit\\s+(commit|add|push|checkout|switch|restore|reset|rebase|merge|stash|tag)\\b"
+    reason: "Коуч не выполняет git-операции — коммит делает исключительно пользователь"
+    incident: "SKILL.md ⛔ «Коуч не выполняет git-операции»"
+deny_mcp:
+  - git_commit
+  - git_create_branch
+  - git_open_pr
+
+stage_actions:
+  edit_skill:
+    kind: [edit, write]
+    match: ".workflow/src/skills/**"
+    stages: [4, 12, 41]
+  run_tests:
+    kind: [shell]
+    match: "run-skill-tests\\.js"
+    stages: [5]
+    max_per_session: 3
+  next_test_id:
+    kind: [shell]
+    match: "get-next-test-id\\.js"
+    stages: [5]
+  edit_backlog:
+    kind: [edit, write]
+    match: ".workflow/coach-backlog.yaml"
+    stages: [6]
+
+cycles:
+  - from: 5
+    to: 4
+    max: 3
+    reason: "Три круга «правка → тест» не сошлись — выход к человеку"
+
+output:
+  final_requires:
+    - "RAILS:\\s*P\\d+[ERSGQ]\\d+"
+    - "verdict\\s*="
+    - "Файлы:"
+  max_stop_blocks: 2

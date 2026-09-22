@@ -14,6 +14,7 @@
     "src/wf-loader.mjs",
     "src/global-dir.mjs",
     "src/junction-manager.mjs",
+    "src/rails/",
     "src/lib/",
     "src/scripts/*.js",
     "src/skills/*/SKILL.md",
@@ -36,7 +37,8 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "test": "node --test src/tests/*.test.mjs",
+    "test": "node --test --import ./src/tests/_rails-home.mjs src/tests/*.test.mjs src/skills/*/tests/rails/*.test.mjs",
+    "test:rails-guards": "node --test --import ./src/tests/_rails-home.mjs src/skills/*/tests/rails/*.test.mjs",
     "bench": "node --test src/tests/artifact-snapshot.bench.mjs",
     "test:skills": "node src/scripts/run-skill-tests.js --all",
     "coverage": "c8 node --test src/tests/*.test.mjs && node scripts/check-coverage-ratchet.mjs",

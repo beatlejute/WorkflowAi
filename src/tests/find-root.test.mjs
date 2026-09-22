@@ -133,6 +133,48 @@ test('findProjectRoot не принимает глобальную директ�
   }
 });
 
+// `WORKFLOW_HOME` переопределён (тесты изолируют память сессий рельсов, второй
+// профиль), а `~/.workflow` по-прежнему лежит на диске: без отдельного
+// исключения умолчания домашний каталог снова становился корнем для всего под
+// ним — включая os.tmpdir(), и тесты «корень не найден» падали.
+test('findProjectRoot не принимает ~/.workflow за корень, даже когда WORKFLOW_HOME указывает в другое место', () => {
+  const homeVar = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+  const fakeHome = join(tmpdir(), `find-root-fake-home-${Date.now()}`);
+  const nested = join(fakeHome, 'AppData', 'Local', 'Temp', 'sandbox');
+  const otherGlobal = join(tmpdir(), `find-root-other-global-${Date.now()}`);
+  const prevHome = process.env[homeVar];
+  const prevWorkflowHome = process.env.WORKFLOW_HOME;
+
+  try {
+    mkdirSync(join(fakeHome, '.workflow'), { recursive: true });
+    mkdirSync(nested, { recursive: true });
+    mkdirSync(otherGlobal, { recursive: true });
+    process.env[homeVar] = fakeHome;
+    process.env.WORKFLOW_HOME = otherGlobal;
+
+    let result = null;
+    try {
+      result = findProjectRoot(nested);
+    } catch {
+      // корень не найден — ожидаемый исход
+    }
+    if (result !== null) {
+      assert.notStrictEqual(
+        realpathSync.native(result).toLowerCase(),
+        realpathSync.native(fakeHome).toLowerCase(),
+        `домашний каталог принят за проект: ${result}`
+      );
+    }
+  } finally {
+    if (prevHome === undefined) delete process.env[homeVar];
+    else process.env[homeVar] = prevHome;
+    if (prevWorkflowHome === undefined) delete process.env.WORKFLOW_HOME;
+    else process.env.WORKFLOW_HOME = prevWorkflowHome;
+    rmSync(fakeHome, { recursive: true, force: true });
+    rmSync(otherGlobal, { recursive: true, force: true });
+  }
+});
+
 // На раннере GitHub `TEMP` — короткое имя 8.3 (`C:\Users\RUNNER~1\…`), а
 // глобальный каталог — длинное (`C:\Users\runneradmin\.workflow`). Подъём
 // от `TEMP` приходил к глобальному каталогу под коротким именем, строковое

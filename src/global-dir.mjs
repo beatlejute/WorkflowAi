@@ -74,9 +74,11 @@ function copySkillsScriptsAndConfigs(packageRoot) {
   const srcSkills = join(packageRoot, 'src', 'skills');
   const srcScripts = join(packageRoot, 'src', 'scripts');
   const srcConfigs = join(packageRoot, 'configs');
+  const srcRails = join(packageRoot, 'src', 'rails');
   const destSkills = join(globalDir, 'skills');
   const destScripts = join(globalDir, 'scripts');
   const destConfigs = join(globalDir, 'configs');
+  const destRails = join(globalDir, 'rails');
 
   if (existsSync(srcSkills)) {
     copyDirectory(srcSkills, destSkills);
@@ -86,6 +88,12 @@ function copySkillsScriptsAndConfigs(packageRoot) {
   }
   if (existsSync(srcConfigs)) {
     copyDirectory(srcConfigs, destConfigs);
+  }
+  // rails/README.md §11: ядро rails копируется в глобальную установку тем же
+  // путём, что skills/scripts/configs — проектная junction (createRailsJunction)
+  // указывает именно сюда.
+  if (existsSync(srcRails)) {
+    copyDirectory(srcRails, destRails);
   }
 }
 
@@ -99,7 +107,18 @@ export function isGlobalDirStale(packageRoot) {
     return true;
   }
   const packageVersion = getPackageVersion(packageRoot);
-  return packageVersion !== globalVersion;
+  if (packageVersion !== globalVersion) {
+    return true;
+  }
+  // rails/README.md §11: версия совпадает, но `<globalDir>/rails` отсутствует,
+  // хотя пакет несёт `src/rails` — так бывает у глобальных установок,
+  // созданных версией пакета до появления rails (версия при этом могла не
+  // меняться). Без этой проверки ensureGlobalDir молча ничего не копирует, а
+  // createRailsJunction в init.mjs — молча ничего не линкует.
+  if (existsSync(join(packageRoot, 'src', 'rails')) && !existsSync(join(globalDir, 'rails'))) {
+    return true;
+  }
+  return false;
 }
 
 export function ensureGlobalDir(packageRoot) {

@@ -1,5 +1,6 @@
 import { existsSync, realpathSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { getGlobalDir } from '../global-dir.mjs';
 
 /**
@@ -40,6 +41,11 @@ function samePath(a, b) {
  * включая песочницы в os.tmpdir() — молча резолвила корень в неё и писала туда
  * тикеты, логи и метрики вместо того, чтобы честно упасть.
  *
+ * Исключаются оба адреса установочного каталога: текущий `getGlobalDir()` и
+ * умолчание `~/.workflow`. Когда `WORKFLOW_HOME` переопределён (тесты, второй
+ * профиль), `~/.workflow` остаётся на диске и без этого снова становился
+ * «проектом» для всего, что лежит под домашней папкой — включая `os.tmpdir()`.
+ *
  * @param {string} [startDir=process.cwd()] - Starting directory path
  * @returns {string} Absolute path to project root
  * @throws {Error} If `.workflow/` directory is not found within 20 levels
@@ -48,11 +54,11 @@ export function findProjectRoot(startDir = process.cwd()) {
   let current = resolve(startDir);
   let iterations = 0;
   const MAX_DEPTH = 20;
-  const globalDir = resolve(getGlobalDir());
+  const installDirs = [resolve(getGlobalDir()), resolve(join(homedir(), '.workflow'))];
 
   while (iterations < MAX_DEPTH) {
     const candidate = resolve(current, '.workflow');
-    if (existsSync(candidate) && !samePath(candidate, globalDir)) {
+    if (existsSync(candidate) && !installDirs.some((dir) => samePath(candidate, dir))) {
       return current;
     }
     const parent = dirname(current);
