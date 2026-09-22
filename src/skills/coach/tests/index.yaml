@@ -37,3 +37,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-21-audit"]
     tags: [consistency, regression-guard]
     severity: high
+  - id: TC-COACH-005
+    file: cases/TC-COACH-005-rails-anatomy.yaml
+    origin_chg: ["convert-2026-09-22"]
+    tags: [rails, anatomy, regression-guard]
+    severity: critical

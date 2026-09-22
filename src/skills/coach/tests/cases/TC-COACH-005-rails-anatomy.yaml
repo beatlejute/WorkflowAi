@@ -1,0 +1,133 @@
+id: TC-COACH-005
+title: "Coach живёт на рельсах: граф ядра в SKILL.md, rails.yaml, фрагменты веток, единая графовая анатомия и оценка соответствия концепции"
+origin:
+  chg: ["convert-2026-09-22"]
+  incidents:
+    - "Полный прогон тестов 2026-09-21: 40 из 46 L2-прогонов зелёные, но правила скилов в прозе не принуждаются — коуч в TC-001/002 отдавал ответ без findings, decompose-plan из фикстуры создал реальные тикеты, пробный коуч правил канон чужого скила из песочницы. Решение стейкхолдера 2026-09-21: единый подход «Рельсы для агента» — граф + хуки-отказы, конверсия всех скилов только через коуча."
+    - "Коррекция стейкхолдера 2026-09-22: в отчёте «прогон под рельсами» — канон «на рельсах»."
+  principle: "Концепция рельс, принципы 1 (один источник истины — граф), 15 (гард доказан тестом), 19 (лениво грузится то, что не цитируется); анатомия — только графовая форма."
+  backlog_sources: []
+tags: [rails, anatomy, regression-guard]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    # 1. Ядро — граф в SKILL.md с входом P0E1 и терминалом отчёта
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "rails: rails\\.yaml"
+      reason: "Frontmatter объявляет конфиг гардов — признак скила на рельсах."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "```mermaid[\\s\\S]*graph TD[\\s\\S]*P0E1\\[\"П0 ВХОД"
+      reason: "Процедура коуча записана mermaid-графом с входным узлом этапа 0."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0Q1\\{\"П0 ВЫБОР[\\s\\S]*CONVERT[\\s\\S]*P0Q1 -->\\|\"CONVERT\"\\| P70E1"
+      reason: "Маршрутизация — Q-узел с веткой CONVERT: перевод скилов на рельсы идёт только через коуча."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0S1\\[\"П0 ШАГ: Канарейка живости[^\\n]*echo RAILS_CANARY"
+      reason: "Проверка живости рельс — узел графа, а не совет в прозе."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P8S2\\[\"П8 ШАГ: Остановиться"
+      reason: "Терминальный узел отчёта существует — финальный ответ привязан к этапу."
+    # 2. Гарды — в rails.yaml, каждый с областью и инцидентом
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "entry: P0E1[\\s\\S]*write_scope:[\\s\\S]*\\.workflow/src/skills/\\*\\*[\\s\\S]*deny_shell:[\\s\\S]*git[^\\n]*commit\\|add\\|push"
+      reason: "H1 (область записи) и H2 (git) заданы конфигом хука, не текстом."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "stage_actions:[\\s\\S]*run_tests:[\\s\\S]*stages: \\[5\\][\\s\\S]*max_per_session: 3"
+      reason: "Прогон runner привязан к этапу теста и имеет потолок (принцип 10)."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "write_deny:[\\s\\S]*\\.workflow/src/skills/coach/rails\\.yaml"
+      reason: "Коуч не может ослабить собственные гарды (принцип 17)."
+    # 3. Ветки — фрагменты графа с узлами своего этапа
+    - kind: skill_contains
+      file: "workflows/convert.md"
+      pattern: "P70E1\\[\"П70 ВХОД: CONVERT[\\s\\S]*P70G1 -->\\|\"да\"\\| P5E1"
+      reason: "Ветка CONVERT — фрагмент графа, выход через гейт покрытия в этап теста."
+    - kind: skill_contains
+      file: "workflows/audit.md"
+      pattern: "P20S2\\[\"П20 ШАГ: Соответствие рельсам[^\\n]*check-rails-graph\\.js[^\\n]*CRITICAL «скил не на рельсах»"
+      reason: "Аудит оценивает соответствие концепции; скил без графа — CRITICAL и CONVERT."
+    - kind: skill_contains
+      file: "workflows/analyze.md"
+      pattern: "P30S4\\[\"П30 ШАГ: Соответствие рельсам поведенчески[^\\n]*rails-denials|P30S4\\[\"П30 ШАГ: Соответствие рельсам поведенчески[^\\n]*report --days"
+      reason: "Анализ оценивает соответствие по журналу отказов (поведенческие метрики)."
+    # 4. Единая анатомия и справочники концепции
+    - kind: skill_contains
+      file: "knowledge/skill-anatomy.md"
+      pattern: "Единственная поддерживаемая форма — графовая"
+      reason: "Legacy-форма не поддерживается как альтернатива — единый подход."
+    - kind: skill_contains
+      file: "knowledge/rails-concept.md"
+      pattern: "Один источник истины, и он машиночитаем[\\s\\S]*Лениво грузится то, что не цитируется"
+      reason: "Коуч хранит принципы концепции как knowledge для CREATE/AUDIT/CONVERT."
+    - kind: skill_contains
+      file: "algorithms/skill-scoring.md"
+      pattern: "Предусловие — скил на рельсах"
+      reason: "Скил без графа и rails.yaml не может получить высокий балл."
+    - kind: skill_contains
+      file: "algorithms/rails-compliance.md"
+      pattern: "Структурные метрики[\\s\\S]*Поведенческие метрики[\\s\\S]*OFF_RAILS"
+      reason: "Алгоритм оценки соответствия — структурный и поведенческий, с итоговой шкалой."
+    - kind: skill_contains
+      file: "knowledge/common-antipatterns.md"
+      pattern: "\\| R0 \\| Рельсы \\| Скил без графа"
+      reason: "Категория R антипаттернов концепции присутствует в чеклисте аудита."
+    # 5. Прозы, дублирующей граф, в ядре нет
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*## Принципы)"
+      reason: "Старая секция «Принципы» не должна вернуться рядом с графом (принцип 1 концепции)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*## Маршрутизация тикетов)"
+      reason: "Маршрутизация живёт в Q-узле, а не в таблице прозы."
+    # 6. Журнал отказов прогонов тестов — вход для анализа слабых узлов (2026-09-22)
+    - kind: skill_contains
+      file: "workflows/analyze.md"
+      pattern: "P30S4\\[\"[^\\n]*report --journal [^\\n]*tests/cases/TC-ID/current"
+      reason: "ANALYZE читает не только журнал проекта, но и журналы прогонов тестов, сохранённые раннером (rails-trial-N.jsonl) — иначе отказы из изолированных workdir'ов терялись бы вместе с ними."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P5S1\\[\"[^\\n]*дополняет его anchors без нового ID"
+      reason: "Правка, покрытая существующим кейсом, дополняет его anchors — иначе каждая мелкая правка плодит новый TC (первый проход коуча по графу 2026-09-22: get-next-test-id был обязателен даже для дополнения)."
+    # 7. Прогон и verdict (первый проход коуча по графу 2026-09-22)
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P5S5\\[\"[^\\n]*--case TC-SKILL-NNN --yes[^\\n]*не --relevant"
+      reason: "--relevant гонял все кейсы скила на всех моделях (kilo в том числе) ради одного изменённого кейса — прогон обязан быть точечным."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P5Q1\\{\"[^\\n]*no_baseline_failures при current_run\\.failed 0[^\\n]*зелёный"
+      reason: "Для нового или изменённого кейса раннер отдаёт no_baseline_failures — это не провал, если current_run.failed = 0; старая формулировка гнала на лишний круг правки."
+    # 8. Термин концепции в выводе (коррекция стейкхолдера 2026-09-22: «не под рельсами, а на рельсах»)
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P8R1\\[\"[^\\n]*«на рельсах», не «под рельсами»"
+      reason: "Канон термина концепции закреплён в правиле формата вывода — узле, который проходит каждый отчёт; без него термин в отчётах плавает."
+    # 9. Уроки прогона TC-COACH-002 на рельсах (2026-09-22)
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*\\n\\s*P\\d+[ERSGQ]\\d+[\\[{]\"[^\\n]*\\$[A-Za-z])"
+      reason: "В лейблах узлов нет «$X»: агент цитирует лейбл в --quote \"…\", shell раскрывает $X в пустоту, и goto отклоняется (P3Q1, P3S5 — отказы в журналах прогона)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P2S5\\[\"[^\\n]*Итог сравнения выведи в ответ отдельной строкой[^\\n]*без этой строки не принимаются"
+      reason: "Сравнение дат и семантического класса CHG выводится в ответ: узел P2Q1 все трое проходили, а в ответ сравнение попало у одного — судья поставил 2 остальным."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P7G1\\{\"[^\\n]*коррекция ещё не прошла шаги 1–2 этапа П7"
+      reason: "Гейт ГЛАВНОГО ПРАВИЛА срабатывает на необработанную коррекцию; без этого условия после обработки он снова отвечает «да» и крутит петлю П7 → П4 → П5 → П7."

@@ -42,8 +42,13 @@ assertions:
       reason: "Эскалация в машинную защиту при повторном инциденте."
 
   deterministic:
-    - kind: output_contains_all
-      values: ["root cause", "машинн"]
+    # Регистронезависимо и с русским синонимом: `output_contains_all` сравнивает через
+    # includes() с учётом регистра — прогон 2026-09-22 не засчитал «Root cause»,
+    # «Машинная защита» и «Причина первого порядка» (формулировка узла П2 коуча).
+    - kind: output_matches
+      regex: "[Rr][Oo][Oo][Tt].?[Cc][Aa][Uu][Ss][Ee]|[Пп]ричин\\S* перв\\S* порядк"
+    - kind: output_matches
+      regex: "[Мм]ашинн"
     - kind: output_does_not_contain
       values: ["формулировк достаточн", "наблюдать"]
 
