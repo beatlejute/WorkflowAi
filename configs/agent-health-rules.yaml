@@ -18,19 +18,6 @@ common:
     exit_codes: "any"
 
 agents:
-  qwen-code:
-    rules:
-      - id: "qwen-quota"
-        class: "unavailable"
-        ttl: "until_utc_midnight"
-        pattern: "Qwen OAuth quota exceeded|qwen.*quota.*exceed|Daily limit.*reached"
-        exit_codes: "any"
-      - id: "qwen-oauth-required"
-        class: "misconfigured"
-        ttl: "1h"
-        pattern: "Please run `qwen login`|qwen OAuth flow"
-        exit_codes: "any"
-
   claude-sonnet:
     rules:
       - id: "claude-overloaded"
@@ -55,21 +42,13 @@ agents:
         pattern: "free tier.*exhaust|daily limit|too many requests"
         exit_codes: "any"
 
-  kilo-deepseek:
+  deepseek-flash:
     rules:
-      - id: "kilo-deepseek-provider-down"
+      - id: "deepseek-provider-down"
         class: "transient"
         ttl: "15m"
         pattern: "deepseek.*unavailable|upstream error"
         exit_codes: "any"
 
-  kilo-glm:
-    rules:
-      - id: "zai-usage-limit"
-        class: "unavailable"
-        ttl: "5h"
-        pattern: "Usage limit reached for \\d+ hour|api\\.z\\.ai.*\"statusCode\":429|AI_APICallError.*z\\.ai"
-        exit_codes: "any"
-
-  kilo-glm-air:
-    extends: kilo-glm
+  deepseek-pro:
+    extends: deepseek-flash

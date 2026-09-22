@@ -6,8 +6,7 @@ execution:
   target_agents:
     - kilo-free
     - claude-haiku
-    - kilo-glm-air
-    - kilo-glm
+    - gpt-luna
   judge_agent: claude-opus
   default_timeout_s: 1200
   baseline_ref: origin/main

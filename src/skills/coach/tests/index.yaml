@@ -5,13 +5,13 @@ generated_at: "2026-04-15"
 # Список моделей, на которых гоняется скил coach.
 # Единая точка правды — наследуется всеми тест-кейсами в cases/.
 # Override возможен точечно в кейсе через поле execution.target_agents.
-# Заполнено вручную на основе pipeline.yaml: execute-task.agents_by_type.coach.agents
+# Имена агентов — из configs/pipeline.yaml (pipeline.agents).
 execution:
   target_agents:
-    - claude-sonnet   # основная модель скила (agents_by_type.coach.agents[0])
-    - kilo-deepseek   # fallback-модель скила (agents_by_type.coach.agents[1])
-    - kilo-minimax    # дополнительная модель для сравнения
-    - kilo-glm        # дополнительная модель для сравнения
+    - claude-sonnet       # основная модель тестов коуча
+    - deepseek-flash      # дополнительная модель для сравнения
+    - gemini-flash-lite   # дополнительная модель для сравнения
+    - gpt-luna            # дополнительная модель для сравнения
   judge_agent: claude-opus  # другая модель, чтобы исключить self-enhancement bias
   default_timeout_s: 1200
   baseline_ref: origin/main  # git ref для сравнения previously_green/red
