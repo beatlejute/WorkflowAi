@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { randomBytes } from 'crypto';
 
 const MARKER_FILE = '.pipeline.lock';
 const LOGS_DIR = '.workflow/logs';
@@ -15,8 +16,8 @@ function ensureLogsDir(projectRoot) {
 }
 
 /**
- * Atomic write via temp file + rename.
- * Fallback to O_EXCL (wx flag) on EXDEV/ENOTSUP.
+ * Atomic create via temp file + link: маркер появляется в каталоге целиком.
+ * Fallback to temp + rename on file systems without hard links (EXDEV/ENOTSUP/EPERM/ENOSYS).
  * Throws Error if marker file already exists (to prevent race conditions).
  */
 export function writeMarker(projectRoot, payload) {
@@ -24,44 +25,47 @@ export function writeMarker(projectRoot, payload) {
   const markerPath = path.join(projectRoot, LOGS_DIR, MARKER_FILE);
   const content = JSON.stringify(payload, null, 2);
 
-  // First, try exclusive create (O_EXCL) - this guarantees atomicity
-  // and prevents race conditions where two processes both think they created the marker
+  // Маркер появляется в каталоге целиком: содержимое пишется во временный файл рядом,
+  // а под финальным именем файл возникает одной операцией link. Прежний порядок —
+  // openSync(markerPath, 'wx') и запись вторым вызовом — оставлял окно, в котором файл
+  // уже существует, но пуст, а readMarker на пустом содержимом отдаёт null, то есть
+  // «пайплайн не запущен». Инцидент 2026-09-24: второй запуск в это окно не видел живой
+  // маркер и шёл выполнять пайплайн параллельно первому (ровно то, что singleton и
+  // предотвращает), а команда остановки отвечала «нечего останавливать».
+  // link, а не rename: link падает с EEXIST на занятом имени и этим сохраняет
+  // эксклюзивность создания, а rename молча перезаписал бы чужой живой маркер.
+  const tempPath = path.join(
+    path.dirname(markerPath),
+    `.pipeline.lock.tmp.${process.pid}.${randomBytes(6).toString('hex')}`
+  );
+
+  fs.writeFileSync(tempPath, content, 'utf-8');
+
   try {
-    const fd = fs.openSync(markerPath, 'wx');
-    fs.writeFileSync(fd, content, 'utf-8');
-    fs.closeSync(fd);
+    fs.linkSync(tempPath, markerPath);
     return;
-  } catch (openErr) {
-    if (openErr.code === 'EEXIST') {
-      // Marker already exists - another process created it
+  } catch (linkErr) {
+    if (linkErr.code === 'EEXIST') {
       throw new Error(`Marker file already exists at ${markerPath}`);
     }
-    // If EXDEV/ENOTSUP (cross-device link), fall back to temp+rename
-    if (openErr.code !== 'EXDEV' && openErr.code !== 'ENOTSUP') {
-      throw openErr;
+    // Файловая система без жёстких ссылок (EXDEV, ENOTSUP, EPERM, ENOSYS) — запасной путь
+    // через rename: содержимое видно целиком, но эксклюзивность приходится проверять
+    // отдельно, поэтому существующий маркер отсеивается до переименования.
+    if (!['EXDEV', 'ENOTSUP', 'EPERM', 'ENOSYS'].includes(linkErr.code)) {
+      throw linkErr;
     }
-  }
-
-  // Fallback: temp file + rename (less atomic but works across devices)
-  const tempPath = markerPath + '.tmp.' + process.pid + '.' + Date.now();
-  try {
-    fs.writeFileSync(tempPath, content, 'utf-8');
+    if (fs.existsSync(markerPath)) {
+      throw new Error(`Marker file already exists at ${markerPath}`);
+    }
     fs.renameSync(tempPath, markerPath);
     return;
-  } catch (renameErr) {
-    // Cleanup temp file if it still exists
+  } finally {
+    // После link временное имя больше не нужно, после rename его уже нет.
     try {
       fs.unlinkSync(tempPath);
     } catch {
       // ignore
     }
-
-    // If rename failed because marker was created by another process in the meantime
-    if (renameErr.code === 'EEXIST' || !fs.existsSync(tempPath)) {
-      throw new Error(`Marker file already exists at ${markerPath}`);
-    }
-
-    throw renameErr;
   }
 }
 
