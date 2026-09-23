@@ -35,3 +35,8 @@ cases:
     origin_chg: ["convert-2026-09-23"]
     tags: [rails, anatomy, regression-guard]
     severity: critical
+  - id: TC-CREATE-REPORT-005
+    file: cases/TC-CREATE-REPORT-005-plan-scope.yaml
+    origin_chg: ["improve-2026-09-24"]
+    tags: [scope, consistency, regression-guard]
+    severity: high

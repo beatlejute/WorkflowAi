@@ -40,7 +40,7 @@ assertions:
       reason: "Шаг 8 требует включать в отчёт секции «Аномалии» и «Прогресс по плану», отсутствующие в обязательном шаблоне, но обязательные по принципу 3 SKILL.md."
     - kind: skill_contains
       file: "workflows/standard.md"
-      pattern: "Аномалии:\\*\\*\\s+все критерии `algorithms/metric-calculation\\.md`\\s+раздел 4"
+      pattern: "Аномалии[^\\n]{0,4}все критерии `algorithms/metric-calculation\\.md` раздел 4"
       reason: "Шаг 6 ссылается на полный набор критериев аномалий (5 типов) algorithms/metric-calculation.md раздел 4, а не только на in-progress-с-результатом."
     - kind: skill_contains
       file: "workflows/standard.md"

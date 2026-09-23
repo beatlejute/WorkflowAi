@@ -1,0 +1,65 @@
+id: TC-CREATE-REPORT-005
+title: "Отчёт не выходит за область своего плана: статистика по тикетам с parent_plan плана, доска — отдельной секцией"
+origin:
+  chg: ["improve-2026-09-24"]
+  incidents:
+    - "Запрос стейкхолдера 2026-09-24: проверить, не выходит ли отчётчик за scope плана. Проверка показала расхождение внутри скила: узел сбора данных требовал все тикеты доски, а собственный скрипт скила (scripts/calc-metrics.js) отбирает тикеты строго по parent_plan — в одном отчёте оказывались числа из двух разных множеств."
+    - "Цена: доля выполненных и доля заблокированных считались по всей доске, а plan health и velocity — по одному плану. Хвост прошлого плана в backlog занижает Done rate, и аналитик (потребитель отчёта, работающий строго по PLAN-NNN) видит просадку, которой у плана нет."
+  principle: "Концепция рельс: принцип 1 (правило живёт узлом графа, а не прозой), принцип 4 (согласованность скила и его скриптов)."
+  backlog_sources:
+    - "src/skills/create-report/scripts/calc-metrics.js — отбор тикетов по parent_plan"
+    - ".workflow/templates/report-template.md — поле related_plan"
+tags: [scope, consistency, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R2\\[\"П0 ПРАВИЛО: Область отчёта — один план"
+      reason: "Область отчёта — правило ядра: отчёт привязан к плану, а не к доске."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R2[^\\n]*parent_plan"
+      reason: "Критерий принадлежности тикета отчёту назван полем, а не на словах."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R2[^\\n]*(вся доска|всей доске)[^\\n]*отдельной секцией"
+      reason: "Числа по всей доске допускаются только отдельной секцией — смешивать множества нельзя."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R7\\[\"П0 ПРАВИЛО: Полнота данных внутри области"
+      reason: "Полнота данных сохранена, но ограничена областью отчёта."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R7[^\\n]*без привязки к плану"
+      reason: "Тикет без parent_plan виден отдельной строкой, а не растворяется в числах."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R2 --> P0R7"
+      reason: "Оба правила стоят в цепочке этапа 0 — агент проходит их до выбора ветки."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: "P10S0\\[\"П10 ШАГ: Определи область отчёта"
+      reason: "Область определяется первым шагом работы, до сбора данных."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: "P10S1[^\\n]*parent_plan равен плану отчёта"
+      reason: "Фильтр по плану стоит в шаге сбора, а не подразумевается."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: "P10S11[^\\n]*называет своё множество"
+      reason: "Каждая таблица отчёта называет множество, по которому посчитана."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: "P10E1 --> P10S0 --> P10S1"
+      reason: "Шаг определения области подключён к графу перед сбором данных."
+
+execution:
+  timeout_s: 60
