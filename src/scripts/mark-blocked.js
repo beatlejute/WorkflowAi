@@ -11,15 +11,10 @@
  *   node mark-blocked.js QA-40 --attempts=3 --reason=human_gate_rejected
  */
 
-import fs from "fs";
 import path from "path";
-import YAML from "workflow-ai/lib/js-yaml.mjs";
 import { findProjectRoot } from "workflow-ai/lib/find-root.mjs";
-import {
-  parseFrontmatter,
-  printResult,
-  serializeFrontmatter,
-} from "workflow-ai/lib/utils.mjs";
+import { printResult } from "workflow-ai/lib/utils.mjs";
+import { markBlockedTicket } from "./mark-blocked-core.js";
 
 // Корень проекта
 const PROJECT_DIR = findProjectRoot();
@@ -62,81 +57,29 @@ if (!reason) {
   process.exit(1);
 }
 
-// Поиск файла тикета рекурсивно
-function findTicketFile(ticketId, searchDir) {
-  try {
-    const files = fs.readdirSync(searchDir, { withFileTypes: true });
-    
-    for (const file of files) {
-      const fullPath = path.join(searchDir, file.name);
-      
-      if (file.isDirectory()) {
-        // Рекурсивный поиск в поддиректориях
-        const found = findTicketFile(ticketId, fullPath);
-        if (found) return found;
-      } else if (file.isFile() && file.name.endsWith('.md') && file.name.startsWith(ticketId)) {
-        return fullPath;
-      }
-    }
-  } catch (error) {
-    console.error(`Ошибка при чтении директории ${searchDir}:`, error.message);
-  }
-  
-  return null;
-}
-
 // Основная функция
 function main() {
   try {
-    // Поиск файла тикета
-    const ticketFile = findTicketFile(ticketId, TICKETS_DIR);
-    if (!ticketFile) {
-      console.error(`Ошибка: тикет ${ticketId} не найден в ${TICKETS_DIR}`);
-      process.exit(1);
-    }
-
-    // Чтение файла тикета
-    const content = fs.readFileSync(ticketFile, 'utf8');
-    const { frontmatter, body } = parseFrontmatter(content);
-
-    // Обновление frontmatter
-    const now = new Date().toISOString();
-    frontmatter.auto_blocked_reason = reason;
-    frontmatter.auto_blocked_attempts = attempts;
-    frontmatter.auto_blocked_at = now;
-
-    // Сериализация и запись обратно в файл
-    const newContent = serializeFrontmatter(frontmatter) + body;
-    fs.writeFileSync(ticketFile, newContent, 'utf8');
+    const result = markBlockedTicket({
+      ticketId,
+      attempts,
+      reason,
+      ticketsDir: TICKETS_DIR,
+      stateDir: STATE_DIR,
+      alertsFile: ALERTS_FILE,
+      project: path.basename(PROJECT_DIR),
+    });
 
     console.log(`✅ Frontmatter тикета ${ticketId} обновлен`);
 
-    // Попытка записи в alerts.jsonl
-    try {
-      // Создание директории state если не существует
-      if (!fs.existsSync(STATE_DIR)) {
-        fs.mkdirSync(STATE_DIR, { recursive: true });
-        console.log(`✅ Директория ${STATE_DIR} создана`);
-      }
+    if (result.stateDirCreated) {
+      console.log(`✅ Директория ${STATE_DIR} создана`);
+    }
 
-      // Формирование JSONL записи
-      const alertEntry = {
-        timestamp: now,
-        severity: "warning",
-        kind: "ticket_auto_blocked",
-        project: path.basename(PROJECT_DIR),
-        ticket_id: ticketId,
-        attempts: attempts,
-        reason: reason,
-        stage: "review-result"
-      };
-
-      // Append-only запись в alerts.jsonl
-      fs.appendFileSync(ALERTS_FILE, JSON.stringify(alertEntry) + '\n', 'utf8');
+    if (result.alertWritten) {
       console.log(`✅ Запись добавлена в ${ALERTS_FILE}`);
-
-    } catch (alertError) {
-      console.warn(`⚠️  Предупреждение: не удалось записать в alerts.jsonl: ${alertError.message}`);
+    } else {
+      console.warn(`⚠️  Предупреждение: не удалось записать в alerts.jsonl: ${result.alertError}`);
       console.log(`ℹ️  Frontmatter обновлен, запись в alerts пропущена`);
     }
 
@@ -145,12 +88,16 @@ function main() {
       ticket_id: ticketId,
       reason: reason,
       attempts: attempts,
-      blocked_at: now,
+      blocked_at: result.blockedAt,
       alerts_file: ALERTS_FILE,
       status: "completed"
     });
 
   } catch (error) {
+    if (error.code === 'TICKET_NOT_FOUND') {
+      console.error(`Ошибка: тикет ${ticketId} не найден в ${TICKETS_DIR}`);
+      process.exit(1);
+    }
     console.error(`Ошибка: ${error.message}`);
     process.exit(1);
   }

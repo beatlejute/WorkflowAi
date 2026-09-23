@@ -1,21 +1,20 @@
 /**
- * Performance benchmark: pick-next-task core logic with 100 tickets in ready/
+ * Стоимость выбора следующего тикета на большой доске (боевые функции из
+ * src/scripts/pick-next-task-core.js, их же зовёт pick-next-task.js).
  *
- * Tests the actual FS operations from pick-next-task.js in-process (real FS, no mock).
- * This approach isolates FS latency from Node.js process startup overhead, matching
- * the design of the approval-hook and mark-blocked benchmarks.
+ * Инцидент: раньше здесь стоял бюджет «p95 ≤ 500 мс за 100 итераций» и рукописная
+ * копия выбора. Копия была легче боевой функции — без дедупликации, проверки
+ * условий и зависимостей, — то есть охраняла не тот код: регресс в
+ * pick-next-task.js она увидеть не могла. А часы мерили загрузку машины: те же
+ * операции под полным набором идут в разы дольше, чем в изоляции.
  *
- * Logic replicated from src/scripts/pick-next-task.js:
- *   readdirSync(ready/) → for each: readFileSync + parseFrontmatter →
- *   filter (conditions/deps) + sort by priority → pick first eligible
- *   (calculateReviewMetrics analog: second scan of ready/ for aggregate stats)
+ * Здесь считается число обращений к диску — оно не зависит от соседей по прогону.
+ * Бюджет линеен по числу тикетов: один проход чтения для выбора, один для метрик,
+ * по одной проверке каждой соседней колонки на дубль. Лишний проход по каталогу
+ * или повторное чтение всех тикетов ломают точную цифру. Часы остались в
+ * src/tests/perf-*.bench.mjs (npm run bench:perf, по одному замеру за раз).
  *
- * Backlog mix: 70 impl (non-human) + 30 human, priorities cycling 1-5.
- * State is stable: pick-next-task does not move ready tickets.
- *
- * 100 tickets in ready/, 100 iterations. CI fails if p95 > 500ms.
- *
- * Run: node --test src/tests/perf-pick-next-task-large-backlog.test.mjs
+ * Запуск: node --test src/tests/perf-pick-next-task-large-backlog.test.mjs
  */
 
 import { test } from 'node:test';
@@ -23,78 +22,17 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { fileURLToPath } from 'url';
-import { parseFrontmatter } from 'workflow-ai/lib/utils.mjs';
+import {
+  createTicketContext,
+  pickNextTicket,
+  calculateReviewMetrics,
+  DUPLICATE_SCAN_DIR_KEYS,
+  METRICS_DIR_KEYS,
+} from '../scripts/pick-next-task-core.js';
+import { createCountingFs } from './_fs-op-counter.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-const ITERATIONS = 100;
 const TICKET_COUNT = 100;
-const P95_THRESHOLD_MS = 500;
-
-// Replicated from src/scripts/pick-next-task.js — readReadyTickets + pickNextTicket
-function readTicketsFromDir(dir) {
-  if (!fs.existsSync(dir)) return [];
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.md') && f !== '.gitkeep.md');
-  const tickets = [];
-  for (const file of files) {
-    try {
-      const content = fs.readFileSync(path.join(dir, file), 'utf8');
-      const { frontmatter } = parseFrontmatter(content);
-      tickets.push({ id: frontmatter.id || file.replace('.md', ''), frontmatter });
-    } catch {
-      // skip unreadable
-    }
-  }
-  return tickets;
-}
-
-function pickNextTicket(readyDir) {
-  const tickets = readTicketsFromDir(readyDir);
-
-  const nonHuman = [];
-  const human = [];
-
-  for (const ticket of tickets) {
-    if (ticket.frontmatter.type === 'human') {
-      human.push(ticket);
-    } else {
-      nonHuman.push(ticket);
-    }
-  }
-
-  if (nonHuman.length > 0) {
-    nonHuman.sort((a, b) => {
-      const pa = a.frontmatter.priority ?? 999;
-      const pb = b.frontmatter.priority ?? 999;
-      return pa !== pb ? pa - pb : new Date(a.frontmatter.created_at ?? 0) - new Date(b.frontmatter.created_at ?? 0);
-    });
-    return { status: 'found', ticket_id: nonHuman[0].id };
-  }
-
-  if (human.length > 0) {
-    human.sort((a, b) => (a.frontmatter.priority ?? 999) - (b.frontmatter.priority ?? 999));
-    return { status: 'human_ready', ticket_id: human[0].id, pending_count: human.length };
-  }
-
-  return { status: 'empty' };
-}
-
-// Simulates calculateReviewMetrics (second pass across all ticket dirs)
-function calculateReviewMetrics(allDirs) {
-  let total = 0;
-  for (const dir of allDirs) {
-    const tickets = readTicketsFromDir(dir);
-    total += tickets.length;
-  }
-  return { tickets_with_reviews: total };
-}
-
-function calcP95(arr) {
-  const sorted = [...arr].sort((a, b) => a - b);
-  const idx = Math.ceil(sorted.length * 0.95) - 1;
-  return sorted[Math.max(0, idx)];
-}
+const COLUMNS = ['ready', 'done', 'in-progress', 'review', 'blocked', 'archive', 'backlog'];
 
 function ticketContent(id, type, priority) {
   return `---
@@ -119,54 +57,93 @@ Benchmark ticket ${id}.
 `;
 }
 
-test(`pick-next-task: p95 latency ≤ ${P95_THRESHOLD_MS}ms with ${TICKET_COUNT} ready tickets, ${ITERATIONS} iterations`, () => {
+/** Доска с `count` тикетами в ready/: 70% impl, 30% human, приоритеты по кругу 1-5. */
+function createBacklog(count) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'perf-pick-next-task-'));
   const ticketsDir = path.join(tmpDir, '.workflow', 'tickets');
-
-  const subdirs = ['ready', 'done', 'in-progress', 'review', 'blocked', 'archive', 'backlog'];
-  for (const dir of subdirs) {
-    fs.mkdirSync(path.join(ticketsDir, dir), { recursive: true });
+  for (const column of COLUMNS) {
+    fs.mkdirSync(path.join(ticketsDir, column), { recursive: true });
   }
-  const allDirs = subdirs.map(d => path.join(ticketsDir, d));
+
   const readyDir = path.join(ticketsDir, 'ready');
-
-  // 70 impl (non-human) + 30 human, priorities cycling 1-5
-  for (let i = 0; i < TICKET_COUNT; i++) {
-    const type = i < 70 ? 'impl' : 'human';
+  const humanFrom = Math.round(count * 0.7);
+  for (let i = 0; i < count; i++) {
     const id = `BENCH-${String(i + 1).padStart(3, '0')}`;
-    const priority = (i % 5) + 1;
-    fs.writeFileSync(path.join(readyDir, `${id}.md`), ticketContent(id, type, priority));
+    fs.writeFileSync(path.join(readyDir, `${id}.md`), ticketContent(id, i < humanFrom ? 'impl' : 'human', (i % 5) + 1));
   }
 
-  const latencies = [];
+  return { tmpDir, projectDir: tmpDir };
+}
 
-  for (let i = 0; i < ITERATIONS; i++) {
-    const start = performance.now();
+test(`pick-next-task: цена выбора на ${TICKET_COUNT} тикетах — ровно два прохода чтения и одна проверка дубля на колонку`, () => {
+  const board = createBacklog(TICKET_COUNT);
+  const counter = createCountingFs();
+  const ctx = createTicketContext(board.projectDir, { fsModule: counter.fs });
 
-    // Primary selection (O(N) reads + sort)
-    const result = pickNextTicket(readyDir);
+  try {
+    const result = pickNextTicket(ctx);
+    const metrics = calculateReviewMetrics(ctx);
 
-    // Secondary scan: simulate calculateReviewMetrics (reads all ticket dirs)
-    calculateReviewMetrics(allDirs);
+    // Работа сделана: без этого цифры ниже ничего не охраняют.
+    assert.equal(result.status, 'found', `ожидался найденный тикет, получено "${result.status}"`);
+    assert.equal(result.ticket_id, 'BENCH-001', 'при равных датах выбирается тикет с высшим приоритетом');
+    assert.equal(metrics.tickets_with_reviews, 0, 'у бенчмарковых тикетов нет секции ревью');
 
-    const elapsed = performance.now() - start;
+    // readdir: ready/ при выборе + по разу на каждую колонку в метриках.
+    const expectedReaddirs = 1 + METRICS_DIR_KEYS.length;
+    // readFileSync: один проход по ready/ при выборе + один проход метрик по всем
+    // колонкам (тикеты лежат только в ready/).
+    const expectedReads = TICKET_COUNT * 2;
+    // existsSync: ready/ при выборе + дедупликация каждого тикета по соседним
+    // колонкам + проверка каждой колонки в метриках.
+    const expectedExists = 1 + TICKET_COUNT * DUPLICATE_SCAN_DIR_KEYS.length + METRICS_DIR_KEYS.length;
 
-    assert.strictEqual(result.status, 'found', `Iteration ${i}: unexpected status "${result.status}"`);
-    latencies.push(elapsed);
+    assert.equal(
+      counter.op('readdirSync'), expectedReaddirs,
+      `каталоги читаются по разу, лишний проход — регресс: ${counter.describe()}`,
+    );
+    assert.equal(
+      counter.op('readFileSync'), expectedReads,
+      `каждый тикет читается дважды (выбор + метрики), третий проход — регресс: ${counter.describe()}`,
+    );
+    assert.equal(
+      counter.op('existsSync'), expectedExists,
+      `проверок существования должно быть ${expectedExists}: ${counter.describe()}`,
+    );
+    assert.equal(counter.op('writeFileSync'), 0, `выбор тикета не пишет на диск: ${counter.describe()}`);
+    assert.equal(counter.op('renameSync'), 0, `дублей нет — перемещать нечего: ${counter.describe()}`);
+  } finally {
+    fs.rmSync(board.tmpDir, { recursive: true, force: true });
   }
+});
 
-  const p95Latency = calcP95(latencies);
-  const avgLatency = latencies.reduce((a, b) => a + b, 0) / latencies.length;
-  const maxLatency = Math.max(...latencies);
+test('pick-next-task: цена линейна по числу тикетов (25 против 100, без квадратичного роста)', () => {
+  const smallBoard = createBacklog(25);
+  const largeBoard = createBacklog(TICKET_COUNT);
+  const smallCounter = createCountingFs();
+  const largeCounter = createCountingFs();
 
-  console.log(
-    `pick-next-task perf (${TICKET_COUNT} tickets): avg=${avgLatency.toFixed(2)}ms  p95=${p95Latency.toFixed(2)}ms  max=${maxLatency.toFixed(2)}ms`
-  );
+  try {
+    for (const [board, counter] of [[smallBoard, smallCounter], [largeBoard, largeCounter]]) {
+      const ctx = createTicketContext(board.projectDir, { fsModule: counter.fs });
+      pickNextTicket(ctx);
+      calculateReviewMetrics(ctx);
+    }
 
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-
-  assert.ok(
-    p95Latency <= P95_THRESHOLD_MS,
-    `p95 ${p95Latency.toFixed(2)}ms exceeds threshold ${P95_THRESHOLD_MS}ms`
-  );
+    // Квадратичный регресс (проход по всем тикетам внутри цикла по тикетам) даёт
+    // рост в 16 раз при четырёхкратной доске — линейный ровно в 4.
+    const growth = largeCounter.op('readFileSync') / smallCounter.op('readFileSync');
+    assert.equal(
+      growth, 4,
+      'тикетов в 4 раза больше — чтений тоже в 4 раза, не больше: ' +
+      `25 тикетов → ${smallCounter.describe()}; ${TICKET_COUNT} тикетов → ${largeCounter.describe()}`,
+    );
+    assert.equal(
+      largeCounter.op('readdirSync'), smallCounter.op('readdirSync'),
+      `число обходов каталогов от размера доски не зависит: ${largeCounter.describe()}`,
+    );
+  } finally {
+    fs.rmSync(smallBoard.tmpDir, { recursive: true, force: true });
+    fs.rmSync(largeBoard.tmpDir, { recursive: true, force: true });
+  }
 });

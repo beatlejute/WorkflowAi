@@ -1,14 +1,19 @@
 /**
- * Performance benchmark: approval-hook (updateApprovalFilesHook from move-ticket.js)
+ * Стоимость approval-хука при перемещении тикета (боевая функция из
+ * src/scripts/move-ticket-core.js, её же зовёт move-ticket.js).
  *
- * 100 iterations on real FS (tmpdir). Measures p95 latency of the hook itself
- * (FS: existsSync + readdirSync + readFileSync + writeFileSync for one pending file).
- * CI fails if p95 > 50ms.
+ * Инцидент: раньше здесь стоял бюджет «p95 ≤ 50 мс за 100 итераций» и рукописная
+ * копия хука. Копия не ловила регресс в боевом коде, а бюджет по стенным часам
+ * падал в полном наборе — под десятком воркеров, которые одновременно молотят
+ * диск, — и был зелёным в изоляции. Цена: красный CI, который никто не считал
+ * настоящим, и незамеченный регресс в хуке.
  *
- * Note: move-ticket.js has module-level side effects, so the hook is replicated here
- * (identical logic to src/scripts/move-ticket.js#updateApprovalFilesHook).
+ * Здесь считается то, что от загрузки машины не зависит: число обращений к диску.
+ * Хук обязан стоить фиксированные 4 операции независимо от того, сколько чужих
+ * approval-файлов лежит в каталоге. Часы остались в src/tests/perf-*.bench.mjs —
+ * их гоняют отдельной целью (npm run bench:perf), одну за раз.
  *
- * Run: node --test src/tests/perf-approval-hook-latency.test.mjs
+ * Запуск: node --test src/tests/perf-approval-hook-latency.test.mjs
  */
 
 import { test } from 'node:test';
@@ -16,90 +21,78 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { fileURLToPath } from 'url';
+import { updateApprovalFilesHook } from '../scripts/move-ticket-core.js';
+import { createCountingFs } from './_fs-op-counter.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const TICKET_ID = 'BENCH-001';
+const TARGET = 'in-progress';
 
-const ITERATIONS = 100;
-const P95_THRESHOLD_MS = 50;
-
-// Replicated from src/scripts/move-ticket.js — keep in sync if hook logic changes.
-function updateApprovalFilesHook(ticketId, target, workflowDir) {
-  try {
-    const approvalsDir = path.join(workflowDir, 'approvals');
-    if (fs.existsSync(approvalsDir)) {
-      const files = fs.readdirSync(approvalsDir);
-      const escapedTicketId = ticketId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const pattern = new RegExp(`^${escapedTicketId}_manual-gate-.*_\\d+\\.json$`);
-      for (const file of files) {
-        if (!pattern.test(file)) continue;
-        const filePath = path.join(approvalsDir, file);
-        try {
-          const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-          if (data.status === 'pending') {
-            data.status = 'approved';
-            data.decided_by = 'move-ticket';
-            data.comment = `auto-approved on move to ${target}`;
-            data.updated_at = new Date().toISOString();
-            fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
-          }
-        } catch (err) {
-          // corrupt file — skip, do not fail
-        }
-      }
-    }
-  } catch (err) {
-    // hook error must not fail the move operation
-  }
-}
-
-function calcP95(arr) {
-  const sorted = [...arr].sort((a, b) => a - b);
-  const idx = Math.ceil(sorted.length * 0.95) - 1;
-  return sorted[Math.max(0, idx)];
-}
-
-test(`approval-hook: p95 latency ≤ ${P95_THRESHOLD_MS}ms over ${ITERATIONS} iterations`, () => {
+function createApprovalsDir(noiseFiles) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'perf-approval-hook-'));
   const workflowDir = path.join(tmpDir, '.workflow');
   const approvalsDir = path.join(workflowDir, 'approvals');
   fs.mkdirSync(approvalsDir, { recursive: true });
 
-  const ticketId = 'BENCH-001';
-  const target = 'in-progress';
-  const approvalFile = path.join(approvalsDir, `${ticketId}_manual-gate-test_001.json`);
-
-  const pendingPayload = JSON.stringify({
+  const pendingFile = path.join(approvalsDir, `${TICKET_ID}_manual-gate-test_001.json`);
+  fs.writeFileSync(pendingFile, JSON.stringify({
     status: 'pending',
-    ticket_id: ticketId,
+    ticket_id: TICKET_ID,
     created_at: new Date().toISOString(),
-  }, null, 2);
+  }, null, 2), 'utf8');
 
-  const latencies = [];
-
-  for (let i = 0; i < ITERATIONS; i++) {
-    // Reset approval file to pending state (setup, outside timing window)
-    fs.writeFileSync(approvalFile, pendingPayload, 'utf8');
-
-    const start = performance.now();
-    updateApprovalFilesHook(ticketId, target, workflowDir);
-    const elapsed = performance.now() - start;
-
-    latencies.push(elapsed);
+  // Чужие гейты и мусор в том же каталоге: хук не должен их читать.
+  for (let i = 0; i < noiseFiles; i++) {
+    const otherId = `OTHER-${String(i + 1).padStart(3, '0')}`;
+    fs.writeFileSync(
+      path.join(approvalsDir, `${otherId}_manual-gate-test_001.json`),
+      JSON.stringify({ status: 'pending', ticket_id: otherId }, null, 2),
+      'utf8',
+    );
   }
 
-  const p95Latency = calcP95(latencies);
-  const avgLatency = latencies.reduce((a, b) => a + b, 0) / latencies.length;
-  const maxLatency = Math.max(...latencies);
+  return { tmpDir, workflowDir, pendingFile };
+}
 
-  console.log(
-    `approval-hook perf: avg=${avgLatency.toFixed(2)}ms  p95=${p95Latency.toFixed(2)}ms  max=${maxLatency.toFixed(2)}ms`
-  );
+test('approval-hook: цена хука — 4 обращения к диску независимо от размера каталога approvals', () => {
+  const { tmpDir, workflowDir, pendingFile } = createApprovalsDir(40);
+  const counter = createCountingFs();
 
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  try {
+    updateApprovalFilesHook(TICKET_ID, TARGET, counter.fs, workflowDir);
 
-  assert.ok(
-    p95Latency <= P95_THRESHOLD_MS,
-    `p95 ${p95Latency.toFixed(2)}ms exceeds threshold ${P95_THRESHOLD_MS}ms`
-  );
+    // Хук сделал работу, а не промолчал: цифры ниже имеют смысл только вместе с этим.
+    const decided = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+    assert.equal(decided.status, 'approved', 'pending-гейт должен быть закрыт хуком');
+    assert.equal(decided.decided_by, 'move-ticket');
+
+    assert.equal(counter.op('existsSync'), 1, `проверка каталога approvals — одна: ${counter.describe()}`);
+    assert.equal(counter.op('readdirSync'), 1, `каталог читается один раз, второй проход — регресс: ${counter.describe()}`);
+    assert.equal(counter.op('readFileSync'), 1, `читается только свой гейт, чужие 40 — нет: ${counter.describe()}`);
+    assert.equal(counter.op('writeFileSync'), 1, `свой гейт переписывается один раз: ${counter.describe()}`);
+    assert.equal(counter.total(), 4, `цена хука — ровно 4 операции: ${counter.describe()}`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('approval-hook: цена не растёт вместе с каталогом (10 чужих гейтов против 400)', () => {
+  const small = createApprovalsDir(10);
+  const large = createApprovalsDir(400);
+  const smallCounter = createCountingFs();
+  const largeCounter = createCountingFs();
+
+  try {
+    updateApprovalFilesHook(TICKET_ID, TARGET, smallCounter.fs, small.workflowDir);
+    updateApprovalFilesHook(TICKET_ID, TARGET, largeCounter.fs, large.workflowDir);
+
+    assert.deepEqual(
+      { ...largeCounter.counts },
+      { ...smallCounter.counts },
+      `в каталоге в 40 раз больше файлов, а обращений к диску столько же должно быть: ` +
+      `10 гейтов → ${smallCounter.describe()}; 400 гейтов → ${largeCounter.describe()}`,
+    );
+  } finally {
+    fs.rmSync(small.tmpDir, { recursive: true, force: true });
+    fs.rmSync(large.tmpDir, { recursive: true, force: true });
+  }
 });
