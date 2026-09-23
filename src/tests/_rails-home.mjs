@@ -8,6 +8,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Worker, isMainThread } from 'node:worker_threads';
 
+// Объявление до вызова armWorkerWatchdog: const в TDZ, обращение из функции
+// ниже упало бы с ReferenceError (проверено запуском).
+export const DEFAULT_WORKER_CAP_MS = 300_000;
+
 // `--import` живёт в execArgv, а его наследует не только дочерний процесс
 // воркера, но и КАЖДЫЙ worker thread внутри него — включая поток-наблюдателя
 // ниже. Без этой отсечки преднагрузка в потоке заводила бы следующий поток, и
@@ -18,6 +22,28 @@ if (isMainThread) {
   process.on('exit', () => rmSync(process.env.WORKFLOW_HOME, { recursive: true, force: true }));
 
   armWorkerWatchdog();
+}
+
+// Порог страховки берётся из WORKFLOW_TEST_WORKER_CAP_MS. Значение приходит
+// строкой из окружения, поэтому разбор отделён и покрыт тестами:
+//   • переменной нет или она пустая — порог по умолчанию;
+//   • «0» — страховка выключена намеренно (так её снимают в тестах самой
+//     страховки, чтобы наблюдатель не плодил потоки);
+//   • не число («5s», «abc») — раньше давало Number → NaN, страховка молча не
+//     вставала, и набор висел вечно ровно там, где её и ждали. Теперь опечатка
+//     видна в выводе, а порог берётся по умолчанию: fail-closed.
+export function resolveWorkerCapMs(env = process.env, warn = message => process.stderr.write(message)) {
+  const raw = env.WORKFLOW_TEST_WORKER_CAP_MS;
+  if (raw === undefined || raw === '') return DEFAULT_WORKER_CAP_MS;
+
+  const capMs = Number(raw);
+  if (Number.isFinite(capMs) && capMs >= 0) return capMs;
+
+  warn(
+    `[test-worker-watchdog] WORKFLOW_TEST_WORKER_CAP_MS="${raw}" — не число миллисекунд. ` +
+    `Беру порог по умолчанию ${DEFAULT_WORKER_CAP_MS} мс; чтобы выключить страховку, задайте 0.\n`
+  );
+  return DEFAULT_WORKER_CAP_MS;
 }
 
 // ---------------------------------------------------------------------------
@@ -48,18 +74,22 @@ if (isMainThread) {
 // из п.1 информативнее (список удерживаемых ручек), отдавать её потоку незачем.
 // ---------------------------------------------------------------------------
 function armWorkerWatchdog() {
-  const capMs = Number(process.env.WORKFLOW_TEST_WORKER_CAP_MS ?? 300_000);
+  const capMs = resolveWorkerCapMs();
   const GRACE_MS = 1000;
-  if (!process.env.NODE_TEST_CONTEXT || !Number.isFinite(capMs) || capMs <= 0) return;
+  if (!process.env.NODE_TEST_CONTEXT || capMs <= 0) return;
 
   const watchdog = setTimeout(() => {
     const held = typeof process.getActiveResourcesInfo === 'function'
       ? process.getActiveResourcesInfo().join(', ')
       : 'unknown';
+    // Формулировка без обвинения: страховка знает только стенные часы, а не
+    // причину. Держит ручку утёкший тест — список ресурсов это покажет; файл
+    // просто долгий — порог поднимается переменной, и она названа прямо здесь.
     process.stderr.write(
-      `[test-worker-watchdog] ${process.argv[1] || 'test file'}: воркер не вышел за ${capMs} мс — ` +
-      `тест не отпустил ресурсы, набор бы повис. Удерживаются: ${held}. ` +
-      'Закройте ручку в самом тесте (after/afterEach) или ограничьте ожидание.\n'
+      `[test-worker-watchdog] ${process.argv[1] || 'test file'}: воркер не вышел за ${capMs} мс ` +
+      `(порог WORKFLOW_TEST_WORKER_CAP_MS). Удерживаются: ${held}. ` +
+      'Если ручку не отпустил тест — закройте её в after/afterEach или ограничьте ожидание; ' +
+      'если файлу честно нужно больше времени — поднимите WORKFLOW_TEST_WORKER_CAP_MS.\n'
     );
     process.exit(13);
   }, capMs);

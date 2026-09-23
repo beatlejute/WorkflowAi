@@ -14,7 +14,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { join, dirname, resolve } from 'node:path';
-import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, rmdirSync, readdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, rmdirSync, readdirSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -36,14 +36,57 @@ const CANON_SKILLS_DIR = join(PROJECT_ROOT, 'src', 'skills');
 // __test-cal-001-1777553217513, а 2026-09-23 skill-test-index-agents.test.mjs
 // поймал живую фикстуру в полном наборе. Каталог в os.tmpdir() не виден ни
 // репозиторию, ни junction'ам проектов, даже если убрать его не успели.
-const SKILLS_DIR = mkdtempSync(join(tmpdir(), 'wf-skills-runner-'));
+// Каждый каталог фикстур заводится через makeSkillsDir и попадает в этот
+// список. Блоки убирают свои каталоги в after(), но after() не выполняется,
+// если блок отфильтрован (--test-name-pattern) или процесс снят по таймауту, —
+// тогда каталоги снимает общий хук на выходе. Мусор в %TEMP% репозиторию не
+// вредит, но копится с каждого прерванного прогона.
+const TEMP_SKILLS_DIRS = [];
+
+function makeSkillsDir(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  TEMP_SKILLS_DIRS.push(dir);
+  return dir;
+}
+
 process.on('exit', () => {
-  try {
-    rmSync(SKILLS_DIR, { recursive: true, force: true });
-  } catch {
-    // Каталог занят или уже снят — в репозитории его всё равно нет.
+  for (const dir of TEMP_SKILLS_DIRS) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Каталог занят или уже снят — в репозитории его всё равно нет.
+    }
   }
 });
+
+const SKILLS_DIR = makeSkillsDir('wf-skills-runner-');
+
+// Остаток от прогона, снятого до этой правки: фикстуры тогда создавались прямо
+// в каноне и при снятии по таймауту там оставались (__test-runner-1777553217483,
+// __test-cal-001-1777553217513 попали так в репозиторий). Такой каталог красил
+// бы проверку на протечку ниже и обвинял текущий прогон, который в канон не
+// пишет вовсе, — поэтому старьё подметается на входе, но не молча.
+function sweepStaleFixtures(dir) {
+  const swept = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.startsWith('__test-')) continue;
+    const full = join(dir, name);
+    // lstat, а не stat: junction'ы и симлинки не разыменовываем и не трогаем —
+    // удаление по ссылке стирает её цель.
+    const info = lstatSync(full);
+    if (info.isSymbolicLink() || !info.isDirectory()) continue;
+    rmSync(full, { recursive: true, force: true });
+    swept.push(name);
+  }
+  return swept;
+}
+
+const sweptFixtures = sweepStaleFixtures(CANON_SKILLS_DIR);
+if (sweptFixtures.length > 0) {
+  process.stderr.write(
+    `[run-skill-tests.test] в каноне убраны фикстуры от прошлых прогонов: ${sweptFixtures.join(', ')}\n`
+  );
+}
 
 // Раннер — инструмент разработки этого репозитория: скилы берёт из
 // `<корень>/src/skills`, а корень находит при импорте по каталогу `.workflow/`.
@@ -1368,7 +1411,7 @@ describe('All skills aggregation', () => {
   // Свой каталог скилов: `--all` обходит КАЖДЫЙ скил каталога, а фикстуры
   // остальных блоков объявляют мок-агентов (agent-a, mock-judge), которых нет в
   // боевом configs/pipeline.yaml — validateAgents уронил бы агрегат в error.
-  const AGG_SKILLS_DIR = mkdtempSync(join(tmpdir(), 'wf-skills-all-'));
+  const AGG_SKILLS_DIR = makeSkillsDir('wf-skills-all-');
   const SKILL_A = `__test-all-a-${Date.now()}`;
   const SKILL_B = `__test-all-b-${Date.now()}`;
   const DIR_A = join(AGG_SKILLS_DIR, SKILL_A);
@@ -1922,7 +1965,7 @@ describe('L1 по фактическому выводу агента', () => {
 // ============================================================================
 
 describe('WORKFLOW_SKILLS_DIR — каталог скилов раннера', () => {
-  const ENV_SKILLS_DIR = mkdtempSync(join(tmpdir(), 'wf-skills-env-'));
+  const ENV_SKILLS_DIR = makeSkillsDir('wf-skills-env-');
   const ENV_SKILL = `__test-env-dir-${Date.now()}`;
 
   before(() => {
@@ -2010,5 +2053,67 @@ describe('WORKFLOW_SKILLS_DIR — каталог скилов раннера', (
     const leaked = readdirSync(CANON_SKILLS_DIR).filter(name => name.startsWith('__'));
 
     assert.deepStrictEqual(leaked, [], `фикстуры протекли в канон: ${leaked.join(', ')}`);
+  });
+});
+
+// ============================================================================
+// Гигиена самого файла тестов: после прогона не должно оставаться ни фикстур в
+// каноне, ни каталогов в %TEMP%. Оба класса мусора уже случались: фикстуры в
+// каноне попадали в репозиторий, а каталоги в %TEMP% копились с каждого
+// прогона, где блок не дошёл до своего after().
+// ============================================================================
+
+describe('гигиена прогона', () => {
+  it('sweepStaleFixtures убирает только каталоги __test-* и не ходит по ссылкам', () => {
+    const sandbox = makeSkillsDir('wf-skills-sweep-');
+    mkdirSync(join(sandbox, '__test-stale-1', 'tests'), { recursive: true });
+    mkdirSync(join(sandbox, '__test-stale-2'), { recursive: true });
+    mkdirSync(join(sandbox, 'execute-task'), { recursive: true });
+    mkdirSync(join(sandbox, '__other-prefix'), { recursive: true });
+    writeFileSync(join(sandbox, '__test-not-a-dir.txt'), 'x');
+
+    const swept = sweepStaleFixtures(sandbox).sort();
+
+    assert.deepStrictEqual(swept, ['__test-stale-1', '__test-stale-2'], 'подметаются только фикстуры раннера');
+    assert.deepStrictEqual(
+      readdirSync(sandbox).sort(),
+      ['__other-prefix', '__test-not-a-dir.txt', 'execute-task'].sort(),
+      'живой скил, чужой префикс и файл остаются на месте'
+    );
+    rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  it('каталоги фикстур в %TEMP% убираются, даже если блок не дошёл до after()', async () => {
+    // Каталоги заводятся в теле describe, то есть при загрузке файла, а
+    // снимаются в after(). Запускаем этот же файл с фильтром по имени: блоки
+    // загружаются (каталоги создаются), но их after() не выполняется — убрать
+    // каталоги обязан общий хук на выходе.
+    const tempEntries = () => new Set(readdirSync(tmpdir()).filter(name => name.startsWith('wf-skills-')));
+    const before = tempEntries();
+
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const exitCode = await new Promise((resolve, reject) => {
+      const child = spawn(
+        process.execPath,
+        [
+          '--test',
+          '--test-timeout=120000',
+          '--import', './src/tests/_rails-home.mjs',
+          '--test-name-pattern', 'нет каталогов с префиксом',
+          'src/tests/run-skill-tests.test.mjs'
+        ],
+        { cwd: PROJECT_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] }
+      );
+      child.stdout.resume();
+      child.stderr.resume();
+      child.on('error', reject);
+      child.on('exit', code => resolve(code));
+    });
+
+    assert.strictEqual(exitCode, 0, 'дочерний прогон с фильтром должен быть зелёным');
+
+    const leaked = [...tempEntries()].filter(name => !before.has(name));
+    assert.deepStrictEqual(leaked, [], `каталоги фикстур остались в %TEMP%: ${leaked.join(', ')}`);
   });
 });

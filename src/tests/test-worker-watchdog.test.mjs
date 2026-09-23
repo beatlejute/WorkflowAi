@@ -20,6 +20,7 @@ import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { resolveWorkerCapMs, DEFAULT_WORKER_CAP_MS } from './_rails-home.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
@@ -30,7 +31,7 @@ const FIXTURES = path.join(__dirname, 'fixtures');
 // завершится никогда, поэтому по истечении бюджета убиваем его и валим тест.
 const SELF_EXIT_BUDGET_MS = 25_000;
 
-function runNodeTest(fixture, capMs) {
+function runNodeTest(fixture, capMs, { budgetMs = SELF_EXIT_BUDGET_MS } = {}) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
     // NODE_TEST_CONTEXT выставлен в нашем собственном воркере; унаследованный
@@ -52,7 +53,7 @@ function runNodeTest(fixture, capMs) {
     const budget = setTimeout(() => {
       killedByBudget = true;
       child.kill('SIGKILL');
-    }, SELF_EXIT_BUDGET_MS);
+    }, budgetMs);
 
     child.on('error', err => { clearTimeout(budget); reject(err); });
     child.on('exit', (code, signal) => {
@@ -80,6 +81,12 @@ test('залипший воркер добивается страховкой, �
     run.output,
     /test-worker-watchdog/,
     `в выводе должен быть маркер страховки с именем файла-виновника; вывод:\n${run.output}`
+  );
+  assert.match(
+    run.output,
+    /WORKFLOW_TEST_WORKER_CAP_MS/,
+    'страховка знает только стенные часы: она обязана назвать порог и переменную, ' +
+    `которой его поднимают, иначе честно долгий файл выглядит как утечка; вывод:\n${run.output}`
   );
   assert.ok(
     run.elapsedMs >= capMs,
@@ -161,5 +168,55 @@ test('преднагрузка внутри worker thread инертна — и�
     homeInMain,
     'преднагрузка в потоке не должна создавать свой WORKFLOW_HOME: значит отсечка по isMainThread снята, ' +
     'а с ней вернулась и рекурсия потоков'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Порог страховки приходит строкой из окружения. Кривое значение раньше давало
+// NaN, страховка молча не вставала — и набор висел вечно ровно там, где её и
+// ждали (ни лога, ни падения). Разбор значения вынесен в resolveWorkerCapMs и
+// покрыт отдельно, чтобы опечатка в CI не оборачивалась тишиной.
+// ---------------------------------------------------------------------------
+
+test('порог страховки: пустое значение и отсутствие переменной — порог по умолчанию', () => {
+  const warnings = [];
+  const warn = message => warnings.push(message);
+
+  assert.equal(resolveWorkerCapMs({}, warn), DEFAULT_WORKER_CAP_MS);
+  assert.equal(resolveWorkerCapMs({ WORKFLOW_TEST_WORKER_CAP_MS: '' }, warn), DEFAULT_WORKER_CAP_MS);
+  assert.deepEqual(warnings, [], 'пустая переменная — штатный случай, ругаться не на что');
+});
+
+test('порог страховки: число берётся как есть, 0 выключает страховку', () => {
+  const warnings = [];
+  const warn = message => warnings.push(message);
+
+  assert.equal(resolveWorkerCapMs({ WORKFLOW_TEST_WORKER_CAP_MS: '2000' }, warn), 2000);
+  assert.equal(resolveWorkerCapMs({ WORKFLOW_TEST_WORKER_CAP_MS: '0' }, warn), 0);
+  assert.deepEqual(warnings, [], 'валидные значения не должны ничего печатать');
+});
+
+test('порог страховки: не число — порог по умолчанию и видимое предупреждение', () => {
+  for (const raw of ['5s', 'abc', '-1', 'NaN']) {
+    const warnings = [];
+    const capMs = resolveWorkerCapMs({ WORKFLOW_TEST_WORKER_CAP_MS: raw }, message => warnings.push(message));
+
+    assert.equal(capMs, DEFAULT_WORKER_CAP_MS, `"${raw}" не должно выключать страховку`);
+    assert.equal(warnings.length, 1, `"${raw}": предупреждение должно быть ровно одно`);
+    assert.match(warnings[0], /WORKFLOW_TEST_WORKER_CAP_MS/, `"${raw}": в предупреждении должно быть имя переменной`);
+  }
+});
+
+test('кривое значение переменной: страховка встаёт на порог по умолчанию, а не молчит', async () => {
+  // Сквозная проверка того же класса: запускаем фикстуру с утечкой и значением
+  // «5s». Порог по умолчанию — 300 с, поэтому за бюджет теста прогон не выйдет
+  // (это ожидаемо), но предупреждение обязано появиться сразу. До правки в
+  // выводе не было ничего: Number('5s') = NaN, страховка не вставала.
+  const run = await runNodeTest('worker-leaks-poll-loop.mjs', '5s', { budgetMs: 5000 });
+
+  assert.match(
+    run.output,
+    /WORKFLOW_TEST_WORKER_CAP_MS="5s"/,
+    `кривое значение должно быть названо в выводе; вывод:\n${run.output}`
   );
 });
