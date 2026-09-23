@@ -36,21 +36,21 @@ pipeline:
   agents:
     claude-haiku:
       command: "claude"
-      args: ["--model", "claude-haiku", "--permission-mode", "bypassPermissions", "-p"]
+      args: ["--model", "claude-haiku-4-5-20251001", "--permission-mode", "bypassPermissions", "-p"]
       workdir: "."
       capabilities: [text, multimodal]
       description: "Claude Haiku — лёгкая быстрая модель, поддержка изображений"
 
     claude-sonnet:
       command: "claude"
-      args: ["--model", "claude-sonnet", "--permission-mode", "bypassPermissions", "-p"]
+      args: ["--model", "claude-sonnet-5", "--permission-mode", "bypassPermissions", "-p"]
       workdir: "."
       capabilities: [text, multimodal]
       description: "Claude Sonnet — быстрая модель, поддержка изображений"
 
     claude-opus:
       command: "claude"
-      args: ["--model", "claude-opus", "--permission-mode", "bypassPermissions", "-p"]
+      args: ["--model", "claude-opus-5", "--permission-mode", "bypassPermissions", "-p"]
       workdir: "."
       capabilities: [text, multimodal]
       description: "Claude Opus — мощная модель, поддержка изображений"
@@ -65,6 +65,13 @@ pipeline:
     gpt-luna:
       command: "kilo"
       args: ["-m", "openai/gpt-5.6-luna", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
+      workdir: "."
+      capabilities: [text]
+      description: "Kilo GPT"
+
+    gpt-terra:
+      command: "kilo"
+      args: ["-m", "openai/gpt-5.6-terra", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
       workdir: "."
       capabilities: [text]
       description: "Kilo GPT"
@@ -92,7 +99,7 @@ pipeline:
 
     deepseek-flash:
       command: "kilo"
-      args: ["-m", "deepseek/deepseek-v4-flash", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
+      args: ["-m", "deepseek/deepseek-flash", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
       workdir: "."
       capabilities: [text]
       description: "Kilo deepseek"

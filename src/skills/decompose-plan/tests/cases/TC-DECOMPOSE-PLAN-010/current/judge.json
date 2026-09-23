@@ -1,0 +1,164 @@
+{
+  "per_model": {
+    "claude-sonnet": {
+      "pass_count": 3,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 4,
+          "passed": true
+        },
+        {
+          "trial": 2,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 3,
+          "score": 5,
+          "passed": true
+        }
+      ]
+    },
+    "gpt-luna": {
+      "pass_count": 0,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 1,
+          "passed": false
+        },
+        {
+          "trial": 2,
+          "score": 2,
+          "passed": false
+        },
+        {
+          "trial": 3,
+          "score": 1,
+          "passed": false
+        }
+      ]
+    },
+    "gemini-flash-lite": {
+      "pass_count": 0,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 3,
+          "passed": false
+        },
+        {
+          "trial": 2,
+          "score": 3,
+          "passed": false
+        },
+        {
+          "trial": 3,
+          "score": null,
+          "passed": false
+        }
+      ]
+    },
+    "deepseek-flash": {
+      "pass_count": 3,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 4,
+          "passed": true
+        },
+        {
+          "trial": 2,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 3,
+          "score": 5,
+          "passed": true
+        }
+      ]
+    }
+  },
+  "rubric_scores": [
+    {
+      "agentId": "deepseek-flash",
+      "trial": 1,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "deepseek-flash",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "deepseek-flash",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "gemini-flash-lite",
+      "trial": 1,
+      "score": 3,
+      "errored": false
+    },
+    {
+      "agentId": "gemini-flash-lite",
+      "trial": 2,
+      "score": 3,
+      "errored": false
+    },
+    {
+      "agentId": "gemini-flash-lite",
+      "trial": 3,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "gpt-luna",
+      "trial": 1,
+      "score": 1,
+      "errored": false
+    },
+    {
+      "agentId": "gpt-luna",
+      "trial": 2,
+      "score": 2,
+      "errored": false
+    },
+    {
+      "agentId": "gpt-luna",
+      "trial": 3,
+      "score": 1,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 1,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    }
+  ],
+  "timestamp": "2026-09-23T05:06:39.271Z"
+}

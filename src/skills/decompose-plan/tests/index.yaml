@@ -58,3 +58,8 @@ cases:
     origin_chg: [ad-hoc-2026-09-21-audit]
     tags: [consistency, regression-guard]
     severity: high
+  - id: TC-DECOMPOSE-PLAN-010
+    file: cases/TC-DECOMPOSE-PLAN-010-dod-not-action-text.yaml
+    origin_chg: [ad-hoc-2026-09-22-incident]
+    tags: [dod-transfer, acceptance-criterion, anti-pattern]
+    severity: high

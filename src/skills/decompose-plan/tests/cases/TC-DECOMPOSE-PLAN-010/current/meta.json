@@ -1,9 +1,8 @@
 {
-  "date": "2026-09-22T20:27:17.667Z",
-  "skill_sha": "73eb799",
+  "date": "2026-09-23T05:06:39.273Z",
+  "skill_sha": "6570297",
   "status": "failed",
-  "duration_ms": 1,
-  "l1_skipped": true,
+  "duration_ms": 512029,
   "per_model": {
     "claude-sonnet": {
       "passed": true,
@@ -13,15 +12,7 @@
       "total": 3,
       "threshold": 2
     },
-    "kilo-glm": {
-      "passed": true,
-      "errored": false,
-      "pass_count": 2,
-      "error_count": 1,
-      "total": 3,
-      "threshold": 2
-    },
-    "kilo-minimax": {
+    "gpt-luna": {
       "passed": false,
       "errored": false,
       "pass_count": 0,
@@ -29,10 +20,18 @@
       "total": 3,
       "threshold": 2
     },
-    "kilo-deepseek": {
+    "gemini-flash-lite": {
       "passed": false,
       "errored": false,
       "pass_count": 0,
+      "error_count": 1,
+      "total": 3,
+      "threshold": 2
+    },
+    "deepseek-flash": {
+      "passed": true,
+      "errored": false,
+      "pass_count": 3,
       "error_count": 0,
       "total": 3,
       "threshold": 2
@@ -40,64 +39,64 @@
   },
   "rubric_scores": [
     {
-      "agentId": "kilo-deepseek",
+      "agentId": "deepseek-flash",
       "trial": 1,
-      "score": 2,
+      "score": 4,
       "errored": false
     },
     {
-      "agentId": "kilo-deepseek",
+      "agentId": "deepseek-flash",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "deepseek-flash",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "gemini-flash-lite",
+      "trial": 1,
+      "score": 3,
+      "errored": false
+    },
+    {
+      "agentId": "gemini-flash-lite",
       "trial": 2,
       "score": 3,
       "errored": false
     },
     {
-      "agentId": "kilo-deepseek",
+      "agentId": "gemini-flash-lite",
       "trial": 3,
-      "score": 1,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-glm",
-      "trial": 1,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-glm",
-      "trial": 2,
       "score": null,
       "errored": true,
-      "error": "Stage \"TC-CREATE-PLAN-002-kilo-glm-trial-2\" timed out after 1200s"
+      "error": "Agent exited with code 1"
     },
     {
-      "agentId": "kilo-glm",
-      "trial": 3,
-      "score": 5,
-      "errored": false
-    },
-    {
-      "agentId": "kilo-minimax",
+      "agentId": "gpt-luna",
       "trial": 1,
       "score": 1,
       "errored": false
     },
     {
-      "agentId": "kilo-minimax",
+      "agentId": "gpt-luna",
       "trial": 2,
       "score": 2,
       "errored": false
     },
     {
-      "agentId": "kilo-minimax",
+      "agentId": "gpt-luna",
       "trial": 3,
-      "score": 2,
+      "score": 1,
       "errored": false
     },
     {
       "agentId": "claude-sonnet",
       "trial": 1,
-      "score": 5,
+      "score": 4,
       "errored": false
     },
     {

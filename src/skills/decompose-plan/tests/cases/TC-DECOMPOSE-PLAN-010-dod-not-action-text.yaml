@@ -1,0 +1,66 @@
+id: TC-DECOMPOSE-PLAN-010
+title: "DoD тикета — проверяемый результат задачи, а не текст правки"
+origin:
+  chg: []
+  incidents:
+    - "PulseProxy DEF-016-001: PLAN-016 задача 17 предписала значение, IMPL-65 получил DoD «значение заменено», ревью passed, попап схлопнулся до ~25px, потребовался FIX-22 приоритета 1"
+  principle: "DoD не изготавливается из формулировки действия"
+  backlog_sources:
+    - "d:/Dev/PulseProxy/.workflow/tickets/archive/IMPL-65.md"
+    - "d:/Dev/PulseProxy/.workflow/tickets/archive/FIX-22.md"
+tags: [dod-transfer, acceptance-criterion, anti-pattern]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Декомпозируй задачу плана на тикеты. Типы тикетов в проекте (из
+    `config.yaml → task_types`): IMPL (реализация), QA (автотесты), DOCS
+    (документация), ADMIN (инфраструктурные операции).
+
+    id_ranges_json: {"IMPL":41,"QA":18,"DOCS":9,"ADMIN":5}
+
+    Файла плана на диске нет — задача приведена ниже целиком, работай по ней.
+
+    Фрагмент плана:
+
+    ### 7. Поднять лимит одновременных подключений
+
+    **Приоритет:** Высокий
+    **Зависимости:** Задача 6
+    **Описание:** В `config/server.yaml` заменить `max_connections: 50` на
+    `max_connections: 500`. Остальные параметры не трогать.
+
+    **Файлы:** `config/server.yaml`
+
+    ## Критерии успеха
+
+    - [ ] Сервис обслуживает 300 одновременных подключений без отказов
+    - [ ] Время ответа на 300 подключениях не превышает 200 мс
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "проверяют факт правки"
+      reason: "Запрет изготавливать DoD из формулировки действия должен быть в стоп-гейте 9.A."
+
+  # L1 не применим: скил пишет тикеты в файлы, а в выводе печатает сводку.
+  # Прогон 2026-09-22 показал разброс 1/0/3 вхождений критерия по попыткам одной
+  # модели — ассершен ловил форму сводки, а не соблюдение правила.
+
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/dod-not-action-text.md"
+      criterion: "Записал ли агент в DoD проверяемый результат задачи из критериев плана вместо факта правки?"
+      pass_threshold: 4
+      trials: 3
+      aggregate: majority
+
+execution:
+  # Per-case override по явному согласию стейкхолдера 2026-09-23: «прогоны только
+  # на клоде». Цель кейса — зафиксировать правило перед переводом скила на рельсы,
+  # а не мерить сферу регрессии. Расширение обратно — решение стейкхолдера.
+  target_agents:
+    - claude-sonnet
+  timeout_s: 2400

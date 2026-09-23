@@ -1,0 +1,120 @@
+{
+  "date": "2026-09-22T20:38:31.126Z",
+  "skill_sha": "73eb799",
+  "status": "failed",
+  "duration_ms": 1388311,
+  "per_model": {
+    "claude-sonnet": {
+      "passed": true,
+      "errored": false,
+      "pass_count": 2,
+      "error_count": 0,
+      "total": 3,
+      "threshold": 2
+    },
+    "gpt-luna": {
+      "passed": false,
+      "errored": false,
+      "pass_count": 1,
+      "error_count": 0,
+      "total": 3,
+      "threshold": 2
+    },
+    "gemini-flash-lite": {
+      "passed": false,
+      "errored": true,
+      "pass_count": 0,
+      "error_count": 3,
+      "total": 3,
+      "threshold": 2
+    },
+    "deepseek-flash": {
+      "passed": false,
+      "errored": true,
+      "pass_count": 0,
+      "error_count": 3,
+      "total": 3,
+      "threshold": 2
+    }
+  },
+  "rubric_scores": [
+    {
+      "agentId": "claude-sonnet",
+      "trial": 1,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 2,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 3,
+      "score": 2,
+      "errored": false
+    },
+    {
+      "agentId": "deepseek-flash",
+      "trial": 1,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "deepseek-flash",
+      "trial": 2,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "deepseek-flash",
+      "trial": 3,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "gemini-flash-lite",
+      "trial": 1,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "gemini-flash-lite",
+      "trial": 2,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "gemini-flash-lite",
+      "trial": 3,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "gpt-luna",
+      "trial": 1,
+      "score": 2,
+      "errored": false
+    },
+    {
+      "agentId": "gpt-luna",
+      "trial": 2,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "gpt-luna",
+      "trial": 3,
+      "score": 2,
+      "errored": false
+    }
+  ]
+}
