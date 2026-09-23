@@ -489,6 +489,38 @@ export function scanCommand(command, dialect = 'posix') {
   let trailingSep = null;
   const pendingHeredocs = [];
   const parenStack = []; // открытые `(`; true — скобка арифметики `(( … ))` (см. heredoc ниже)
+  // Раунд 5 (2026-09-22, LOW-4). Строгий признак арифметической команды — правило самого bash
+  // (parse_arith_cmd): после `((` разбирается пара, открытая ВТОРОЙ скобкой, и это арифметика,
+  // только если сразу за её `)` стоит ещё одна `)`. Иначе это вложенные подоболочки, которые
+  // bash ВЫПОЛНЯЕТ. Проверено запуском bash 5.2 msys: `((touch f))` — «syntax error in
+  // expression», файла нет; `((echo x) > b)`, `(((a)) > b)`, `((cd x) && (touch y))` — файлы
+  // создаются. parenStack выше остаётся прежним, НЕстрогим: на нём держится запрет heredoc
+  // внутри `(( ))` из раунда 3 (сузить его — снова спрятать команды за телом heredoc).
+  //
+  // Ревью C2 r5 (2026-09-22, HIGH): признак хранился СТЕКОМ (arithStack), и любой разбор,
+  // проскочивший закрывающие `))` мимо ветки скобок, оставлял его невытолкнутым — arith:true
+  // получали ВСЕ следующие сегменты команды, а commandIO молча выбрасывал их редиректы (ложное
+  // РАЗРЕШЕНИЕ; найденный путь — `#` внутри `(( … ))`, он исправлен отдельно выше). Теперь
+  // признак — ГРАНИЦА ПО ПОЗИЦИИ: конец арифметической области известен в тот же момент, что и
+  // её начало (зонд всё равно ищет закрывающую скобку), поэтому «протечь» за `))` он не может
+  // независимо от того, как токенайзер прошёл текст. Разбор идёт слева направо и arithUntil
+  // только растёт, так что «позиция внутри области» = `pos <= arithUntil`.
+  let arithUntil = -1;
+  // Зонд на каждую `((` стоит O(n); бюджет держит суммарную работу линейной, а его исчерпание
+  // трактуется как «подоболочка» (редиректы считаются записью — только ложный отказ).
+  let arithBudget = 4 * n + 1024;
+  function markArith(i) {
+    if (i <= arithUntil) return; // внутри `(( ))` всё арифметика, граница уже стоит
+    if (s[i + 1] !== '(' || arithBudget <= 0) return;
+    let j;
+    try {
+      j = findClosingParen(s, i + 2, dialect);
+    } catch {
+      return; // слишком глубокая вложенность — разбор всё равно упадёт в ok: false
+    }
+    arithBudget -= (j < 0 ? n : j) - i;
+    if (j >= 0 && s[j + 1] === ')') arithUntil = j + 1;
+  }
   let ok = true;
   let error;
   // Конец последнего НЕэкранированного символа оператора редиректа (`<`, `>`, `&` в `&>`/`>&`,
@@ -498,7 +530,7 @@ export function scanCommand(command, dialect = 'posix') {
   let lastOpEnd = -1;
 
   function ensureCmd(pos) {
-    if (!seg) seg = { start: pos, end: pos, text: '', sepBefore, commands: [] };
+    if (!seg) seg = { start: pos, end: pos, text: '', sepBefore, commands: [], arith: pos <= arithUntil };
     if (!cmd) cmd = { start: pos, end: pos, text: '', tokens: [], heredocs: [] };
   }
   function ensureTok(pos) {
@@ -731,7 +763,16 @@ export function scanCommand(command, dialect = 'posix') {
       // Комментарий: `#` в начале слова — до конца строки (bash и PowerShell; проверено).
       // PowerShell: одиночный CR тоже кончает комментарий (`#c<CR>Write-Output X` выполняет
       // Write-Output — проверено); bash: CR — часть комментария.
-      if (ch === '#' && !tok) {
+      // Ревью C2 r5 (2026-09-22, HIGH): внутри `(( … ))` `#` комментарием НЕ является — bash
+      // разбирает его как часть арифметического выражения, ругается на неё в рантайме и идёт
+      // дальше (проверено запуском bash 5.2 msys: строка `(( a # ))`, следом строка
+      // `echo SECOND-RAN` — SECOND-RAN печатается; `(( a # )); echo AFTER-SEMI` печатает
+      // AFTER-SEMI). Сканер же перематывал разбор до конца строки, съедая `))` вместе с её
+      // остатком: скобки не выталкивались, а команды после `;` выпадали из разбора совсем —
+      // ложное РАЗРЕШЕНИЕ (запись за пределами области была не видна). Признак берётся
+      // НЕстрогий (parenStack), тот же, что у запрета heredoc: он шире настоящей арифметики,
+      // и лишний разбор комментария в подоболочке `((cmd) # …)` даёт только ложный отказ.
+      if (ch === '#' && !tok && !(!ps && parenStack.includes(true))) {
         const nl = s.indexOf('\n', i);
         const cr = ps ? s.indexOf('\r', i) : -1;
         const stop = [nl, cr].filter((k) => k !== -1);
@@ -893,8 +934,11 @@ export function scanCommand(command, dialect = 'posix') {
           // ВЫПОЛНЯЕТ, а сканер уводил их в тело — запись оттуда была не видна.
           if (ch === '(') {
             const arith = s[i + 1] === '(' || (parenStack[parenStack.length - 1] === true && s[i - 1] === '(');
+            markArith(i);
             parenStack.push(arith ? true : (s[i - 1] === '=' ? 'array' : false));
-          } else parenStack.pop();
+          } else {
+            parenStack.pop();
+          }
           endSeg(ch);
           i += 1;
           continue;
@@ -1357,6 +1401,53 @@ function unescapeBacktickBody(body) {
   return body.replace(/\\([`\\$])/g, '$1');
 }
 
+// Содержимое `$( … )` — это арифметическая подстановка `$(( … ))`, а не подстановка команды?
+// Правило bash (chk_arithsub, subst.c): содержимое начинается с `(`, кончается `)`, и между
+// ними скобки сбалансированы; кавычки и `\` пропускаются целиком. Раунд 5 (2026-09-22, LOW-4):
+// проверено запуском bash 5.2 msys — `echo $(( 5 > 3 ))` печатает 1 и файла `3` не создаёт
+// (детектор давал фантомную цель <cwd>/3), а `echo $((cd x) && (touch y))` и `echo $((ls) > c)`
+// bash ВЫПОЛНЯЕТ как подстановку команды (y и c создаются) — их разбирать по-прежнему нужно.
+function isArithSubst(inner) {
+  if (!inner.startsWith('(') || !inner.endsWith(')') || inner.length < 2) return false;
+  const body = inner.slice(1, -1);
+  let count = 0;
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i];
+    if (ch === '\\') {
+      i += 1;
+      continue;
+    }
+    if (ch === "'") {
+      const j = body.indexOf("'", i + 1);
+      if (j < 0) return false;
+      i = j;
+      continue;
+    }
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < body.length && body[j] !== '"') j += body[j] === '\\' ? 2 : 1;
+      if (j >= body.length) return false;
+      i = j;
+      continue;
+    }
+    if (ch === '(') count += 1;
+    else if (ch === ')') {
+      count -= 1;
+      if (count < 0) return false;
+    }
+  }
+  return count === 0;
+}
+
+// Содержимое `$( … )`: подстановка команды уходит в разбор как есть, арифметика — обёрнутой
+// назад в `(( … ))`, чтобы сканер разметил её сегменты как арифметические (тогда `>` внутри
+// не редирект), а остальной разбор не менялся: подстановки внутри арифметики выполняются
+// (`$(( $(touch f; echo 1) + 1 ))` создаёт f, проверено запуском), и присваивание с
+// динамическим именем (`$(( x = 1, $n = 5 ))`) по-прежнему делает переменные неизвестными.
+function pushSubstScript(inner, ps, out) {
+  out.scripts.push(!ps && isArithSubst(inner) ? `(${inner})` : inner);
+}
+
 // Подстановки внутри текста "…" или тела heredoc: $(…), `…` (POSIX), ${…}.
 function collectFromText(raw, ps, out) {
   const dialect = ps ? 'powershell' : 'posix';
@@ -1373,7 +1464,7 @@ function collectFromText(raw, ps, out) {
         out.opaque = true;
         return;
       }
-      out.scripts.push(raw.slice(k + 2, j));
+      pushSubstScript(raw.slice(k + 2, j), ps, out);
       k = j + 1;
       continue;
     }
@@ -1415,7 +1506,11 @@ function collectFromRegion(raw, ps, out) {
     return;
   }
   if (!ps) {
-    if (raw.startsWith('$(') || raw.startsWith('<(') || raw.startsWith('>(')) out.scripts.push(raw.slice(2, -1));
+    if (raw.startsWith('$(')) {
+      pushSubstScript(raw.slice(2, -1), ps, out);
+      return;
+    }
+    if (raw.startsWith('<(') || raw.startsWith('>(')) out.scripts.push(raw.slice(2, -1));
     else if (raw.startsWith('`')) out.scripts.push(unescapeBacktickBody(raw.slice(1, -1)));
     else out.opaque = true;
     return;

@@ -143,6 +143,9 @@ const IS_WIN32 = process.platform === 'win32';
 const MARK = '?';
 const MARKER_ITEM = Object.freeze({ marker: true });
 const EMPTY_WORD = Object.freeze({ kind: 'word', parts: [], value: '', text: '', quote: 'none', hasSubstitution: false, hasExpansion: false });
+// Синтетические слова `sh -c <строка>`: строку-скрипт обёртки (`flock f -c '…'`) разбирает
+// тот же путь, что и настоящий `sh -c` (nestedShellWrites).
+const DASH_C_WORD = Object.freeze({ ...EMPTY_WORD, value: '-c', text: '-c' });
 // Предохранители: миров больше — всё неизвестно; вложенность подстановок и общий объём работы
 // ограничены (патологическая команда не должна уронить хук или съесть бюджет решения, §7).
 const MAX_WORLDS = 16;
@@ -227,8 +230,14 @@ const WRAPPERS = {
   // файла блокировки) команда. В Git Bash на этой машине обеих утилит нет (проверено
   // `command -v` — not found), поведение взято из их документированной формы; правило только
   // расширяет детект записи, ложного разрешения из него не возникает.
-  setsid: { value: ['-c'] },
-  flock: { value: ['-w', '--wait', '--timeout', '-E', '--conflict-exit-code'], positional: 1 },
+  //
+  // Раунд 5 (2026-09-22, LOW-3): у setsid `-c`/`--ctty` значения НЕТ (это переключатель, как
+  // -f/-w, util-linux setsid(1)) — он съедал имя обёрнутой команды, и `setsid -c touch <вне
+  // области>` давал commandName 'f' без записи. У flock `-c`/`--command <строка>` значение
+  // есть, но это СКРИПТ: flock выполняет его через `${SHELL:-/bin/sh} -c` (flock(1)) — общий
+  // разбор флагов проглатывал -c, и строка попадала в позицию имени команды.
+  setsid: {},
+  flock: { value: ['-w', '--wait', '--timeout', '-E', '--conflict-exit-code'], script: ['-c', '--command'], positional: 1 },
   timeout: { value: ['-s', '-k'], positional: 1 },
   xargs: { value: ['-I', '-L', '-n', '-P', '-d', '-E', '-s', '-a'], appends: true },
   git: { value: ['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path'], chdir: ['-C', '--git-dir', '--work-tree'] },
@@ -397,6 +406,33 @@ function envValue(env, name, ci) {
   return typeof env[key] === 'string' ? env[key] : null;
 }
 
+// Домашний каталог POSIX. Источник — переменная окружения HOME (раунд 5, LOW-2: раньше
+// ведущая `~` шла через os.homedir() и игнорировала HOME, а `$HOME` брался из env — два
+// источника для одного значения). Проверено запуском bash 5.2 msys: `~` следует $HOME, и
+// заданному в окружении вызова (`HOME=<dir> bash -c 'touch ~/a'` пишет в <dir>), и
+// переназначенному внутри команды — поэтому переназначение (taint) даёт null → '?'.
+//
+// Ревью C2 r5 (2026-09-22, MEDIUM): различие `~` и `$HOME` при ОТСУТСТВУЮЩЕМ HOME — не два
+// источника, а правило самого bash, и снимать его нельзя. Проверено запуском:
+//   env -u HOME bash -c 'echo ~'     -> /c/Users/Denis  (каталог пользователя из passwd)
+//   env -u HOME bash -c 'echo $HOME' -> пусто
+//   HOME= bash -c 'echo ~'           -> пусто           (HOME задан, пусть и пустой)
+// то есть `~` не отказывает никогда, а без HOME берёт каталог пользователя процесса —
+// os.homedir() на этой машине даёт ровно его, и `env -u HOME bash -c 'touch ~/f'` создаёт
+// файл именно там (проверено запуском). Процесс хука HOME не видит: node, порождённый из
+// powershell.exe, имеет process.env.HOME === undefined (есть только USERPROFILE и
+// HOMEDRIVE/HOMEPATH) — без запасного источника ЛЮБАЯ команда с `~` давала '?', а '?' в
+// core.mjs — безусловный deny. `$HOME` запасного источника не получает: у bash он в этом
+// случае пуст, а пустой путь честнее показать неизвестностью.
+// `envValue` возвращает null только когда ключа НЕТ; HOME='' даёт '' и запасной источник не
+// включается — это и есть третья строка замера выше.
+function posixHome(ctx, tilde = false) {
+  if (ctx.taint.has('HOME')) return null;
+  const value = envValue(ctx.env, 'HOME', false);
+  if (value !== null) return value;
+  return tilde ? homedir() : null;
+}
+
 // Значение переменной в мире: сначала присвоенные этой же командой, затем окружение;
 // неизвестно — null (цель записи станет '?'). PowerShell `$X` — не `$env:X`: неприсвоенная
 // `$ZZ` пуста, даже если есть переменная окружения ZZ (проверено запуском PS 5.1).
@@ -418,14 +454,14 @@ function lookupFor(w, ctx) {
     }
     if (ref.tilde) {
       if (ref.tilde === '~+') return fullDir(w.dir);
-      return ctx.taint.has('HOME') ? null : homedir();
+      return posixHome(ctx, true);
     }
     const { name } = ref;
     if (ctx.taint.has(name) || (!ref.quoted && ctx.taint.has('IFS'))) return null;
     if (name === 'PWD') return fullDir(w.dir);
     if (POSIX_DYNAMIC.has(name)) return null;
     if (w.vars.has(name)) return w.vars.get(name);
-    if (name === 'HOME') return envValue(ctx.env, 'HOME', false) ?? homedir();
+    if (name === 'HOME') return posixHome(ctx);
     return envValue(ctx.env, name, false);
   };
 }
@@ -614,9 +650,18 @@ function startsLoop(seg, ctx) {
 }
 
 // Ровно `cd|pushd <каталог>` (POSIX, допустим `--`) или `cd|chdir|sl|Set-Location|pushd|
-// Push-Location [-Path|-LiteralPath] <каталог>` (PowerShell), без редиректов.
+// Push-Location [-Path|-LiteralPath] <каталог>` (PowerShell).
+//
+// Раунд 5 (2026-09-22, LOW-1, регресс allow→deny против HEAD): условие `redirects.length === 0`
+// отнимало каталог у частой идиомы `cd sub >/dev/null && …` — вся команда пишет внутри области,
+// а decide отказывал. Редирект в псевдоустройство переход НЕ отменяет (проверено запуском
+// bash 5.2 msys: после `cd sub >/dev/null`, `pushd sub >/dev/null`, `cd sub 2>/dev/null` pwd —
+// …/sub; PS 5.1: после `Set-Location sub > $null` — тоже). Любой другой редирект оставлен
+// неизвестностью: bash и с ним переходит, но ложный отказ допустим, а неудавшийся редирект
+// (`cd sub >nodir/x`) команду не выполняет вовсе (проверено запуском — pwd не изменился).
 function cdForm(words, redirects, ctx) {
-  if (redirects.length > 0 || words.length < 2 || words.length > 3) return null;
+  if (words.length < 2 || words.length > 3) return null;
+  if (redirects.some((r) => !r.target || !isLiteralNullDevice(r.target, ctx))) return null;
   const name = words[0].value;
   if (name === null) return null;
   if (ctx.ps) {
@@ -779,7 +824,9 @@ function runSegment(seg, cls, w, ctx, depth) {
 }
 
 // Вложенные скрипты (подстановки, тела heredoc) и редиректы простой команды.
-function commandIO(cmd, w, ctx, depth) {
+// `arith` — сегмент внутри `(( … ))`: там `>`/`<` — операторы сравнения, а не редирект
+// (раунд 5, LOW-4; сканер размечает такие сегменты правилом самого bash).
+function commandIO(cmd, w, ctx, depth, arith = false) {
   const { words, redirects } = ctx.split(cmd);
   let world = w;
   let changed = false;
@@ -800,7 +847,7 @@ function commandIO(cmd, w, ctx, depth) {
       }
     }
   }
-  if (!ctx.taintPass) for (const r of redirects) redirectWrite(r, world, ctx);
+  if (!ctx.taintPass && !arith) for (const r of redirects) redirectWrite(r, world, ctx);
   return { world, changed, words, redirects };
 }
 
@@ -822,13 +869,31 @@ function redirectWrite(r, world, ctx) {
   addTarget(ctx, world, { word: r.target });
 }
 
-// Псевдоустройства — не запись: /dev/null, /dev/stdout, /dev/stderr, NUL (POSIX, как в HEAD);
-// PowerShell — $null и NUL (там `/dev/null` — обычный путь от корня диска).
+// Псевдоустройства — не запись: POSIX — /dev/null, /dev/stdout, /dev/stderr; PowerShell —
+// $null и NUL (там `/dev/null` — обычный путь от корня диска).
+//
+// Раунд 5 (2026-09-22), ЛОЖНОЕ РАЗРЕШЕНИЕ (было и в HEAD): POSIX-ветка считала псевдоустройством
+// и `NUL`. В Git Bash (msys) на этой машине NUL — ОБЫЧНЫЙ файл: `echo HELLOWORLD > NUL` создаёт
+// в текущем каталоге файл NUL с этим содержимым (`stat` — regular file, 11 байт; проверено
+// запуском). Запись вне области проходила как allow. В PowerShell 5.1 `> NUL` — устройство:
+// Out-File падает «asked to open a device that was not a file», файла нет (проверено запуском).
 function isNullTarget(word, world, ctx) {
   if (ctx.ps) return word.text.toLowerCase() === '$null' || (word.value ?? '').toLowerCase() === 'nul';
   const x = expandWord(word, 'posix', lookupFor(world, ctx));
   if (!x) return false;
-  return x.value === '/dev/null' || x.value === '/dev/stdout' || x.value === '/dev/stderr' || x.value.toLowerCase() === 'nul';
+  return x.value === '/dev/null' || x.value === '/dev/stdout' || x.value === '/dev/stderr';
+}
+
+// Цель редиректа — псевдоустройство, видное БЕЗ раскрытий (литерал). Нужна cdForm: `cd` с
+// редиректом в /dev/null каталог всё-таки меняет, а с любым другим редиректом трекер
+// консервативно отказывается. Подстановка в цели снова даёт неизвестность.
+// Ревью раунда 5 (2026-09-22, LOW, проверено запуском PowerShell 5.1.26100.9444): `> NUL` в
+// PowerShell — устройство, и Out-File падает на его открытии ДО выполнения команды, поэтому
+// `Set-Location sub > NUL` каталог НЕ меняет (в отличие от `> $null`, который меняет).
+// Для трекера каталога годится только `$null`; `NUL` рядом с cd оставляет каталог неизвестным.
+function isLiteralNullDevice(word, ctx) {
+  if (ctx.ps) return word.text.toLowerCase() === '$null';
+  return word.value === '/dev/null';
 }
 
 function commandName(v, ctx) {
@@ -881,6 +946,28 @@ function commandInfo(words, cmd, seg, ctx) {
         const short = !a.startsWith('--') && a.length > 2 ? a.slice(0, 2) : null;
         if (wr.chdir && (wr.chdir.includes(flag) || (short && wr.chdir.includes(short)))) chdir = true;
         if (name === 'env' && (flag === '-S' || flag === '--split-string' || short === '-S')) return { kind: 'unknown' };
+        // `flock файл -c '<скрипт>'` — строку выполняет шелл: разбираем как `sh -c` (раунд 5).
+        // Ревью раунда 5 (2026-09-22, LOW): короткие флаги склеиваются в группу, и `-c` в ней
+        // не обязан быть первым (`flock -xc '<скрипт>' f`, `-nc`). Без разбора группы строка
+        // уходила в позиционный аргумент, именем команды становился файл блокировки, а список
+        // записей выходил ПУСТЫМ — ложное разрешение того же класса, что закрывала правка.
+        if (wr.script && !a.startsWith('--') && eq === -1) {
+          const cluster = a.slice(1);
+          const k = [...cluster].findIndex((c) => wr.script.includes(`-${c}`));
+          if (k !== -1) {
+            const rest = cluster.slice(k + 1);
+            const scriptWord = rest ? { ...EMPTY_WORD, value: rest, text: rest } : words[i + 1];
+            return { kind: 'cmd', name: 'sh', args: scriptWord ? [DASH_C_WORD, scriptWord] : [DASH_C_WORD], chdir, appends };
+          }
+        }
+        if (wr.script) {
+          const glued = short && wr.script.includes(short) ? a.slice(2) : wr.script.includes(flag) && eq !== -1 ? a.slice(eq + 1) : null;
+          const next = glued === null && eq === -1 && wr.script.includes(flag);
+          if (glued !== null || next) {
+            const scriptWord = next ? words[i + 1] : { ...EMPTY_WORD, value: glued, text: glued };
+            return { kind: 'cmd', name: 'sh', args: scriptWord ? [DASH_C_WORD, scriptWord] : [DASH_C_WORD], chdir, appends };
+          }
+        }
         if (eq === -1 && !short && wr.value?.includes(flag)) i += 1;
         i += 1;
         continue;
@@ -998,7 +1085,7 @@ function dynamicAssignName(name, args) {
 }
 
 function analyzeCommand(cmd, w, ctx, depth, seg) {
-  const io = commandIO(cmd, w, ctx, depth);
+  const io = commandIO(cmd, w, ctx, depth, seg?.arith === true);
   let world = io.world;
   let changed = io.changed;
   const ci = commandInfo(io.words, cmd, seg, ctx);

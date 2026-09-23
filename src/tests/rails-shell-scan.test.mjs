@@ -603,3 +603,117 @@ test('scan posix (C2 r4, HIGH): heredoc в списке массива `a=( … 
   const cmd = scanCommand('a=$(cat <<EOF\nbody\nEOF\n)');
   assert.equal(cmd.ok, true, cmd.error);
 });
+
+// Раунд 5 (2026-09-22, LOW-4). Арифметику от вложенных подоболочек `((cmd) && cmd)` bash
+// различает СИНТАКСИЧЕСКИ, и сканер повторяет это правило: `((` — арифметика, только если
+// пара, открытая второй скобкой, закрывается непосредственно перед `)` (parse_arith_cmd);
+// `$((` — если содержимое `$( … )` начинается с `(`, кончается `)` и скобки между ними
+// сбалансированы (chk_arithsub). Поведение bash 5.2 msys проверено запуском (см. последний
+// тест файла): `((touch f))` — арифметическая ошибка, файла нет, а `((echo x) > b)`,
+// `(((a)) > b)`, `((cd x) && (touch y))`, `echo $((ls) > c)` bash ВЫПОЛНЯЕТ.
+test('scan posix (C2 r5): сегменты `(( … ))` помечены arith, вложенные подоболочки — нет', () => {
+  const ariths = (command) => {
+    const r = scanCommand(command, 'posix');
+    assert.equal(r.ok, true, r.error);
+    return r.segments.map((s) => [s.commands.map((c) => c.text).join(' | '), s.arith]);
+  };
+  assert.deepEqual(ariths('(( n > 0 ))'), [['n > 0', true]]);
+  assert.deepEqual(ariths('(( (a+b) * c ))'), [['a+b', true], ['* c', true]]);
+  assert.deepEqual(ariths('((touch f))'), [['touch f', true]]);
+  assert.deepEqual(ariths('((echo x) > b)'), [['echo x', false], ['> b', false]]);
+  // `(((a)) > b)` — подоболочка, внутри которой арифметическая команда `((a))` с редиректом
+  // `> b`: редирект вне арифметики и остаётся записью (bash создаёт b, проверено запуском)
+  assert.deepEqual(ariths('(((a)) > b)'), [['a', true], ['> b', false]]);
+  assert.deepEqual(ariths('(((a) > b))'), [['a', true], ['> b', true]], 'а это уже арифметика целиком');
+  assert.deepEqual(ariths('((cd x) && (touch y))'), [['cd x', false], ['touch y', false]]);
+  assert.deepEqual(ariths('(cd x) && touch y'), [['cd x', false], ['touch y', false]]);
+  // редирект ПОСЛЕ `))` — уже вне арифметики
+  assert.deepEqual(ariths('(( n > 0 )) 2>err'), [['n > 0', true], ['2>err', false]]);
+  // PowerShell своих `(( ))` не имеет — arith всегда false
+  const ps = scanCommand('(Get-Item a) > b', 'powershell');
+  assert.equal(ps.segments.every((s) => s.arith === false), true);
+});
+
+test('nestedScripts (C2 r5): `$(( … ))` — арифметика (обёрнута назад в `(( … ))`), `$((cmd) …)` — подстановка команды', () => {
+  const w = (s, d = 'posix') => splitRedirects(cmd0(`x ${s}`, d), d).words[1];
+  const sc = (s) => nestedScripts(w(s), 'posix').scripts;
+  assert.deepEqual(sc('$(( 5 > 3 ))'), ['(( 5 > 3 ))']);
+  assert.deepEqual(sc('$(( (a+b) > c ))'), ['(( (a+b) > c ))']);
+  assert.deepEqual(sc('$(())'), ['(())']);
+  assert.deepEqual(sc('$(( $(touch f) + 1 ))'), ['(( $(touch f) + 1 ))'], 'подстановка внутри арифметики остаётся в разборе');
+  // не арифметика: скобки внутри не сбалансированы после снятия внешней пары
+  assert.deepEqual(sc('$((ls) > c)'), ['(ls) > c']);
+  assert.deepEqual(sc('$((cd x) && (touch y))'), ['(cd x) && (touch y)']);
+  assert.deepEqual(sc('$((a) > (b))'), ['(a) > (b)']);
+  assert.deepEqual(sc('$((ls) | cat)'), ['(ls) | cat']);
+  assert.deepEqual(sc('$( (touch t) )'), [' (touch t) '], 'пробел перед `(` — обычная подстановка команды');
+  assert.deepEqual(sc('$(touch t)'), ['touch t']);
+  // кавычки внутри пропускаются целиком, как в chk_arithsub
+  assert.deepEqual(sc('$(( "a)b" ))'), ['(( "a)b" ))']);
+  assert.deepEqual(sc(`$(( 'a)b' ))`), [`(( 'a)b' ))`]);
+  // в "…" — тот же разбор
+  assert.deepEqual(nestedScripts(w('"$(( 5 > 3 ))"'), 'posix').scripts, ['(( 5 > 3 ))']);
+  assert.deepEqual(nestedScripts(w('"$((ls) > c)"'), 'posix').scripts, ['(ls) > c']);
+});
+
+// Ревью C2 r5 (2026-09-22, HIGH). Признак arith хранился СТЕКОМ, который выталкивался только
+// в ветке `)`. `#` внутри `(( … ))` перематывал разбор до конца строки, `))` до этой ветки не
+// доходили, стек оставался с true — и ВСЕ следующие сегменты получали arith:true (в actions.mjs
+// это молча выбрасывает их редиректы, то есть ложное РАЗРЕШЕНИЕ). Две правки: (1) внутри
+// `(( … ))` `#` не комментарий — так же, как у bash (проверено запуском, см. тест в конце
+// файла); (2) признак — ГРАНИЦА ПО ПОЗИЦИИ, а не стек: конец области известен в момент входа
+// в неё, поэтому «протечь» за `))` он не может, как бы токенайзер ни прошёл текст.
+test('scan posix (ревью C2 r5, HIGH): признак arith не уходит за `))` — `#` внутри `(( … ))`', () => {
+  const NL = String.fromCharCode(10);
+  const ariths = (command) => {
+    const r = scanCommand(command, 'posix');
+    assert.equal(r.ok, true, r.error);
+    return r.segments.map((x) => [x.commands.map((c) => c.text).join(' | '), x.arith]);
+  };
+  // `#` — часть арифметического выражения, `))` закрывают область, вторая команда вне её
+  assert.deepEqual(ariths(`(( a # ))${NL}echo x > out.txt`), [['a #', true], ['echo x > out.txt', false]]);
+  assert.deepEqual(ariths('(( a # )); echo x > out.txt'), [['a #', true], ['echo x > out.txt', false]]);
+  assert.deepEqual(ariths(`((#))${NL}echo x > out.txt`), [['#', true], ['echo x > out.txt', false]]);
+  assert.deepEqual(ariths('(( a # b ))'), [['a # b', true]]);
+  // вне скобок `#` остаётся комментарием
+  assert.deepEqual(ariths('echo ok # > out.txt'), [['echo ok', false]]);
+  assert.deepEqual(ariths(`(( 1 )) # c${NL}echo x > out.txt`), [['1', true], ['echo x > out.txt', false]]);
+  // граница по позиции: в подоболочке `((cmd) …)` флага нет и комментарий там разбирается как
+  // слова (для bash это комментарий — расхождение в сторону ложного отказа, не разрешения)
+  assert.deepEqual(ariths('((echo A) # c)'), [['echo A', false], ['# c', false]]);
+  // контроль LOW-4 не изменился
+  assert.deepEqual(ariths('(( n > 0 ))'), [['n > 0', true]]);
+  assert.deepEqual(ariths('((echo x) > b)'), [['echo x', false], ['> b', false]]);
+  assert.deepEqual(ariths('(( n > 0 )) 2>err'), [['n > 0', true], ['2>err', false]]);
+});
+
+test('bash (C2 r5): правило `((` — арифметика только при `))`, иначе вложенные подоболочки', () => {
+  if (process.platform !== 'win32') return;
+  const base = mkdtempSync(join(tmpdir(), 'rails-scan-r5-'));
+  const sh = (script) => {
+    try {
+      execFileSync('bash', ['-c', script], { cwd: base, stdio: 'ignore' });
+    } catch {
+      /* арифметическая ошибка даёт ненулевой код — важно, что файла нет */
+    }
+  };
+  try {
+    for (const [script, file, created] of [
+      ['((touch arith.txt))', 'arith.txt', false],
+      ['echo $((touch arith2.txt))', 'arith2.txt', false],
+      ['n=1; (( n > 0 ))', '0', false],
+      ['echo $(( 5 > 3 ))', '3', false],
+      ['((echo x) > sub1.txt)', 'sub1.txt', true],
+      ['(((a)) > sub2.txt)', 'sub2.txt', true],
+      ['((cd /tmp) && (touch sub3.txt))', 'sub3.txt', true],
+      ['echo $((ls) > sub4.txt)', 'sub4.txt', true],
+      ['echo $((cd /tmp) && (touch sub5.txt))', 'sub5.txt', true],
+      ['(( n > 0 )) 2>sub6.txt', 'sub6.txt', true],
+    ]) {
+      sh(script);
+      assert.equal(existsSync(join(base, file)), created, `${script} -> ${file}`);
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});

@@ -245,9 +245,12 @@ test('detectShellWrites: git — обёртка позиции, но не ком
   assert.deepEqual(detectShellWrites('git commit -m "touch a"'), []);
 });
 
-test('detectShellWrites: редирект в псевдоустройство (/dev/null, NUL) — не запись и не маркер "?"', () => {
+test('detectShellWrites: редирект в псевдоустройство (/dev/null) — не запись и не маркер "?"', () => {
   assert.deepEqual(detectShellWrites('node cli.mjs report --skill coach 2>/dev/null | head -14'), []);
-  assert.deepEqual(detectShellWrites('dir > NUL'), []);
+  // раунд 5: в POSIX `NUL` — обычный файл (Git Bash создаёт его, проверено запуском),
+  // псевдоустройство только в PowerShell
+  assert.deepEqual(detectShellWrites('dir > NUL'), ['NUL']);
+  assert.deepEqual(detectShellWrites('dir > NUL', { dialect: 'powershell' }), []);
   assert.deepEqual(detectShellWrites('cmd 2>/dev/null > out.txt'), ['out.txt']);
 });
 
@@ -329,11 +332,12 @@ test('detectShellWrites (C2, bypass MEDIUM #4): PowerShell Push-Location, chdir,
   }
 });
 
-test('detectShellWrites (C2, bypass MEDIUM #5): cd с флагами и редиректами — не трекается (кроме `--`)', () => {
+test('detectShellWrites (C2, bypass MEDIUM #5): cd с флагами — не трекается (кроме `--`); редирект — только в псевдоустройство', () => {
   assert.deepEqual(writes(`cd -- ${O} && touch x.txt`), [at(OUT, 'x.txt')]);
   assert.deepEqual(writes(`cd -P ${O} && touch x.txt`), ['?']);
-  assert.deepEqual(writes(`cd "${O}" 2>&1 && touch x.txt`), ['?']);
-  assert.deepEqual(writes(`cd ${O} 2>/dev/null && touch x.txt`), ['?']);
+  assert.deepEqual(writes(`cd "${O}" 2>&1 && touch x.txt`), ['?'], 'дубль дескриптора — не псевдоустройство');
+  // раунд 5, LOW-1: `cd … 2>/dev/null` в каталог переходит (проверено запуском) — не отказ
+  assert.deepEqual(writes(`cd ${O} 2>/dev/null && touch x.txt`), [at(OUT, 'x.txt')]);
 });
 
 test('detectShellWrites (C2, bypass MEDIUM #6 / correctness #3): нераскрываемый аргумент cd — каталог неизвестен', () => {
@@ -398,7 +402,7 @@ test('detectShellWrites (C2): все формы редиректа в файл �
   assert.deepEqual(psWrites(`Write-Output x *> ${O}/s.txt`), [`${O}/s.txt`]);
   assert.deepEqual(psWrites(`Write-Output x 3>> ${O}/s.txt`), [`${O}/s.txt`]);
   assert.deepEqual(psWrites('Write-Output x 2>$null > $null'), []);
-  assert.deepEqual(writes('cmd 2>/dev/null >NUL'), []);
+  assert.deepEqual(writes('cmd 2>/dev/null >NUL'), [at(SCOPE, 'NUL')], 'раунд 5: NUL в POSIX — обычный файл');
 });
 
 test('detectShellWrites (C2): сканер не разобрал команду (незакрытая кавычка/heredoc) — "?"', () => {
@@ -451,11 +455,13 @@ test('detectShellWrites (C2): переменная, которой где-либ
 });
 
 test('detectShellWrites (C2): "~" — домашний каталог (POSIX вне кавычек, PowerShell в любых кавычках)', () => {
-  assert.deepEqual(writes('touch ~/scratch.txt'), [`${homedir()}/scratch.txt`]);
-  assert.deepEqual(writes('cd ~/proj && touch a.txt'), [at(homedir(), 'proj', 'a.txt')]);
-  assert.deepEqual(writes('touch "~/x"'), [at(SCOPE, '~', 'x')], 'в кавычках bash не раскрывает ~ (проверено запуском)');
-  assert.deepEqual(psWrites("Set-Content -LiteralPath '~\\x' -Value 1"), [`${homedir()}\\x`]);
-  assert.deepEqual(writes('touch ~other/x'), ['?']);
+  // раунд 5, LOW-2: в POSIX `~` берётся из env HOME (тот же источник, что у `$HOME`)
+  const home = { env: { HOME: homedir() } };
+  assert.deepEqual(writes('touch ~/scratch.txt', home), [`${homedir()}/scratch.txt`]);
+  assert.deepEqual(writes('cd ~/proj && touch a.txt', home), [at(homedir(), 'proj', 'a.txt')]);
+  assert.deepEqual(writes('touch "~/x"', home), [at(SCOPE, '~', 'x')], 'в кавычках bash не раскрывает ~ (проверено запуском)');
+  assert.deepEqual(psWrites("Set-Content -LiteralPath '~\\x' -Value 1"), [`${homedir()}\\x`], 'PowerShell: $HOME — автоматическая переменная, не env:HOME (проверено запуском PS 5.1)');
+  assert.deepEqual(writes('touch ~other/x', home), ['?']);
 });
 
 test('detectShellWrites (C2): `;`/`||` после cd — запись и в прежнем каталоге; `&&` — только в новом', () => {
@@ -853,6 +859,290 @@ test('bash (C2 r4): `a=(<<E)` — синтаксическая ошибка, her
         /* syntax error — ненулевой код; важно, что следующая строка выполнена */
       }
       assert.equal(existsSync(join(base, file)), true, `bash выполнил строку после ошибочного heredoc: ${file}`);
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// --- раунд 5: LOW-замечания ревью раунда 3 C2 (2026-09-22) -------------------------------
+
+// LOW-1: cdForm требовал redirects.length === 0, и частая идиома `cd … >/dev/null` лишала
+// трекера каталога (регресс allow→deny против HEAD). Проверено запуском bash 5.2 msys:
+// `cd sub >/dev/null`, `pushd sub >/dev/null`, `cd sub 2>/dev/null` в каталог ПЕРЕХОДЯТ
+// (pwd = …/sub); PowerShell 5.1 — `Set-Location sub > $null` тоже. Редирект в файл переход
+// тоже не отменяет, но правило остаётся консервативным: неизвестность — только ложный отказ.
+test('detectShellWrites (C2 r5, LOW-1): редирект в псевдоустройство рядом с cd/pushd не делает каталог неизвестным', () => {
+  assert.deepEqual(writes('pushd sub >/dev/null && touch f.txt'), [at(SCOPE, 'sub', 'f.txt')]);
+  assert.deepEqual(writes('pushd sub > /dev/null && touch f.txt && popd > /dev/null'), [at(SCOPE, 'sub', 'f.txt')]);
+  assert.deepEqual(writes('cd sub 2>/dev/null && touch f.txt'), [at(SCOPE, 'sub', 'f.txt')]);
+  assert.deepEqual(writes('cd sub 1>/dev/null 2>/dev/null && touch f.txt'), [at(SCOPE, 'sub', 'f.txt')]);
+  assert.deepEqual(writes('cd -- sub >/dev/null && touch f.txt'), [at(SCOPE, 'sub', 'f.txt')]);
+  // PowerShell 5.1: `&&` нет, `;` — запись и в прежнем каталоге (cd мог не удаться)
+  assert.deepEqual(psWrites('Set-Location sub > $null; Set-Content a.txt 1'), [at(SCOPE, 'sub', 'a.txt'), at(SCOPE, 'a.txt')]);
+  assert.deepEqual(psWrites('Push-Location -Path sub 2> $null; Set-Content a.txt 1'), [at(SCOPE, 'sub', 'a.txt'), at(SCOPE, 'a.txt')]);
+  // Ревью раунда 5 (LOW, проверено запуском PS 5.1): `> NUL` — устройство, Out-File падает на
+  // его открытии ДО выполнения команды, и `Set-Location sub > NUL` каталог не меняет.
+  assert.deepEqual(psWrites('Set-Location sub > NUL; Set-Content a.txt 1'), ['?']);
+  // любой другой редирект — каталог по-прежнему неизвестен (консервативно), а редирект — запись
+  assert.deepEqual(writes(`cd sub > ${O}/out.log && touch f.txt`), [`${O}/out.log`, '?']);
+  assert.deepEqual(writes('cd sub 2>err.log && touch f.txt'), [at(SCOPE, 'err.log'), '?']);
+  // «псевдоустройство» — только литерал: подстановка в цели редиректа даёт неизвестность
+  assert.deepEqual(writes('cd sub >$DEV && touch f.txt'), ['?']);
+});
+
+// LOW-2: ведущая `~` раскрывалась через os.homedir(), а `$HOME` — из env: два источника для
+// одного значения. Проверено запуском bash 5.2: `~` следует $HOME (в том числе заданному в
+// окружении вызова и переназначенному внутри команды), при unset HOME `~` берётся из passwd —
+// детектор этого не знает, поэтому неизвестный HOME → '?'.
+test('detectShellWrites (C2 r5, LOW-2): `~` и `$HOME` — один источник (env HOME); HOME неизвестен → "?"', () => {
+  const home = fwd(join(BASE, 'home'));
+  assert.deepEqual(writes('touch ~/a.txt', { env: { HOME: home } }), [`${home}/a.txt`]);
+  assert.deepEqual(writes('touch $HOME/a.txt', { env: { HOME: home } }), [`${home}/a.txt`]);
+  assert.deepEqual(writes('cd ~/proj && touch a.txt', { env: { HOME: home } }), [at(home, 'proj', 'a.txt')]);
+  // Ревью C2 r5 (MEDIUM): без HOME `~` НЕ неизвестность — bash берёт каталог пользователя
+  // (см. тест «поведение bash …»), а '?' в core.mjs — безусловный deny на каждую команду с `~`
+  assert.deepEqual(writes('touch ~/a.txt'), [`${homedir()}/a.txt`], 'HOME нет — каталог пользователя');
+  assert.deepEqual(writes('touch $HOME/a.txt'), ['?'], '$HOME без HOME у bash пуст — неизвестность');
+  assert.deepEqual(writes(`HOME=${home} touch ~/a.txt`), ['?'], 'HOME переназначен в команде');
+  assert.deepEqual(writes(`HOME=${home}; touch $HOME/a.txt`), ['?']);
+});
+
+// LOW-3: обёртки со строкой-скриптом. `flock файл -c '<скрипт>'` выполняет строку через
+// шелл — флаг -c съедался общим разбором флагов, значение попадало в позицию имени команды
+// (commandName давал 'x'), запись пропадала. У setsid `-c`/`--ctty` значения не имеет
+// (переключатель) — он съедал имя обёрнутой команды. Обеих утилит в Git Bash на этой машине
+// нет (`command -v` пусто) — форма взята из документации util-linux, правило только расширяет
+// детект записи, ложного разрешения из него не возникает.
+test('detectShellWrites (C2 r5, LOW-3): flock -c <строка-скрипт>, setsid -c — переключатель', () => {
+  assert.deepEqual(writes(`flock /tmp/l -c 'touch ${O}/x.txt'`), [`${O}/x.txt`]);
+  assert.deepEqual(writes(`flock /tmp/l -c "touch ${O}/x.txt"`), [`${O}/x.txt`]);
+  assert.deepEqual(writes(`flock -w 5 /tmp/l --command 'touch ${O}/x.txt'`), [`${O}/x.txt`]);
+  assert.deepEqual(writes(`flock /tmp/l --command='touch ${O}/x.txt'`), [`${O}/x.txt`]);
+  assert.deepEqual(writes(`flock -e /tmp/l -c'touch ${O}/x.txt'`), [`${O}/x.txt`]);
+  // Ревью раунда 5 (LOW): короткие флаги склеиваются, `-c` в группе не первый — раньше строка
+  // уходила в позиционный аргумент, именем команды становился файл блокировки, список выходил
+  // пустым (ложное разрешение того же класса).
+  assert.deepEqual(writes(`flock -xc 'touch ${O}/x.txt' /tmp/l`), [`${O}/x.txt`]);
+  assert.deepEqual(writes(`flock -nc 'rm -rf ${O}/x' /tmp/l`), [`${O}/x`]);
+  assert.deepEqual(writes(`flock -nc'touch ${O}/x.txt' /tmp/l`), [`${O}/x.txt`]);
+  assert.deepEqual(writes('flock -xc "$CMD" /tmp/l'), ['?'], 'строка-скрипт в группе не литерал — маркер');
+  assert.deepEqual(writes('flock /tmp/l -c "$CMD"'), ['?'], 'строка-скрипт не литерал — маркер');
+  assert.deepEqual(writes(`setsid -c touch ${O}/y.txt`), [`${O}/y.txt`]);
+  assert.deepEqual(writes(`setsid -w -f touch ${O}/y.txt`), [`${O}/y.txt`]);
+  // контроль: позиционная форма обёрток по-прежнему разбирается
+  assert.deepEqual(writes(`flock /tmp/l touch ${O}/z.txt`), [`${O}/z.txt`]);
+  assert.deepEqual(writes(`setsid touch ${O}/z.txt`), [`${O}/z.txt`]);
+});
+
+// LOW-4: `(( … ))` и `$(( … ))` разбирались как команда с редиректом — фантомная цель записи
+// (`if (( n > 0 ))` → <cwd>/0). Отличить арифметику от вложенных подоболочек `((cmd) && cmd)`
+// можно СИНТАКСИЧЕСКИ, это правило самого bash (проверено запуском bash 5.2 msys, см. тест
+// «поведение bash …» ниже): `((` — арифметика, только если пара, открытая ВТОРОЙ скобкой,
+// закрывается непосредственно перед `)`; `$((` — если содержимое `$( … )` начинается с `(`,
+// кончается `)` и скобки между ними сбалансированы (правило chk_arithsub из bash).
+test('detectShellWrites (C2 r5, LOW-4): арифметика (( )) / $(( )) — не команда с редиректом', () => {
+  assert.deepEqual(writes('n=$(ls | wc -l); if (( n > 0 )); then echo many; fi'), []);
+  assert.deepEqual(writes('echo $(( 5 > 3 ))'), []);
+  assert.deepEqual(writes('(( i = 1 )); (( i > 0 )) && echo yes'), []);
+  assert.deepEqual(writes('echo $(( (a+b) > c ))'), []);
+  assert.deepEqual(writes('while (( i > 0 )); do echo x; done'), []);
+  // вложенные подоболочки bash ВЫПОЛНЯЕТ — запись должна остаться видимой
+  assert.deepEqual(writes(`((echo x) > ${O}/b.txt)`), [`${O}/b.txt`]);
+  assert.deepEqual(writes(`(((a)) > ${O}/b.txt)`), [`${O}/b.txt`]);
+  assert.deepEqual(writes(`echo $((ls) > ${O}/c.txt)`), [`${O}/c.txt`]);
+  assert.deepEqual(writes(`((cd sub) && (touch ${O}/y.txt))`), [`${O}/y.txt`]);
+  assert.deepEqual(writes(`echo $((cd sub) && (touch ${O}/y.txt))`), [`${O}/y.txt`]);
+  // подстановка внутри арифметики выполняется
+  assert.deepEqual(writes(`(( x = $(touch ${O}/t8.txt; echo 1) ))`), [`${O}/t8.txt`]);
+  // пре-существующий ложный отказ (был и до раунда 5): первое слово арифметики — подстановка,
+  // разбор считает его нелитеральным ИМЕНЕМ команды и добавляет '?'. Правка раунда 5 снимала
+  // только фантомный редирект, командную позицию внутри `(( ))` не трогала.
+  assert.deepEqual(writes(`echo $(( $(touch ${O}/t.txt; echo 1) + 1 ))`), [`${O}/t.txt`, '?']);
+  // редирект ПОСЛЕ `))` — настоящий
+  assert.deepEqual(writes(`(( n > 0 )) 2>${O}/err.txt`), [`${O}/err.txt`]);
+  // heredoc внутри `(( ))` по-прежнему не разбирается (ревью r3, HIGH) — '?'
+  assert.deepEqual(writes(`(( x = 1 << 2 ))\ntouch ${O}/h.txt`), ['?']);
+});
+
+// Ложное РАЗРЕШЕНИЕ того же класса, найденное по дороге (было и в HEAD): POSIX-ветка
+// isNullTarget считала `NUL` псевдоустройством. В Git Bash (msys) `NUL` — ОБЫЧНЫЙ файл:
+// `echo HELLOWORLD > NUL` создаёт файл NUL с содержимым (проверено запуском, см. тест
+// поведения ниже). В PowerShell 5.1 `> NUL` — устройство: Out-File падает, файла нет.
+test('detectShellWrites (C2 r5, ложное разрешение): `> NUL` в POSIX — обычный файл, не псевдоустройство', () => {
+  assert.deepEqual(writes('echo x > NUL'), [at(SCOPE, 'NUL')]);
+  assert.deepEqual(writes('cmd 2>/dev/null >NUL'), [at(SCOPE, 'NUL')]);
+  assert.deepEqual(writes(`echo x > ${O}/NUL`), [`${O}/NUL`]);
+  assert.deepEqual(writes('echo x > /dev/null'), [], '/dev/null — настоящее устройство msys');
+  assert.deepEqual(psWrites('Write-Output x > NUL'), [], 'PowerShell 5.1: NUL — устройство, файла нет');
+  assert.deepEqual(psWrites('Write-Output x > $null'), []);
+});
+
+// --- ревью раунда 5 (2026-09-22) -----------------------------------------------------------
+
+// HIGH, ложное РАЗРЕШЕНИЕ (регресс раунда 5 против HEAD 3f0eb5a). Признак арифметики хранился
+// стеком, а `#` внутри `(( … ))` перематывал разбор до конца строки и съедал закрывающие `))`:
+// стек не выталкивался, ВСЕ следующие сегменты получали arith:true, и commandIO молча
+// выбрасывал их редиректы — запись за пределами write_scope становилась не видна, decide давал
+// allow. Расхождение с bash проверено запуском (см. тест «поведение bash (ревью C2 r5) …»):
+// для bash `#` внутри `((` комментарием НЕ является, это часть арифметического выражения,
+// ошибка разбирается в рантайме, а следующая команда ВЫПОЛНЯЕТСЯ.
+test('detectShellWrites (ревью C2 r5, HIGH): `#` внутри `(( … ))` не уносит редиректы следующих команд', () => {
+  const NL = String.fromCharCode(10);
+  for (const prefix of ['(( a # ))', '((#))', '(( a #))', '((##))', '(( #))', '((;#))', '((#;))', '((#}))', '((# a ))', '(( # a ))', '((#1))']) {
+    assert.deepEqual(writes(`${prefix}${NL}echo PWNED > ${O}/e.txt`), [`${O}/e.txt`], prefix);
+  }
+  // `<<` внутри `(( ))` — разбор отказывает (запрет heredoc из раунда 3): это '?', то есть
+  // deny, а не обход; раньше тот же префикс давал пустой список, то есть allow
+  assert.deepEqual(writes(`((#<<E))${NL}echo PWNED > ${O}/e.txt`), ['?']);
+  // та же строка: после `(( … # … ))` идёт `;` — bash выполняет вторую команду
+  assert.deepEqual(writes(`(( a # )); echo PWNED > ${O}/e.txt`), [`${O}/e.txt`]);
+  assert.deepEqual(writes(`((# a )) | cat; echo PWNED > ${O}/e.txt`), [`${O}/e.txt`]);
+  // несколько записей подряд и разные формы редиректа
+  assert.deepEqual(
+    writes(`(( a # ))${NL}echo one > ${O}/a.txt${NL}date >> ${O}/b.txt${NL}ls &> ${O}/c.txt${NL}cat 2> ${O}/d.txt`),
+    [`${O}/a.txt`, `${O}/b.txt`, `${O}/c.txt`, `${O}/d.txt`],
+  );
+  // смена каталога после скобок — '?' и с `#`, и без него (пре-существующий ложный отказ:
+  // сегмент за `)` теряет отслеживаемый каталог), важно лишь что это deny, а не пустой список
+  assert.deepEqual(writes(`(( a # ))${NL}cd ${O} && echo PWNED > d.txt`), ['?']);
+  assert.deepEqual(writes(`(( a ))${NL}cd ${O} && echo PWNED > d.txt`), ['?'], 'то же без `#`');
+  // контроль: `#` ВНЕ скобок — по-прежнему комментарий (иначе правка была бы ложным отказом)
+  assert.deepEqual(writes(`# echo PWNED > ${O}/no.txt`), []);
+  assert.deepEqual(writes(`echo ok # > ${O}/no.txt`), []);
+  assert.deepEqual(writes(`(( 1 )) # > ${O}/no.txt`), [], 'после `))` скобка закрыта — комментарий');
+  assert.deepEqual(writes(`(( 1 )) # c${NL}echo x > ${O}/y.txt`), [`${O}/y.txt`]);
+  // контроль LOW-4: настоящая арифметика фантомных целей по-прежнему не даёт
+  assert.deepEqual(writes('n=$(ls | wc -l); if (( n > 0 )); then echo many; fi'), []);
+  assert.deepEqual(writes('echo $(( 5 > 3 ))'), []);
+});
+
+// MEDIUM: раунд 5 свёл `~` и `$HOME` к одному источнику (env.HOME) и тем сломал рабочий случай
+// хука — его процесс HOME не видит (node, порождённый из powershell.exe: process.env.HOME ===
+// undefined, проверено в тесте поведения ниже), а detectShellWrites в core.mjs вызывается без
+// env, то есть на process.env. ЛЮБОЙ путь с `~` давал '?', а '?' — безусловный deny. Разница
+// `~` и `$HOME` при отсутствующем HOME — правило самого bash, а не второй источник: `~` берёт
+// каталог пользователя, `$HOME` пуст.
+test('detectShellWrites (ревью C2 r5, MEDIUM): `~` без HOME — каталог пользователя, а не "?"', () => {
+  const home = homedir();
+  assert.deepEqual(writes('echo x > ~/f.txt'), [`${home}/f.txt`]);
+  assert.deepEqual(writes('mkdir -p ~/.workflow && echo x > ~/.workflow/log.txt'), [`${home}/.workflow`, `${home}/.workflow/log.txt`]);
+  assert.deepEqual(writes('cd ~/proj && touch a.txt'), [at(homedir(), 'proj', 'a.txt')]);
+  // env.HOME по-прежнему главнее запасного источника, и он же — источник для `$HOME`
+  const alt = fwd(join(BASE, 'home'));
+  assert.deepEqual(writes('touch ~/a.txt', { env: { HOME: alt } }), [`${alt}/a.txt`]);
+  assert.deepEqual(writes('touch $HOME/a.txt', { env: { HOME: alt } }), [`${alt}/a.txt`]);
+  // `$HOME` без HOME у bash пуст — запасного источника не получает
+  assert.deepEqual(writes('touch $HOME/a.txt'), ['?']);
+  // переназначение HOME в самой команде — по-прежнему неизвестность
+  assert.deepEqual(writes(`HOME=${alt} touch ~/a.txt`), ['?']);
+  assert.deepEqual(writes(`HOME=${alt}; touch ~/a.txt`), ['?']);
+});
+
+test('поведение bash (ревью C2 r5): `#` внутри `(( ))` не комментарий; `~` без HOME — каталог пользователя', () => {
+  if (process.platform !== 'win32') return;
+  const NL = String.fromCharCode(10);
+  // диалект posix моделирует Git Bash (msys); если PATH ведёт к другому bash (например к
+  // WSL `C:/WINDOWS/system32/bash.exe`, у которого свой /home/<user>), пробу не проводим
+  if (execFileSync('bash', ['-c', 'echo $OSTYPE'], { encoding: 'utf8' }).trim() !== 'msys') return;
+  const base = mkdtempSync(join(tmpdir(), 'rails-c2r5rev-'));
+  const sh = (script, env) => {
+    try {
+      execFileSync('bash', ['-c', script], { cwd: base, stdio: 'ignore', env: env ?? process.env });
+    } catch {
+      /* арифметическая ошибка даёт ненулевой код — важно, что делает следующая команда */
+    }
+  };
+  try {
+    // HIGH: `(( … # … ))` — ОДНА арифметическая команда, следующая ВЫПОЛНЯЕТСЯ
+    for (const [script, file] of [
+      [`(( a # ))${NL}echo PWNED > hash1.txt`, 'hash1.txt'],
+      ['(( a # )); echo PWNED > hash2.txt', 'hash2.txt'],
+      [`((#))${NL}echo PWNED > hash3.txt`, 'hash3.txt'],
+      [`(( a # ))${NL}cd . && echo PWNED > hash4.txt`, 'hash4.txt'],
+      ['((# a )) | cat; echo PWNED > hash5.txt', 'hash5.txt'],
+    ]) {
+      sh(script);
+      assert.equal(existsSync(join(base, file)), true, `bash выполнил команду после (( … # … )): ${script}`);
+    }
+    // а `#` ВНЕ скобок — комментарий: файла нет
+    sh('# echo PWNED > nohash1.txt');
+    sh('echo ok # > nohash2.txt');
+    assert.equal(existsSync(join(base, 'nohash1.txt')), false);
+    assert.equal(existsSync(join(base, 'nohash2.txt')), false);
+    // MEDIUM: без HOME `~` не отказывает — это каталог пользователя, os.homedir() даёт его же
+    const noHome = { ...process.env };
+    delete noHome.HOME;
+    const probe = join(homedir(), 'rails-c2r5-tilde-probe.txt');
+    rmSync(probe, { force: true });
+    sh('touch ~/rails-c2r5-tilde-probe.txt', noHome);
+    assert.equal(existsSync(probe), true, '`~` при unset HOME = os.homedir()');
+    rmSync(probe, { force: true });
+    // и `$HOME`, и `~` у того же bash дают ровно os.homedir(): msys синтезирует HOME при
+    // старте, если его нет в окружении (проверено запуском — поэтому «$HOME пуст без HOME»
+    // утверждать нельзя; пустым он остаётся только под `env -u HOME` из msys-родителя)
+    const seen = execFileSync('bash', ['-c', 'echo "[$HOME][$(echo ~)]"'], { cwd: base, env: noHome, encoding: 'utf8' }).trim();
+    const posixHomedir = execFileSync('bash', ['-c', 'cd ~ && pwd'], { cwd: base, encoding: 'utf8' }).trim();
+    assert.equal(seen, `[${posixHomedir}][${posixHomedir}]`, 'bash без HOME в окружении: $HOME и ~ — каталог пользователя');
+    // node без HOME в окружении (так запускается процесс хука: `node claude-hook.mjs` из
+    // окружения Claude Code, где HOME нет — проверено запуском вручную, в тесте это не
+    // воспроизводится: powershell.exe наследует HOME теста) всё равно знает каталог
+    // пользователя, и это ровно тот, куда пишет `~` у bash выше
+    const nodeHome = execFileSync(
+      process.execPath,
+      ['-e', 'process.stdout.write(process.env.HOME + "|" + require("os").homedir())'],
+      { env: noHome, encoding: 'utf8' },
+    ).trim();
+    assert.equal(nodeHome, `undefined|${homedir()}`, 'node без HOME: os.homedir() остаётся');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('detectShellWrites (C2 r5): поведение bash, на которое опираются правила раунда 5', () => {
+  if (process.platform !== 'win32') return;
+  const base = mkdtempSync(join(tmpdir(), 'rails-c2r5-'));
+  const sh = (script) => {
+    try {
+      execFileSync('bash', ['-c', script], { cwd: base, stdio: 'ignore' });
+    } catch {
+      /* ненулевой код не важен — важны созданные файлы и каталог перехода */
+    }
+  };
+  try {
+    mkdirSync(join(base, 'sub'));
+    // LOW-1: редирект рядом с cd/pushd переход не отменяет
+    sh('cd sub >/dev/null && touch cd1.txt');
+    sh('pushd sub >/dev/null && touch cd2.txt && popd >/dev/null');
+    sh('cd sub 2>/dev/null && touch cd3.txt');
+    for (const f of ['cd1.txt', 'cd2.txt', 'cd3.txt']) {
+      assert.equal(existsSync(join(base, 'sub', f)), true, `cd с редиректом перешёл в sub: ${f}`);
+    }
+    // ложное разрешение: NUL в Git Bash — обычный файл
+    sh('echo HELLOWORLD > NUL');
+    assert.equal(existsSync(join(base, 'NUL')), true, 'Git Bash: `> NUL` создаёт обычный файл');
+    // LOW-4: правило bash для `((` — арифметика только при `))`, иначе вложенные подоболочки
+    sh('((echo x) > par1.txt)');
+    sh('(((a)) > par2.txt)');
+    sh('echo $((ls) > par3.txt)');
+    sh('((cd sub) && (touch par4.txt))');
+    sh('echo $((cd sub) && (touch par5.txt))');
+    sh('(( n > 0 )) 2>par6.txt');
+    for (const f of ['par1.txt', 'par2.txt', 'par3.txt', 'par4.txt', 'par5.txt', 'par6.txt']) {
+      assert.equal(existsSync(join(base, f)), true, `bash выполнил подоболочку/редирект: ${f}`);
+    }
+    // а настоящая арифметика команд не выполняет и файлов не создаёт
+    sh('((touch arith1.txt))');
+    sh('echo $((touch arith2.txt))');
+    sh('n=1; (( n > 0 )); echo $(( 5 > 3 ))');
+    for (const f of ['arith1.txt', 'arith2.txt', '0', '3', 'n']) {
+      assert.equal(existsSync(join(base, f)), false, `арифметика не создала файл: ${f}`);
+    }
+    // подстановка внутри арифметики выполняется
+    sh('(( x = $(touch arith3.txt; echo 1) ))');
+    sh('echo $(( $(touch arith4.txt; echo 1) + 1 ))');
+    for (const f of ['arith3.txt', 'arith4.txt']) {
+      assert.equal(existsSync(join(base, f)), true, `подстановка внутри арифметики выполнена: ${f}`);
     }
   } finally {
     rmSync(base, { recursive: true, force: true });
