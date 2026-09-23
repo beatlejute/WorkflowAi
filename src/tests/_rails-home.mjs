@@ -18,8 +18,13 @@ export const DEFAULT_WORKER_CAP_MS = 300_000;
 // так до упора (проверено запуском: поток за потоком, пока процесс не падал).
 // Потоку изоляция и не нужна: WORKFLOW_HOME он получает копией env от родителя.
 if (isMainThread) {
-  process.env.WORKFLOW_HOME = mkdtempSync(join(tmpdir(), 'rails-test-home-'));
-  process.on('exit', () => rmSync(process.env.WORKFLOW_HOME, { recursive: true, force: true }));
+  // Каталог запоминается переменной, а не читается из env на выходе: файл теста
+  // вправе подменить WORKFLOW_HOME на свой (так делают тесты хука, плагина и
+  // CLI), и тогда хук по env снёс бы чужой каталог, а свой оставил навсегда.
+  // Проверено запуском: за один прогон набора в %TEMP% оставалось 9 каталогов.
+  const home = mkdtempSync(join(tmpdir(), 'rails-test-home-'));
+  process.env.WORKFLOW_HOME = home;
+  process.on('exit', () => rmSync(home, { recursive: true, force: true }));
 
   armWorkerWatchdog();
 }

@@ -19,6 +19,8 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import { readdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveWorkerCapMs, DEFAULT_WORKER_CAP_MS } from './_rails-home.mjs';
 
@@ -208,15 +210,35 @@ test('порог страховки: не число — порог по умо�
 });
 
 test('кривое значение переменной: страховка встаёт на порог по умолчанию, а не молчит', async () => {
-  // Сквозная проверка того же класса: запускаем фикстуру с утечкой и значением
-  // «5s». Порог по умолчанию — 300 с, поэтому за бюджет теста прогон не выйдет
-  // (это ожидаемо), но предупреждение обязано появиться сразу. До правки в
-  // выводе не было ничего: Number('5s') = NaN, страховка не вставала.
-  const run = await runNodeTest('worker-leaks-poll-loop.mjs', '5s', { budgetMs: 5000 });
+  // Сквозная проверка того же класса: значение «5s» вместо числа. До правки в
+  // выводе не было ничего — Number('5s') = NaN, страховка молча не вставала.
+  // Фикстура взята здоровая, а не с утечкой: залипший прогон пришлось бы снимать
+  // сигналом, а снятый воркер не выполняет свой хук на выходе и оставляет
+  // каталог в %TEMP% — за прогон набора ровно один такой и накапливался.
+  const run = await runNodeTest('worker-exits-cleanly.mjs', '5s');
 
   assert.match(
     run.output,
     /WORKFLOW_TEST_WORKER_CAP_MS="5s"/,
     `кривое значение должно быть названо в выводе; вывод:\n${run.output}`
   );
+  assert.equal(run.killedByBudget, false, 'здоровая фикстура обязана выйти сама');
+  assert.equal(run.code, 0, `прогон должен быть зелёным; вывод:\n${run.output}`);
+});
+
+test('преднагрузка убирает свой каталог, даже если тест подменил WORKFLOW_HOME', async () => {
+  // Хук на выходе читал переменную, а не помнил свой каталог. Файл теста,
+  // подменивший WORKFLOW_HOME на собственный дом (так делают тесты хука,
+  // плагина Kilo и CLI), уводил хук на чужой каталог: свой оставался в %TEMP%
+  // навсегда. За один прогон набора так накапливалось 9 каталогов.
+  const homes = () => new Set(
+    readdirSync(tmpdir()).filter(name => name.startsWith('rails-test-home-'))
+  );
+  const before = homes();
+
+  const run = await runNodeTest('worker-overrides-home.mjs', 60_000);
+  assert.equal(run.code, 0, `фикстура должна быть зелёной; вывод:\n${run.output}`);
+
+  const leaked = [...homes()].filter(name => !before.has(name));
+  assert.deepEqual(leaked, [], `каталоги остались в %TEMP%: ${leaked.join(', ')}`);
 });
