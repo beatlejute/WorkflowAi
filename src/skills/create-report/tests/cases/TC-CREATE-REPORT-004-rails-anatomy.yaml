@@ -1,0 +1,83 @@
+id: TC-CREATE-REPORT-004
+title: "create-report на рельсах: граф ядра и фрагмента, гейт атрибуции root cause, гарды записи и выходной слой"
+origin:
+  chg: ["convert-2026-09-23"]
+  incidents:
+    - "Решение стейкхолдера 2026-09-21: единый подход «Рельсы для агента» — все скилы переводятся на граф плюс хуки-отказы через коуча (CONVERT). create-report — седьмой скил после коуча, analyze-report, execute-task, review-result, create-plan и decompose-plan."
+    - "Инцидент атрибуции root cause (кейс TC-CREATE-REPORT-001): тикет фиксирует своё состояние, но не указывает, какой стейдж принял решение; без чтения лога отчёт содержит угаданные обвинения, и правится не тот компонент. Теперь атрибуция — гейт графа, а угадывание запрещено выходным слоем."
+    - "Аудит 2026-09-21 (HIGH): шаг сбора данных читал только done, blocked и in-progress, тогда как таблица статистики и knowledge требуют ready и backlog — total без них занижает Done rate и Blocked rate. Теперь полный список колонок живёт в узле."
+  principle: "Концепция рельс: принцип 1 (граф — единственный источник процедуры), 6 и 9 (отказ инструмента и выходной слой), 11 (дата и цена у гарда), 15 (гард доказан тестом, канарейка)."
+  backlog_sources: []
+tags: [rails, anatomy, regression-guard]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "rails: rails\\.yaml"
+      reason: "Frontmatter объявляет конфиг гардов — признак скила на рельсах."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "```mermaid[\\s\\S]*graph TD[\\s\\S]*P0E1\\[\"П0 ВХОД: Составитель отчётов"
+      reason: "Процедура записана mermaid-графом с входным узлом этапа 0."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0S1\\[\"П0 ШАГ: Канарейка живости[^\\n]*echo RAILS_CANARY"
+      reason: "Проверка живости рельс — узел графа (принцип 15)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R5\\[\"П0 ПРАВИЛО: Атрибуция root cause — только по логу пайплайна"
+      reason: "Запрет угаданных обвинений — правило ядра, а не пожелание в прозе."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P6E1 --> P6R1 --> P6S1 --> P6S2"
+      reason: "Вывод результата и остановка — последний этап, терминал P6S2."
+
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: "P10G1\\{\"П10 ГЕЙТ \\(ОБЯЗАТЕЛЬНЫЙ ШАГ\\): у каждой проблемы отчёта есть атрибуция по логу"
+      reason: "Атрибуция по логу — гейт перед связкой с планом и сохранением."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: "P10S13 --> P6E1"
+      reason: "Выход фрагмента ведёт в вывод результата ядра."
+
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "write_scope:[\\s\\S]*\\.workflow/reports/\\*\\*"
+      reason: "Отчётчик пишет только файл отчёта."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "write_deny:[\\s\\S]*\\.workflow/tickets/\\*\\*"
+      reason: "Правка тикета «под отчёт» подменяет данные, по которым отчёт считается."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "stage_actions:[\\s\\S]*next_report_id:[\\s\\S]*stages: \\[10\\]"
+      reason: "ID отчёта берётся скриптом на этапе сохранения — ручной алгоритм запрещён."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "final_requires:[\\s\\S]*report_id"
+      reason: "Выходной слой требует идентификатор созданного отчёта."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "final_forbids:[\\s\\S]*root cause"
+      reason: "Угаданная атрибуция запрещена выходным слоем (кейс TC-CREATE-REPORT-001)."
+
+    - kind: skill_contains
+      file: "rails-migration.yaml"
+      pattern: "baseline:"
+      reason: "Карта переноса фиксирует базовую версию, от которой считается покрытие фраз-инвариантов."
+    - kind: skill_contains
+      file: "rails-migration.yaml"
+      pattern: "entries:[\\s\\S]*target: \"P10S8\""
+      reason: "Служебные фразы прозы переехали в лейблы узлов, решение по каждой записано в карте."
+
+execution:
+  timeout_s: 60

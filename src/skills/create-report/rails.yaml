@@ -1,0 +1,69 @@
+# Рельсы скила create-report (CONVERT 2026-09-23).
+# Схема — .workflow/src/rails/README.md §4. Гард добавляется только по инциденту с датой и
+# ценой — источники в tests/cases/*.origin.incidents. Правки этого файла делает человек.
+version: 1
+skill: create-report
+entry: P0E1
+terminal: [P6S2]
+pause_nodes: []
+fragments: ["workflows/*.md"]
+quote_min: 25
+canary: "echo RAILS_CANARY"
+
+# H1 — область записи. Отчётчик пишет ровно один артефакт: файл отчёта.
+# Тикеты и планы для него — источник данных, а не продукт (узел P0R1).
+write_scope:
+  - ".workflow/reports/**"
+allow_temp: true
+
+# H2 — запреты записи. Правка тикета «под отчёт» подменяет данные, по которым отчёт и
+# считается: отчёт обязан описывать состояние доски, а не приводить его к красивому виду.
+write_deny:
+  - ".workflow/tickets/**"
+  - ".workflow/plans/**"
+  - ".workflow/logs/**"
+  - ".workflow/src/skills/create-report/rails.yaml"
+  - ".workflow/src/skills/create-report/tests/rails/**"
+  - ".workflow/src/rails/**"
+
+# H3 — чужие стадии. Перемещение тикетов по доске и git-операции не входят в работу
+# отчётчика: он фиксирует факты, а не меняет их.
+deny_shell:
+  - pattern: "\\bmove-ticket(\\.js)?\\b"
+    reason: "Перемещение тикетов — стадия пайплайна, отчёт только описывает состояние доски"
+    incident: "SKILL.md P0R1: принятие решений — не работа отчётчика"
+  - pattern: "\\bgit\\s+(commit|add|push|checkout|switch|restore|reset|rebase|merge|stash)\\b"
+    reason: "Отчётчик не делает git-операций — коммит на стороне человека"
+    incident: "SKILL.md P0R1: границы компетенции"
+
+deny_mcp:
+  - move_ticket
+  - create_ticket
+  - start_pipeline
+
+# H4 — действия по этапам. Скрипт выдачи ID и запись отчёта относятся к сохранению и
+# допустимы только на этапе работы, когда данные собраны и атрибуция сделана: ID,
+# взятый раньше, повисает при отказе от отчёта, а ручной поиск даёт collision с
+# существующими файлами и ломает ссылки между отчётами.
+stage_actions:
+  next_report_id:
+    kind: [shell]
+    match: "(^|[;&|(]\\s*)node(\\.exe)?\\s+\\S*get-next-id\\.js"
+    stages: [10]
+  write_report:
+    kind: [edit, write]
+    match: ".workflow/reports/**"
+    stages: [10]
+
+# H5 — выходной слой. Блок результата обязателен и содержит report_id: без него
+# следующий отчёт и аналитик не знают, какой файл считать текущим.
+output:
+  final_requires:
+    - "RAILS:\\s*P6S2"
+    - "verdict\\s*="
+    - "Файлы:"
+    - "---RESULT---"
+    - "report_id:\\s*REPORT-"
+  final_forbids:
+    - "(возможно|вероятно|похоже)[^\\n]{0,40}(root cause|виноват|причина)"
+  max_stop_blocks: 2
