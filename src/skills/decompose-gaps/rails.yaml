@@ -1,0 +1,73 @@
+# Рельсы скила decompose-gaps (CONVERT 2026-09-24).
+# Схема — .workflow/src/rails/README.md §4. Гард добавляется только по инциденту с датой и
+# ценой — источники в tests/cases/*.origin.incidents. Правки этого файла делает человек.
+version: 1
+skill: decompose-gaps
+entry: P0E1
+terminal: [P6S2]
+pause_nodes: []
+fragments: ["workflows/*.md"]
+quote_min: 25
+canary: "echo RAILS_CANARY"
+
+# H1 — область записи. Скил создаёт тикеты-доработки в backlog и больше ничего:
+# отчёт и план для него вход, остальные колонки доски двигает пайплайн.
+write_scope:
+  - ".workflow/tickets/backlog/**"
+allow_temp: true
+
+# H2 — запреты записи. Правка плана или отчёта «под gap» подменяет то, из чего gap и
+# выведен: инцидент PulseProxy CHG-049 — тикет ушёл за границу плана, который стейкхолдер
+# утверждал, и работа поехала мимо scope.
+write_deny:
+  - ".workflow/tickets/ready/**"
+  - ".workflow/tickets/in-progress/**"
+  - ".workflow/tickets/review/**"
+  - ".workflow/tickets/done/**"
+  - ".workflow/plans/**"
+  - ".workflow/reports/**"
+  - ".workflow/config/**"
+  - ".workflow/src/skills/decompose-gaps/rails.yaml"
+  - ".workflow/src/skills/decompose-gaps/tests/rails/**"
+  - ".workflow/src/rails/**"
+
+# H3 — чужие стадии. Перемещение тикетов, запуск пайплайна и git-операции не входят в
+# работу скила: он кладёт тикеты в backlog, дальше решает пайплайн.
+deny_shell:
+  - pattern: "\\bmove-ticket(\\.js)?\\b"
+    reason: "Перемещение тикетов — стадия пайплайна, не декомпозиция пробелов"
+    incident: "SKILL.md P0R1: управление workflow — пайплайн и его скрипты"
+  - pattern: "\\bgit\\s+(commit|add|push|checkout|switch|restore|reset|rebase|merge|stash)\\b"
+    reason: "Скил не делает git-операций — коммит на стороне человека"
+    incident: "SKILL.md P0R1: границы компетенции"
+
+deny_mcp:
+  - move_ticket
+  - start_pipeline
+
+# H4 — действия по этапам. Запись тикета допустима только на этапе работы, после проверки
+# scope и обоих стоп-гейтов: инцидент PulseProxy CHG-050 — перезапись существующих тикетов
+# чужими стадиями, и инциденты workflowAi 2026-04-19 и 2026-04-21 — тикет без parent_plan
+# невидим для пайплайна: его не берут в работу и не архивируют.
+stage_actions:
+  write_ticket:
+    kind: [edit, write]
+    match: ".workflow/tickets/backlog/**"
+    stages: [10]
+
+# H5 — потолки циклов. from == to — возврат внутри этапа.
+cycles:
+  - { from: 10, to: 10, max: 3, reason: "Три круга по чеклисту завершения не сошлись — перечисли в выводе, какой пункт не выполняется, и остановись: молчаливый четвёртый круг скрывает незакрытый gap" }
+
+# H6 — выходной слой. Блок результата обязателен и содержит список созданных тикетов:
+# без него следующая стадия не знает, что появилось на доске.
+output:
+  final_requires:
+    - "RAILS:\\s*P6S2"
+    - "verdict\\s*="
+    - "Файлы:"
+    - "---RESULT---"
+    - "created_tickets:"
+  final_forbids:
+    - "parent_plan:\\s*(\"\"|''|null|\\n)"
+  max_stop_blocks: 2
