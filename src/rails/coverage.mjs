@@ -40,6 +40,24 @@ const TABLE_SEP_RE = /^\s*\|[\s:|-]+\|\s*$/;
 const TABLE_HEADING_RE = /маршрутизац|загрузк|шаблон/i;
 const HEADING_RE = /^#{1,6}\s+(.+)$/;
 
+// Обрывок разбора — не инвариант. Строка режется на предложения по точке, поэтому нумерация
+// списка («8.», «9.», «10.») и закрывающая скобка примера становились отдельными
+// «требованиями»: покрыть их нельзя ни лейблом узла, ни картой переноса (ключ карты — минимум
+// 10 символов), и гейт конверсии не закрывался (конверсия execute-task, 2026-09-23).
+// Требованием считается фраза от 10 символов, в которой есть хотя бы три буквы.
+const MIN_PHRASE_LEN = 10;
+
+function isPhrase(text) {
+  const t = String(text ?? '').trim();
+  if (t.length < MIN_PHRASE_LEN) return false;
+  let letters = 0;
+  for (const ch of t) {
+    if (/\p{L}/u.test(ch)) letters += 1;
+    if (letters >= 3) return true;
+  }
+  return false;
+}
+
 export function extractInvariants(text) {
   const lines = String(text ?? '').split(/\r?\n/).map((l) => l.trim());
   const out = [];
@@ -64,7 +82,7 @@ export function extractInvariants(text) {
     if (MARK_RE.test(line)) {
       for (const sentence of line.split(/(?<=[.!?])\s+/)) {
         const t = sentence.trim();
-        if (t) out.push(t);
+        if (isPhrase(t)) out.push(t);
       }
     }
   }

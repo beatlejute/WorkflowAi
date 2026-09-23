@@ -426,3 +426,25 @@ test('run: cli coverage без --map и без rails-migration.yaml -> «Кар�
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+// Конверсия execute-task (2026-09-23): строка режется на предложения по точке, и нумерация
+// списка ограничений («8.», «9.», «10.») попадала в инварианты отдельными «требованиями».
+// Покрыть такой обрывок нельзя ни лейблом узла, ни картой переноса (ключ карты — минимум
+// 10 символов), поэтому гейт конверсии не закрывался ни при какой правке скила.
+test('extractInvariants: обрывки разбора — нумерация и скобки — не инварианты', () => {
+  const text = [
+    '## Ограничения',
+    '',
+    '⛔ **Запрещено** делать это. 8. Второй пункт списка. 9.',
+    '',
+    '- **Пример:** формат `DEF-XXX-N`. 10.',
+    '',
+    '⛔ Да.',
+  ].join('\n');
+  const phrases = extractInvariants(text);
+  for (const noise of ['8.', '9.', '10.', 'Да.']) {
+    assert.equal(phrases.includes(noise), false, `обрывок «${noise}» инвариантом быть не должен`);
+  }
+  assert.ok(phrases.some((p) => p.includes('Запрещено')), JSON.stringify(phrases));
+  assert.ok(phrases.some((p) => p.includes('Второй пункт списка')), JSON.stringify(phrases));
+});

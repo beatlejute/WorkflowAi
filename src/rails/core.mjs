@@ -705,8 +705,46 @@ function currentNodeLabel(state, graph) {
   return node ? truncate(node.label, 80) : '';
 }
 
-function sameCanary(command, canary) {
-  return String(command ?? '').trim() === String(canary ?? '').trim();
+// Канарейка живости: команда считается канарейкой, если она И ЕСТЬ канарейка, либо если
+// канарейка стоит отдельной простой командой внутри составной. Инцидент 2026-09-23 (коуч,
+// узел P0S1): сравнивалась вся строка целиком, поэтому `echo RAILS_CANARY 2>&1 | tail -2;
+// node …` выполнился — проба живости молча прошла, а узел графа велит по этому признаку
+// остановиться и сообщить человеку «рельсы выключены». Сверяются токены начала простой
+// команды, поэтому дописанный редирект канарейку не прячет, а текст канарейки внутри цитаты
+// (`--quote "echo RAILS_CANARY"`) отказа не вызывает: там это один токен-слово.
+function canaryTokens(text, dialect) {
+  const scan = scanCommand(String(text ?? ''), dialect);
+  if (!scan || !scan.ok) return null;
+  const out = [];
+  for (const seg of scan.segments ?? []) {
+    for (const cmd of seg.commands ?? []) out.push((cmd.tokens ?? []).map((t) => String(t.text ?? '')));
+  }
+  return out;
+}
+
+function sameCanary(command, canary, dialect) {
+  const target = String(canary ?? '').trim();
+  if (!target) return false;
+  if (String(command ?? '').trim() === target) return true;
+
+  const targetCommands = canaryTokens(target, dialect);
+  const wanted = targetCommands && targetCommands.length === 1 ? targetCommands[0] : null;
+  if (!wanted || wanted.length === 0) return false;
+  const scan = scanCommand(String(command ?? ''), dialect);
+  if (!scan || !scan.ok) return false;
+  for (const seg of scan.segments ?? []) {
+    for (const cmd of seg.commands ?? []) {
+      const tokens = (cmd.tokens ?? []).map((t) => String(t.text ?? ''));
+      if (tokens.length >= wanted.length && wanted.every((w, i) => tokens[i] === w)) return true;
+      // Вложенный интерпретатор: `bash -c "<канарейка>"`, `eval '<канарейка>'`. Слово, чьё
+      // значение после снятия кавычек РАВНО канарейке, считается её запуском. Цитата лейбла
+      // канарейку не прячет и отказа не вызывает: там значение слова длиннее (quote_min 25).
+      for (const t of cmd.tokens ?? []) {
+        if (typeof t.value === 'string' && t.value.trim() === target) return true;
+      }
+    }
+  }
+  return false;
 }
 
 // Тексты команды для общих правил (canary, deny_shell, stage_actions, detectShellWrites):
@@ -840,7 +878,7 @@ function decideSkillMode({ root, action, ctx, state, config, graph }) {
   const shellTexts = action?.kind === 'shell' ? commandTextVariants(action.command) : [];
 
   // 2. Канарейка.
-  if (action?.kind === 'shell' && config.canary && shellTexts.some((text) => sameCanary(text, config.canary))) {
+  if (action?.kind === 'shell' && config.canary && shellTexts.some((text) => sameCanary(text, config.canary, action.shell))) {
     return deny(describeWhat(action), `RAILS_CANARY: рельсы активны, узел ${state.node}`);
   }
 

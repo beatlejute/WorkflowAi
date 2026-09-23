@@ -882,6 +882,42 @@ test('decide: команда совпадает с canary -> deny "RAILS_CANARY"
   });
 });
 
+// Инцидент 2026-09-23 (коуч, узел P0S1): канарейка сравнивалась со всей строкой команды, и
+// `echo RAILS_CANARY 2>&1 | tail -2; node …` выполнился — проба живости молча прошла, хотя
+// рельсы работали. Узел графа велит по такому признаку остановиться и сообщить человеку, что
+// рельсы выключены, то есть дыра ведёт к ложному выводу о выключенных рельсах.
+test('decide (2026-09-23): канарейка отдельной простой командой внутри составной -> deny', () => {
+  withProject(({ root }) => {
+    writeCliStub(root);
+    const { sessionId } = makeState(root, 'P4S1');
+    for (const command of [
+      'echo RAILS_CANARY 2>&1 | tail -2',
+      'echo RAILS_CANARY; node .workflow/src/rails/cli.mjs status',
+      'cd .workflow && echo RAILS_CANARY',
+      'echo RAILS_CANARY > out.txt',
+      '(echo RAILS_CANARY)',
+      'bash -c "echo RAILS_CANARY"',
+    ]) {
+      const r = decide({ action: { tool: 'Bash', kind: 'shell', command, shell: 'posix' }, ctx: { cwd: root, sessionId } });
+      assert.equal(r.decision, 'deny', command);
+      assert.match(r.reason, /RAILS_CANARY/, command);
+    }
+    // Контроль: текст канарейки внутри цитаты cli-вызова отказа не вызывает — там это слово,
+    // а не команда; иначе агент не смог бы цитировать лейбл узла P0S1.
+    const quoted = decide({
+      action: { tool: 'Bash', kind: 'shell', command: 'node .workflow/src/rails/cli.mjs goto P4S1 --quote "выполни команду echo RAILS_CANARY здесь"', shell: 'posix' },
+      ctx: { cwd: root, sessionId },
+    });
+    assert.notEqual(quoted.reason ?? '', 'RAILS_CANARY');
+    assert.equal(/RAILS_CANARY: рельсы активны/.test(quoted.reason ?? ''), false);
+    // Контроль: похожая, но другая команда канарейкой не считается.
+    for (const command of ['echo RAILS_CANARY_EXTRA', 'echo RAILS', 'echoRAILS_CANARY']) {
+      const r = decide({ action: { tool: 'Bash', kind: 'shell', command, shell: 'posix' }, ctx: { cwd: root, sessionId } });
+      assert.equal(/RAILS_CANARY: рельсы активны/.test(r.reason ?? ''), false, command);
+    }
+  });
+});
+
 // --- §7.4.3: deny_shell -----------------------------------------------------------
 
 test('decide: deny_shell по паттерну команды -> deny с reason и incident', () => {
