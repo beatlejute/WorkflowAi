@@ -1,0 +1,77 @@
+# Рельсы скила review-result (CONVERT 2026-09-23).
+# Схема — .workflow/src/rails/README.md §4. Гард добавляется только по инциденту с датой и
+# ценой — источники в tests/cases/*.origin.incidents. Правки этого файла делает человек.
+version: 1
+skill: review-result
+entry: P0E1
+terminal: [P6S2]
+pause_nodes: []
+fragments: ["workflows/*.md"]
+quote_min: 25
+canary: "echo RAILS_CANARY"
+
+# H1 — область записи. Принцип No Fix: ревьюер не исправляет ошибки, он пишет только запись
+# в секцию Ревью своего тикета. Всё остальное дерево проекта для него только на чтение.
+write_scope:
+  - ".workflow/tickets/review/**"
+allow_temp: true
+
+# H2 — запреты записи. Создание планов и тикетов — зона скилов декомпозиции; тикеты в других
+# директориях ревьюеру не принадлежат. Инцидент 2026-05-02: исполнитель создал парный тикет
+# на передачу работы человеку, ревью конструкцию не отвергло, человек откатил оба тикета.
+write_deny:
+  - ".workflow/plans/**"
+  - ".workflow/tickets/backlog/**"
+  - ".workflow/tickets/ready/**"
+  - ".workflow/tickets/in-progress/**"
+  - ".workflow/tickets/done/**"
+  - ".workflow/src/skills/review-result/rails.yaml"
+  - ".workflow/src/skills/review-result/tests/rails/**"
+  - ".workflow/src/rails/**"
+
+# H3 — перемещение тикета и git: ревью выносит вердикт, переходы делает пайплайн, коммит —
+# человек. Статус skipped — прерогатива скила проверки актуальности (узел P0R1).
+deny_shell:
+  - pattern: "\\bmove-ticket(\\.js)?\\b"
+    reason: "Перемещение тикета — стадия пайплайна по goto-переходу вердикта, не ревьюер"
+    incident: "SKILL.md P0R1: ревьюер не перемещает тикеты"
+  - pattern: "\\b(mv|rename|Move-Item)\\b[^\\n]*\\.workflow[\\\\/]tickets"
+    reason: "Перемещение файла тикета запрещено"
+    incident: "SKILL.md P0R1: ревьюер не перемещает тикеты"
+  - pattern: "\\bgit\\s+(commit|add|push|checkout|switch|restore|reset|rebase|merge|stash)\\b"
+    reason: "Ревьюер не делает git-операций — коммит на стороне человека"
+    incident: "SKILL.md P0R4, принцип No Fix"
+
+deny_mcp:
+  - move_ticket
+  - create_ticket
+
+# H4 — действия по этапам. Механическая предпроверка скриптом — этап 2 (до содержательного
+# ревью), запись в тикет — этап 6 (один проход, одна запись, принцип Single Pass).
+stage_actions:
+  verify_artifacts:
+    kind: [shell]
+    match: "(^|[;&|(]\\s*)node(\\.exe)?\\s+\\S*verify-artifacts\\.js"
+    stages: [2]
+  review_note:
+    kind: [edit, write]
+    match: ".workflow/tickets/review/**"
+    stages: [6]
+
+# H5 — потолки. from == to — возврат из гейта к шагу своего этапа.
+cycles:
+  - { from: 4, to: 4, max: 3, reason: "Три круга специальных проверок не сошлись — выноси failed и опиши в issues, какую проверку выполнить не удалось" }
+  - { from: 5, to: 3, max: 3, reason: "Три возврата от вердикта к проверке DoD не сошлись — выноси failed и перечисли непроверенные критерии" }
+
+# H6 — выходной слой. status только passed или failed, блок ---RESULT--- ровно один и в самом
+# конце ответа. Инцидент 2026-04-27: тикет с невалидным frontmatter прошёл ревью как passed,
+# зависимый ресурс падал на парсинге до ручного фикса через два дня (кейс
+# TC-REVIEW-RESULT-005); чужой статус в блоке раннер трактует как сбой стадии.
+output:
+  final_requires:
+    - "---RESULT---"
+    - "status:\\s*(passed|failed)"
+  final_forbids:
+    - "status:\\s*(default|ok|done|skipped|completed|blocked)"
+    - "(?:---RESULT---[\\s\\S]*){3}"
+  max_stop_blocks: 2

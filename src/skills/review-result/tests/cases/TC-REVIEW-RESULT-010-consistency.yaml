@@ -18,8 +18,8 @@ assertions:
   static:
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "Дата\\s*→\\s*Статус\\s*→\\s*Самари\\s*→\\s*Агент"
-      reason: "Порядок колонок таблицы ревью описан один раз, канонически, в SKILL.md."
+      pattern: "колонки в порядке Дата, Статус, Самари, Агент"
+      reason: "Порядок колонок секции ревью задан лейблом узла P0R7 (Агент последним)."
     - kind: skill_contains
       file: "workflows/review.md"
       pattern: "^(?![\\s\\S]*\\{имя модели или 'unknown'\\}\\s*\\|\\s*\\{[✅❌])"
@@ -34,8 +34,8 @@ assertions:
       reason: "Pre-flight больше не указывает на in-progress/, где тикета на этой стадии уже нет."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "следуй шагам 1-7"
-      reason: "SKILL.md делегирует все 7 шагов воркфлоу, включая шаг 7 (пометка тикета секцией ревью — обязанность скила по строке 19)."
+      pattern: "фрагмент графа в `workflows/review.md`"
+      reason: "Ссылка на шаги воркфлоу заменена ссылкой на фрагмент графа: полная проверка — этапы 3 и 4 в workflows/review.md."
     - kind: skill_contains
       file: "SKILL.md"
       pattern: "^(?![\\s\\S]*следуй шагам 1-6)"
@@ -57,9 +57,9 @@ assertions:
       pattern: "^(?![\\s\\S]*Любой issue = failed)"
       reason: "Алгоритм больше не заявляет блокирующий `failed` для любого issue без исключений — это противоречило PARTIAL/HIGH/LOW градации в workflows/review.md и knowledge/dod-patterns.md."
     - kind: skill_contains
-      file: "workflows/review.md"
-      pattern: "физически не существуют \\(шаг 4\\.7, основная проверка, шаг 1"
-      reason: "Случай «скриншот заявлен, но отсутствует физически» ссылается на верный шаг (основная проверка 4.7, шаг 1 — failed, файл не существует), а не на шаг 4.7.0 (который применяется только когда скриншот НЕ заявлен)."
+      file: "SKILL.md"
+      pattern: "заявил скриншоты в результате или DoD, но они физически не существуют"
+      reason: "Правило QA-тикетов живёт в ядре (узел P5R3), проверка скриншотов — во фрагменте (узлы P4S1-P4S3)."
     - kind: skill_contains
       file: "workflows/review.md"
       pattern: "^(?![\\s\\S]*физически не существуют \\(HIGH issue из шага 4\\.7\\.0\\))"

@@ -1,0 +1,109 @@
+id: TC-REVIEW-RESULT-011
+title: "review-result на рельсах: граф ядра и фрагмента, No Fix гардом записи, выходной слой passed/failed"
+origin:
+  chg: ["convert-2026-09-23"]
+  incidents:
+    - "Решение стейкхолдера 2026-09-21: единый подход «Рельсы для агента» — все скилы переводятся на граф плюс хуки-отказы через коуча (CONVERT). review-result — четвёртый скил после коуча, analyze-report и execute-task."
+    - "Инцидент 2026-04-27: тикет с невалидным frontmatter прошёл ревью как passed, зависимый ресурс падал на парсинге до ручного фикса через два дня (кейс TC-REVIEW-RESULT-005). Теперь pre-flight — узел графа, а невалидный frontmatter уводит ребром сразу в вердикт."
+    - "Инцидент 2026-05-03: PASS на четыре UI-инварианта с именами команд приняли без сверки с манифестом (кейс TC-REVIEW-RESULT-007). Теперь правило source-of-truth — узел P0R5."
+    - "Инцидент 2026-05-02: исполнитель создал парный handoff-тикет и закрыл свой со ссылкой на него, ревью конструкцию не отвергло (кейс TC-REVIEW-RESULT-008). Теперь запрет — узел P0R6, а создание тикетов закрыто гардом записи."
+    - "Принцип No Fix (SKILL.md, принцип 4): ревьюер не исправляет ошибки. До рельс это была только проза — теперь область записи ограничена файлом своего тикета в review/."
+  principle: "Концепция рельс: принцип 1 (граф — единственный источник процедуры), 6 и 9 (отказ инструмента и выходной слой), 10 (потолки циклов), 11 (дата и цена у гарда), 15 (гард доказан тестом, канарейка)."
+  backlog_sources: []
+tags: [rails, anatomy, regression-guard]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    # 1. Ядро — граф с входом, пре-флайтом и терминалом
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "rails: rails\\.yaml"
+      reason: "Frontmatter объявляет конфиг гардов — признак скила на рельсах."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "```mermaid[\\s\\S]*graph TD[\\s\\S]*P0E1\\[\"П0 ВХОД"
+      reason: "Процедура записана mermaid-графом с входным узлом этапа 0."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0S1\\[\"П0 ШАГ: Канарейка живости[^\\n]*echo RAILS_CANARY"
+      reason: "Проверка живости рельс — узел графа (принцип 15)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0Q1 -->\\|\"нет\"\\| P6E1"
+      reason: "Невалидный frontmatter уводит сразу в вердикт — ребро графа, а не проза (инцидент 2026-04-27)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P1Q1 -->\\|\"да\"\\| P6E1"
+      reason: "Быстрый выход при последней записи passed или skipped — ребро графа."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P2Q1 -->\\|\"нет\"\\| P6E1"
+      reason: "Провал механической предпроверки ведёт к вердикту failed без содержательного ревью."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P6E1 --> P6R1 --> P6S1 --> P6S2"
+      reason: "Вердикт и пометка тикета — последний этап, терминал P6S2."
+
+    # 2. Фрагмент — парсинг DoD и специальные проверки
+    - kind: skill_contains
+      file: "workflows/review.md"
+      pattern: "```mermaid[\\s\\S]*P3E1\\[\"П3 ВХОД[\\s\\S]*P4G1"
+      reason: "Этапы 3 и 4 живут фрагментом графа, подключаемым через fragments в rails.yaml."
+    - kind: skill_contains
+      file: "workflows/review.md"
+      pattern: "P4G1 -->\\|\"да\"\\| P5E1"
+      reason: "После специальных проверок граф ведёт к правилу QA-тикетов и вердикту."
+
+    # 3. Гарды — только по инцидентам, каждый с ценой
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "write_scope:[\\s\\S]*\\.workflow/tickets/review/\\*\\*"
+      reason: "Принцип No Fix выражен областью записи: ревьюер пишет только в свой тикет на ревью."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "write_deny:[\\s\\S]*\\.workflow/plans/\\*\\*"
+      reason: "Создание планов и тикетов ревьюером закрыто гардом записи (инцидент 2026-05-02)."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "deny_shell:[\\s\\S]*move-ticket"
+      reason: "Перемещение тикета делает пайплайн по goto-переходу вердикта."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "deny_shell:[\\s\\S]*git"
+      reason: "Ревьюер не делает git-операций — коммит на стороне человека."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "stage_actions:[\\s\\S]*verify_artifacts:[\\s\\S]*stages: \\[2\\]"
+      reason: "Механическая предпроверка скриптом допустима только на этапе 2, до содержательного ревью."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "stage_actions:[\\s\\S]*review_note:[\\s\\S]*stages: \\[6\\]"
+      reason: "Запись в тикет — только на этапе вердикта (принцип Single Pass)."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "final_requires:[\\s\\S]*passed"
+      reason: "Выходной слой требует ровно два допустимых статуса."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "final_forbids:[\\s\\S]*default\\|ok\\|done\\|skipped"
+      reason: "Чужой статус в блоке результата запрещён выходным слоем (узел P0R2)."
+
+    # 4. Перенос содержимого без потерь
+    - kind: skill_contains
+      file: "rails-migration.yaml"
+      pattern: "baseline:"
+      reason: "Карта переноса фиксирует базовую версию, от которой считается покрытие фраз-инвариантов."
+    - kind: skill_contains
+      file: "rails-migration.yaml"
+      pattern: "entries:[\\s\\S]*target: P0R3"
+      reason: "Служебные заголовки прозы переехали в лейблы узлов, решение по каждой фразе записано в карте."
+
+execution:
+  timeout_s: 60
