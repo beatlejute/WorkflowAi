@@ -51,7 +51,7 @@ assertions:
       reason: "Явное упоминание запрета на изобретённые ключи."
     - kind: skill_contains
       file: "workflows/decompose.md"
-      pattern: "9.C"
+      pattern: "P10G4"
       reason: "В воркфлоу должен быть стоп-гейт выписки capabilities_registry."
     - kind: skill_contains
       file: "workflows/decompose.md"

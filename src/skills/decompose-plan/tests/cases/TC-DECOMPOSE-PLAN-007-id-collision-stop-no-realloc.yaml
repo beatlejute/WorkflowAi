@@ -37,7 +37,7 @@ assertions:
       reason: "Ни одно предписание записать файл тикета (любым глаголом) не стоит раньше пре-валидации занятости."
     - kind: skill_contains
       file: "workflows/decompose.md"
-      pattern: "Пре-валидация занятости ID[\\s\\S]{0,1500}\\n5\\. Сохрани в `\\.workflow/tickets/backlog"
+      pattern: "Пре-валидация занятости ID[\\s\\S]{0,1500}P10S15[\\s\\S]{0,400}Сохрани тикет в \\.workflow/tickets/backlog"
       reason: "Пре-валидация занятости — отдельный пункт непосредственно перед пунктом сохранения файла."
     - kind: skill_contains
       file: "workflows/decompose.md"

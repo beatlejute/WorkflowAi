@@ -1,0 +1,83 @@
+# Рельсы скила decompose-plan (CONVERT 2026-09-23).
+# Схема — .workflow/src/rails/README.md §4. Гард добавляется только по инциденту с датой и
+# ценой — источники в tests/cases/*.origin.incidents. Правки этого файла делает человек.
+version: 1
+skill: decompose-plan
+entry: P0E1
+terminal: [P6S2]
+pause_nodes: []
+fragments: ["workflows/*.md"]
+quote_min: 25
+canary: "echo RAILS_CANARY"
+
+# H1 — область записи. Декомпозитор пишет тикеты в backlog и добавляет в план ссылки
+# на них. Всё остальное дерево проекта для него только на чтение.
+write_scope:
+  - ".workflow/tickets/backlog/**"
+  - ".workflow/plans/current/**"
+allow_temp: true
+
+# H2 — запреты записи. Тикеты в других колонках доски двигает пайплайн, конфигурация
+# типов и capabilities — источник правды для декомпозиции, а не её продукт.
+write_deny:
+  - ".workflow/tickets/ready/**"
+  - ".workflow/tickets/in-progress/**"
+  - ".workflow/tickets/review/**"
+  - ".workflow/tickets/done/**"
+  - ".workflow/config/**"
+  - ".workflow/src/skills/decompose-plan/rails.yaml"
+  - ".workflow/src/skills/decompose-plan/tests/rails/**"
+  - ".workflow/src/rails/**"
+
+# H3 — нумерация. Единственный источник номеров — id_ranges со входа стадии (узел P10G3).
+# Инцидент PulseProxy PLAN-014 (2026-04-20) и workflowAi CHG-029: номера, взятые не из
+# выделенного диапазона, дают коллизию ID — depends_on и parent_plan уже ссылаются на
+# записанный идентификатор, и ссылочная целостность ломается на всей доске.
+deny_shell:
+  - pattern: "\\bget-next-id(\\.js)?\\b"
+    reason: "Нумерация приходит в id_ranges со входа стадии — скрипт выдачи ID здесь не вызывается"
+    incident: "workflows/decompose.md P10G3, инцидент workflowAi CHG-029: коллизия ID из-за ручного номера"
+  - pattern: "\\bmove-ticket(\\.js)?\\b"
+    reason: "Перемещение тикетов по доске — работа пайплайна, не декомпозитора"
+    incident: "SKILL.md P0R1: управление доской — пайплайн и его скрипты"
+  - pattern: "\\bgit\\s+(commit|add|push|checkout|switch|restore|reset|rebase|merge|stash)\\b"
+    reason: "Декомпозитор не делает git-операций — коммит на стороне человека"
+    incident: "SKILL.md P0R1: границы компетенции"
+
+deny_mcp:
+  - move_ticket
+  - start_pipeline
+
+# H4 — действия по этапам. Скрипт дедупликации относится к шагу дедупликации, запись
+# тикета — к шагу сохранения после стоп-гейтов. Инцидент PulseProxy PLAN-014 (2026-04-20):
+# тикеты записывались до выписки реестра capabilities, ключи оказались изобретёнными
+# (typescript, browser-extension при реестре text, multimodal) — каскад no_capable_agent,
+# 12 безрезультатных попыток исполнения, 2 тикета в blocked, план застопорен.
+stage_actions:
+  check_duplicates:
+    kind: [shell]
+    match: "(^|[;&|(]\\s*)node(\\.exe)?\\s+\\S*check-duplicates\\.js"
+    stages: [10]
+  write_ticket:
+    kind: [edit, write]
+    match: ".workflow/tickets/backlog/**"
+    stages: [10]
+
+# H5 — потолки циклов. from == to — возврат внутри этапа.
+cycles:
+  - { from: 10, to: 10, max: 3, reason: "Три круга разбиения по чеклисту атомарности не сошлись — опиши в выводе стадии, какая проверка не проходит, и остановись: повторный проход оплачивается заново" }
+
+# H6 — выходной слой. Блок результата обязателен, и в нём обязательна секция
+# ids_allocated_from: её отсутствие означает, что СТОП-гейт нумерации был пропущен
+# (аудит 2026-09-21, HIGH: шаблон блока результата шага 11 не содержал секцию, хотя
+# стоп-гейт объявляет её обязательной частью контракта стадии).
+output:
+  final_requires:
+    - "RAILS:\\s*P6S2"
+    - "verdict\\s*="
+    - "Файлы:"
+    - "---RESULT---"
+    - "ids_allocated_from:"
+  final_forbids:
+    - "status:\\s*active"
+  max_stop_blocks: 2

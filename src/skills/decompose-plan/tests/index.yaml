@@ -63,3 +63,8 @@ cases:
     origin_chg: [ad-hoc-2026-09-22-incident]
     tags: [dod-transfer, acceptance-criterion, anti-pattern]
     severity: high
+  - id: TC-DECOMPOSE-PLAN-011
+    file: cases/TC-DECOMPOSE-PLAN-011-rails-anatomy.yaml
+    origin_chg: [convert-2026-09-23]
+    tags: [rails, anatomy, regression-guard]
+    severity: critical
