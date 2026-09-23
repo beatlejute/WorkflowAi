@@ -12,8 +12,15 @@
  * Проверяемые критерии:
  * - Pending approval-файл создаётся при входе в manual-gate стадию
  * - После программной записи status: approved, pipeline переходит на finish-approved
- * - Latency от записи approved до перехода ≤ poll_interval_ms + 100ms = 200ms
+ *   (проверяется счётчиком стадии finish-approved, а не только фактом завершения)
+ * - Решение подхватывается первым же опросом approval-файла: считаются чтения
+ *   файла после записи решения, а не миллисекунды на стенных часах
  * - Существующий test-suite остаётся зелёным
+ *
+ * Тесты читают approval-файл сразу, как увидели его в readdir. Это безопасно
+ * потому, что раннер публикует файл целиком одним hard link'ом
+ * (writeApprovalPending): в каталоге approvals не бывает ни пустого файла, ни
+ * временного. Регресс на это — src/tests/race-approval-file-atomic-create.test.mjs.
  *
  * Запуск: node --test src/tests/pipeline-runner-manual-gate.test.mjs
  */
@@ -187,17 +194,39 @@ test('QA-37-002: после записи approved pipeline переходит н
     // Проверяем что pipeline завершился успешно
     assert.ok(result, 'runner должен вернуть результат');
     assert.ok(result.steps > 0, 'pipeline должен выполнить несколько шагов');
+
+    // Заголовок теста обещает переход именно на finish-approved, поэтому ветку
+    // проверяем её счётчиком: без этого тест был зелёным и когда гейт уходил в
+    // timeout или в finish-rejected — то есть решение человека терялось.
+    assert.strictEqual(runner.counters.finish_counter, 1, 'должна отработать стадия finish-approved');
+    assert.strictEqual(runner.counters.reject_counter, undefined, 'finish-rejected отрабатывать не должна');
   } finally {
     cleanupDir(tmpDir);
   }
 });
 
-test('QA-37-003: latency от записи approved до перехода ≤ 200ms', async () => {
+test('QA-37-003: решение подхватывается первым же опросом approval-файла', async () => {
+  // Прежнее название обещало «latency от записи approved до перехода ≤ 200ms»,
+  // а ассершен допускал 10000 мс: секундомер в этом тесте мерил загрузку машины
+  // и delay_between_stages, а не реакцию раннера, и потому не падал никогда.
+  // Тот же инвариант наблюдаем без стенных часов: считаем опросы, в которых
+  // раннер УВИДЕЛ решение. Их должно быть ровно один — гейт обязан выйти на
+  // первом же таком чтении. Если он прочитает approved и всё равно продолжит
+  // цикл, человек будет ждать лишние интервалы опроса или упрётся в таймаут,
+  // и счётчик это покажет независимо от загрузки машины.
   const tmpDir = createTmpDir();
 
   try {
     const config = createConfig();
     const runner = new PipelineRunner(config, { project: tmpDir });
+
+    let approvedSightings = 0;
+    const readApprovalFile = runner.readApprovalFile.bind(runner);
+    runner.readApprovalFile = async (filePath) => {
+      const data = await readApprovalFile(filePath);
+      if (data && data.status === 'approved') approvedSightings++;
+      return data;
+    };
 
     // Запускаем runner в фоне
     const runPromise = runner.run();
@@ -222,9 +251,6 @@ test('QA-37-003: latency от записи approved до перехода ≤ 20
 
     assert.ok(approvalFile, 'approval-файл должен быть создан');
 
-    // Засекаем время перед записью approved
-    const t0 = Date.now();
-
     // Программно записываем approved
     const approvalData = JSON.parse(fs.readFileSync(approvalFile, 'utf8'));
     approvalData.status = 'approved';
@@ -232,22 +258,23 @@ test('QA-37-003: latency от записи approved до перехода ≤ 20
     approvalData.updated_at = new Date().toISOString();
     fs.writeFileSync(approvalFile, JSON.stringify(approvalData, null, 2));
 
-    // Ждём завершения pipeline (max 20s, включая delay_between_stages)
+    // Ограничение по времени оставлено только как страховка от вечного зависания:
+    // это не проверка латентности, а признак того, что гейт залип.
     const completePromise = Promise.race([
       runPromise,
       new Promise((_, reject) => setTimeout(() => reject(new Error('Pipeline timeout')), 20000))
     ]);
 
     const result = await completePromise;
-    const elapsed = Date.now() - t0;
 
-    // Латенси должен быть ≤ poll_interval_ms + 100ms = 200ms
-    // (плюс delay_between_stages = 5s и buffer для обработки)
-    assert.ok(
-      elapsed <= 10000, // 10s включает delay_between_stages и overhead
-      `latency от записи approved до завершения pipeline должен быть ≤ 10000ms, фактически ${elapsed}ms`
+    assert.strictEqual(
+      approvedSightings,
+      1,
+      `гейт обязан выйти на первом же опросе, увидевшем approved; ` +
+      `фактически решение было прочитано ${approvedSightings} раз(а)`
     );
 
+    assert.strictEqual(runner.counters.finish_counter, 1, 'гейт должен уйти в approved-ветку, а не в timeout');
     assert.ok(result.steps > 0, 'pipeline должен завершиться успешно');
   } finally {
     cleanupDir(tmpDir);

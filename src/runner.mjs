@@ -1926,19 +1926,53 @@ class PipelineRunner {
 
       const content = JSON.stringify(approvalData, null, 2);
 
-      // Атомарно создаём файл с флагом 'wx' (fail if exists)
+      // Появление approval-файла обязано быть атомарным для читателей. Раньше
+      // здесь были open(filePath, 'wx') + write: флаг 'wx' даёт эксклюзивное
+      // создание, но между open и write файл лежит в каталоге нулевой длины.
+      // Кто прочитал его в этот момент — получил пустую строку и
+      // «Unexpected end of JSON input»: раннер в polling-цикле падал в
+      // goto.error по «corrupt approval file», а хук move-ticket молча
+      // пропускал auto-approve уже принятого человеком решения. Так упал
+      // QA-37-003 в реальном прогоне набора.
+      //
+      // Поэтому JSON пишется целиком во временный файл, а в каталог approvals
+      // попадает одним hard link'ом: читатель видит либо отсутствие файла,
+      // либо весь JSON. link заодно сохраняет эксклюзивность — на уже
+      // существующем пути он падает с EEXIST (проверено запуском на NTFS),
+      // тогда как rename молча затёр бы чужое решение.
+      //
+      // Временный файл лежит на уровень выше каталога approvals: том тот же
+      // (link между томами — EXDEV), но ни одно сканирование approvals его не
+      // видит — ни шаблон хука ^<ticket>_manual-gate-.*_\d+\.json$, ни
+      // readdirSync(approvals)[0] в тестах. Имя не содержит step_id намеренно:
+      // id тикета бывает длиной 256 символов (src/tests/edge-ticket-id-long),
+      // а компонент пути длиннее 255 на NTFS не создаётся (проверено запуском).
+      const tmpPath = path.join(
+        dir,
+        '..',
+        `.approval-tmp.${process.pid}.${crypto.randomBytes(6).toString('hex')}`
+      );
+
       try {
-        const handle = await fs.promises.open(filePath, 'wx');
-        await handle.write(content);
-        await handle.close();
-        return approvalData;
-      } catch (err) {
-        if (err.code === 'EEXIST') {
-          // Файл уже был создан (например, при recovery) — читаем и возвращаем
-          const existing = await fs.promises.readFile(filePath, 'utf8');
-          return JSON.parse(existing);
+        await fs.promises.writeFile(tmpPath, content, 'utf8');
+
+        // Две попытки: файл может исчезнуть между EEXIST и чтением (другой
+        // процесс отменил гейт). Вернуть в этом случае null нельзя — вызывающий
+        // executeManualGate сразу читает existing.status и упал бы на TypeError.
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            await fs.promises.link(tmpPath, filePath);
+            return approvalData;
+          } catch (err) {
+            if (err.code !== 'EEXIST') throw err;
+            const existing = await this.readApprovalFile(filePath);
+            if (existing) return existing;
+          }
         }
-        throw err;
+
+        throw new Error(`approval file at ${filePath} vanished while being created`);
+      } finally {
+        await fs.promises.unlink(tmpPath).catch(() => {});
       }
     }
 
@@ -1950,18 +1984,36 @@ class PipelineRunner {
      * @throws {Error} При невалидном JSON — с сообщением "corrupt approval file at {path}: {parse error}"
      */
     async readApprovalFile(filePath) {
-      try {
-        const content = await fs.promises.readFile(filePath, 'utf8');
-        return JSON.parse(content);
-      } catch (err) {
-        if (err.code === 'ENOENT') {
-          return null;
+      // Создание файла атомарно (см. writeApprovalPending), но решение в него
+      // вписывают перезаписью на месте: и хук move-ticket
+      // (updateApprovalFilesHook), и approveOpenGates делают writeFile поверх
+      // существующего файла, а он сначала обрезает его до нуля. Читатель,
+      // попавший в это
+      // окно, увидит пустую строку — при том, что файл цел и решение в нём
+      // сейчас появится. Цена доверия первому чтению: гейт роняет пайплайн в
+      // goto.error ровно в тот момент, когда человек нажал approve. Поэтому
+      // обрезанное чтение перечитывается, а битым файл объявляется только если
+      // JSON не собрался и после повторов.
+      const RETRY_DELAYS_MS = [25, 50];
+
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const content = await fs.promises.readFile(filePath, 'utf8');
+          return JSON.parse(content);
+        } catch (err) {
+          if (err.code === 'ENOENT') {
+            return null;
+          }
+          if (err instanceof SyntaxError) {
+            if (attempt < RETRY_DELAYS_MS.length) {
+              await new Promise(resolve => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
+              continue;
+            }
+            throw new Error(`corrupt approval file at ${filePath}: ${err.message}`);
+          }
+          // Перебрасываем другие ошибки (например, fs-ошибки) без изменений
+          throw err;
         }
-        if (err instanceof SyntaxError) {
-          throw new Error(`corrupt approval file at ${filePath}: ${err.message}`);
-        }
-        // Перебрасываем другие ошибки (например, fs-ошибки) без изменений
-        throw err;
       }
     }
 
