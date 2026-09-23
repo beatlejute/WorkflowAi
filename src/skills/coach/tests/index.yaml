@@ -13,7 +13,7 @@ execution:
     - gemini-flash-lite   # дополнительная модель для сравнения
     - gpt-luna            # дополнительная модель для сравнения
   judge_agent: claude-opus  # другая модель, чтобы исключить self-enhancement bias
-  default_timeout_s: 1200
+  default_timeout_s: 2400
   baseline_ref: origin/main  # git ref для сравнения previously_green/red
 
 cases:

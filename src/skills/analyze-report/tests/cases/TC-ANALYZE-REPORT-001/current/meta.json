@@ -1,8 +1,8 @@
 {
-  "date": "2026-09-22T08:05:41.760Z",
+  "date": "2026-09-23T08:14:12.310Z",
   "skill_sha": "d517689",
   "status": "failed",
-  "duration_ms": 295166,
+  "duration_ms": 1220933,
   "per_model": {
     "claude-sonnet": {
       "passed": true,
@@ -12,96 +12,33 @@
       "total": 3,
       "threshold": 2
     },
-    "kilo-glm": {
-      "passed": false,
-      "errored": true,
-      "pass_count": 0,
-      "error_count": 3,
+    "gpt-luna": {
+      "passed": true,
+      "errored": false,
+      "pass_count": 2,
+      "error_count": 1,
       "total": 3,
       "threshold": 2
     },
-    "kilo-minimax": {
+    "gemini-flash-lite": {
       "passed": false,
-      "errored": true,
-      "pass_count": 0,
-      "error_count": 3,
+      "errored": false,
+      "pass_count": 1,
+      "error_count": 2,
       "total": 3,
       "threshold": 2
     },
-    "kilo-deepseek": {
-      "passed": false,
-      "errored": true,
-      "pass_count": 0,
-      "error_count": 3,
+    "deepseek-flash": {
+      "passed": true,
+      "errored": false,
+      "pass_count": 3,
+      "error_count": 0,
       "total": 3,
       "threshold": 2
     }
   },
   "rubric_scores": [
     {
-      "agentId": "kilo-deepseek",
-      "trial": 1,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-deepseek",
-      "trial": 2,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-deepseek",
-      "trial": 3,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-glm",
-      "trial": 1,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-glm",
-      "trial": 2,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-glm",
-      "trial": 3,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-minimax",
-      "trial": 1,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-minimax",
-      "trial": 2,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-minimax",
-      "trial": 3,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
       "agentId": "claude-sonnet",
       "trial": 1,
       "score": 5,
@@ -115,6 +52,63 @@
     },
     {
       "agentId": "claude-sonnet",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "deepseek-flash",
+      "trial": 1,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "deepseek-flash",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "deepseek-flash",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "gemini-flash-lite",
+      "trial": 1,
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-ANALYZE-REPORT-001-gemini-flash-lite-trial-1\" timed out after 1200s"
+    },
+    {
+      "agentId": "gemini-flash-lite",
+      "trial": 2,
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-ANALYZE-REPORT-001-gemini-flash-lite-trial-2\" timed out after 1200s"
+    },
+    {
+      "agentId": "gemini-flash-lite",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "gpt-luna",
+      "trial": 1,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "gpt-luna",
+      "trial": 2,
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-ANALYZE-REPORT-001-gpt-luna-trial-2\" timed out after 1200s"
+    },
+    {
+      "agentId": "gpt-luna",
       "trial": 3,
       "score": 5,
       "errored": false

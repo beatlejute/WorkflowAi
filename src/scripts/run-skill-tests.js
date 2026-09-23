@@ -1393,7 +1393,13 @@ function aggregateResults(results, testCase) {
   };
 }
 
-async function writeMetaJson(caseId, skillName, status, durationMs, l2Results = null, l1_skipped = null) {
+// `currentAgents` — агенты текущего прогона (target_agents кейса или скила, либо --agent).
+// Инцидент 2026-09-22: per_model сливался с прошлым прогоном без фильтра, и записи агентов,
+// убранных из configs/pipeline.yaml (kilo-glm, kilo-minimax, kilo-deepseek), навсегда держали
+// кейс красным: их прогоны падали с «Agent exited with code 1», новые модели проходили, а
+// status считался по объединению. Теперь запись агента, которого нет в текущем списке,
+// из meta.json выбрасывается (артефакты его проб остаются в каталоге кейса).
+async function writeMetaJson(caseId, skillName, status, durationMs, l2Results = null, l1_skipped = null, currentAgents = null) {
   if (skipMetaWrite) return;
 
   const skillsDir = findSkillsDir();
@@ -1435,6 +1441,14 @@ async function writeMetaJson(caseId, skillName, status, durationMs, l2Results = 
     if (l2Results.tokens) {
       meta.tokens = l2Results.tokens;
     }
+  }
+
+  if (Array.isArray(currentAgents) && currentAgents.length > 0) {
+    const allowed = new Set(currentAgents);
+    for (const agentId of Object.keys(mergedPerModel)) {
+      if (!allowed.has(agentId)) delete mergedPerModel[agentId];
+    }
+    mergedRubricScores = mergedRubricScores.filter((r) => !r.agentId || allowed.has(r.agentId));
   }
 
   if (Object.keys(mergedPerModel).length > 0) {
@@ -1718,7 +1732,7 @@ async function runTestsForSkill(skillName, opts) {
             result.current_run.passed++;
           }
 
-          await writeMetaJson(caseDef.id, skillName, caseStatus, Date.now() - caseStart, l2Results, result.l1_skipped);
+          await writeMetaJson(caseDef.id, skillName, caseStatus, Date.now() - caseStart, l2Results, result.l1_skipped, effectiveTargetAgents);
         } else if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent && hasRubric) {
           const trials = opts.fast ? 1 : 3;
           const defaultTimeout = index.execution?.default_timeout_s || 300;
@@ -1763,7 +1777,7 @@ async function runTestsForSkill(skillName, opts) {
           }
 
           currentRunStatuses[caseDef.id] = caseStatus;
-          await writeMetaJson(caseDef.id, skillName, caseStatus, Date.now() - caseStart, l2Results);
+          await writeMetaJson(caseDef.id, skillName, caseStatus, Date.now() - caseStart, l2Results, null, effectiveTargetAgents);
         } else {
           result.current_run.passed++;
           currentRunStatuses[caseDef.id] = 'passed';

@@ -52,3 +52,11 @@ agents:
 
   deepseek-pro:
     extends: deepseek-flash
+
+  gemini-flash-lite:
+    rules:
+      - id: "gemini-free-tier-quota"
+        class: "unavailable"
+        ttl: "10m"
+        pattern: "exceeded your current quota|generate_content_free_tier|generativelanguage.googleapis.com"
+        exit_codes: "any"

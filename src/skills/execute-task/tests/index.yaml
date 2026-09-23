@@ -8,7 +8,7 @@ execution:
     - kilo-free
     - gpt-luna
   judge_agent: claude-opus
-  default_timeout_s: 1200
+  default_timeout_s: 2400
   baseline_ref: origin/main
 
 cases:

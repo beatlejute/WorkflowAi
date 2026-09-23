@@ -21,14 +21,14 @@
         }
       ]
     },
-    "kilo-glm": {
-      "pass_count": 0,
+    "gpt-luna": {
+      "pass_count": 2,
       "total": 3,
       "trials": [
         {
           "trial": 1,
-          "score": null,
-          "passed": false
+          "score": 5,
+          "passed": true
         },
         {
           "trial": 2,
@@ -37,13 +37,13 @@
         },
         {
           "trial": 3,
-          "score": null,
-          "passed": false
+          "score": 5,
+          "passed": true
         }
       ]
     },
-    "kilo-minimax": {
-      "pass_count": 0,
+    "gemini-flash-lite": {
+      "pass_count": 1,
       "total": 3,
       "trials": [
         {
@@ -58,98 +58,35 @@
         },
         {
           "trial": 3,
-          "score": null,
-          "passed": false
+          "score": 5,
+          "passed": true
         }
       ]
     },
-    "kilo-deepseek": {
-      "pass_count": 0,
+    "deepseek-flash": {
+      "pass_count": 3,
       "total": 3,
       "trials": [
         {
           "trial": 1,
-          "score": null,
-          "passed": false
+          "score": 5,
+          "passed": true
         },
         {
           "trial": 2,
-          "score": null,
-          "passed": false
+          "score": 5,
+          "passed": true
         },
         {
           "trial": 3,
-          "score": null,
-          "passed": false
+          "score": 5,
+          "passed": true
         }
       ]
     }
   },
   "rubric_scores": [
     {
-      "agentId": "kilo-deepseek",
-      "trial": 1,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-deepseek",
-      "trial": 2,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-deepseek",
-      "trial": 3,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-glm",
-      "trial": 1,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-glm",
-      "trial": 2,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-glm",
-      "trial": 3,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-minimax",
-      "trial": 1,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-minimax",
-      "trial": 2,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-minimax",
-      "trial": 3,
-      "score": null,
-      "errored": true,
-      "error": "Agent exited with code 1"
-    },
-    {
       "agentId": "claude-sonnet",
       "trial": 1,
       "score": 5,
@@ -163,10 +100,68 @@
     },
     {
       "agentId": "claude-sonnet",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "deepseek-flash",
+      "trial": 1,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "deepseek-flash",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "deepseek-flash",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "gemini-flash-lite",
+      "trial": 1,
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-ANALYZE-REPORT-001-gemini-flash-lite-trial-1\" timed out after 1200s"
+    },
+    {
+      "agentId": "gemini-flash-lite",
+      "trial": 2,
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-ANALYZE-REPORT-001-gemini-flash-lite-trial-2\" timed out after 1200s"
+    },
+    {
+      "agentId": "gemini-flash-lite",
+      "trial": 3,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "gpt-luna",
+      "trial": 1,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "gpt-luna",
+      "trial": 2,
+      "score": null,
+      "errored": true,
+      "error": "Stage \"TC-ANALYZE-REPORT-001-gpt-luna-trial-2\" timed out after 1200s"
+    },
+    {
+      "agentId": "gpt-luna",
       "trial": 3,
       "score": 5,
       "errored": false
     }
   ],
-  "timestamp": "2026-09-22T08:05:41.758Z"
+  "timestamp": "2026-09-23T08:14:12.309Z",
+  "status": "failed"
 }

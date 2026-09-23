@@ -22,11 +22,15 @@ function knownAgents() {
 function skillIndexes() {
   const out = [];
   for (const name of readdirSync(SKILLS_DIR)) {
+    // Прогоны раннера создают временные скилы-фикстуры прямо в каноническом src/skills
+    // (имена вида `__test-runner-<метка времени>`). Они живут доли секунды и к реестру
+    // тестов отношения не имеют — пропускаем, иначе тест ловит чужую фикстуру.
+    if (name.startsWith('__') || name.startsWith('.')) continue;
     const dir = join(SKILLS_DIR, name);
     if (!statSync(dir).isDirectory()) continue;
     const indexPath = join(dir, 'tests', 'index.yaml');
     if (!existsSync(indexPath)) continue;
-    out.push({ skill: name, indexPath, doc: yaml.load(readFileSync(indexPath, 'utf8')) });
+    out.push({ skill: name, dir, indexPath, doc: yaml.load(readFileSync(indexPath, 'utf8')) });
   }
   return out;
 }
@@ -59,4 +63,22 @@ test('tests/index.yaml каждого скила: judge_agent и per-case overri
     }
   }
   assert.deepEqual(unknown, [], `агентов нет в configs/pipeline.yaml: ${unknown.join(', ')}`);
+});
+
+// Скил на рельсах объявляет каждый узел отдельным вызовом cli.mjs, поэтому прогон идёт
+// заметно дольше прозаического. Инцидент 2026-09-23: при бюджете 1200 с на пробу
+// gemini-flash-lite и gpt-luna упирались в таймаут на TC-ANALYZE-REPORT-001 и 002 — кейсы
+// числились красными, хотя судья ставил высшую оценку там, где проба доходила до конца.
+// Решение стейкхолдера: для скилов на рельсах бюджет не меньше 2400 с.
+const RAILS_MIN_TIMEOUT_S = 2400;
+
+test('tests/index.yaml скила на рельсах: default_timeout_s не меньше 2400 с', () => {
+  const small = [];
+  for (const { skill, dir, doc } of skillIndexes()) {
+    if (!existsSync(join(dir, 'rails.yaml'))) continue;
+    const t = doc?.execution?.default_timeout_s;
+    assert.equal(typeof t, 'number', `${skill}: default_timeout_s не задан`);
+    if (t < RAILS_MIN_TIMEOUT_S) small.push(`${skill}: ${t}`);
+  }
+  assert.deepEqual(small, [], `бюджет пробы меньше ${RAILS_MIN_TIMEOUT_S} с: ${small.join(', ')}`);
 });
