@@ -27,6 +27,7 @@ import {
   allowedTransitions,
   currentNodeInfo,
   newestSessionId,
+  listSessionIds,
 } from './state.mjs';
 import { appendDenial, appendEvent, readJournal, readJournalFile, summarize } from './journal.mjs';
 import { checkCoverage } from './coverage.mjs';
@@ -66,20 +67,36 @@ function formatTransitions(transitions) {
 
 // §5: --session, иначе WORKFLOW_RAILS_SESSION, иначе самый свежий файл
 // состояния проекта (с предупреждением в stderr — забота CLI).
+// Инцидент 2026-09-23: в проекте работали две сессии коуча, команда `goto` без `--session`
+// взяла самую свежую сессию (чужую) и записала в её журнал отказ по чужому узлу. Теперь
+// угадывание допустимо только при ОДНОЙ сессии проекта; при двух и более — отказ с перечнем
+// (ложный отказ дешевле правки чужого состояния). Явные `--session` и WORKFLOW_RAILS_SESSION
+// работают всегда.
 function resolveSessionId(root, flags, env) {
-  if (flags.session) return { sessionId: String(flags.session), guessed: false };
-  if (env && env.WORKFLOW_RAILS_SESSION) return { sessionId: String(env.WORKFLOW_RAILS_SESSION), guessed: false };
+  if (flags.session) return { sessionId: String(flags.session), guessed: false, sessions: [] };
+  if (env && env.WORKFLOW_RAILS_SESSION) return { sessionId: String(env.WORKFLOW_RAILS_SESSION), guessed: false, sessions: [] };
 
-  const newest = newestSessionId(root);
+  const sessions = listSessionIds(root);
+  if (sessions.length > 1) return { sessionId: null, guessed: false, sessions };
+  const newest = sessions[0] ?? null;
   if (newest) {
     try {
-      process.stderr.write(`rails: --session не задан, используется самая свежая сессия проекта: ${newest}\n`);
+      process.stderr.write(`rails: --session не задан, в проекте одна сессия: ${newest}\n`);
     } catch {
       // stderr недоступен — не наша забота
     }
-    return { sessionId: newest, guessed: true };
+    return { sessionId: newest, guessed: true, sessions };
   }
-  return { sessionId: null, guessed: false };
+  return { sessionId: null, guessed: false, sessions };
+}
+
+// Текст отказа при неоднозначности: перечень сессий и что делать.
+function ambiguousSessionError(sessions) {
+  const list = sessions.map((s) => `  ${s}`).join('\n');
+  return {
+    code: 1,
+    stdout: `Ошибка: в проекте ${sessions.length} сессии рельсов, --session не задан — команда могла бы уйти в чужую сессию.\nСессии (от свежей):\n${list}\nЗадай --session <id> или WORKFLOW_RAILS_SESSION.\n`,
+  };
 }
 
 // --- start -----------------------------------------------------------------------------
@@ -135,7 +152,8 @@ function cmdGoto(root, positional, flags, env) {
   }
   const quote = typeof flags.quote === 'string' ? flags.quote : '';
 
-  const { sessionId } = resolveSessionId(root, flags, env);
+  const { sessionId, sessions } = resolveSessionId(root, flags, env);
+  if (!sessionId && sessions.length > 1) return ambiguousSessionError(sessions);
   if (!sessionId) {
     return { code: 1, stdout: 'Ошибка: нет активной сессии (задай --session/WORKFLOW_RAILS_SESSION или сначала start).\n' };
   }
@@ -189,7 +207,8 @@ function cmdGoto(root, positional, flags, env) {
 // --- status ----------------------------------------------------------------------------
 
 function cmdStatus(root, positional, flags, env) {
-  const { sessionId } = resolveSessionId(root, flags, env);
+  const { sessionId, sessions } = resolveSessionId(root, flags, env);
+  if (!sessionId && sessions.length > 1) return ambiguousSessionError(sessions);
   if (!sessionId) return { code: 1, stdout: 'Ошибка: нет активной сессии.\n' };
 
   const state = loadState(root, sessionId);
@@ -223,7 +242,8 @@ function cmdStatus(root, positional, flags, env) {
 // --- reset -----------------------------------------------------------------------------
 
 function cmdReset(root, positional, flags, env) {
-  const { sessionId } = resolveSessionId(root, flags, env);
+  const { sessionId, sessions } = resolveSessionId(root, flags, env);
+  if (!sessionId && sessions.length > 1) return ambiguousSessionError(sessions);
   if (!sessionId) return { code: 1, stdout: 'Ошибка: нет активной сессии.\n' };
 
   const state = loadState(root, sessionId);

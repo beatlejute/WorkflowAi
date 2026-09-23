@@ -58,7 +58,7 @@ test('loadRailsConfig: минимальный rails.yaml дополняется 
   assert.deepEqual(cfg.deny_mcp, []);
   assert.deepEqual(cfg.stage_actions, {});
   assert.deepEqual(cfg.cycles, []);
-  assert.deepEqual(cfg.output, { final_requires: [], max_stop_blocks: 2 });
+  assert.deepEqual(cfg.output, { final_requires: [], final_forbids: [], max_stop_blocks: 2 });
 
   const check = validateRailsConfig(cfg);
   assert.deepEqual(check.errors, []);

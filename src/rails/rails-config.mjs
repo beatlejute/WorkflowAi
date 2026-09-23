@@ -24,6 +24,7 @@ const DEFAULTS = {
   cycles: [],
   output: {
     final_requires: [],
+    final_forbids: [],
     max_stop_blocks: 2,
   },
 };
@@ -224,16 +225,20 @@ export function validateRailsConfig(obj) {
     if (!isPlainObject(obj.output)) {
       pushError(errors, 'bad-type', 'output', 'output должен быть объектом');
     } else {
-      if (obj.output.final_requires !== undefined) {
-        if (!isStringArray(obj.output.final_requires)) {
-          pushError(errors, 'bad-type', 'output.final_requires', 'final_requires должен быть массивом строк-регулярок');
-        } else {
-          obj.output.final_requires.forEach((pattern, i) => {
-            if (!isValidRegex(pattern)) {
-              pushError(errors, 'bad-regex', `output.final_requires[${i}]`, `невалидное регулярное выражение: ${pattern}`);
-            }
-          });
+      // Четыре списка регулярок выходного слоя: требования и запреты, для терминала и
+      // для узла-паузы. `*_forbids` добавлены 2026-09-23 (часть инвариантов скила — запрет
+      // на форму ответа, а не требование наличия).
+      for (const key of ['final_requires', 'final_forbids', 'pause_requires', 'pause_forbids']) {
+        if (obj.output[key] === undefined) continue;
+        if (!isStringArray(obj.output[key])) {
+          pushError(errors, 'bad-type', `output.${key}`, `${key} должен быть массивом строк-регулярок`);
+          continue;
         }
+        obj.output[key].forEach((pattern, i) => {
+          if (!isValidRegex(pattern)) {
+            pushError(errors, 'bad-regex', `output.${key}[${i}]`, `невалидное регулярное выражение: ${pattern}`);
+          }
+        });
       }
       if (obj.output.max_stop_blocks !== undefined && (!Number.isFinite(obj.output.max_stop_blocks) || obj.output.max_stop_blocks < 0)) {
         pushError(errors, 'bad-type', 'output.max_stop_blocks', 'max_stop_blocks должен быть неотрицательным числом');

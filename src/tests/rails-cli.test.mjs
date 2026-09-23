@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
@@ -176,6 +176,54 @@ test('run status: без --session, но есть единственная се�
     const r = run(['status'], { cwd: root, env: {} });
     assert.equal(r.code, 0);
     assert.match(r.stdout, new RegExp(`Сессия: ${sessionId}`));
+  });
+});
+
+// Инцидент 2026-09-23: в проекте работали две сессии коуча; `goto` без `--session` ушёл в
+// самую свежую (чужую) сессию, и в её журнал попал отказ по чужому узлу. Теперь при двух и
+// более сессиях CLI отказывает; явная сессия работает по-прежнему.
+test('run: две сессии проекта и нет --session -> code 1, перечень сессий, чужое состояние не тронуто', () => {
+  withProject(({ root }) => {
+    const mine = randomUUID();
+    const other = randomUUID();
+    run(['start', 'clitest', '--session', mine], { cwd: root, env: {} });
+    run(['start', 'clitest', '--session', other], { cwd: root, env: {} });
+
+    for (const argv of [['status'], ['goto', 'P4S1', '--quote', 'Выполнить шаг мини-скила теста CLI'], ['reset']]) {
+      const r = run(argv, { cwd: root, env: {} });
+      assert.equal(r.code, 1, argv.join(' '));
+      assert.match(r.stdout, /--session не задан/, argv.join(' '));
+      assert.match(r.stdout, new RegExp(mine), argv.join(' '));
+      assert.match(r.stdout, new RegExp(other), argv.join(' '));
+    }
+
+    // Ни одна из сессий не сдвинулась и не удалена: отказ произошёл до загрузки состояния.
+    for (const sessionId of [mine, other]) {
+      const st = run(['status', '--session', sessionId], { cwd: root, env: {} });
+      assert.equal(st.code, 0);
+      assert.match(st.stdout, /Узел: P4E1/);
+    }
+    // Журнал отказов пуст: чужой отказ в него не попал.
+    const journal = join(root, '.workflow', 'logs', 'rails-denials.jsonl');
+    const denials = existsSync(journal) ? readFileSync(journal, 'utf8').trim() : '';
+    assert.equal(denials.includes('P4E1'), false, 'отказ по узлу чужой сессии в журнал не пишется');
+  });
+});
+
+test('run: две сессии проекта, сессия задана явно или через WORKFLOW_RAILS_SESSION -> работает', () => {
+  withProject(({ root }) => {
+    const mine = randomUUID();
+    const other = randomUUID();
+    run(['start', 'clitest', '--session', mine], { cwd: root, env: {} });
+    run(['start', 'clitest', '--session', other], { cwd: root, env: {} });
+
+    const explicit = run(['status', '--session', mine], { cwd: root, env: {} });
+    assert.equal(explicit.code, 0);
+    assert.match(explicit.stdout, new RegExp(`Сессия: ${mine}`));
+
+    const viaEnv = run(['status'], { cwd: root, env: { WORKFLOW_RAILS_SESSION: mine } });
+    assert.equal(viaEnv.code, 0);
+    assert.match(viaEnv.stdout, new RegExp(`Сессия: ${mine}`));
   });
 });
 

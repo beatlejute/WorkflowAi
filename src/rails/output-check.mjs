@@ -18,6 +18,14 @@ import fs from 'node:fs';
 const POSITION_MISSING_PREFIX = 'position:';
 
 /**
+ * Запрещённый паттерн в финальном ответе: `output.final_forbids` (и `pause_forbids`).
+ * Добавлено 2026-09-23 при переводе execute-task: часть инвариантов скила — запреты на
+ * форму ответа («не перечисляй пункты DoD в stdout», «не декларируй self-check»), а
+ * выходной слой умел только требовать наличие. Элемент `missing[]` отличим по префиксу.
+ */
+const FORBIDDEN_MISSING_PREFIX = 'forbidden:';
+
+/**
  * @param {string} text финальный ответ агента
  * @param {object} config распарсенный `rails.yaml` (используется `config.output`)
  * @param {object} state состояние сессии (используется `state.node`)
@@ -35,6 +43,9 @@ export function check(text, config, state) {
   const requires = atPause
     ? (Array.isArray(output.pause_requires) ? output.pause_requires : [])
     : (Array.isArray(output.final_requires) ? output.final_requires : []);
+  const forbids = atPause
+    ? (Array.isArray(output.pause_forbids) ? output.pause_forbids : [])
+    : (Array.isArray(output.final_forbids) ? output.final_forbids : []);
   const value = String(text ?? '');
 
   for (const pattern of requires) {
@@ -48,6 +59,18 @@ export function check(text, config, state) {
       continue;
     }
     if (!re.test(value)) missing.push(pattern);
+  }
+
+  for (const pattern of forbids) {
+    let re;
+    try {
+      re = new RegExp(pattern, 'i');
+    } catch {
+      // Невалидный regex — как и в requires, вина валидации конфига. Здесь считаем
+      // запрет несработавшим: иначе битая строка глушила бы любой ответ.
+      continue;
+    }
+    if (re.test(value)) missing.push(`${FORBIDDEN_MISSING_PREFIX}${pattern}`);
   }
 
   const terminal = Array.isArray(config?.terminal) ? config.terminal : [];

@@ -69,6 +69,53 @@ function withTmpDir(fn) {
   }
 }
 
+// 2026-09-23, при переводе execute-task: часть инвариантов скила — запреты на форму ответа
+// («не перечисляй пункты DoD в stdout», «не декларируй self-check»), а выходной слой умел
+// только требовать наличие. `final_forbids` / `pause_forbids` — регулярки, которые совпасть
+// НЕ должны; элемент missing помечен префиксом `forbidden:`.
+const FORBIDS_CONFIG = {
+  terminal: ['P8S3'],
+  pause_nodes: ['P3Q1'],
+  output: {
+    final_requires: ['---RESULT---'],
+    final_forbids: ['\\[x\\]', '(?:^|\\n)[ \\t]*[-*] .+(?:\\n[ \\t]*[-*] .+)+'],
+    pause_forbids: ['---RESULT---'],
+  },
+};
+
+test('check: запрещённый паттерн в финальном ответе -> missing с префиксом forbidden:', () => {
+  const ok = check('выполнено: модуль и тесты\n---RESULT---', FORBIDS_CONFIG, { node: 'P8S3' });
+  assert.equal(ok.ok, true, JSON.stringify(ok.missing));
+
+  const checkbox = check('готово [x] пункт DoD\n---RESULT---', FORBIDS_CONFIG, { node: 'P8S3' });
+  assert.equal(checkbox.ok, false);
+  assert.deepEqual(checkbox.missing, ['forbidden:\\[x\\]']);
+
+  const list = check('---RESULT---\n- пункт один\n- пункт два', FORBIDS_CONFIG, { node: 'P8S3' });
+  assert.equal(list.ok, false);
+  assert.equal(list.missing.length, 1);
+  assert.match(list.missing[0], /^forbidden:/);
+});
+
+test('check: forbids берутся по положению — в узле-паузе действует pause_forbids', () => {
+  const atPause = check('Вопрос стейкхолдеру: какой вариант?', FORBIDS_CONFIG, { node: 'P3Q1' });
+  assert.equal(atPause.ok, true, JSON.stringify(atPause.missing));
+
+  const resultAtPause = check('---RESULT---\nstatus: default', FORBIDS_CONFIG, { node: 'P3Q1' });
+  assert.equal(resultAtPause.ok, false);
+  assert.deepEqual(resultAtPause.missing, ['forbidden:---RESULT---']);
+
+  // В терминале pause_forbids не применяется, а final_forbids — применяется.
+  const atTerminal = check('---RESULT---', FORBIDS_CONFIG, { node: 'P8S3' });
+  assert.equal(atTerminal.ok, true, JSON.stringify(atTerminal.missing));
+});
+
+test('check: битая регулярка в forbids ответ не глушит (в отличие от requires)', () => {
+  const config = { terminal: ['P8S3'], pause_nodes: [], output: { final_forbids: ['([unclosed'] } };
+  const r = check('любой текст', config, { node: 'P8S3' });
+  assert.equal(r.ok, true, JSON.stringify(r.missing));
+});
+
 test('lastAssistantText: берёт текст последней assistant-записи', () => {
   withTmpDir((dir) => {
     const file = join(dir, 'transcript.jsonl');

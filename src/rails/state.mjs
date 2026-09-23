@@ -374,34 +374,42 @@ export function applyGoto(state, graph, config, { node, quote } = {}) {
  * @returns {string|null}
  */
 export function newestSessionId(root) {
+  return listSessionIds(root)[0] ?? null;
+}
+
+/**
+ * Сессии проекта по файлам состояния, от самой свежей к старым (mtime).
+ * Инцидент 2026-09-23: CLI без `--session` брал самую свежую сессию проекта, и команда
+ * из одной сессии писала отказ в журнал ЧУЖОЙ (две сессии коуча в одном проекте).
+ * Резолв по одной сессии оставлен, при двух и более CLI обязан отказать.
+ *
+ * @param {string} root
+ * @returns {string[]}
+ */
+export function listSessionIds(root) {
   let dir;
   try {
     dir = stateDir(root);
   } catch {
-    return null;
+    return [];
   }
   let entries;
   try {
     entries = fs.readdirSync(dir);
   } catch {
-    return null;
+    return [];
   }
-  let best = null;
-  let bestMtime = -Infinity;
+  const found = [];
   for (const name of entries) {
     if (!name.endsWith('.json') || name.startsWith('.')) continue;
-    const full = path.join(dir, name);
     let stat;
     try {
-      stat = fs.statSync(full);
+      stat = fs.statSync(path.join(dir, name));
     } catch {
       continue;
     }
-    const mtime = stat.mtimeMs;
-    if (mtime > bestMtime) {
-      bestMtime = mtime;
-      best = name.slice(0, -'.json'.length);
-    }
+    found.push({ sessionId: name.slice(0, -'.json'.length), mtimeMs: stat.mtimeMs });
   }
-  return best;
+  found.sort((a, b) => b.mtimeMs - a.mtimeMs || a.sessionId.localeCompare(b.sessionId));
+  return found.map((x) => x.sessionId);
 }
