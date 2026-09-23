@@ -349,7 +349,11 @@ describe('executeManualGate — approved (with polling)', () => {
     const stepId = 'QA-12_approve_0';
     const filePath = path.join(approvalsDir, `${stepId}.json`);
 
-    // Start polling, then update file after first iteration
+    // Start polling, then update file after first iteration.
+    // Ошибку записи решения ловим здесь: throw из таймера node:test валит
+    // текущий тест, но polling-цикл внутри executeManualGate остаётся жить —
+    // воркер не выходит и весь набор висит без отчёта.
+    let writeError = null;
     const updateTimeout = setTimeout(() => {
       const approvedData = {
         step_id: stepId,
@@ -362,16 +366,24 @@ describe('executeManualGate — approved (with polling)', () => {
         decided_by: 'test-user',
         comment: 'LGTM'
       };
-      fs.writeFileSync(filePath, JSON.stringify(approvedData, null, 2));
+      try {
+        fs.writeFileSync(filePath, JSON.stringify(approvedData, null, 2));
+      } catch (err) {
+        writeError = err;
+      }
     }, 75); // Update after first poll (50ms) + some margin
 
     try {
+      // timeout_seconds обязателен: без него цикл ждёт решения вечно, и любой
+      // сбой записи выше превращается в вечно живой воркер вместо падения.
       const result = await runner.executeManualGate('approve', {
         type: 'manual-gate',
         poll_interval_ms: 50,
+        timeout_seconds: 30,
         goto: { approved: 'next', rejected: 'rollback' }
       });
 
+      assert.strictEqual(writeError, null, `запись решения не удалась: ${writeError && writeError.message}`);
       assert.strictEqual(result.status, 'approved');
       assert.strictEqual(result.result.step_id, stepId);
       assert.strictEqual(result.result.decided_by, 'test-user');
@@ -404,7 +416,9 @@ describe('executeManualGate — rejected (with polling)', () => {
     const stepId = 'QA-12_review_0';
     const filePath = path.join(approvalsDir, `${stepId}.json`);
 
-    // Start polling, then update file after first iteration
+    // Start polling, then update file after first iteration.
+    // Ошибку записи решения ловим здесь — см. комментарий в тесте approved.
+    let writeError = null;
     const updateTimeout = setTimeout(() => {
       const rejectedData = {
         step_id: stepId,
@@ -417,16 +431,22 @@ describe('executeManualGate — rejected (with polling)', () => {
         decided_by: 'reviewer',
         comment: 'needs rework'
       };
-      fs.writeFileSync(filePath, JSON.stringify(rejectedData, null, 2));
+      try {
+        fs.writeFileSync(filePath, JSON.stringify(rejectedData, null, 2));
+      } catch (err) {
+        writeError = err;
+      }
     }, 75);
 
     try {
       const result = await runner.executeManualGate('review', {
         type: 'manual-gate',
         poll_interval_ms: 50,
+        timeout_seconds: 30,
         goto: { approved: 'next', rejected: 'rollback' }
       });
 
+      assert.strictEqual(writeError, null, `запись решения не удалась: ${writeError && writeError.message}`);
       assert.strictEqual(result.status, 'rejected');
       assert.strictEqual(result.result.step_id, stepId);
       assert.strictEqual(result.result.decided_by, 'reviewer');
@@ -527,6 +547,7 @@ describe('executeManualGate — aborted', () => {
       const result = await runner.executeManualGate('gate', {
         type: 'manual-gate',
         poll_interval_ms: 50,
+        timeout_seconds: 30,
         goto: { approved: 'next', rejected: 'rollback' }
       });
 
@@ -554,6 +575,7 @@ describe('executeManualGate — aborted', () => {
       const result = await runner.executeManualGate('review', {
         type: 'manual-gate',
         poll_interval_ms: 50,
+        timeout_seconds: 30,
         goto: { approved: 'next', rejected: 'rollback' }
       });
 
