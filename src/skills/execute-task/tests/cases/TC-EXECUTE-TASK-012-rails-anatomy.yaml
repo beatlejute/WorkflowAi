@@ -1,0 +1,101 @@
+id: TC-EXECUTE-TASK-012
+title: "execute-task на рельсах: граф ядра и фрагмента, гарды по инцидентам, выходной слой ---RESULT--- без перечислений"
+origin:
+  chg: ["convert-2026-09-23"]
+  incidents:
+    - "Решение стейкхолдера 2026-09-21: единый подход «Рельсы для агента» — все скилы переводятся на граф плюс хуки-отказы через коуча (CONVERT). execute-task — третий скил после коуча и analyze-report."
+    - "PulseProxy CHG-051 и CHG-047: исполнитель создавал тикеты вместо фиксации дефекта в своём тикете, backlog разрастался без решения человека. Теперь — write_deny на чужие директории тикетов и на .workflow/plans/**."
+    - "COACH-SYNTH-1: правка тикета вне in-progress/. Теперь — write_deny на backlog/, ready/, review/, done/."
+    - "Наблюдение 2026-04-19: модели выдавали блок ---RESULT--- со status default без единого Edit файла тикета (призрачное выполнение). Теперь — stage_actions: правка тикета только на этапах 3 и 5, плюс гейты этапа 6."
+    - "PulseProxy CHG-052: дубль-чеклист DoD в stdout и в секции Result дал 6 retry и затем blocked. Теперь — запреты выходного слоя (final_forbids)."
+  principle: "Концепция рельс: принцип 1 (граф — единственный источник процедуры), 6 и 9 (отказ инструмента и выходной слой), 10 (потолки циклов), 11 (дата и цена у гарда), 15 (гард доказан тестом, канарейка)."
+  backlog_sources: []
+tags: [rails, anatomy, regression-guard]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    # 1. Ядро — граф с входом, гейтами и терминалом
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "rails: rails\\.yaml"
+      reason: "Frontmatter объявляет конфиг гардов — признак скила на рельсах."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "```mermaid[\\s\\S]*graph TD[\\s\\S]*P0E1\\[\"П0 ВХОД"
+      reason: "Процедура записана mermaid-графом с входным узлом этапа 0."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0S1\\[\"П0 ШАГ: Канарейка живости[^\\n]*echo RAILS_CANARY"
+      reason: "Проверка живости рельс — узел графа (принцип 15)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0Q1 -->\\|\"нет\"\\| P7E1"
+      reason: "Тикет не найден в in-progress/ — ребро графа на вывод blocked, а не проза."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P2G1 -->\\|\"нет\"\\| P7E1"
+      reason: "Permission-гейт контекста — Q-узел с ребром на blocked (инцидент DOCS-18)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P7E1 --> P7R1 --> P7R2 --> P7S1 --> P7S2"
+      reason: "Вывод результата — последний этап графа, терминал P7S2."
+
+    # 2. Фрагмент — выполнение и гейты
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "```mermaid[\\s\\S]*P3E1\\[\"П3 ВХОД[\\s\\S]*P6G1"
+      reason: "Этапы 3 и 6 живут фрагментом графа, подключаемым через fragments в rails.yaml."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "P6G1 -->\\|\"нет\"\\| P3E1"
+      reason: "Непройденный гейт возвращает к выполнению — ребро графа с потолком в rails.yaml."
+
+    # 3. Гарды — только по инцидентам, каждый с ценой
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "write_deny:[\\s\\S]*\\.workflow/tickets/review/\\*\\*"
+      reason: "Тикеты вне in-progress/ закрыты гардом записи (инцидент COACH-SYNTH-1)."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "write_deny:[\\s\\S]*\\.workflow/plans/\\*\\*"
+      reason: "Создание планов исполнителем закрыто гардом записи (инциденты CHG-051, CHG-047)."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "deny_shell:[\\s\\S]*move-ticket"
+      reason: "Перемещение тикета — стадия пайплайна, гард отклоняет вызов скрипта."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "stage_actions:[\\s\\S]*edit_ticket:[\\s\\S]*stages: \\[3, 5\\]"
+      reason: "Правка тикета разрешена только на выполнении и записи результата (наблюдение 2026-04-19)."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "cycles:[\\s\\S]*from: 6, to: 3"
+      reason: "Возврат гейтов к выполнению ограничен потолком (принцип 10)."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "final_requires:[\\s\\S]*---RESULT---[\\s\\S]*status:"
+      reason: "Выходной слой требует блок ---RESULT--- со статусом default или blocked."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "final_forbids:"
+      reason: "Перечисления пунктов DoD и декларации self-check в stdout запрещены выходным слоем (инцидент CHG-052)."
+
+    # 4. Перенос содержимого без потерь
+    - kind: skill_contains
+      file: "rails-migration.yaml"
+      pattern: "baseline:"
+      reason: "Карта переноса фиксирует базовую версию, от которой считается покрытие фраз-инвариантов."
+    - kind: skill_contains
+      file: "rails-migration.yaml"
+      pattern: "entries:[\\s\\S]*target: P0R2"
+      reason: "Служебные заголовки прозы переехали в лейблы узлов, решение по каждой фразе записано в карте."
+
+execution:
+  timeout_s: 60

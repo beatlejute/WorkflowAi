@@ -25,8 +25,8 @@ assertions:
   static:
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "⛔"
-      reason: "Запрет создания тикетов должен быть явно отмечен."
+      pattern: "Запрещено создавать файлы тикетов"
+      reason: "Запрет создания тикетов и планов — узел P0R2 ядра; после перевода на рельсы правило живёт лейблом узла, а не строкой с маркером."
 
   deterministic:
     - kind: output_does_not_contain

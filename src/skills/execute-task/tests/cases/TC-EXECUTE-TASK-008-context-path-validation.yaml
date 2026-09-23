@@ -39,16 +39,16 @@ assertions:
       reason: "SKILL.md должен требовать сверки пути с context.files перед Edit."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: "GATE-1.*Edit-вызовов"
-      reason: "Воркфлоу должен содержать GATE-1 (Edit-проверку)."
+      pattern: "GATE-1, проверка Edit-вызовов"
+      reason: "GATE-1 — узел P6S1 фрагмента."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: "GATE-2.*Механическая.*Read"
-      reason: "Воркфлоу должен содержать GATE-2 (механическую Read-проверку)."
+      pattern: "GATE-2, механическая Read-проверка"
+      reason: "GATE-2 — узел P6S2 фрагмента."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: "GATE-3.*Self-check"
-      reason: "Воркфлоу должен содержать GATE-3 (self-check)."
+      pattern: "GATE-3, self-check"
+      reason: "GATE-3 — узел P6S3 фрагмента."
 
   rubric:
     - kind: llm_judge

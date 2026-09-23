@@ -28,17 +28,17 @@ assertions:
       pattern: "Configured paths и cleanup"
       reason: "Принцип 9 «Configured paths и cleanup» должен быть явно поименован в списке принципов SKILL.md."
     - kind: skill_contains
-      file: "SKILL.md"
-      pattern: "найди в нём поле target-директории"
-      reason: "Инструкция читать конфиг и находить target-директорию должна быть в принципе 9."
+      file: "workflows/execute.md"
+      pattern: "найди поле target-директории"
+      reason: "Configured paths — узел P3R6 фрагмента: перед созданием файла читается конфиг инструмента."
     - kind: skill_contains
-      file: "SKILL.md"
+      file: "workflows/execute.md"
       pattern: "удали пустые родительские директории"
-      reason: "Инструкция удалять пустые родительские директории после rm должна быть в принципе 9."
+      reason: "Cleanup пустых директорий — узел P3R6 фрагмента."
     - kind: skill_contains
-      file: "SKILL.md"
-      pattern: "временные/промежуточные файлы и пустые директории"
-      reason: "Self-check перед RESULT должен включать строку про удаление временных файлов и пустых директорий."
+      file: "workflows/execute.md"
+      pattern: "временные и промежуточные файлы и пустые директории"
+      reason: "Проверка удаления временных файлов — self-check узла P6S3 фрагмента."
 
 execution:
   timeout_s: 60

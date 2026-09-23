@@ -21,7 +21,7 @@ assertions:
     # B-1: единственный вход тикета — in-progress/, без мёртвой ветки review/
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "не найден в `in-progress/`[^\\n]*status: blocked"
+      pattern: "не найден в in-progress/ — выведи status: blocked"
       reason: "Тикет не найден → status: blocked, а не чтение из review/ (execute-task туда никогда не попадает: pipeline.yaml execute-task.goto.default → move-to-review, retry идёт review→ready→in-progress)."
     - kind: skill_contains
       file: "workflows/execute.md"
@@ -31,23 +31,23 @@ assertions:
     # B-2: секция «Формат вывода» не противоречит строгому stdout-формату шага 8
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "^(?![\\s\\S]*Структурированный результат с секциями)[\\s\\S]*шагу 8"
+      pattern: "^(?![\\s\\S]*Структурированный результат с секциями)[\\s\\S]*Формат stdout строго"
       reason: "«Формат вывода» ссылается на строгий формат шага 8 (одна строка + RESULT), а не требует отдельного «структурированного результата с секциями» в stdout."
 
     # B-10: GATE-1 — инвариант состояния файла, а не счётчик вызовов Edit
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "^(?![\\s\\S]*как минимум дважды)[\\s\\S]*должны быть зафиксированы: изменённые DoD-чекбоксы"
-      reason: "GATE-1 в SKILL.md требует инвариант (чекбоксы + непустой Result через Edit), а не фиксированное число вызовов Edit — выполнимо и при continuation, где чекбоксы уже все [x]."
+      pattern: "^(?![\\s\\S]*как минимум дважды)(?![\\s\\S]*минимум дважды)"
+      reason: "Ядро не задаёт число вызовов Edit: инвариант GATE-1 (изменённые чекбоксы плюс непустой Result через Edit) живёт узлом P6S1 фрагмента, и модель «минимум дважды» не возвращается ни в ядро, ни во фрагмент — иначе continuation, где чекбоксы уже отмечены, становится невыполнимым."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: "^(?![\\s\\S]*минимум дважды)[\\s\\S]*должны быть зафиксированы: изменённые чекбоксы DoD"
+      pattern: "^(?![\\s\\S]*минимум дважды)[\\s\\S]*должны быть зафиксированы изменённые чекбоксы DoD"
       reason: "GATE-1 в workflows/execute.md использует тот же инвариант, что и SKILL.md, без счётчика «минимум дважды»."
 
     # B-3: единая модель невыполнимого пункта DoD — [x] с причиной в строке
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: "^(?![\\s\\S]*Все — `\\[x\\]` или с пометкой причины невыполнения\\.)[\\s\\S]*Все переведены в `\\[x\\]` или помечены причиной невыполнения"
+      pattern: "^(?![\\s\\S]*Все — `\\[x\\]` или с пометкой причины невыполнения\\.)[\\s\\S]*все переведены в отмеченные или помечены причиной невыполнения"
       reason: "GATE-2 в execute.md больше не допускает оставить `[ ]` «с пометкой» при одновременном запрете любого `[ ]` — модель невыполнимого пункта единая: `[x] Пункт — не применимо: <причина>`."
     - kind: skill_contains
       file: "SKILL.md"
@@ -73,11 +73,11 @@ assertions:
     # A-9: канон секции Result/DoD — из templates/ticket-template.md, tickets.mjs, verify-artifacts.js
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "^(?![\\s\\S]*`## Result`)[\\s\\S]*## Результат выполнения"
+      pattern: "^(?![\\s\\S]*`## Result`)[\\s\\S]*Результат выполнения"
       reason: "SKILL.md использует единственный канон `## Результат выполнения` (templates/ticket-template.md:75, tickets.mjs, verify-artifacts.js), без альтернативы `## Result`."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: "^(?![\\s\\S]*`## Result`)[\\s\\S]*## Результат выполнения"
+      pattern: "^(?![\\s\\S]*`## Result`)[\\s\\S]*Результат выполнения"
       reason: "workflows/execute.md использует тот же канон `## Результат выполнения`, без `## Result`."
     - kind: skill_contains
       file: "knowledge/ticket-structure.md"
@@ -106,9 +106,9 @@ assertions:
       pattern: "Таксономия свойств, которые может описывать критерий"
       reason: "algorithms/execution-strategy.md (загружается ВСЕГДА) — единственный источник таксономии и таблицы соразмерности проверки критерию."
     - kind: skill_contains
-      file: "workflows/execute.md"
+      file: "SKILL.md"
       pattern: "^(?![\\s\\S]*#### ⛔ Соразмерность проверки критерию)[\\s\\S]*Соразмерность проверки критерию"
-      reason: "workflows/execute.md больше не дублирует полный блок «Соразмерность проверки критерию» — только ссылка на algorithms/execution-strategy.md."
+      reason: "Ядро ссылается на algorithms/execution-strategy.md как единственный источник таксономии соразмерности (узел P4R1), полного блока правила у себя не держит."
     - kind: skill_contains
       file: "SKILL.md"
       pattern: "^(?![\\s\\S]*Быстрые соответствия)"

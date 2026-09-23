@@ -1,0 +1,75 @@
+# Рельсы скила execute-task (CONVERT 2026-09-23).
+# Схема — .workflow/src/rails/README.md §4. Гард добавляется только по инциденту с датой и
+# ценой — источники в tests/cases/*.origin.incidents. Правки этого файла делает человек.
+version: 1
+skill: execute-task
+entry: P0E1
+terminal: [P7S2]
+pause_nodes: []
+fragments: ["workflows/*.md"]
+quote_min: 25
+canary: "echo RAILS_CANARY"
+
+# H1 — область записи. Исполнитель меняет файлы проекта по DoD, но внутри .workflow/ ему
+# принадлежит только собственный тикет в in-progress/.
+write_scope:
+  - "**"
+allow_temp: true
+
+# H2 — запреты записи.
+# Инциденты PulseProxy CHG-051 (агент создал BUG-049-001 вместо фиксации дефекта в QA-тикете)
+# и CHG-047 (дефекты фиксируются в QA-тикете, не в отдельных сущностях): без запрета возникает
+# каскад «выполнение создаёт план → декомпозиция создаёт тикеты → backlog без контроля».
+# Инцидент COACH-SYNTH-1: правка тикета вне in-progress/ (e2e-проверка coach-preview).
+write_deny:
+  - ".workflow/tickets/backlog/**"
+  - ".workflow/tickets/ready/**"
+  - ".workflow/tickets/review/**"
+  - ".workflow/tickets/done/**"
+  - ".workflow/plans/**"
+  - ".workflow/src/skills/execute-task/rails.yaml"
+  - ".workflow/src/skills/execute-task/tests/rails/**"
+  - ".workflow/src/rails/**"
+
+# H3 — перемещение тикета и смена статуса: это работа пайплайна, не исполнителя.
+deny_shell:
+  - pattern: "\\bmove-ticket(\\.js)?\\b"
+    reason: "Перемещение тикета — отдельная стадия пайплайна, исполнитель тикет не двигает"
+    incident: "SKILL.md P0R4: поля status и completed_at управляются скриптами пайплайна"
+  - pattern: "\\b(mv|rename|Move-Item)\\b[^\\n]*\\.workflow[\\\\/]tickets"
+    reason: "Перемещение файла тикета запрещено"
+    incident: "SKILL.md P0R4: тикет застревает в директории при дубле ключа frontmatter"
+
+deny_mcp:
+  - move_ticket
+
+# H4 — действия по этапам. Правка тикета допустима там, где она предусмотрена процедурой:
+# этап 3 (инкрементальная запись по ходу выполнения) и этап 5 (итоговый Result). Наблюдение
+# 2026-04-19: модели выдавали блок RESULT со status default без единого Edit файла тикета
+# (призрачное выполнение, кейс TC-EXECUTE-TASK-005).
+stage_actions:
+  edit_ticket:
+    kind: [edit, write]
+    match: ".workflow/tickets/in-progress/**"
+    stages: [3, 5]
+
+# H5 — потолки. from == to — возврат из гейта к шагу своего этапа; 6 → 3 — возврат гейтов
+# к выполнению. Порог «после 3 попыток подход не даёт прогресса — status: blocked» —
+# algorithms/execution-strategy.md, раздел «Выбор подхода».
+cycles:
+  - { from: 3, to: 3, max: 3, reason: "Три круга «записать пункт в тикет» не сошлись — заверши со status blocked и укажи, что именно не записывается" }
+  - { from: 6, to: 3, max: 3, reason: "Три круга «гейт не прошёл → доделать» не сошлись — заверши со status blocked с причиной" }
+  - { from: 4, to: 3, max: 3, reason: "Три круга «критерий не закрыт → доделать» не сошлись — заверши со status blocked и перечисли незакрытые критерии" }
+
+# H6 — выходной слой. Финальный ответ кончается блоком ---RESULT--- со статусом default или
+# blocked, а перечисления пунктов DoD в stdout запрещены: пайплайн считает чекбоксы только в
+# оригинальных секциях файла тикета. Инцидент PulseProxy CHG-052: дубль-чеклист DoD дал
+# 6 retry и затем blocked (кейс TC-EXECUTE-TASK-002).
+output:
+  final_requires:
+    - "---RESULT---"
+    - "status:\\s*(default|blocked)"
+  final_forbids:
+    - "(?:^|\\n)[ \\t>*-]*(?:\\[x\\]|✅|✓)"
+    - "(?:^|\\n)[ \\t]*(?:[-*]|\\d+\\.)\\s+.+(?:\\n[ \\t]*(?:[-*]|\\d+\\.)\\s+.+)+"
+  max_stop_blocks: 2

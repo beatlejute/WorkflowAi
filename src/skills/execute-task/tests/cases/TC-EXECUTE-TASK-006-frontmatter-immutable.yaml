@@ -31,8 +31,8 @@ assertions:
   static:
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "Frontmatter не модифицирован"
-      reason: "SKILL.md шаг 8 должен явно требовать неизменность frontmatter."
+      pattern: "Frontmatter не модифицируется вообще"
+      reason: "Запрет любых правок frontmatter — узел P0R5 ядра."
 
   rubric:
     - kind: llm_judge

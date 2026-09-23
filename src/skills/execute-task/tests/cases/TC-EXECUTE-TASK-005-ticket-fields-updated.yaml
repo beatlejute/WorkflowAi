@@ -23,9 +23,9 @@ scenario:
 assertions:
   static:
     - kind: skill_contains
-      file: "SKILL.md"
-      pattern: "перечита.+файл тикета"
-      reason: "SKILL.md должен требовать физической перечитки файла перед RESULT."
+      file: "workflows/execute.md"
+      pattern: "Выполни Read файла тикета"
+      reason: "Механическая Read-проверка файла тикета перед выводом — узел P6S2 фрагмента (этап гейтов)."
 
   rubric:
     - kind: llm_judge

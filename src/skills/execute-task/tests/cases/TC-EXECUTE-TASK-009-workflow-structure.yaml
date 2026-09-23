@@ -16,7 +16,10 @@ severity: high
 scenario:
   system_prompt_file: "../../SKILL.md"
   description: |
-    L0 static-кейс: проверка структурных инвариантов в workflows/execute.md и SKILL.md.
+    L0 static-кейс: проверка структурных инвариантов графа скила. Перепривязан 2026-09-23
+    при переводе скила на рельсы: ядро (этапы 0-2, 4, 5, 7) живёт в SKILL.md, этапы 3
+    (выполнение) и 6 (гейты) — во фрагменте workflows/execute.md, поэтому часть проверок
+    переехала из фрагмента в ядро.
     После улучшений COACH-035 воркфлоу должен содержать:
     - шаг «Проверить существующий прогресс»
     - секцию «Инкрементальная запись» с инструкцией записывать после каждого пункта DoD
@@ -29,25 +32,25 @@ scenario:
 assertions:
   static:
     - kind: skill_contains
-      file: "workflows/execute.md"
+      file: "SKILL.md"
       pattern: "Проверить существующий прогресс"
-      reason: "Workflow должен содержать шаг 1 проверки существующего прогресса (Result/Ревью/DoD из предыдущих попыток)."
+      reason: "Этап 1 графа — проверка существующего прогресса (Result, Ревью, DoD из предыдущих попыток), узел P1E1 в ядре."
     - kind: skill_contains
       file: "workflows/execute.md"
       pattern: "Инкрементальная запись"
       reason: "Workflow должен содержать секцию инкрементальной записи с требованием записывать результат после каждого пункта DoD."
     - kind: skill_contains
-      file: "workflows/execute.md"
+      file: "SKILL.md"
       pattern: "knowledge/ticket-structure.md"
-      reason: "Workflow должен ссылаться на knowledge/ticket-structure.md в шаге проверки прогресса."
+      reason: "Ленивая загрузка справочника семантики полей тикета — узел P2S2 и таблица «Справочники» в ядре."
     - kind: skill_contains
       file: "workflows/execute.md"
       pattern: "algorithms/execution-strategy.md"
       reason: "Workflow должен ссылаться на algorithms/execution-strategy.md для стратегии выполнения."
     - kind: skill_contains
-      file: "workflows/execute.md"
+      file: "SKILL.md"
       pattern: "templates/result-template.md"
-      reason: "Workflow должен ссылаться на templates/result-template.md в шаге записи результата."
+      reason: "Шаблон секции результата подключается на этапе 5 — узел P5S1 и таблица «Справочники» в ядре."
     - kind: skill_contains
       file: "workflows/execute.md"
       pattern: "Пропуск проверки существующего прогресса"
@@ -58,8 +61,8 @@ assertions:
       reason: "Список антипаттернов должен включать отложенную запись результата (вместо инкрементальной)."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "Загрузка шаблонов"
-      reason: "SKILL.md должен содержать секцию «Загрузка шаблонов» с ссылкой на templates/result-template.md."
+      pattern: "Справочники"
+      reason: "Ядро содержит таблицу «Справочники» — что и на каком узле загружать (knowledge, algorithms, templates, shared)."
 
 execution:
   timeout_s: 60
