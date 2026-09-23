@@ -1,4 +1,5 @@
 {
+  "_comment_exclude": "Из отчёта исключены каталоги развёртывания, а не логика. `.kilo/` — вывод `src/scripts/register-rails.js` на конкретной машине: он в .gitignore, на CI его нет вовсе, и единственный файл в нём — `.kilo/plugin/workflow-rails.js` — это одна строка реэкспорта `WorkflowRails` из `src/rails/kilo-plugin.mjs`. Своей логики у строки нет: её порождение и содержимое проверяет src/tests/rails-integration.test.mjs (writeKiloPluginLoader), а цель реэкспорта — src/rails/kilo-plugin.mjs — измеряется отдельной строкой отчёта. Пока каталог считался продуктом, локальный замер показывал 0% там, где на CI файла нет вообще: гейт краснел от того, что разработчик зарегистрировал рельсы у себя. Та же причина, что у `.stryker-tmp/**` и `test_snippet.mjs` ниже.",
   "all": true,
   "provider": "v8",
   "reporter": [
@@ -18,6 +19,7 @@
     "src/tests/**",
     "**/*.test.mjs",
     ".workflow/**",
+    ".kilo/**",
     "src/skills/**",
     "src/cli.mjs",
     "src/init.mjs",
