@@ -64,3 +64,6 @@ CLAUDE.md
 .stryker-tmp/
 test_snippet.mjs
 .workflow/state/
+
+# Регистрация хуков рельсов (генерирует src/scripts/register-rails.js), локальная
+.kilo/
