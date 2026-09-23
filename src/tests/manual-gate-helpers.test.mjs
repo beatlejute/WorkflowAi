@@ -29,6 +29,46 @@ function createMinimalRunner(tmpDir, overrides = {}) {
   return runner;
 }
 
+// Единственный наблюдаемый след polling-цикла manual-gate — чтения
+// approval-файла: круг опроса начинается с одного чтения, а дедлайн цикл
+// проверяет ДО него. Считаем круги и момент их начала, чтобы проверки говорили
+// о поведении, а не о стенных часах: секундомер краснел на исправном коде под
+// нагрузкой, и каждое падение приходилось опознавать глазами как ложное —
+// набор переставал быть сигналом.
+// Обёртки ставятся на экземпляр (он создан через Object.create), прототип
+// PipelineRunner не меняется — параллельные тесты не задеваются.
+function trackApprovalPolls(runner) {
+  const readApprovalFile = PipelineRunner.prototype.readApprovalFile;
+  const writeApprovalPending = PipelineRunner.prototype.writeApprovalPending;
+  // rounds — мс от момента, с которого цикл считает дедлайн, до начала круга.
+  const polls = { rounds: [], reads: 0 };
+  let waitStartedAt = null;
+
+  runner.readApprovalFile = async function (...args) {
+    // Первое чтение — recovery-проверка до цикла, круги идут со второго.
+    const isRound = polls.reads > 0;
+    const calledAt = Date.now();
+    polls.reads += 1;
+    if (isRound) polls.rounds.push(calledAt - waitStartedAt);
+    try {
+      return await readApprovalFile.apply(this, args);
+    } finally {
+      if (!isRound) waitStartedAt = Date.now();
+    }
+  };
+
+  runner.writeApprovalPending = async function (...args) {
+    try {
+      return await writeApprovalPending.apply(this, args);
+    } finally {
+      // Дедлайн цикл отсчитывает от момента после создания pending-файла.
+      waitStartedAt = Date.now();
+    }
+  };
+
+  return polls;
+}
+
 // ============================================================================
 // computeStepId
 // ============================================================================
@@ -276,21 +316,29 @@ describe('executeManualGate — recovery (already approved)', () => {
     };
     fs.writeFileSync(filePath, JSON.stringify(approvedData, null, 2));
 
-    const startTime = Date.now();
+    const pollIntervalMs = 2000;
+    const polls = trackApprovalPolls(runner);
 
     const result = await runner.executeManualGate('manual-approve', {
       type: 'manual-gate',
-      poll_interval_ms: 2000,
+      poll_interval_ms: pollIntervalMs,
       goto: { approved: 'next', rejected: 'rollback' }
     });
-
-    const elapsed = Date.now() - startTime;
 
     assert.strictEqual(result.status, 'approved');
     assert.strictEqual(result.result.step_id, stepId);
     assert.strictEqual(result.result.decided_by, 'admin-user');
     assert.strictEqual(result.result.comment, 'LGTM');
-    assert.ok(elapsed < 100, `should return within 100ms (recovery path), took ${elapsed}ms`);
+    // Смысл проверки — не «быстро», а «не ждал»: решение уже записано, значит
+    // ни одного круга опроса быть не должно. Порог в 100 мс говорил о часах, а
+    // не о поведении, и краснел на исправном коде под нагрузкой.
+    assert.deepStrictEqual(
+      polls.rounds,
+      [],
+      `перезапуск на уже одобренном шаге не должен ждать опроса, иначе каждый ` +
+      `recovery стоит лишние ${pollIntervalMs} мс; круги (мс от старта ожидания): ` +
+      `${polls.rounds.join(', ') || 'ни одного'}`
+    );
   });
 
   it('should return {status: "rejected"} immediately when file is already rejected', async () => {
@@ -479,12 +527,20 @@ describe('executeManualGate — timeout', () => {
     const stepId = 'QA-12_gate_0';
     const filePath = path.join(approvalsDir, `${stepId}.json`);
 
+    const pollIntervalMs = 50;
+    const timeoutSeconds = 0.15;
+    const deadlineMs = timeoutSeconds * 1000;
+    // Перед каждой проверкой цикл ждёт poll_interval_ms, поэтому в дедлайн
+    // укладывается не больше такого числа кругов (под нагрузкой — меньше).
+    const maxRounds = Math.ceil(deadlineMs / pollIntervalMs);
+
+    const polls = trackApprovalPolls(runner);
     const startTime = Date.now();
 
     const result = await runner.executeManualGate('gate', {
       type: 'manual-gate',
-      poll_interval_ms: 50,
-      timeout_seconds: 0.15, // ~150ms to allow 2-3 iterations before timeout
+      poll_interval_ms: pollIntervalMs,
+      timeout_seconds: timeoutSeconds,
       goto: { approved: 'next', rejected: 'rollback' }
     });
 
@@ -492,9 +548,33 @@ describe('executeManualGate — timeout', () => {
 
     assert.strictEqual(result.status, 'timeout');
     assert.strictEqual(result.result.step_id, stepId);
-    // Verify timeout occurred within reasonable bounds (150-400ms)
-    assert.ok(elapsed >= 150, `timeout should take at least 150ms, took ${elapsed}ms`);
-    assert.ok(elapsed < 400, `timeout should complete within 400ms, took ${elapsed}ms`);
+
+    // Нижняя граница честная: от нагрузки часы только отстают. Сработай
+    // таймаут раньше срока — решение, принятое человеком на последних
+    // миллисекундах, ушло бы в мусор вместе с ожиданием.
+    assert.ok(
+      elapsed >= deadlineMs,
+      `таймаут не имеет права срабатывать раньше ${deadlineMs} мс, сработал на ${elapsed} мс`
+    );
+
+    // Верхней границы по секундомеру больше нет: под нагрузкой пробуждение
+    // таймера задерживается, и на исправном коде набор краснел с перелётом
+    // порога. Перелёт ловим наблюдаемым фактом: дедлайн проверяется ДО чтения
+    // файла, поэтому исправный цикл не начинает круг после дедлайна, сколько
+    // бы ни длилось само ожидание. Запас в 1 мс — разница между чтением часов
+    // внутри цикла и нашим замером, а не допуск на нагрузку.
+    const lateRounds = polls.rounds.filter(at => at > deadlineMs + 1);
+    assert.deepStrictEqual(
+      lateRounds,
+      [],
+      `после дедлайна ${deadlineMs} мс цикл опрашивать файл не должен; ` +
+      `круги (мс от старта ожидания): ${polls.rounds.join(', ') || 'ни одного'}`
+    );
+    assert.ok(
+      polls.rounds.length <= maxRounds,
+      `в ${deadlineMs} мс укладывается не больше ${maxRounds} кругов по ${pollIntervalMs} мс, ` +
+      `сделано ${polls.rounds.length} — интервал опроса не соблюдается`
+    );
   });
 
   it('should return {status: "timeout"} with correct step_id in result', async () => {
