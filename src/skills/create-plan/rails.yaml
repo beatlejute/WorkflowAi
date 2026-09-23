@@ -1,0 +1,80 @@
+# Рельсы скила create-plan (CONVERT 2026-09-23).
+# Схема — .workflow/src/rails/README.md §4. Гард добавляется только по инциденту с датой и
+# ценой — источники в tests/cases/*.origin.incidents. Правки этого файла делает человек.
+version: 1
+skill: create-plan
+entry: P0E1
+terminal: [P6S2]
+pause_nodes: []
+fragments: ["workflows/*.md"]
+quote_min: 25
+canary: "echo RAILS_CANARY"
+
+# H1 — область записи. Планировщик пишет ровно один артефакт: файл плана в current/.
+# Декомпозиция на тикеты и выполнение задач — чужая работа (узел P0R1).
+write_scope:
+  - ".workflow/plans/current/**"
+allow_temp: true
+
+# H2 — запреты записи. Тикеты создаёт скил декомпозиции, архив планов ведёт жизненный цикл,
+# код продукта правит исполнитель. Инцидент PulseProxy DEF-016-001 (план PLAN-016, задача 17):
+# планирование предписало конкретное значение вместо критерия приёмки, значение оказалось
+# неверным и нашлось только ручной проверкой — планировщик не проверяет код, значит и не правит его.
+write_deny:
+  - ".workflow/tickets/**"
+  - ".workflow/plans/archive/**"
+  - ".workflow/src/skills/create-plan/rails.yaml"
+  - ".workflow/src/skills/create-plan/tests/rails/**"
+  - ".workflow/src/rails/**"
+
+# H3 — чужие стадии. Перемещение и создание тикетов, запуск пайплайна и git-операции не входят
+# в работу планировщика: план создаётся черновиком, дальше решает стейкхолдер (узел P6R1).
+deny_shell:
+  - pattern: "\\bmove-ticket(\\.js)?\\b"
+    reason: "Перемещение тикетов — стадия пайплайна, планировщик тикетов не касается"
+    incident: "SKILL.md P0R1: декомпозиция на тикеты — скил декомпозиции"
+  - pattern: "\\bgit\\s+(commit|add|push|checkout|switch|restore|reset|rebase|merge|stash)\\b"
+    reason: "Планировщик не делает git-операций — коммит на стороне человека"
+    incident: "SKILL.md P0R1: границы компетенции"
+
+deny_mcp:
+  - create_ticket
+  - move_ticket
+  - start_pipeline
+
+# H4 — действия по этапам. Оба скрипта относятся к сохранению плана и допустимы только на
+# этапе 5, после того как чеклисты пройдены: ID берётся один раз перед записью черновика,
+# валидация идёт перед сохранением результата, а не после отчёта стейкхолдеру
+# (инциденты workflowAi CHG-023 «добавлен шаг автоматической валидации» и CHG-024
+# «валидация перед сохранением, не после»).
+stage_actions:
+  next_plan_id:
+    kind: [shell]
+    match: "(^|[;&|(]\\s*)node(\\.exe)?\\s+\\S*get-next-id\\.js"
+    stages: [5]
+  validate_completeness:
+    kind: [shell]
+    match: "(^|[;&|(]\\s*)node(\\.exe)?\\s+\\S*validate-completeness\\.js"
+    stages: [5]
+  write_plan:
+    kind: [edit, write]
+    match: ".workflow/plans/current/**"
+    stages: [5]
+
+# H5 — потолки циклов. from == to — возврат внутри этапа.
+cycles:
+  - { from: 10, to: 10, max: 3, reason: "Три круга дробления задач не сошлись — оставь задачу одним действием и вынеси остальное отдельными задачами плана" }
+  - { from: 5, to: 10, max: 3, reason: "Три возврата от самопроверки к извлечению данных не сошлись — зафиксируй в плане, каких данных нет во входном документе, и спроси стейкхолдера" }
+  - { from: 5, to: 5, max: 3, reason: "Три прогона валидации подряд не дали valid: true — сообщи стейкхолдеру список ошибок валидатора, не переписывай план вслепую" }
+
+# H6 — выходной слой. Финальный ответ — только в терминале. Статус плана в ответе — draft:
+# утверждение делает стейкхолдер (узел P6R1, knowledge/plan-lifecycle.md).
+output:
+  final_requires:
+    - "RAILS:\\s*P6S2"
+    - "verdict\\s*="
+    - "Файлы:"
+  final_forbids:
+    - "статус[^\\n]{0,20}(approved|утверждён|утвержден)"
+    - "status:\\s*approved"
+  max_stop_blocks: 2

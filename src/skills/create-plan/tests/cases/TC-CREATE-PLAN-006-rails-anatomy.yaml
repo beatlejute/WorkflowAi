@@ -1,0 +1,115 @@
+id: TC-CREATE-PLAN-006
+title: "create-plan на рельсах: граф ядра и фрагмента, правило доказательности, гарды записи и выходной слой"
+origin:
+  chg: ["convert-2026-09-23"]
+  incidents:
+    - "Решение стейкхолдера 2026-09-21: единый подход «Рельсы для агента» — все скилы переводятся на граф плюс хуки-отказы через коуча (CONVERT). create-plan — пятый скил после коуча, analyze-report, execute-task и review-result."
+    - "Требование стейкхолдера 2026-09-23: каждое утверждение плана подтверждено конкретным источником — цитатой входного документа, file:line кода или выводом команды. План не строится на догадках: непроверенное утверждение помечается предположением и получает задачу проверки."
+    - "Инцидент PulseProxy DEF-016-001: PLAN-016 задача 17 предписала конкретное значение без критерия приёмки и без источника; значение оказалось неверным, дефект нашёлся только ручной проверкой (кейс TC-CREATE-PLAN-005). Теперь источник у значения — узел графа, а проверка источников — гейт перед сохранением."
+    - "Инциденты workflowAi CHG-023 и CHG-024: автоматическая валидация полноты появилась как шаг и была перенесена на позицию до сохранения. Теперь запуск валидатора и скрипта выдачи ID разрешён только на этапе сохранения — гард stage_actions."
+    - "Инцидент workflowAiVsCode CHG-107: принцип Task Granularity — одно действие на задачу. Теперь это правило ядра и гейт фрагмента с потолком циклов."
+  principle: "Концепция рельс: принцип 1 (граф — единственный источник процедуры), 6 и 9 (отказ инструмента и выходной слой), 10 (потолки циклов), 11 (дата и цена у гарда), 15 (гард доказан тестом, канарейка)."
+  backlog_sources: []
+tags: [rails, anatomy, evidence, regression-guard]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    # 1. Ядро — граф с входом, правилами роли и терминалом
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "rails: rails\\.yaml"
+      reason: "Frontmatter объявляет конфиг гардов — признак скила на рельсах."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "```mermaid[\\s\\S]*graph TD[\\s\\S]*P0E1\\[\"П0 ВХОД: Архитектор планов"
+      reason: "Процедура записана mermaid-графом с входным узлом этапа 0."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0S1\\[\"П0 ШАГ: Канарейка живости[^\\n]*echo RAILS_CANARY"
+      reason: "Проверка живости рельс — узел графа (принцип 15)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P6E1 --> P6R1 --> P6S1 --> P6S2"
+      reason: "Отчёт и остановка — последний этап, терминал P6S2."
+
+    # 2. Правило доказательности — узел ядра и гейт самопроверки
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R4\\[\"П0 ПРАВИЛО: Доказательность — каждое утверждение плана подтверждено конкретным источником"
+      reason: "Требование стейкхолдера живёт узлом графа, а не прозой рядом."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R4[\\s\\S]{0,900}(цитата|дословная цитата)[\\s\\S]{0,300}file:line"
+      reason: "Источник назван конкретно: цитата документа, file:line кода, вывод команды."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R5\\[\"П0 ПРАВИЛО: Отрицательное утверждение о существовании"
+      reason: "Отрицательное утверждение требует самостоятельной проверки — отдельное правило."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P5S3\\[\"П5 ШАГ: Чеклист доказательности"
+      reason: "Перед сохранением план проходит проверку источников — шаг самопроверки."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P5G1\\{\"П5 ГЕЙТ: Все три чеклиста пройдены — полнота, структура задач, доказательность"
+      reason: "Гейт не пропускает план, у которого утверждения без источников."
+    - kind: skill_contains
+      file: "workflows/create.md"
+      pattern: "P10S3\\[\"П10 ШАГ: К каждому перенесённому значению поставь источник"
+      reason: "Источник ставится в момент переноса значения, а не задним числом."
+
+    # 3. Фрагмент — шаги создания плана
+    - kind: skill_contains
+      file: "workflows/create.md"
+      pattern: "```mermaid[\\s\\S]*P10E1\\[\"П10 ВХОД[\\s\\S]*P10G1"
+      reason: "Этап 10 живёт фрагментом графа, подключаемым через fragments в rails.yaml."
+    - kind: skill_contains
+      file: "workflows/create.md"
+      pattern: "P10S10 --> P5E1"
+      reason: "Выход фрагмента ведёт в самопроверку ядра."
+
+    # 4. Гарды — только по инцидентам, каждый с ценой
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "write_scope:[\\s\\S]*\\.workflow/plans/current/\\*\\*"
+      reason: "Планировщик пишет ровно один артефакт — файл плана в current/."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "write_deny:[\\s\\S]*\\.workflow/tickets/\\*\\*"
+      reason: "Декомпозиция на тикеты — чужая работа, закрыта гардом записи."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "stage_actions:[\\s\\S]*validate_completeness:[\\s\\S]*stages: \\[5\\]"
+      reason: "Валидация идёт перед сохранением, а не после отчёта (CHG-023, CHG-024)."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "stage_actions:[\\s\\S]*next_plan_id:[\\s\\S]*stages: \\[5\\]"
+      reason: "ID плана берётся скриптом на этапе сохранения — ручной алгоритм запрещён."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "cycles:[\\s\\S]*from: 5, to: 10"
+      reason: "Возврат от самопроверки к извлечению данных имеет потолок."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "final_forbids:[\\s\\S]*approved"
+      reason: "Утверждение плана — прерогатива стейкхолдера, выходной слой это держит."
+
+    # 5. Перенос содержимого без потерь
+    - kind: skill_contains
+      file: "rails-migration.yaml"
+      pattern: "baseline:"
+      reason: "Карта переноса фиксирует базовую версию, от которой считается покрытие фраз-инвариантов."
+    - kind: skill_contains
+      file: "rails-migration.yaml"
+      pattern: "entries:[\\s\\S]*target: \"P10S4\""
+      reason: "Служебные заголовки прозы переехали в лейблы узлов, решение по каждой фразе записано в карте."
+
+execution:
+  timeout_s: 60
