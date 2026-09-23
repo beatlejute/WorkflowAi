@@ -22,9 +22,10 @@ function knownAgents() {
 function skillIndexes() {
   const out = [];
   for (const name of readdirSync(SKILLS_DIR)) {
-    // Прогоны раннера создают временные скилы-фикстуры прямо в каноническом src/skills
-    // (имена вида `__test-runner-<метка времени>`). Они живут доли секунды и к реестру
-    // тестов отношения не имеют — пропускаем, иначе тест ловит чужую фикстуру.
+    // Фикстуры раннера (`__test-*`) теперь создаются в каталоге из
+    // WORKFLOW_SKILLS_DIR (os.tmpdir), а не в каноническом src/skills, так что ловить
+    // их на лету, как 2026-09-23, уже нечем. Фильтр остаётся сеткой на случай
+    // протёкшего каталога из старого прогона: реестром тестов он всё равно не является.
     if (name.startsWith('__') || name.startsWith('.')) continue;
     const dir = join(SKILLS_DIR, name);
     if (!statSync(dir).isDirectory()) continue;

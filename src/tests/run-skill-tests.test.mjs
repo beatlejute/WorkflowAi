@@ -14,7 +14,8 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { join, dirname, resolve } from 'node:path';
-import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, rmdirSync, readdirSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, rmdirSync, readdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -22,8 +23,27 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PROJECT_ROOT = resolve(__dirname, '../..');
 const RUNNER_PATH = join(PROJECT_ROOT, 'src', 'scripts', 'run-skill-tests.js');
-const SKILLS_DIR = join(PROJECT_ROOT, 'src', 'skills');
 const TEST_PIPELINE_PATH = join(PROJECT_ROOT, 'src', 'tests', 'fixtures', 'test-pipeline.yaml');
+
+// Канонический каталог скилов: на него junction'ятся все проекты. Этот файл в
+// него не пишет — только читает (baseline живых скилов, проверка на протечку).
+const CANON_SKILLS_DIR = join(PROJECT_ROOT, 'src', 'skills');
+
+// Скилы-фикстуры живут в отдельном временном каталоге, а раннер узнаёт о нём из
+// WORKFLOW_SKILLS_DIR (src/scripts/run-skill-tests.js, findSkillsDir).
+// Прежде фикстуры создавались прямо в каноне и при снятии файла по таймауту там
+// и оставались: так в репозиторий попали __test-runner-1777553217483 и
+// __test-cal-001-1777553217513, а 2026-09-23 skill-test-index-agents.test.mjs
+// поймал живую фикстуру в полном наборе. Каталог в os.tmpdir() не виден ни
+// репозиторию, ни junction'ам проектов, даже если убрать его не успели.
+const SKILLS_DIR = mkdtempSync(join(tmpdir(), 'wf-skills-runner-'));
+process.on('exit', () => {
+  try {
+    rmSync(SKILLS_DIR, { recursive: true, force: true });
+  } catch {
+    // Каталог занят или уже снят — в репозитории его всё равно нет.
+  }
+});
 
 // Раннер — инструмент разработки этого репозитория: скилы берёт из
 // `<корень>/src/skills`, а корень находит при импорте по каталогу `.workflow/`.
@@ -62,7 +82,9 @@ function runRunner(args, env = {}) {
     const proc = spawn(process.execPath, [RUNNER_PATH, ...args], {
       cwd: PROJECT_ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ...env }
+      // cwd — корень репозитория: оттуда раннер берёт .workflow/, мок-агентов и
+      // configs/. Скилы он берёт из каталога фикстур, а не из канона.
+      env: { ...process.env, WORKFLOW_SKILLS_DIR: SKILLS_DIR, ...env }
     });
 
     let stdout = '';
@@ -116,38 +138,7 @@ function buildCaseYaml(staticAssertions = [], deterministicAssertions = []) {
 // ============================================================================
 
 /**
- * Подметает временные скилы от прогонов, не доживших до after().
- *
- * after() — обычный хук: если node --test снимает файл по таймауту или процесс
- * падает, хук не выполняется, и `__test-*` остаётся в канонном src/skills/ —
- * а на него junction'ятся все проекты. Так в репозиторий уже попали
- * __test-runner-1777553217483 и __test-cal-001-1777553217513.
- *
- * Час запаса — чтобы не снести директорию параллельного прогона.
- */
-function sweepStaleTestSkills() {
-  const STALE_MS = 60 * 60 * 1000;
-  let entries;
-  try {
-    entries = readdirSync(SKILLS_DIR);
-  } catch {
-    return;
-  }
-  for (const name of entries) {
-    if (!name.startsWith('__test-')) continue;
-    const dir = join(SKILLS_DIR, name);
-    try {
-      if (Date.now() - statSync(dir).mtimeMs < STALE_MS) continue;
-      rmSync(dir, { recursive: true, force: true });
-      console.warn(`[run-skill-tests.test] удалён протухший временный скил: ${name}`);
-    } catch {
-      // параллельный прогон мог удалить раньше — не наша забота
-    }
-  }
-}
-
-/**
- * Слепок current/meta.json всех НЕтестовых скилов.
+ * Слепок current/meta.json живых скилов канона.
  *
  * meta.json — baseline, а не вывод прогона: loadBaselineMeta() читает его через
  * `git show origin/main:...`, чтобы отличить previously_green от now_red.
@@ -157,13 +148,12 @@ function snapshotRealSkillMetas() {
   const snapshot = {};
   let skills;
   try {
-    skills = readdirSync(SKILLS_DIR);
+    skills = readdirSync(CANON_SKILLS_DIR);
   } catch {
     return snapshot;
   }
   for (const skill of skills) {
-    if (skill.startsWith('__test-')) continue;
-    const casesDir = join(SKILLS_DIR, skill, 'tests', 'cases');
+    const casesDir = join(CANON_SKILLS_DIR, skill, 'tests', 'cases');
     let cases;
     try {
       cases = readdirSync(casesDir);
@@ -182,7 +172,6 @@ function snapshotRealSkillMetas() {
 }
 
 before(() => {
-  sweepStaleTestSkills();
   mkdirSync(TESTS_DIR, { recursive: true });
 
   // SKILL.md содержит "SIGNATURE_PRESENT" для L0 pass-тестов
@@ -1096,7 +1085,7 @@ describe('Verdict Logic — git HEAD comparison', () => {
 
   function runVerdict(args, gitMock) {
     return new Promise((resolve) => {
-      const env = { ...process.env };
+      const env = { ...process.env, WORKFLOW_SKILLS_DIR: SKILLS_DIR };
       if (gitMock) {
         env.TEST_GIT_MOCK = gitMock;
       }
@@ -1376,49 +1365,105 @@ describe('Severity filtering', () => {
 // ============================================================================
 
 describe('All skills aggregation', () => {
+  // Свой каталог скилов: `--all` обходит КАЖДЫЙ скил каталога, а фикстуры
+  // остальных блоков объявляют мок-агентов (agent-a, mock-judge), которых нет в
+  // боевом configs/pipeline.yaml — validateAgents уронил бы агрегат в error.
+  const AGG_SKILLS_DIR = mkdtempSync(join(tmpdir(), 'wf-skills-all-'));
   const SKILL_A = `__test-all-a-${Date.now()}`;
   const SKILL_B = `__test-all-b-${Date.now()}`;
-  const DIR_A = join(SKILLS_DIR, SKILL_A);
-  const DIR_B = join(SKILLS_DIR, SKILL_B);
+  const DIR_A = join(AGG_SKILLS_DIR, SKILL_A);
+  const DIR_B = join(AGG_SKILLS_DIR, SKILL_B);
   const TESTS_A = join(DIR_A, 'tests');
   const TESTS_B = join(DIR_B, 'tests');
 
+  // В каталоге 4 кейса, тег aggregate-test — у двух. Кейсы без этого тега
+  // обязательны: пока у каждого скила был единственный кейс и он же с тегом,
+  // фильтру нечего было отбрасывать, и все ассершены теста «tag-filtered»
+  // проходили при полностью убранном --tag (проверено запуском: вывод с --tag
+  // и без него совпадал побайтово). Прежде тест шёл по канону, где 71 кейс и
+  // ни одного с этим тегом, — оттуда и брал нагрузку на фильтр.
+  const TAGGED_TOTAL = 2;     // TC-A + TC-B
+  const UNFILTERED_TOTAL = 4; // + TC-A-OTHER (другой тег) + TC-B-OTHER (без тегов)
+
   before(() => {
-    // Skill A
+    // Skill A: кейс с нужным тегом + кейс с ДРУГИМ тегом.
     mkdirSync(TESTS_A, { recursive: true });
     writeFileSync(join(DIR_A, 'SKILL.md'), '# Skill A\nSIGNATURE_A\n');
     writeFileSync(join(TESTS_A, 'tc-a.yaml'),
       buildCaseYaml([{ kind: 'skill_contains', pattern: 'SIGNATURE_A', reason: 'A case' }])
     );
-    writeFileSync(join(TESTS_A, 'index.yaml'),
-      `cases:\n  - id: TC-A\n    file: tc-a.yaml\n    tags: [aggregate-test]\n`
+    writeFileSync(join(TESTS_A, 'tc-a-other.yaml'),
+      buildCaseYaml([{ kind: 'skill_contains', pattern: 'SIGNATURE_A', reason: 'A case, other tag' }])
     );
+    writeFileSync(join(TESTS_A, 'index.yaml'), [
+      'cases:',
+      '  - id: TC-A',
+      '    file: tc-a.yaml',
+      '    tags: [aggregate-test]',
+      '  - id: TC-A-OTHER',
+      '    file: tc-a-other.yaml',
+      '    tags: [other-tag]',
+      ''
+    ].join('\n'));
 
-    // Skill B
+    // Skill B: кейс с нужным тегом + кейс вообще без поля tags.
     mkdirSync(TESTS_B, { recursive: true });
     writeFileSync(join(DIR_B, 'SKILL.md'), '# Skill B\nSIGNATURE_B\n');
     writeFileSync(join(TESTS_B, 'tc-b.yaml'),
       buildCaseYaml([{ kind: 'skill_contains', pattern: 'SIGNATURE_B', reason: 'B case' }])
     );
-    writeFileSync(join(TESTS_B, 'index.yaml'),
-      `cases:\n  - id: TC-B\n    file: tc-b.yaml\n    tags: [aggregate-test]\n`
+    writeFileSync(join(TESTS_B, 'tc-b-other.yaml'),
+      buildCaseYaml([{ kind: 'skill_contains', pattern: 'SIGNATURE_B', reason: 'B case, no tags' }])
     );
+    writeFileSync(join(TESTS_B, 'index.yaml'), [
+      'cases:',
+      '  - id: TC-B',
+      '    file: tc-b.yaml',
+      '    tags: [aggregate-test]',
+      '  - id: TC-B-OTHER',
+      '    file: tc-b-other.yaml',
+      ''
+    ].join('\n'));
   });
 
   after(() => {
-    if (existsSync(DIR_A)) rmSync(DIR_A, { recursive: true, force: true });
-    if (existsSync(DIR_B)) rmSync(DIR_B, { recursive: true, force: true });
+    rmSync(AGG_SKILLS_DIR, { recursive: true, force: true });
   });
 
   it('--all aggregates totals across skills (tag-filtered)', async () => {
-    const { stdout } = await runRunner(['--all', '--tag', 'aggregate-test', '--layer', 'static']);
-    assert.match(stdout, /total: 2/, 'total should be 2');
-    assert.match(stdout, /current_run\.passed: 2/);
+    const { stdout } = await runRunner(
+      ['--all', '--tag', 'aggregate-test', '--layer', 'static'],
+      { WORKFLOW_SKILLS_DIR: AGG_SKILLS_DIR }
+    );
+    assert.match(stdout, new RegExp(`total: ${TAGGED_TOTAL}\\b`), 'total should be 2');
+    assert.match(stdout, new RegExp(`current_run\\.passed: ${TAGGED_TOTAL}\\b`));
     assert.match(stdout, /current_run\.failed: 0/);
+    assert.doesNotMatch(
+      stdout,
+      new RegExp(`total: ${UNFILTERED_TOTAL}\\b`),
+      `--tag обязан отбросить кейсы без этого тега: их в каталоге ${UNFILTERED_TOTAL - TAGGED_TOTAL}`
+    );
     assert.match(stdout, /skill: all/);
     assert.match(stdout, /mode: aggregated/);
     assert.match(stdout, /verdict: all_passed/);
     assert.match(stdout, /outcome_message: All skills passed/);
+  });
+
+  it('--all без --tag берёт все кейсы каталога — значит фильтр выше отбрасывает, а не совпадает', async () => {
+    // Пара к предыдущему тесту: фиксирует, что отбрасывать реально было что.
+    // Если этот тест увидит 2, значит фикстуры снова оставили только кейсы с
+    // тегом и тест «tag-filtered» опять ничего не проверяет.
+    const { stdout } = await runRunner(
+      ['--all', '--layer', 'static'],
+      { WORKFLOW_SKILLS_DIR: AGG_SKILLS_DIR }
+    );
+    assert.match(
+      stdout,
+      new RegExp(`total: ${UNFILTERED_TOTAL}\\b`),
+      `без --tag должны считаться все ${UNFILTERED_TOTAL} кейса каталога`
+    );
+    assert.match(stdout, new RegExp(`current_run\\.passed: ${UNFILTERED_TOTAL}\\b`));
+    assert.match(stdout, /current_run\.failed: 0/);
   });
 });
 
@@ -1427,14 +1472,18 @@ describe('All skills aggregation', () => {
 // ============================================================================
 
 describe('Combined flags --all --severity', () => {
-  // --all идёт по канону src/skills/, включая живые скилы: coach,
-  // decompose-plan, execute-task — единственные с severity: critical. Без
+  // Единственная проверка файла, которой нужен именно канон: severity: critical
+  // объявляют живые скилы (coach, decompose-plan, execute-task), поэтому здесь
+  // WORKFLOW_SKILLS_DIR указывает на src/skills, а не на каталог фикстур. Без
   // --skip-meta-write каждый прогон этого теста переписывал им current/meta.json,
   // то есть baseline, с которым сравнивается следующий прогон.
   it('--all --severity critical returns at least 3 tests (current state)', async () => {
     const metasBefore = snapshotRealSkillMetas();
 
-    const { stdout } = await runRunner(['--all', '--severity', 'critical', '--layer', 'static', '--skip-meta-write']);
+    const { stdout } = await runRunner(
+      ['--all', '--severity', 'critical', '--layer', 'static', '--skip-meta-write'],
+      { WORKFLOW_SKILLS_DIR: CANON_SKILLS_DIR }
+    );
     const totalMatch = stdout.match(/total:\s*(\d+)/);
     assert.ok(totalMatch, 'Output should contain total');
     const total = parseInt(totalMatch[1], 10);
@@ -1857,5 +1906,109 @@ describe('L1 по фактическому выводу агента', () => {
     assert.match(stdout, /status: failed/, 'agent-b → MOCK_LOW_SCORE → rubric fail');
     assert.match(stdout, /current_run.failed: 1/);
     assert.doesNotMatch(stdout, /current_run.passed: [1-9]/, 'провал L2 не может быть засчитан как passed');
+  });
+});
+
+// ============================================================================
+// WORKFLOW_SKILLS_DIR — каталог скилов раннера
+//
+// Раннер знал только `findProjectRoot(process.cwd())/src/skills`, поэтому тесты
+// создавали фикстуры прямо в каноне: на него junction'ятся все проекты, а при
+// снятии файла по таймауту каталог `__test-*` там и оставался (так в репозиторий
+// попали __test-runner-1777553217483 и __test-cal-001-1777553217513).
+// Переменная отвязывает каталог скилов от корня проекта: cwd остаётся корнем
+// репозитория (мок-агенты, .workflow/ и configs/ ищутся относительно него), а
+// скилы берутся оттуда, куда указали.
+// ============================================================================
+
+describe('WORKFLOW_SKILLS_DIR — каталог скилов раннера', () => {
+  const ENV_SKILLS_DIR = mkdtempSync(join(tmpdir(), 'wf-skills-env-'));
+  const ENV_SKILL = `__test-env-dir-${Date.now()}`;
+
+  before(() => {
+    const testsDir = join(ENV_SKILLS_DIR, ENV_SKILL, 'tests');
+    mkdirSync(testsDir, { recursive: true });
+    writeFileSync(join(ENV_SKILLS_DIR, ENV_SKILL, 'SKILL.md'), [
+      '# Env Skills Dir',
+      'SIGNATURE_ENV',
+      ''
+    ].join('\n'));
+    writeFileSync(join(testsDir, 'tc-env.yaml'),
+      buildCaseYaml([{ kind: 'skill_contains', pattern: 'SIGNATURE_ENV', reason: 'SKILL.md читается из каталога переменной' }])
+    );
+    writeFileSync(join(testsDir, 'index.yaml'), [
+      'cases:',
+      '  - id: TC-ENV',
+      '    file: tc-env.yaml',
+      ''
+    ].join('\n'));
+  });
+
+  after(() => {
+    rmSync(ENV_SKILLS_DIR, { recursive: true, force: true });
+  });
+
+  it('раннер берёт скилы из каталога переменной и ничего не пишет в канон', async () => {
+    const { stdout, exitCode } = await runRunner(
+      ['--skill', ENV_SKILL, '--layer', 'static'],
+      { WORKFLOW_SKILLS_DIR: ENV_SKILLS_DIR }
+    );
+
+    assert.strictEqual(exitCode, 0, `раннер не должен падать: ${stdout}`);
+    assert.match(stdout, /total: 1/, 'кейс из каталога переменной должен быть найден');
+    assert.match(stdout, /status: passed/, 'L0 по SKILL.md из каталога переменной должен пройти');
+    assert.ok(
+      existsSync(join(ENV_SKILLS_DIR, ENV_SKILL, 'tests', 'cases', 'TC-ENV', 'current', 'meta.json')),
+      'meta.json должен быть записан в каталог переменной'
+    );
+    assert.ok(
+      !existsSync(join(CANON_SKILLS_DIR, ENV_SKILL)),
+      'в каноническом src/skills не должно появиться ничего'
+    );
+  });
+
+  it('скил из канона не находится, когда переменная указывает в другой каталог', async () => {
+    // Различающая проверка: берём ЖИВОЙ скил канона и требуем, чтобы его не
+    // нашли, пока переменная указывает в каталог фикстур. Зеркальная проверка
+    // («фикстуры нет в каноне») была бы зелёной и на раннере без поддержки
+    // переменной: он всегда смотрит в канон, где фикстуры нет ни при каком
+    // раскладе, и одинаково отдаёт `status: error`. Здесь наоборот: раннер без
+    // поддержки переменной найдёт скил в каноне и прогонит его кейсы.
+    const canonSkill = readdirSync(CANON_SKILLS_DIR)
+      .filter(name => !name.startsWith('__') && !name.startsWith('.'))
+      .find(name => existsSync(join(CANON_SKILLS_DIR, name, 'tests', 'index.yaml')));
+
+    assert.ok(canonSkill, 'в каноне должен быть хотя бы один скил с tests/index.yaml');
+
+    const metasBefore = snapshotRealSkillMetas();
+    // --skip-meta-write: раннер БЕЗ поддержки переменной дойдёт до канона и
+    // перезаписал бы baseline живого скила (current/meta.json) на красном прогоне.
+    const { stdout } = await runRunner(
+      ['--skill', canonSkill, '--layer', 'static', '--skip-meta-write'],
+      { WORKFLOW_SKILLS_DIR: ENV_SKILLS_DIR }
+    );
+
+    assert.match(
+      stdout,
+      /status: error/,
+      `скил ${canonSkill} есть в каноне, но не в каталоге переменной — фолбэка на канон быть не должно: ${stdout}`
+    );
+    assert.match(stdout, /total: 0/, `кейсы канона не должны попасть в прогон: ${stdout}`);
+    assert.deepStrictEqual(
+      snapshotRealSkillMetas(),
+      metasBefore,
+      'прогон не должен трогать baseline живых скилов'
+    );
+  });
+
+  it('после прогонов в каноническом src/skills нет каталогов с префиксом __', () => {
+    // Сетка на протечку, а не доказательство переменной: эта проверка зелёная и
+    // на раннере без её поддержки (фикстуры тогда создавались в каноне под
+    // именами __test-*, но убирались в after()). Ловит остаток от прогона,
+    // снятого по таймауту, — именно так __test-runner-1777553217483 и
+    // __test-cal-001-1777553217513 попали в репозиторий.
+    const leaked = readdirSync(CANON_SKILLS_DIR).filter(name => name.startsWith('__'));
+
+    assert.deepStrictEqual(leaked, [], `фикстуры протекли в канон: ${leaked.join(', ')}`);
   });
 });

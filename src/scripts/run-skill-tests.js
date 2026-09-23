@@ -16,6 +16,22 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = findProjectRoot(process.cwd());
 
+// Каталог скилов: по умолчанию `<корень проекта>/src/skills`, но его можно
+// задать переменной WORKFLOW_SKILLS_DIR.
+//
+// Зачем: юнит-тесты раннера (src/tests/run-skill-tests.test.mjs) запускают его
+// подпроцессом с cwd = корень репозитория — только там findProjectRoot находит
+// `.workflow/`, а мок-агенты и configs/ задаются путями от корня. Скилы-фикстуры
+// при этом приходилось создавать прямо в каноническом src/skills, на который
+// junction'ятся все проекты: при снятии файла по таймауту каталог `__test-*`
+// оставался в репозитории (так попали __test-runner-1777553217483 и
+// __test-cal-001-1777553217513), а 2026-09-23 полный набор упал, поймав живую
+// фикстуру в skill-test-index-agents.test.mjs. Переменная разводит две вещи:
+// корень проекта (cwd) и каталог скилов.
+const skillsDirOverride = process.env.WORKFLOW_SKILLS_DIR
+  ? path.resolve(process.env.WORKFLOW_SKILLS_DIR)
+  : null;
+
 // current/meta.json — не временный вывод прогона, а baseline: loadBaselineMeta()
 // читает его через `git show origin/main:...`, чтобы отличить previously_green
 // от now_red. --skip-meta-write позволяет прогнать тесты, не трогая baseline.
@@ -153,7 +169,9 @@ function createTestWorkdir(skillName, suffix = '') {
 
   const srcDir = path.join(workflowDir, 'src');
   fs.mkdirSync(srcDir, { recursive: true });
-  const realSkills = path.join(projectRoot, 'src', 'skills');
+  // Тот же каталог, откуда взят прогоняемый скил (findSkillsDir), иначе агент в
+  // workdir не увидел бы скила из WORKFLOW_SKILLS_DIR.
+  const realSkills = findSkillsDir();
   const realScripts = path.join(projectRoot, 'src', 'scripts');
   const realRails = path.join(projectRoot, 'src', 'rails');
   const linkSkills = path.join(srcDir, 'skills');
@@ -284,7 +302,7 @@ function parseArgs() {
 }
 
 function findSkillsDir() {
-  return path.join(projectRoot, 'src', 'skills');
+  return skillsDirOverride || path.join(projectRoot, 'src', 'skills');
 }
 
 function findSkillTestsDir(skillName) {
@@ -1983,6 +2001,9 @@ function showHelp() {
   console.log('  node run-skill-tests.js --fast            Run with trials=1 for all cases');
   console.log('  node run-skill-tests.js --yes             Skip pre-flight approval gate');
   console.log('  node run-skill-tests.js --calibrate       Run only calibration gate (no full suite)');
+  console.log('');
+  console.log('Environment:');
+  console.log('  WORKFLOW_SKILLS_DIR   Skills directory (default: <project root>/src/skills)');
 }
 
 async function main() {
