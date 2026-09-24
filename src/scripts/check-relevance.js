@@ -15,11 +15,9 @@
 
 import fs from "fs";
 import path from "path";
-import YAML from "workflow-ai/lib/js-yaml.mjs";
 import { findProjectRoot } from "workflow-ai/lib/find-root.mjs";
 import {
   parseFrontmatter,
-  serializeFrontmatter,
   getLastReviewStatus,
   appendReviewEntry,
 } from "workflow-ai/lib/utils.mjs";
@@ -38,7 +36,7 @@ const VALID_STATUSES = [
   "archive",
 ];
 
-function getCurrentStatus(ticketPath) {
+export function getCurrentStatus(ticketPath) {
   const fileName = path.basename(ticketPath);
   for (const status of VALID_STATUSES) {
     const statusDir = path.join(TICKETS_DIR, status);
@@ -50,7 +48,7 @@ function getCurrentStatus(ticketPath) {
   return null;
 }
 
-function extractPlanId(parentPlan) {
+export function extractPlanId(parentPlan) {
   if (!parentPlan) return null;
   const basename = path.basename(parentPlan, ".md");
   const match = basename.match(/^PLAN-(\d+)$/i);
@@ -60,8 +58,16 @@ function extractPlanId(parentPlan) {
   return basename;
 }
 
-function getDodCompletion(content) {
-  const dodSectionMatch = content.match(/## Критерии готовности.*?\n([\s\S]*?)(?=\n## |\n# |\z)/i);
+// Конец секции — следующий заголовок или конец текста. Прежде третьей альтернативой
+// стоял `\z`, но в JS-регэкспах такого якоря нет: без флага u это просто буква «z».
+// Проверено запуском 2026-09-24: секция критериев, стоящая последней, не находилась
+// вовсе (completed: false при всех [x]), а секция с буквой z в тексте обрезалась на
+// ней — «- [x] size ok» превращалось в «- [x] si», и пункты после этого места не
+// считались. Невыполненный пункт после буквы z давал completed: true, и тикет с
+// пройденным ревью уходил в irrelevant/dod_completed, хотя критерий не выполнен.
+// Без флага m `$` — ровно конец текста.
+export function getDodCompletion(content) {
+  const dodSectionMatch = content.match(/## Критерии готовности.*?\n([\s\S]*?)(?=\n## |\n# |$)/i);
   if (!dodSectionMatch) return { completed: false, total: 0, checked: 0 };
 
   const section = dodSectionMatch[1];
@@ -74,7 +80,7 @@ function getDodCompletion(content) {
   return { completed, total, checked: checkedMatches.length };
 }
 
-function hasResultSection(content) {
+export function hasResultSection(content) {
   const resultPatterns = [
     /##\s*Result/gi,
     /##\s*Результат/gi,
@@ -83,12 +89,14 @@ function hasResultSection(content) {
   return resultPatterns.some((pattern) => pattern.test(content));
 }
 
-function getBlockedSection(content) {
-  const blockedMatch = content.match(/##\s*Блокировки\s*\n([\s\S]*?)(?=\n## |\n# |\z)/i);
+// Тот же дефект `\z`, что в getDodCompletion: секция блокировок последней не
+// находилась, а текст обрезался на первой букве z.
+export function getBlockedSection(content) {
+  const blockedMatch = content.match(/##\s*Блокировки\s*\n([\s\S]*?)(?=\n## |\n# |$)/i);
   return blockedMatch ? blockedMatch[1].trim() : "";
 }
 
-function findTicketInColumns(ticketId) {
+export function findTicketInColumns(ticketId) {
   for (const status of VALID_STATUSES) {
     const statusDir = path.join(TICKETS_DIR, status);
     const ticketPath = path.join(statusDir, `${ticketId}.md`);
@@ -99,7 +107,7 @@ function findTicketInColumns(ticketId) {
   return null;
 }
 
-async function checkRelevance(ticketPath) {
+export async function checkRelevance(ticketPath) {
   if (!fs.existsSync(ticketPath)) {
     // file_not_found — это не ошибка скрипта (verdict=relevant — fail-safe).
     // Не выходим с exit=1, чтобы pipeline продолжил выполнение следующего стейджа.
@@ -214,7 +222,7 @@ async function checkRelevance(ticketPath) {
 }
 
 // IMPL-89: Replace manual markdown-write with appendReviewEntry from review-section.mjs.
-function addSkippedReview(ticketPath, reason) {
+export function addSkippedReview(ticketPath, reason) {
   const date = new Date().toISOString().slice(0, 10);
   const r = appendReviewEntry(ticketPath, {
     date,
@@ -227,33 +235,37 @@ function addSkippedReview(ticketPath, reason) {
   }
 }
 
+/**
+ * Путь к тикету из аргумента стадии: пайплайн передаёт контекст строкой
+ * («ticket_id: IMPL-001 …»), человек — ID или путь. ID резолвится в in-progress/:
+ * стадия проверки актуальности стоит перед выполнением.
+ *
+ * Экспортируется для теста (src/tests/check-relevance.test.mjs).
+ */
+export function resolveTicketArg(arg, cwd = process.cwd()) {
+  let ticketPath;
+  const ticketMatch = arg.match(/ticket_id:\s*(\S+)/);
+  if (ticketMatch) {
+    ticketPath = path.join(TICKETS_DIR, "in-progress", `${ticketMatch[1]}.md`);
+  } else if (/^[A-Z]+-\d+$/i.test(arg)) {
+    // Чистый ticket_id (например, IMPL-001) — резолвим в in-progress
+    ticketPath = path.join(TICKETS_DIR, "in-progress", `${arg}.md`);
+  } else {
+    ticketPath = arg;
+  }
+  return path.isAbsolute(ticketPath) ? ticketPath : path.resolve(cwd, ticketPath);
+}
+
 async function main() {
   const args = process.argv.slice(2);
-  let ticketPath;
 
   if (args.length === 0) {
     console.error("Usage: node check-relevance.js <path-to-ticket>");
     console.error("Example: node check-relevance.js .workflow/tickets/in-progress/IMPL-001.md");
     process.exit(1);
-  } else if (args.length === 1) {
-    const arg = args[0];
-    const ticketMatch = arg.match(/ticket_id:\s*(\S+)/);
-    if (ticketMatch) {
-      const ticketId = ticketMatch[1];
-      ticketPath = path.join(TICKETS_DIR, "in-progress", `${ticketId}.md`);
-    } else if (/^[A-Z]+-\d+$/i.test(arg)) {
-      // Чистый ticket_id (например, IMPL-001) — резолвим в in-progress
-      ticketPath = path.join(TICKETS_DIR, "in-progress", `${arg}.md`);
-    } else {
-      ticketPath = arg;
-    }
-  } else {
-    ticketPath = args[0];
   }
 
-  if (!path.isAbsolute(ticketPath)) {
-    ticketPath = path.resolve(process.cwd(), ticketPath);
-  }
+  const ticketPath = resolveTicketArg(args[0]);
 
   const result = await checkRelevance(ticketPath);
 
@@ -283,7 +295,16 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error("[FATAL]", e.message);
-  process.exit(1);
-});
+// Запуск main() только при прямом вызове (не при импорте) — тот же приём, что в
+// check-plan-templates.js, check-conditions.js и move-to-review.js.
+const isDirectRun =
+  process.argv[1] &&
+  (process.argv[1].endsWith("check-relevance.js") ||
+    process.argv[1].endsWith("check-relevance"));
+
+if (isDirectRun) {
+  main().catch((e) => {
+    console.error("[FATAL]", e.message);
+    process.exit(1);
+  });
+}

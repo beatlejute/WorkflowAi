@@ -128,10 +128,10 @@
       "branches": 80.71
     },
     "src/lib/review-section.mjs": {
-      "lines": 61.84,
-      "statements": 61.84,
+      "lines": 97.25,
+      "statements": 97.25,
       "functions": 100,
-      "branches": 59.45
+      "branches": 94.66
     },
     "src/lib/stop-command.mjs": {
       "lines": 63.96,
@@ -236,16 +236,16 @@
       "branches": 63.05
     },
     "src/scripts/archive-plan-tickets.js": {
-      "lines": 0,
-      "statements": 0,
-      "functions": 0,
-      "branches": 0
+      "lines": 84,
+      "statements": 84,
+      "functions": 66.66,
+      "branches": 90
     },
     "src/scripts/check-anomalies.js": {
-      "lines": 0,
-      "statements": 0,
-      "functions": 0,
-      "branches": 0
+      "lines": 80.11,
+      "statements": 80.11,
+      "functions": 100,
+      "branches": 73.91
     },
     "src/scripts/check-conditions.js": {
       "lines": 80.2,
@@ -254,16 +254,16 @@
       "branches": 65.71
     },
     "src/scripts/check-mcp.js": {
-      "lines": 0,
-      "statements": 0,
-      "functions": 0,
-      "branches": 0
+      "lines": 94.27,
+      "statements": 94.27,
+      "functions": 95,
+      "branches": 84.74
     },
     "src/scripts/check-plan-decomposed.js": {
-      "lines": 0,
-      "statements": 0,
-      "functions": 0,
-      "branches": 0
+      "lines": 89.02,
+      "statements": 89.02,
+      "functions": 85.71,
+      "branches": 83.63
     },
     "src/scripts/check-plan-templates.js": {
       "lines": 61.93,
@@ -284,16 +284,16 @@
       "branches": 79.61
     },
     "src/scripts/check-relevance.js": {
-      "lines": 0,
-      "statements": 0,
-      "functions": 0,
-      "branches": 0
+      "lines": 82.25,
+      "statements": 82.25,
+      "functions": 90,
+      "branches": 88.73
     },
     "src/scripts/complete-plan.js": {
-      "lines": 0,
-      "statements": 0,
-      "functions": 0,
-      "branches": 0
+      "lines": 64.28,
+      "statements": 64.28,
+      "functions": 66.66,
+      "branches": 84.61
     },
     "src/scripts/get-next-id.js": {
       "lines": 86.91,
@@ -344,10 +344,10 @@
       "branches": 70.58
     },
     "src/scripts/move-to-review.js": {
-      "lines": 0,
-      "statements": 0,
-      "functions": 0,
-      "branches": 0
+      "lines": 79.76,
+      "statements": 79.76,
+      "functions": 66.66,
+      "branches": 81.25
     },
     "src/scripts/pick-next-task-core.js": {
       "lines": 95.15,
@@ -368,10 +368,10 @@
       "branches": 91.29
     },
     "src/scripts/reset-agent-health.js": {
-      "lines": 0,
-      "statements": 0,
-      "functions": 0,
-      "branches": 0
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 100
     },
     "src/scripts/run-skill-tests.js": {
       "lines": 78.24,
@@ -392,10 +392,10 @@
       "branches": 87.5
     },
     "src/scripts/sync-ticket-status.js": {
-      "lines": 0,
-      "statements": 0,
-      "functions": 0,
-      "branches": 0
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 92.85
     },
     "src/wf-loader.mjs": {
       "lines": 100,

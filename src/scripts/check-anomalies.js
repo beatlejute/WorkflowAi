@@ -20,7 +20,6 @@
 
 import fs from 'fs';
 import path from 'path';
-import YAML from 'workflow-ai/lib/js-yaml.mjs';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { parseFrontmatter, printResult } from 'workflow-ai/lib/utils.mjs';
 
@@ -32,8 +31,10 @@ const IN_PROGRESS_DIR = path.join(TICKETS_DIR, 'in-progress');
 /**
  * Проверяет, заполнен ли раздел результатов
  * Возвращает true, если раздел содержит реальный контент (не только комментарии)
+ *
+ * Экспортируется для теста (src/tests/check-anomalies.test.mjs).
  */
-function hasFilledResult(body) {
+export function hasFilledResult(body) {
   // Ищем раздел "Результат выполнения" или "Result"
   // Используем более гибкий паттерн
   const resultSectionRegex = /^##\s*(Результат выполнения|Result)\s*$/m;
@@ -67,9 +68,18 @@ function hasFilledResult(body) {
 
   const summaryContent = sectionContent.substring(summaryStart, summaryEnd);
 
+  // Строка самого заголовка «### Summary» из проверки исключается. Прежде она в
+  // проверку входила, и после удаления комментариев в остатке всегда оставался
+  // заголовок: непустой остаток означал «раздел заполнен», поэтому аномалией
+  // объявлялся КАЖДЫЙ тикет в in-progress — шаблон тикета
+  // (templates/ticket-template.md:75-81) как раз и состоит из «## Результат
+  // выполнения», «### Summary» и HTML-комментариев. Проверка кричала на всех и
+  // потому не значила ничего; найдено тестом 2026-09-24.
+  const summaryBody = summaryContent.replace(/^###\s*(Summary|Что сделано)\s*$/m, '');
+
   // Проверяем, что контент не пустой и не состоит только из комментариев
   // Удаляем HTML комментарии и проверяем остаток
-  const withoutComments = summaryContent.replace(/<!--[\s\S]*?-->/g, '').trim();
+  const withoutComments = summaryBody.replace(/<!--[\s\S]*?-->/g, '').trim();
 
   // Если после удаления комментариев остался текст — раздел заполнен
   return withoutComments.length > 0;
@@ -77,8 +87,10 @@ function hasFilledResult(body) {
 
 /**
  * Основная функция проверки аномалий
+ *
+ * Экспортируется для теста.
  */
-async function checkAnomalies() {
+export async function checkAnomalies() {
   const anomalies = [];
 
   // Проверяем существование директории in-progress
@@ -142,20 +154,28 @@ async function checkAnomalies() {
   };
 }
 
-// Main entry point
-checkAnomalies().then(result => {
-  printResult(result);
+// Запуск только при прямом вызове (не при импорте) — тот же приём, что в
+// check-plan-templates.js, check-conditions.js и move-to-review.js.
+const isDirectRun = process.argv[1] && (
+  process.argv[1].endsWith('check-anomalies.js') ||
+  process.argv[1].endsWith('check-anomalies')
+);
 
-  // Если найдены аномалии, выводим их в читаемом виде
-  if (result.anomalies && result.anomalies.length > 0) {
-    console.log('\n[ANOMALIES DETECTED]');
-    for (const anomaly of result.anomalies) {
-      console.log(`  - ${anomaly.id}: ${anomaly.title}`);
-      console.log(`    Recommendation: ${anomaly.recommendation}`);
+if (isDirectRun) {
+  checkAnomalies().then(result => {
+    printResult(result);
+
+    // Если найдены аномалии, выводим их в читаемом виде
+    if (result.anomalies && result.anomalies.length > 0) {
+      console.log('\n[ANOMALIES DETECTED]');
+      for (const anomaly of result.anomalies) {
+        console.log(`  - ${anomaly.id}: ${anomaly.title}`);
+        console.log(`    Recommendation: ${anomaly.recommendation}`);
+      }
     }
-  }
 
-  if (result.status === 'error') {
-    process.exit(1);
-  }
-});
+    if (result.status === 'error') {
+      process.exit(1);
+    }
+  });
+}

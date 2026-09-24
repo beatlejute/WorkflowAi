@@ -1,4 +1,7 @@
 import fs from 'node:fs';
+// Цикл utils.mjs ↔ review-section.mjs безопасен: utils только переэкспортирует отсюда,
+// а replaceFileAtomicSync вызывается во время работы, не при загрузке модуля.
+import { replaceFileAtomicSync } from './utils.mjs';
 
 export function getLastReviewStatus(content) {
   if (typeof content !== 'string') {
@@ -160,14 +163,22 @@ export function appendReviewEntry(ticketPath, entry) {
     }
   }
 
-  // Atomic write
-  const tempPath = ticketPath + '.tmp.' + process.pid + '.' + Date.now();
+  // Публикация — общим помощником, а не своим temp + rename. Своя версия на NTFS
+  // падала EPERM, как только тикет держал открытым любой другой читатель (скан доски,
+  // MCP get_ticket): rename поверх открытого файла там запрещён, а повторов не было.
+  // Проверено запуском 2026-09-24: при открытом дескрипторе чтения appendReviewEntry
+  // возвращал WRITE_ERROR, строка ревью терялась. Цена: у check-relevance пропадала
+  // отметка skipped (addSkippedReview бросает, main ловит и только пишет в лог, вердикт
+  // уходит без отметки в тикете), у verify-artifacts — строка вердикта; а тикет без
+  // строки ревью getLastReviewStatus читает как «ревью не было», и move-to-review
+  // возвращает закрытый тикет из done/ в review/. У помощника лестница повторов и
+  // слышимый запасной путь
+  // (src/lib/utils.mjs, replaceFileAtomicSync), а имя временного файла укладывается в
+  // лимит длины компонента пути — своя версия этого бюджета не держала.
   try {
-    fs.writeFileSync(tempPath, newContent, 'utf8');
-    fs.renameSync(tempPath, ticketPath);
+    replaceFileAtomicSync(ticketPath, newContent);
     return { ok: true };
   } catch (err) {
-    try { fs.unlinkSync(tempPath); } catch {}
     return { ok: false, code: 'WRITE_ERROR', error: err.message };
   }
 }

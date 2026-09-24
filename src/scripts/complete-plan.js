@@ -33,8 +33,10 @@ const PLANS_DIR = path.join(WORKFLOW_DIR, 'plans', 'current');
 /**
  * Находит активный план в plans/current/ (status: active).
  * Возвращает planId или null.
+ *
+ * Экспортируется для теста (src/tests/complete-plan.test.mjs).
  */
-function findActivePlan() {
+export function findActivePlan() {
   if (!fs.existsSync(PLANS_DIR)) return null;
 
   const files = fs.readdirSync(PLANS_DIR).filter(f => f.endsWith('.md'));
@@ -56,51 +58,69 @@ function findActivePlan() {
   return null;
 }
 
-// Main entry point
-const rawArgs = process.argv.slice(2);
-let planId = null;
-
-if (rawArgs.length >= 1) {
-  const arg = rawArgs[0];
+/**
+ * Достаёт plan_id из аргумента: пайплайн передаёт весь контекст стадии строкой
+ * («plan_id: PLAN-009 …»), человек — сам ID или его номер.
+ *
+ * Экспортируется для теста.
+ */
+export function parsePlanArg(arg) {
+  if (!arg) return null;
   const planMatch = arg.match(/plan_id:\s*(\S+)/i);
-  planId = planMatch ? normalizePlanId(planMatch[1]) : normalizePlanId(arg);
+  return planMatch ? normalizePlanId(planMatch[1]) : normalizePlanId(arg);
 }
 
-if (!planId) {
-  planId = extractPlanId();
+function main() {
+  const rawArgs = process.argv.slice(2);
+  let planId = rawArgs.length >= 1 ? parsePlanArg(rawArgs[0]) : null;
+
+  if (!planId) {
+    planId = extractPlanId();
+  }
+
+  if (!planId) {
+    console.log('[INFO] No plan_id in context, searching for active plan...');
+    planId = findActivePlan();
+  }
+
+  if (!planId) {
+    console.log('[INFO] No active plan found');
+    printResult({ status: 'no_plan' });
+    process.exit(0);
+  }
+
+  console.log(`[INFO] Completing plan: ${planId}`);
+
+  const result = checkAndClosePlan(WORKFLOW_DIR, planId);
+
+  if (result.closed) {
+    console.log(`[INFO] Plan ${planId} completed: ${result.done}/${result.total} tickets done, ${result.archived?.length || 0} archived`);
+    printResult({
+      status: 'completed',
+      plan_id: planId,
+      total: result.total,
+      done: result.done,
+      archived: result.archived?.length || 0
+    });
+  } else {
+    console.log(`[INFO] Plan ${planId} not closed: ${result.reason}`);
+    printResult({
+      status: 'not_ready',
+      plan_id: planId,
+      reason: result.reason,
+      total: result.total,
+      done: result.done
+    });
+  }
 }
 
-if (!planId) {
-  console.log('[INFO] No plan_id in context, searching for active plan...');
-  planId = findActivePlan();
-}
+// Запуск main() только при прямом вызове (не при импорте) — тот же приём, что в
+// check-plan-templates.js, check-conditions.js и move-to-review.js.
+const isDirectRun = process.argv[1] && (
+  process.argv[1].endsWith('complete-plan.js') ||
+  process.argv[1].endsWith('complete-plan')
+);
 
-if (!planId) {
-  console.log('[INFO] No active plan found');
-  printResult({ status: 'no_plan' });
-  process.exit(0);
-}
-
-console.log(`[INFO] Completing plan: ${planId}`);
-
-const result = checkAndClosePlan(WORKFLOW_DIR, planId);
-
-if (result.closed) {
-  console.log(`[INFO] Plan ${planId} completed: ${result.done}/${result.total} tickets done, ${result.archived?.length || 0} archived`);
-  printResult({
-    status: 'completed',
-    plan_id: planId,
-    total: result.total,
-    done: result.done,
-    archived: result.archived?.length || 0
-  });
-} else {
-  console.log(`[INFO] Plan ${planId} not closed: ${result.reason}`);
-  printResult({
-    status: 'not_ready',
-    plan_id: planId,
-    reason: result.reason,
-    total: result.total,
-    done: result.done
-  });
+if (isDirectRun) {
+  main();
 }

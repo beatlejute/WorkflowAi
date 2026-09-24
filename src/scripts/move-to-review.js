@@ -31,15 +31,18 @@ const ARCHIVE_DIR = path.join(TICKETS_DIR, "archive");
 /**
  * Парсит ticket_id из промпта (контекста pipeline runner)
  */
-function parseTicketId(prompt) {
+export function parseTicketId(prompt) {
   const match = prompt.match(/ticket_id:\s*(\S+)/);
   return match ? match[1].trim() : null;
 }
 
 /**
  * Перемещает тикет из in-progress/ в review/
+ *
+ * Экспортируется для теста (src/tests/move-to-review.test.mjs): у функции пять
+ * исходов, и каждый меняет состояние доски.
  */
-function moveToReview(ticketId) {
+export function moveToReview(ticketId) {
   const sourcePath = path.join(IN_PROGRESS_DIR, `${ticketId}.md`);
   const targetPath = path.join(REVIEW_DIR, `${ticketId}.md`);
 
@@ -148,8 +151,18 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error(`[ERROR] ${e.message}`);
-  printResult({ status: "error", error: e.message });
-  process.exit(1);
-});
+// Запуск main() только при прямом вызове (не при импорте) — тот же приём, что в
+// check-plan-templates.js и check-conditions.js. Пайплайн зовёт скрипт командой
+// `node .workflow/src/scripts/move-to-review.js` (configs/pipeline.yaml).
+const isDirectRun =
+  process.argv[1] &&
+  (process.argv[1].endsWith("move-to-review.js") ||
+    process.argv[1].endsWith("move-to-review"));
+
+if (isDirectRun) {
+  main().catch((e) => {
+    console.error(`[ERROR] ${e.message}`);
+    printResult({ status: "error", error: e.message });
+    process.exit(1);
+  });
+}

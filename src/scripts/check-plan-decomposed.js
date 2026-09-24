@@ -45,7 +45,7 @@ const TICKET_DIRS = ['backlog', 'ready', 'in-progress', 'review', 'done', 'block
  * или null при ошибке. Pipeline различает approved (ожидает декомпозиции или
  * атомарности) и active (прошёл атомарность, в работе).
  */
-function getPlanStatus(planFile) {
+export function getPlanStatus(planFile) {
   const fullPath = path.join(WORKFLOW_DIR, planFile);
   if (!fs.existsSync(fullPath)) return null;
   try {
@@ -61,7 +61,7 @@ function getPlanStatus(planFile) {
 /**
  * Проверяет, есть ли тикеты, привязанные к данному плану
  */
-function hasTicketsForPlan(planId) {
+export function hasTicketsForPlan(planId) {
   for (const dir of TICKET_DIRS) {
     const dirPath = path.join(TICKETS_DIR, dir);
     if (!fs.existsSync(dirPath)) continue;
@@ -87,7 +87,7 @@ function hasTicketsForPlan(planId) {
 /**
  * Находит файл плана в plans/current/
  */
-function findPlanFile(planId) {
+export function findPlanFile(planId) {
   if (!fs.existsSync(PLANS_DIR)) return null;
 
   const expectedName = `${planId}.md`;
@@ -110,7 +110,7 @@ function findPlanFile(planId) {
 /**
  * Возвращает все файлы планов из plans/current/
  */
-function getAllPlanFiles() {
+export function getAllPlanFiles() {
   if (!fs.existsSync(PLANS_DIR)) return [];
 
   return fs.readdirSync(PLANS_DIR)
@@ -122,56 +122,56 @@ function getAllPlanFiles() {
     .filter(p => p.planId !== null);
 }
 
-async function main() {
-  const planId = extractPlanId();
-
-  if (planId) {
-    // Режим A: конкретный план
-    console.log(`[INFO] Checking decomposition for plan: ${planId}`);
-
-    const planFile = findPlanFile(planId);
-    if (!planFile) {
-      console.log(`[INFO] Plan ${planId} not found in plans/current/`);
-      printResult({ status: 'no_plan' });
-      return;
-    }
-
-    console.log(`[INFO] Found plan file: ${planFile}`);
-
-    const planStatus = getPlanStatus(planFile);
-    const hasTickets = hasTicketsForPlan(planId);
-
-    if (hasTickets && planStatus === 'active') {
-      console.log(`[INFO] Plan ${planId} is active and has tickets — decomposed`);
-      printResult({ status: 'decomposed' });
-      return;
-    }
-
-    if (hasTickets && planStatus === 'approved') {
-      console.log(`[INFO] Plan ${planId} is approved and has tickets — awaiting atomicity verification`);
-      printResult({ status: 'awaiting_atomicity', plan_file: planFile });
-      return;
-    }
-
-    if (!hasTickets) {
-      console.log(`[INFO] Plan ${planId} has no tickets — needs decomposition`);
-      printResult({ status: 'needs_decomposition', plan_file: planFile });
-      return;
-    }
-
-    console.log(`[INFO] Plan ${planId} has tickets but status="${planStatus}" — treating as decomposed`);
-    printResult({ status: 'decomposed' });
-    return;
+/**
+ * Решение по одному плану (режим A). Возвращает объект результата стадии, ничего не
+ * печатая в блок результата — так решение можно проверить тестом.
+ *
+ * Исходы: no_plan (файла плана нет), decomposed (план активен и тикеты есть),
+ * awaiting_atomicity (тикеты есть, но план ещё approved — атомарность не подтверждена),
+ * needs_decomposition (тикетов нет).
+ */
+export function decidePlan(planId) {
+  const planFile = findPlanFile(planId);
+  if (!planFile) {
+    console.log(`[INFO] Plan ${planId} not found in plans/current/`);
+    return { status: 'no_plan' };
   }
 
-  // Режим B: сканируем все планы в plans/current/
-  console.log('[INFO] No plan_id specified, scanning all plans in plans/current/');
+  console.log(`[INFO] Found plan file: ${planFile}`);
 
+  const planStatus = getPlanStatus(planFile);
+  const hasTickets = hasTicketsForPlan(planId);
+
+  if (hasTickets && planStatus === 'active') {
+    console.log(`[INFO] Plan ${planId} is active and has tickets — decomposed`);
+    return { status: 'decomposed' };
+  }
+
+  if (hasTickets && planStatus === 'approved') {
+    console.log(`[INFO] Plan ${planId} is approved and has tickets — awaiting atomicity verification`);
+    return { status: 'awaiting_atomicity', plan_file: planFile };
+  }
+
+  if (!hasTickets) {
+    console.log(`[INFO] Plan ${planId} has no tickets — needs decomposition`);
+    return { status: 'needs_decomposition', plan_file: planFile };
+  }
+
+  console.log(`[INFO] Plan ${planId} has tickets but status="${planStatus}" — treating as decomposed`);
+  return { status: 'decomposed' };
+}
+
+/**
+ * Решение по всем планам в plans/current/ (режим B): первый план, которому нужна работа,
+ * и определяет маршрут стадии. План в статусе draft, completed или archived пропускается;
+ * active без тикетов — аномалия, тоже пропуск (иначе стадия зациклилась бы на плане, для
+ * которого декомпозиция уже прошла, а тикеты закрыты и заархивированы).
+ */
+export function decideAllPlans() {
   const allPlans = getAllPlanFiles();
   if (allPlans.length === 0) {
     console.log('[INFO] No plans found in plans/current/');
-    printResult({ status: 'no_plan' });
-    return;
+    return { status: 'no_plan' };
   }
 
   console.log(`[INFO] Found ${allPlans.length} plan(s) in plans/current/`);
@@ -188,14 +188,12 @@ async function main() {
 
     if (planStatus === 'approved' && !hasTickets) {
       console.log(`[INFO] Plan ${pid} is approved with no tickets — needs decomposition`);
-      printResult({ status: 'needs_decomposition', plan_file: planFile });
-      return;
+      return { status: 'needs_decomposition', plan_file: planFile };
     }
 
     if (planStatus === 'approved' && hasTickets) {
       console.log(`[INFO] Plan ${pid} is approved and has tickets — awaiting atomicity verification`);
-      printResult({ status: 'awaiting_atomicity', plan_file: planFile });
-      return;
+      return { status: 'awaiting_atomicity', plan_file: planFile };
     }
 
     if (planStatus === 'active' && !hasTickets) {
@@ -207,11 +205,33 @@ async function main() {
   }
 
   console.log('[INFO] All eligible plans are decomposed');
-  printResult({ status: 'decomposed' });
+  return { status: 'decomposed' };
 }
 
-main().catch(e => {
-  console.error(`[ERROR] ${e.message}`);
-  printResult({ status: 'error', error: e.message });
-  process.exit(1);
-});
+async function main() {
+  const planId = extractPlanId();
+
+  if (planId) {
+    console.log(`[INFO] Checking decomposition for plan: ${planId}`);
+    printResult(decidePlan(planId));
+    return;
+  }
+
+  console.log('[INFO] No plan_id specified, scanning all plans in plans/current/');
+  printResult(decideAllPlans());
+}
+
+// Запуск main() только при прямом вызове (не при импорте) — тот же приём, что в
+// check-plan-templates.js, check-conditions.js и move-to-review.js.
+const isDirectRun = process.argv[1] && (
+  process.argv[1].endsWith('check-plan-decomposed.js') ||
+  process.argv[1].endsWith('check-plan-decomposed')
+);
+
+if (isDirectRun) {
+  main().catch(e => {
+    console.error(`[ERROR] ${e.message}`);
+    printResult({ status: 'error', error: e.message });
+    process.exit(1);
+  });
+}
