@@ -4,6 +4,7 @@ origin:
   chg: []
   incidents:
     - "workflowAi PLAN-006: FIX-5 (unit-тест в feat-тикете), IMPL-25 (commit как DoD), FIX-7 (интеграция другого тикета в DoD) — 7 из 23 multi-iteration tickets плана"
+    - "workflowAi 2026-09-24: после перевода скила на рельсы (b6a8c91, 2026-09-23) вход стадии стал гейтом П0 — план и карта id_ranges. Кейс id_ranges_json не подавал, и агент останавливался на входе. Добавлены id_ranges_json и указание, что задача передана текстом."
   principle: "Executor-атомарность: один тип исполнителя на тикет"
   backlog_sources:
     - ".workflow/coach-backlog.yaml"
@@ -19,6 +20,11 @@ scenario:
     DOCS (обновление документации), ADMIN (инфраструктурные операции).
     Git-операции (commit, merge, push) в этом проекте выполняет стейкхолдер,
     не агент-исполнитель.
+
+    id_ranges_json: {"ARCH":3,"IMPL":41,"FIX":12,"REVIEW":4,"DOCS":9,"ADMIN":5,"QA":18,"COACH":7,"HUMAN":6,"RSH":2}
+
+    Файла плана на диске нет — задача приведена ниже в разделе plan_content
+    целиком, работай по ней.
   inputs:
     - kind: inline
       as: plan_content
@@ -41,16 +47,24 @@ assertions:
       pattern: "executor"
       reason: "Явное упоминание executor-атомарности."
 
+  # L1 проверяет только итоговый ответ стадии: раннер сохраняет его одного. Прогон
+  # 2026-09-24 (судья 4): таблицы проверок с «7. Один исполнитель» в итоговом ответе
+  # нет, а «Коммит feat» нашёлся в объяснении, что этот пункт плана из DoD исключён, —
+  # оба ассершена краснили правильное поведение. Git-операции в DoD тикетов оценивает
+  # рубрика; здесь — раздел «Файлы:»: тикеты трёх типов исполнителя и ни одного HUMAN.
   deterministic:
     - kind: output_matches
-      regex: "7\\. Один исполнитель"
-      reason: "В inline-таблице чеклиста должна быть Проверка 7."
+      regex: 'Файлы:[*_ \t]*(?:\n[ \t]*){0,2}(?:(?!\n[ \t]*\n|---RESULT---)[\s\S])*?tickets[/\x5c][a-z-]+[/\x5c]IMPL-\d+\.md'
+      reason: "Реализация функции — отдельный IMPL-тикет."
+    - kind: output_matches
+      regex: 'Файлы:[*_ \t]*(?:\n[ \t]*){0,2}(?:(?!\n[ \t]*\n|---RESULT---)[\s\S])*?tickets[/\x5c][a-z-]+[/\x5c]QA-\d+\.md'
+      reason: "Юнит-тест — отдельный QA-тикет."
+    - kind: output_matches
+      regex: 'Файлы:[*_ \t]*(?:\n[ \t]*){0,2}(?:(?!\n[ \t]*\n|---RESULT---)[\s\S])*?tickets[/\x5c][a-z-]+[/\x5c]DOCS-\d+\.md'
+      reason: "Обновление README — отдельный DOCS-тикет."
     - kind: output_does_not_contain
-      values: ["Коммит feat", "commit создан", "merge выполнен"]
-      reason: "Git-операции не должны попасть в DoD ни одного тикета."
-    - kind: output_does_not_contain
-      values: ["HUMAN-001", "HUMAN-0", "Создать коммит"]
-      reason: "Git-коммит — не HUMAN-задача (workflows/decompose.md шаг 3, human-task-rules.md). Тикет на коммит не создаётся — действие вне scope декомпозиции."
+      values: ["/HUMAN-", "\\HUMAN-"]
+      reason: "Git-коммит — не HUMAN-задача (human-task-rules.md): файла HUMAN-тикета среди созданных нет."
 
   rubric:
     - kind: llm_judge

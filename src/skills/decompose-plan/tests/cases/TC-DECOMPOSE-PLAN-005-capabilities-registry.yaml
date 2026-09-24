@@ -5,6 +5,7 @@ origin:
   incidents:
     - "PulseProxy PLAN-014 (2026-04-20): claude-sonnet назначил required_capabilities=[typescript, browser-extension] / [typescript, i18n] — ключей нет в реестре (реально только text, multimodal). Каскад no_capable_agent → 12 безрезультатных execute-task, 2 тикета ушли в blocked, план застопорен."
     - "workflowAi PLAN-003 (2026-04-19, CHG-076): QA-002 создана с required_capabilities=[code_editing] — ключ не в реестре, привёл к misrouting → manual-testing → escalation → IMPL-009."
+    - "workflowAi 2026-09-24: после перевода скила на рельсы (b6a8c91, 2026-09-23) вход стадии стал гейтом П0 — план и карта id_ranges. Кейс id_ranges_json не подавал, и агент останавливался на входе. Добавлены id_ranges_json и указание, что задача передана текстом."
   principle: "required_capabilities — замкнутый словарь из agents.*.capabilities pipeline-конфига, не описание предметной области"
   backlog_sources:
     - ".workflow/coach-backlog.yaml"
@@ -27,6 +28,11 @@ scenario:
     рассуждении. Для каждого создаваемого тикета назначь `required_capabilities`
     строго из этого списка (или оставь пустым). Не изобретай ключи, описывающие
     язык, платформу или подсистему.
+
+    id_ranges_json: {"ARCH":3,"IMPL":41,"FIX":12,"REVIEW":4,"DOCS":9,"ADMIN":5,"QA":18,"COACH":7,"HUMAN":6,"RSH":2}
+
+    Файла плана на диске нет — задача приведена ниже в разделе plan_content
+    целиком, работай по ней.
 
   inputs:
     - kind: inline

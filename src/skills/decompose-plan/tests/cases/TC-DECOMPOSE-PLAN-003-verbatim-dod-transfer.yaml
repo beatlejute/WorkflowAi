@@ -4,6 +4,7 @@ origin:
   chg: [CHG-040]
   incidents:
     - "PulseProxy: CHG-040 — стоп-гейт 9.A дословного переноса формулировок"
+    - "workflowAi 2026-09-24: после перевода скила на рельсы (b6a8c91, 2026-09-23) вход стадии стал гейтом П0 — план и карта id_ranges. Кейс не подавал ни плана, ни id_ranges_json, и агент останавливался на входе. Добавлены фрагмент плана с этим критерием и id_ranges_json."
   principle: "Дословный перенос DoD"
   backlog_sources:
     - "d:/Dev/PulseProxy/.workflow/coach-backlog.yaml"
@@ -14,6 +15,25 @@ scenario:
   system_prompt_file: "../../SKILL.md"
   extra_instructions: |
     Декомпозируй план. Критерий плана дословно: «Кнопка визуально соответствует макету Figma».
+
+    id_ranges_json: {"ARCH":3,"IMPL":41,"FIX":12,"REVIEW":4,"DOCS":9,"ADMIN":5,"QA":18,"COACH":7,"HUMAN":6,"RSH":2}
+
+    Файла плана на диске нет — план приведён ниже в разделе plan_content
+    целиком, работай по нему.
+  inputs:
+    - kind: inline
+      as: plan_content
+      content: |
+        ### 1. Кнопка «Экспорт» на панели отчёта
+
+        **Описание:** Добавить на панель отчёта кнопку «Экспорт», которая
+        скачивает отчёт в CSV.
+
+        **Файлы:** `src/ui/report-panel.tsx`
+
+        ## Критерии успеха
+
+        - [ ] Кнопка визуально соответствует макету Figma
 
 assertions:
   static:

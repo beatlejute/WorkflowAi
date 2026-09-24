@@ -1,9 +1,10 @@
 id: TC-DECOMPOSE-PLAN-002
-title: "Декомпозитор использует get-next-id.js вместо ручного поиска ID"
+title: "Декомпозитор нумерует тикеты из id_ranges со входа стадии, а не ручным поиском ID"
 origin:
   chg: [CHG-029, CHG-036]
   incidents:
     - "workflowAi: CHG-029 — коллизия IMPL-001/002/003 из-за ручного ID"
+    - "workflowAi 2026-09-24: после перевода скила на рельсы (b6a8c91, 2026-09-23) вход стадии стал гейтом П0 — план и карта id_ranges, а скрипт выдачи ID внутри стадии закрыт гардом. Кейс не подавал ни плана, ни id_ranges_json и ждал упоминания get-next-id. Добавлены фрагмент плана и id_ranges_json, L0 и L1 переведены на нумерацию из id_ranges."
   principle: "Машинная генерация ID"
   backlog_sources:
     - ".workflow/coach-backlog.yaml"
@@ -15,22 +16,46 @@ scenario:
   extra_instructions: |
     Создай тикеты для плана. В tickets/ уже есть тикеты IMPL-001..IMPL-005 в archive/.
 
+    id_ranges_json: {"ARCH":3,"IMPL":41,"FIX":12,"REVIEW":4,"DOCS":9,"ADMIN":5,"QA":18,"COACH":7,"HUMAN":6,"RSH":2}
+
+    Файла плана на диске нет — план приведён ниже в разделе plan_content
+    целиком, работай по нему.
+  inputs:
+    - kind: inline
+      as: plan_content
+      content: |
+        ### 1. Экспорт отчёта в CSV
+
+        **Описание:** Добавить эндпоинт `GET /reports/{id}/export.csv`.
+
+        **Файлы:** `src/api/reports.ts`
+
+        ## Критерии успеха
+
+        - [ ] GET /reports/{id}/export.csv отдаёт файл, первая строка которого — заголовки колонок отчёта
+
 assertions:
   static:
     - kind: skill_contains
       file: "workflows/decompose.md"
-      pattern: "get-next-id"
-      reason: "Воркфлоу должен вызывать скрипт get-next-id.js."
+      pattern: "get-next-id.js не вызывается"
+      reason: "Номера приходят только в id_ranges со входа стадии: скрипт выдачи ID внутри стадии не вызывается (гейт P10G3)."
     - kind: skill_contains
       file: "workflows/decompose.md"
       pattern: "⛔.*ручн"
       reason: "Ручной поиск ID должен быть запрещён."
 
+  # После перевода скила на рельсы (b6a8c91, 2026-09-23) скрипт выдачи ID внутри
+  # стадии не вызывается — прежний ассершен на упоминание get-next-id требовал
+  # запрещённого. Ловушка кейса — архивные IMPL-001..005: ручной поиск даёт IMPL-006,
+  # нумерация из id_ranges — стартовые номера карты.
   deterministic:
-    - kind: output_contains_all
-      values: ["get-next-id"]
+    - kind: output_matches
+      regex: '\b(?:IMPL-0*41|FIX-0*12|QA-0*18|DOCS-0*9|ADMIN-0*5)\b'
+      reason: "Первый тикет своего префикса получил стартовый номер из id_ranges_json."
     - kind: output_does_not_contain
-      values: ["максимальн", "вручную найд"]
+      values: ["IMPL-006", "IMPL-6.", "максимальн", "вручную найд"]
+      reason: "Номер, следующий за архивными IMPL-001..005, — признак ручного поиска."
 
   rubric:
     - kind: llm_judge
