@@ -30,15 +30,10 @@
  *   ---RESULT---
  */
 
-import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
-import { parseFrontmatter, serializeFrontmatter, printResult } from 'workflow-ai/lib/utils.mjs';
-
-// Папки доски == допустимые значения status (см. VALID_STATUSES в move-ticket.js).
-// archive/ намеренно исключён: там лежат тикеты закрытых планов, их status
-// отражает состояние на момент архивации.
-const BOARD_DIRS = ['backlog', 'ready', 'in-progress', 'review', 'blocked', 'done'];
+import { printResult } from 'workflow-ai/lib/utils.mjs';
+import { syncProject } from './sync-ticket-status-core.js';
 
 function parseArgs(argv) {
   const args = { apply: false, project: null };
@@ -47,73 +42,6 @@ function parseArgs(argv) {
     else if (argv[i] === '--project') args.project = argv[++i];
   }
   return args;
-}
-
-/**
- * Синхронизирует статусы тикетов одного проекта.
- *
- * @param {string} projectRoot
- * @param {boolean} apply - false = только отчёт
- * @returns {{statusFixed: Array, completedFilled: Array, scanned: number}}
- */
-function syncProject(projectRoot, apply) {
-  const ticketsDir = path.join(projectRoot, '.workflow', 'tickets');
-  const statusFixed = [];
-  const completedFilled = [];
-  let scanned = 0;
-
-  for (const dir of BOARD_DIRS) {
-    const dirPath = path.join(ticketsDir, dir);
-    if (!fs.existsSync(dirPath)) continue;
-
-    for (const file of fs.readdirSync(dirPath)) {
-      if (!file.endsWith('.md') || file === '.gitkeep.md') continue;
-
-      const filePath = path.join(dirPath, file);
-      let content;
-      try {
-        content = fs.readFileSync(filePath, 'utf8');
-      } catch (e) {
-        console.error(`[WARN] ${file}: не читается — ${e.message}`);
-        continue;
-      }
-
-      let parsed;
-      try {
-        parsed = parseFrontmatter(content);
-      } catch (e) {
-        console.error(`[WARN] ${file}: битый frontmatter — ${e.message}`);
-        continue;
-      }
-
-      const { frontmatter, body } = parsed;
-      if (!frontmatter || Object.keys(frontmatter).length === 0) continue;
-
-      scanned++;
-      const id = frontmatter.id || file.replace('.md', '');
-      let changed = false;
-
-      if (frontmatter.status !== dir) {
-        statusFixed.push({ id, dir, was: frontmatter.status || '(нет)' });
-        frontmatter.status = dir;
-        changed = true;
-      }
-
-      if (dir === 'done' && !frontmatter.completed_at) {
-        const mtime = fs.statSync(filePath).mtime.toISOString();
-        completedFilled.push({ id, mtime });
-        frontmatter.completed_at = mtime;
-        changed = true;
-      }
-
-      if (changed && apply) {
-        frontmatter.updated_at = new Date().toISOString();
-        fs.writeFileSync(filePath, serializeFrontmatter(frontmatter) + body, 'utf8');
-      }
-    }
-  }
-
-  return { statusFixed, completedFilled, scanned };
 }
 
 function main() {

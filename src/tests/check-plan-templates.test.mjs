@@ -12,7 +12,8 @@ fs.mkdirSync(path.join(importRoot, '.workflow'), { recursive: true });
 process.on('exit', () => fs.rmSync(importRoot, { recursive: true, force: true }));
 const cwdBeforeImport = process.cwd();
 process.chdir(importRoot);
-const { evaluateTrigger, generateNextPlanId } = await import('../scripts/check-plan-templates.js');
+const { evaluateTrigger, generateNextPlanId, createPlanFromTemplate } =
+  await import('../scripts/check-plan-templates.js');
 process.chdir(cwdBeforeImport);
 
 // ============ evaluateTrigger tests ============
@@ -198,4 +199,39 @@ test('generateNextPlanId picks max across current and archive', () => {
   } finally {
     fs.rmSync(root, { recursive: true });
   }
+});
+
+// ============ значения по умолчанию ============
+
+test('interval_days без params считает интервал равным одному дню', () => {
+  const trigger = { type: 'interval_days' };
+  const now = new Date('2026-03-29T10:00:00Z');
+  assert.strictEqual(evaluateTrigger(trigger, '2026-03-28', now), true);
+  assert.strictEqual(evaluateTrigger(trigger, '2026-03-29', now), false);
+});
+
+// ============ createPlanFromTemplate ============
+
+// Каталог планов создаётся при первом плане: в свежем проекте
+// .workflow/plans/current/ ещё нет, и без этого шага публикация плана падала бы
+// ENOENT. Автор шаблона необязателен — тогда план подписывается system.
+test('createPlanFromTemplate создаёт каталог планов и подставляет автора system', () => {
+  const plansDir = path.join(importRoot, '.workflow', 'plans', 'current');
+  assert.strictEqual(fs.existsSync(plansDir), false, 'каталога планов до вызова нет');
+
+  const templatePath = path.join(importRoot, 'template.md');
+  const planPath = createPlanFromTemplate(
+    templatePath,
+    { id: 'TPL-001', title: 'Регулярная проверка' },
+    '## Цель\n\nТело шаблона.\n',
+    'PLAN-042',
+    '2026-09-24'
+  );
+
+  assert.strictEqual(planPath, path.join(plansDir, 'PLAN-042.md'));
+  const content = fs.readFileSync(planPath, 'utf8');
+  assert.match(content, /author: "?system"?/);
+  assert.match(content, /source_template: "?TPL-001"?/);
+  assert.match(content, /title: "?Регулярная проверка \(2026-09-24\)"?/);
+  assert.match(content, /Тело шаблона\./);
 });

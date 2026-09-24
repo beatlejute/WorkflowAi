@@ -111,8 +111,12 @@ function readTickets(dir) {
 
 /**
  * Перемещает тикет из ready/ в backlog/
+ *
+ * Экспортируется для теста: публикация содержимого после переезда — тот же класс
+ * гонки, что закрыт для маркера пайплайна и approval-файла, и проверяется
+ * поведенчески (src/tests/race-ticket-demote-atomic-write.test.mjs).
  */
-function demoteToBacklog(ticketId) {
+export function demoteToBacklog(ticketId) {
   const sourcePath = path.join(READY_DIR, `${ticketId}.md`);
   const targetPath = path.join(BACKLOG_DIR, `${ticketId}.md`);
 
@@ -271,8 +275,19 @@ async function main() {
   }
 }
 
-main().catch(e => {
-  console.error(`[ERROR] ${e.message}`);
-  printResult({ status: 'error', error: e.message });
-  process.exit(1);
-});
+// Запуск main() только при прямом вызове (не при импорте) — тот же приём, что в
+// check-plan-templates.js. Пайплайн зовёт скрипт командой
+// `node .workflow/src/scripts/check-conditions.js` (configs/pipeline.yaml), а импорт
+// нужен тесту демотирования: без этой проверки импорт прогонял всю доску.
+const isDirectRun = process.argv[1] && (
+  process.argv[1].endsWith('check-conditions.js') ||
+  process.argv[1].endsWith('check-conditions')
+);
+
+if (isDirectRun) {
+  main().catch(e => {
+    console.error(`[ERROR] ${e.message}`);
+    printResult({ status: 'error', error: e.message });
+    process.exit(1);
+  });
+}
