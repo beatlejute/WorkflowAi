@@ -139,30 +139,6 @@
       "functions": 45,
       "branches": 61.66
     },
-    "src/lib/test-error-classifier.mjs": {
-      "lines": 0,
-      "statements": 0,
-      "functions": 0,
-      "branches": 0
-    },
-    "src/lib/test-extends.mjs": {
-      "lines": 0,
-      "statements": 0,
-      "functions": 0,
-      "branches": 0
-    },
-    "src/lib/test-version.mjs": {
-      "lines": 0,
-      "statements": 0,
-      "functions": 0,
-      "branches": 0
-    },
-    "src/lib/ticket-finder.mjs": {
-      "lines": 0,
-      "statements": 0,
-      "functions": 0,
-      "branches": 0
-    },
     "src/lib/utils.mjs": {
       "lines": 89.73,
       "statements": 89.73,
@@ -422,10 +398,10 @@
       "branches": 0
     },
     "src/wf-loader.mjs": {
-      "lines": 0,
-      "statements": 0,
-      "functions": 0,
-      "branches": 0
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 100
     }
   }
 }
