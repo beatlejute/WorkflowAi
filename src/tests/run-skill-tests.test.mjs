@@ -612,6 +612,38 @@ describe('L2 Rubric Layer — Trials & Aggregation', () => {
     assert.match(stdout, /status: failed/, 'agent-b fail → модель должна провалиться');
   });
 
+  // Регрессия 2026-09-24: промпт судьи собирался из description/name кейса, а их
+  // не объявляет ни один кейс — судья получал заглушку «Evaluate the response»,
+  // хотя вопрос лежал рядом с rubric_file в поле criterion.
+  // Проверка: criterion содержит маркер, на который mock-judge отвечает score 2.
+  // Дошёл до судьи → кейс падает; не дошёл → agent-a даёт score 5 и кейс проходит.
+  it('criterion кейса доходит до судьи, а не заменяется заглушкой', async () => {
+    const caseId = 'TC-L2-010';
+    const caseFile = `${caseId}.yaml`;
+    writeFileSync(join(TESTS_DIR_L2, caseFile), [
+      'description: "Criterion delivery"',
+      'prompt: "Criterion delivery prompt"',
+      'severity: normal',
+      'assertions:',
+      '  rubric:',
+      '    - rubric_file: rubrics/l2-rubric.md',
+      '      criterion: "MOCK_LOW_SCORE — вопрос кейса, который обязан дойти до судьи"',
+      '  static: []',
+      '  deterministic: []'
+    ].join('\n'));
+
+    const indexYaml = createIndexYaml([AGENT_A], 'mock-judge', [{ id: caseId, file: caseFile }]);
+    writeFileSync(join(TESTS_DIR_L2, 'index.yaml'), indexYaml);
+
+    const { stdout } = await runRunner([
+      '--skill', TEST_SKILL_L2, '--layer', 'l2',
+      '--skip-secret-scan', '--fast', '--yes',
+      '--pipeline', TEST_PIPELINE_PATH
+    ]);
+
+    assert.match(stdout, /status: failed/, 'маркер из criterion обязан дойти до судьи');
+  });
+
   // TC-L2-003: severity=critical + no aggregate → all must pass
   // agent-a (pass) → 1/1 pass → критерий all выполнен → case pass
   it('TC-L2-003: severity critical + no aggregate → all must pass', async () => {

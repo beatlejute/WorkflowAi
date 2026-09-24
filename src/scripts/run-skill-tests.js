@@ -1047,13 +1047,18 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
   }
 
   let rubricName = 'default';
+  // Вопрос, на который отвечает судья: кейсы объявляют его рядом с rubric_file.
+  // До 2026-09-24 он в промпт не попадал — судья получал заглушку «Evaluate the
+  // response» и оценивал по одной рубрике (замер: все 201 сохранённых вызова).
+  let rubricCriterion = '';
   if (testCase.assertions?.rubric && testCase.assertions.rubric.length > 0) {
     const rubricPath = testCase.assertions.rubric[0].rubric_file;
     if (rubricPath) {
       rubricName = path.basename(rubricPath, '.md');
     }
+    rubricCriterion = testCase.assertions.rubric[0].criterion || '';
   }
-  
+
   const rubric = loadRubric(skillName, rubricName);
   const results = {
     per_model: {},
@@ -1183,7 +1188,7 @@ ${rubric}
 ${targetOutput.output || targetOutput.status || 'No output'}
 ${ticketFilesSection}
 ## Task
-${testCase.description || testCase.name || 'Evaluate the response'}
+${rubricCriterion || testCase.description || testCase.name || 'Evaluate the response'}
 
 Please evaluate the output according to the rubric and provide a score from 1 to 5.
 Output format:
