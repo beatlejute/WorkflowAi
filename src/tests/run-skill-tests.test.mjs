@@ -644,6 +644,117 @@ describe('L2 Rubric Layer — Trials & Aggregation', () => {
     assert.match(stdout, /status: failed/, 'маркер из criterion обязан дойти до судьи');
   });
 
+  // Регрессия 2026-09-24: вход kind: dir раннер молча пропускал — агент
+  // TC-EXECUTE-TASK-008 не находил файлов проекта, а кейс выглядел провалом скила.
+  // agent-dir-probe отвечает MOCK_HIGH_SCORE, только если файл-зонд фикстуры лежит
+  // в его рабочем каталоге под dest_dir.
+  function writeDirInputCase(caseId, input) {
+    writeFileSync(join(TESTS_DIR_L2, `${caseId}.yaml`), [
+      'description: "Dir input"',
+      'severity: normal',
+      'scenario:',
+      '  extra_instructions: "Dir input probe"',
+      '  inputs:',
+      ...input.map(line => `    ${line}`),
+      'assertions:',
+      '  rubric:',
+      '    - rubric_file: rubrics/l2-rubric.md',
+      '  static: []',
+      '  deterministic: []'
+    ].join('\n'));
+    writeFileSync(join(TESTS_DIR_L2, 'index.yaml'),
+      createIndexYaml(['agent-dir-probe'], 'mock-judge', [{ id: caseId, file: `${caseId}.yaml` }]));
+  }
+
+  function runDirInputCase() {
+    return runRunner([
+      '--skill', TEST_SKILL_L2, '--layer', 'l2',
+      '--skip-secret-scan', '--fast', '--yes',
+      '--pipeline', TEST_PIPELINE_PATH
+    ]);
+  }
+
+  function readDirProbeTrial(caseId) {
+    return readFileSync(
+      join(TESTS_DIR_L2, 'cases', caseId, 'current', 'agent-dir-probe', 'trial-1.md'),
+      'utf8'
+    );
+  }
+
+  it('вход kind: dir раскладывает каталог фикстуры в рабочий каталог агента', async () => {
+    const tree = join(TESTS_DIR_L2, 'fixtures', 'probe-tree', 'nested');
+    mkdirSync(tree, { recursive: true });
+    writeFileSync(join(tree, 'probe.txt'), 'DIR_PROBE_OK\n');
+    writeDirInputCase('TC-L2-011', [
+      '- kind: dir',
+      '  path: "fixtures/probe-tree"',
+      '  dest_dir: "project"'
+    ]);
+
+    const { stdout } = await runDirInputCase();
+
+    assert.match(readDirProbeTrial('TC-L2-011'), /MOCK_HIGH_SCORE/,
+      'файл-зонд обязан лежать в рабочем каталоге под dest_dir');
+    assert.match(stdout, /status: passed/);
+  });
+
+  it('dest_dir за пределами рабочего каталога — trial с ошибкой, снаружи ничего не пишется', async () => {
+    const escapeName = `wf-dir-escape-${Date.now()}`;
+    const tree = join(TESTS_DIR_L2, 'fixtures', 'escape-tree');
+    mkdirSync(tree, { recursive: true });
+    writeFileSync(join(tree, 'probe.txt'), 'DIR_PROBE_OK\n');
+    writeDirInputCase('TC-L2-012', [
+      '- kind: dir',
+      '  path: "fixtures/escape-tree"',
+      `  dest_dir: "../${escapeName}"`
+    ]);
+
+    const { stdout } = await runDirInputCase();
+
+    assert.match(readDirProbeTrial('TC-L2-012'), /dest_dir leaves task workdir/);
+    assert.ok(!existsSync(join(tmpdir(), escapeName)), 'рядом с рабочим каталогом ничего не создано');
+    assert.doesNotMatch(stdout, /status: passed/);
+  });
+
+  // В рабочем каталоге .workflow/config — junction на настоящий configs/
+  // репозитория. Запись сквозь него испортила бы репозиторий (класс инцидента
+  // 2026-09-21 из CLAUDE.md), поэтому путь с ссылкой отклоняется до mkdir.
+  it('dest_dir через junction рабочего каталога — ошибка, цель ссылки не тронута', async () => {
+    const markerDir = `wf-dir-link-${Date.now()}`;
+    const realTarget = join(PROJECT_ROOT, 'configs', markerDir);
+    assert.ok(!existsSync(realTarget), 'предусловие: каталога-маркера в configs/ нет');
+    const tree = join(TESTS_DIR_L2, 'fixtures', 'link-tree', markerDir);
+    mkdirSync(tree, { recursive: true });
+    writeFileSync(join(tree, 'probe.txt'), 'DIR_PROBE_OK\n');
+    writeDirInputCase('TC-L2-013', [
+      '- kind: dir',
+      '  path: "fixtures/link-tree"',
+      '  dest_dir: ".workflow/config"'
+    ]);
+
+    try {
+      await runDirInputCase();
+      assert.match(readDirProbeTrial('TC-L2-013'), /crosses a link: \.workflow[\\/]config/);
+      assert.ok(!existsSync(realTarget), 'в настоящий configs/ ничего не записано');
+    } finally {
+      // Реальный путь репозитория, не путь через ссылку: снимается только то,
+      // что создал бы провалившийся гард.
+      rmSync(realTarget, { recursive: true, force: true });
+    }
+  });
+
+  it('незнакомый вид входа сценария — trial с ошибкой, а не молчаливый пропуск', async () => {
+    writeDirInputCase('TC-L2-014', [
+      '- kind: folder',
+      '  path: "fixtures/probe-tree"'
+    ]);
+
+    const { stdout } = await runDirInputCase();
+
+    assert.match(readDirProbeTrial('TC-L2-014'), /unknown scenario input kind "folder"/);
+    assert.doesNotMatch(stdout, /status: passed/);
+  });
+
   // TC-L2-003: severity=critical + no aggregate → all must pass
   // agent-a (pass) → 1/1 pass → критерий all выполнен → case pass
   it('TC-L2-003: severity critical + no aggregate → all must pass', async () => {

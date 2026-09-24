@@ -230,6 +230,68 @@ function cleanupTestWorkdir(tmpRoot) {
   try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
 }
 
+// Вход сценария kind: dir — каталог фикстуры раскладывается в рабочий каталог
+// прогона, dest_dir отсчитывается от его корня. До 2026-09-24 такой вход молча
+// пропускался: агент TC-EXECUTE-TASK-008 не находил файлов проекта.
+// В рабочем каталоге лежат junction'ы на настоящие src/scripts, src/rails и
+// configs (createTestWorkdir): запись сквозь них попала бы в репозиторий. Поэтому
+// путь назначения строится по одному сегменту, и любая ссылка на нём — ошибка;
+// ссылки внутри самой фикстуры тоже не копируются.
+function copyFixtureDir(srcDir, workdir, destDir, caseId) {
+  if (!workdir) {
+    throw new Error(`dir input requires task workdir (case ${caseId})`);
+  }
+  if (!fs.existsSync(srcDir) || !fs.statSync(srcDir).isDirectory()) {
+    throw new Error(`dir fixture not found: ${srcDir}`);
+  }
+  const root = path.resolve(workdir);
+  const destRel = path.relative(root, path.resolve(root, destDir));
+  if (destRel === '..' || destRel.startsWith(`..${path.sep}`) || path.isAbsolute(destRel)) {
+    throw new Error(`dir input dest_dir leaves task workdir: ${destDir} (case ${caseId})`);
+  }
+
+  // Создаёт каталоги по пути rel внутри root, не проходя через ссылки.
+  function ensureDirInside(rel) {
+    let current = root;
+    for (const segment of rel.split(path.sep).filter(Boolean)) {
+      current = path.join(current, segment);
+      if (!fs.existsSync(current)) {
+        fs.mkdirSync(current);
+        continue;
+      }
+      const stat = fs.lstatSync(current);
+      if (stat.isSymbolicLink()) {
+        throw new Error(`dir input path crosses a link: ${path.relative(root, current)} (case ${caseId})`);
+      }
+      if (!stat.isDirectory()) {
+        throw new Error(`dir input path is not a directory: ${path.relative(root, current)} (case ${caseId})`);
+      }
+    }
+    return current;
+  }
+
+  function copyTree(fromDir, toRel) {
+    const toDir = ensureDirInside(toRel);
+    for (const entry of fs.readdirSync(fromDir, { withFileTypes: true })) {
+      const from = path.join(fromDir, entry.name);
+      if (entry.isSymbolicLink()) {
+        throw new Error(`dir fixture contains a link: ${from}`);
+      }
+      if (entry.isDirectory()) {
+        copyTree(from, path.join(toRel, entry.name));
+      } else if (entry.isFile()) {
+        const to = path.join(toDir, entry.name);
+        if (fs.existsSync(to) && fs.lstatSync(to).isSymbolicLink()) {
+          throw new Error(`dir input target is a link: ${path.relative(root, to)} (case ${caseId})`);
+        }
+        fs.copyFileSync(from, to);
+      }
+    }
+  }
+
+  copyTree(srcDir, destRel);
+}
+
 function parseArgs() {
   const args = process.argv.slice(2);
   const opts = {
@@ -1114,6 +1176,13 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
           fs.mkdirSync(path.dirname(destPath), { recursive: true });
           fs.copyFileSync(fixturePath, destPath);
           targetPrompt += `## Context\nticket_id: ${ticketId}\n\n`;
+        } else if (input.kind === 'dir') {
+          const fixtureDir = path.join(testsDir, caseDir, input.path);
+          copyFixtureDir(fixtureDir, taskWorkdir, input.dest_dir || '.', caseId);
+        } else {
+          // Незнакомый вид входа раньше пропускался молча — агент работал без
+          // данных, а кейс выглядел как провал скила.
+          throw new Error(`unknown scenario input kind "${input.kind}" (case ${caseId})`);
         }
       }
     }

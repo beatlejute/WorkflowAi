@@ -7,6 +7,7 @@
 #   mock-judge   — детерминированный judge на основе маркеров в промпте
 #   agent-a      — алиас agent-pass (для совместимости)
 #   agent-b      — алиас agent-fail (для тестов AND-логики где одна модель падает)
+#   agent-dir-probe — pass, только если вход kind: dir разложен в рабочий каталог
 
 pipeline:
   name: "test-pipeline"
@@ -40,6 +41,13 @@ pipeline:
       workdir: "."
       capabilities: [text]
       description: "Mock agent-b — fail (alias for agent-fail, для AND-тестов)"
+
+    agent-dir-probe:
+      command: "node"
+      args: ["src/tests/fixtures/mock-agent-dir-probe.js"]
+      workdir: "."
+      capabilities: [text]
+      description: "Mock agent — pass, только если вход kind: dir разложен в рабочий каталог"
 
     mock-judge:
       command: "node"
