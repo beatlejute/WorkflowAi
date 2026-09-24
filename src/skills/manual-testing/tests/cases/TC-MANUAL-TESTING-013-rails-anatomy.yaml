@@ -1,0 +1,109 @@
+id: TC-MANUAL-TESTING-013
+title: "manual-testing на рельсах: граф ядра и пяти фрагментов, правила source-grounded, self-check гейтом, выходной слой"
+origin:
+  chg: ["convert-2026-09-24"]
+  incidents:
+    - "Решение стейкхолдера 2026-09-21: единый подход «Рельсы для агента» — все скилы переводятся на граф плюс хуки-отказы через коуча (CONVERT). manual-testing — девятый и последний прозаический скил."
+    - "Аудит 2026-09-21: контекст скила 1683 строки при пороге 800 — ядро с прозой и пятью воркфлоу не помещалось в бюджет исполнителя. После конверсии ядро 125 строк, фрагмент не больше 24."
+    - "Инцидент 2026-05-02: исполнитель в роли тестировщика создал парный тикет в backlog, чтобы делегировать live-проверки UI человеку; стейкхолдер откатил созданное, проверки не выполнены. Теперь запрет — правило ядра, гард записи и запрет в выходном слое."
+    - "Инцидент 2026-05-03: PASS записан на четыре UI-инварианта с именами команд и кнопок без сверки с декларативным конфигом продукта. Теперь сверка с source-of-truth — правила ядра на двух стадиях: составление тест-плана и запись PASS."
+    - "Аудит 2026-09-21 (CRITICAL): инструкция скила предписывала записать completed_at во frontmatter тикета — поле принадлежит пайплайну, дубль ключа ломает обработку. Теперь запрет — правило этапа self-check."
+  principle: "Концепция рельс: принцип 1 (граф — единственный источник процедуры), 6 и 9 (отказ инструмента и выходной слой), 10 (потолки циклов), 11 (дата и цена у гарда), 15 (гард доказан тестом, канарейка)."
+  backlog_sources: []
+tags: [rails, anatomy, regression-guard]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "rails: rails\\.yaml"
+      reason: "Frontmatter объявляет конфиг гардов — признак скила на рельсах."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "```mermaid[\\s\\S]*graph TD[\\s\\S]*P0E1\\[\"П0 ВХОД: Тестировщик \\(QA-инженер\\)"
+      reason: "Процедура записана mermaid-графом с входным узлом этапа 0."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0S1\\[\"П0 ШАГ: Канарейка живости[^\\n]*echo RAILS_CANARY"
+      reason: "Проверка живости рельс — узел графа (принцип 15)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R6\\[\"П0 ПРАВИЛО: QA-тикеты создаются скилами декомпозиции проекта[\\s\\S]{0,600}Запрет на создание тикетов любого типа"
+      reason: "Запрет на создание тикетов — правило ядра с названной ценой (инцидент 2026-05-02)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R13\\[\"П0 ПРАВИЛО: Source-Grounded UI Assertion \\+ Test Plan Authoring"
+      reason: "Сверка UI-утверждений с source-of-truth — правило ядра, не проза рядом с графом."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P5G1\\{\"П5 ГЕЙТ: Все шесть пунктов self-check пройдены"
+      reason: "Self-check стал гейтом графа с потолком циклов, а не списком пожеланий."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P9E1 --> P9R1 --> P9S1 --> P9S2"
+      reason: "Вывод результата и остановка — последний этап, терминал P9S2."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0Q1 -->\\|\"SMOKE\"\\| P10E1[\\s\\S]{0,400}P0Q1 -->\\|\"TEST-PLAN\"\\| P50E1"
+      reason: "Маршрутизация по типу тикета — рёбра узла выбора во все пять фрагментов."
+
+    - kind: skill_contains
+      file: "workflows/smoke.md"
+      pattern: "P10S5\\[\"П10 ШАГ: Budget Guard \\(ОБЯЗАТЕЛЬНО\\)"
+      reason: "Budget Guard — узел фрагмента, действует безусловно."
+    - kind: skill_contains
+      file: "workflows/smoke.md"
+      pattern: "P10G1 -->\\|\"да\"\\| P5E1"
+      reason: "Выход фрагмента ведёт в self-check ядра, а не в собственный отчёт."
+    - kind: skill_contains
+      file: "workflows/regression.md"
+      pattern: "P20G1 -->\\|\"да\"\\| P5E1"
+      reason: "Регресс возвращается в self-check ядра."
+    - kind: skill_contains
+      file: "workflows/exploratory.md"
+      pattern: "P30G1 -->\\|\"да\"\\| P5E1"
+      reason: "Исследовательская сессия возвращается в self-check ядра."
+    - kind: skill_contains
+      file: "workflows/acceptance.md"
+      pattern: "P40G1 -->\\|\"да\"\\| P5E1"
+      reason: "Приёмка возвращается в self-check ядра."
+    - kind: skill_contains
+      file: "workflows/test-plan.md"
+      pattern: "P50G1 -->\\|\"да\"\\| P5E1"
+      reason: "Ветка тест-плана возвращается в self-check ядра."
+
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "write_deny:[\\s\\S]*\\.workflow/tickets/backlog/\\*\\*"
+      reason: "Создание тикета закрыто гардом записи (инцидент 2026-05-02)."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "deny_mcp:[\\s\\S]*create_ticket"
+      reason: "Создание тикета через MCP закрыто тем же гардом."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "stage_actions:[\\s\\S]*edit_ticket:[\\s\\S]*stages: \\[5, 10, 20, 30, 40, 50\\]"
+      reason: "Запись в тикет разрешена на этапах проверки и self-check, не раньше."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "final_forbids:[\\s\\S]*HUMAN-тикет"
+      reason: "Упоминание созданного тикета в выводе запрещено выходным слоем."
+
+    - kind: skill_contains
+      file: "rails-migration.yaml"
+      pattern: "baseline:"
+      reason: "Карта переноса фиксирует базовую версию, от которой считается покрытие фраз-инвариантов."
+    - kind: skill_contains
+      file: "rails-migration.yaml"
+      pattern: "entries:[\\s\\S]*target: \"P0R12\""
+      reason: "Ссылки «принцип N» прозы переехали на узлы графа, решение по каждой записано в карте."
+
+execution:
+  timeout_s: 60

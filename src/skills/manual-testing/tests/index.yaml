@@ -9,7 +9,7 @@ execution:
     - gemini-flash-lite
     - deepseek-flash
   judge_agent: claude-opus
-  default_timeout_s: 1200
+  default_timeout_s: 2400
   baseline_ref: origin/main
 
 cases:
@@ -73,3 +73,8 @@ cases:
     origin_chg: [ad-hoc-2026-09-21-audit]
     tags: [consistency, regression-guard]
     severity: high
+  - id: TC-MANUAL-TESTING-013
+    file: cases/TC-MANUAL-TESTING-013-rails-anatomy.yaml
+    origin_chg: [convert-2026-09-24]
+    tags: [rails, anatomy, regression-guard]
+    severity: critical
