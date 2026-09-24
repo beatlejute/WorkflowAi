@@ -28,10 +28,38 @@ function parseNodeId(id) {
   return { stage: Number(m[1]), type: m[2], num: Number(m[3]) };
 }
 
-// Порядок узлов внутри этапа по грамматике §3 (E → R → S → G/Q), внутри типа — по номеру.
-const TYPE_RANK = { E: 0, R: 1, S: 2, G: 3, Q: 3 };
-function nodeRank(info) {
-  return (TYPE_RANK[info.type] ?? 9) * 1000 + info.num;
+// Узлы, достижимые из `start`, не заходя в `avoid`; при `stage` — только по узлам этапа.
+function reachableFrom(graph, start, { stage = null, avoid = null } = {}) {
+  const seen = new Set();
+  if (start === avoid) return seen;
+  seen.add(start);
+  const queue = [start];
+  while (queue.length) {
+    const id = queue.shift();
+    for (const { to } of graph?.outgoing(id) || []) {
+      if (to === avoid || seen.has(to)) continue;
+      if (stage !== null && parseNodeId(to)?.stage !== stage) continue;
+      seen.add(to);
+      queue.push(to);
+    }
+  }
+  return seen;
+}
+
+// Возврат внутри этапа — переход в узел, через который проходит любой путь от входа
+// этапа к текущему узлу (цель доминирует над текущим внутри этапа). Узел, в который
+// от входа внутри этапа не попасть (гейт валидации, куда приходят из другого этапа), —
+// возврат, если переход замыкает петлю по графу целиком.
+// Порядок типов E < R < S < G/Q для этого не годится: гейт стоит в конце цепочки,
+// и его штатный переход «да» к следующему шагу выглядел возвратом. На этапе разбиения
+// скила декомпозиции таких рёбер пять, потолок 3 — запись тикетов отклонялась на
+// четвёртом шаге вперёд в каждом прогоне (2026-09-24).
+function isReturnWithinStage(graph, stage, from, to) {
+  const entry = `P${stage}E1`;
+  if (graph?.node(entry) && reachableFrom(graph, entry, { stage }).has(from)) {
+    return !reachableFrom(graph, entry, { stage, avoid: to }).has(from);
+  }
+  return reachableFrom(graph, to).has(from);
 }
 
 /**
@@ -337,11 +365,11 @@ export function applyGoto(state, graph, config, { node, quote } = {}) {
   if (fromInfo && toInfo && Array.isArray(config?.cycles)) {
     const cyc = config.cycles.find((c) => c.from === fromInfo.stage && c.to === toInfo.stage);
     // Запись `from == to` — потолок на ВОЗВРАТ внутри этапа (гейт → шаг), а не на
-    // любой переход по цепочке E → R → S → G: первый прогон коуча 2026-09-22 упёрся в
-    // «cycle_limit» на P1R3 после трёх штатных шагов вперёд. Возврат = целевой узел
-    // раньше текущего по порядку типов E < R < S < G/Q, при равном типе — по номеру.
+    // любой переход внутри этапа: первый прогон коуча 2026-09-22 упёрся в «cycle_limit»
+    // на P1R3 после трёх штатных шагов вперёд. Что считается возвратом —
+    // isReturnWithinStage.
     const sameStage = fromInfo.stage === toInfo.stage;
-    const isBackward = !sameStage || nodeRank(toInfo) < nodeRank(fromInfo);
+    const isBackward = !sameStage || isReturnWithinStage(graph, fromInfo.stage, current, node);
     if (cyc && isBackward) {
       const key = `cycle:${fromInfo.stage}>${toInfo.stage}`;
       const projected = (s.counters[key] || 0) + 1;

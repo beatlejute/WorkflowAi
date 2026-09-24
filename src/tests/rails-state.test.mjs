@@ -18,6 +18,7 @@ import {
   normalizeLabel,
 } from '../rails/state.mjs';
 import { loadSkillGraph } from '../rails/graph.mjs';
+import { loadRailsConfig } from '../rails/rails-config.mjs';
 
 const FIXTURES = join(fileURLToPath(new URL('.', import.meta.url)), 'fixtures', 'rails', 'graph');
 
@@ -102,6 +103,193 @@ test('applyGoto: from == to — переходы вперёд по цепочк�
   assert.equal(third.ok, false);
   assert.equal(third.code, 'cycle_limit');
   assert.match(third.reason, /человеку/);
+});
+
+// Регрессия 2026-09-24: возвратом считался любой переход к узлу «раньше по порядку
+// типов» — в том числе штатный переход гейта «да» к следующему шагу (G → S). На этапе
+// разбиения скила декомпозиции таких рёбер пять при потолке 3, и запись тикетов
+// отклонялась на четвёртом шаге вперёд в каждом прогоне.
+function stageNode(id, text) {
+  const m = /^P(\d+)([ERSGQ])(\d+)$/.exec(id);
+  return { id, stage: Number(m[1]), type: m[2], label: `${id} ${text} — узел тестового этапа` };
+}
+
+function walk(state, graph, config, path) {
+  for (const id of path) {
+    const r = applyGoto(state, graph, config, { node: id, quote: graph.node(id).label });
+    if (!r.ok) return { at: id, ...r };
+  }
+  return { ok: true };
+}
+
+test('applyGoto: from == to — переход гейта «да» к следующему шагу не возврат, сколько бы гейтов ни стояло в цепочке', () => {
+  const ids = ['P10E1', 'P10S1', 'P10G1', 'P10S2', 'P10G2', 'P10S3', 'P10G3', 'P10S4', 'P10G4', 'P10S5', 'P6E1'];
+  const graph = makeGraph(ids.map((id) => stageNode(id, 'шаг цепочки разбиения')), [
+    ...ids.slice(1).map((to, i) => ({ from: ids[i], to, label: ids[i].includes('G') ? 'да' : null })),
+    { from: 'P10G1', to: 'P10S1', label: 'нет' },
+  ]);
+  const config = { quote_min: 25, cycles: [{ from: 10, to: 10, max: 3, reason: 'Три круга разбиения не сошлись' }] };
+  const state = { node: 'P10E1', history: [], counters: {}, denials: {} };
+
+  assert.deepEqual(walk(state, graph, config, ids.slice(1)), { ok: true });
+  assert.equal(state.counters['cycle:10>10'], undefined, 'четыре перехода гейт → шаг вперёд не считаются');
+
+  state.node = 'P10G1';
+  assert.equal(walk(state, graph, config, ['P10S1']).ok, true);
+  assert.equal(state.counters['cycle:10>10'], 1, 'возврат гейта «нет» к началу считается');
+});
+
+test('applyGoto: from == to — в двойной петле круг считается один раз, а не на каждом ребре гейт → шаг', () => {
+  // P5S1 → P5G1 (да → P5S2, нет → P5S1); P5S2 → P5G2 (да → выход, нет → P5S1).
+  const ids = ['P5E1', 'P5S1', 'P5G1', 'P5S2', 'P5G2', 'P6E1'];
+  const graph = makeGraph(ids.map((id) => stageNode(id, 'узел двойной петли')), [
+    { from: 'P5E1', to: 'P5S1' },
+    { from: 'P5S1', to: 'P5G1' },
+    { from: 'P5G1', to: 'P5S2', label: 'да' },
+    { from: 'P5G1', to: 'P5S1', label: 'нет' },
+    { from: 'P5S2', to: 'P5G2' },
+    { from: 'P5G2', to: 'P6E1', label: 'да' },
+    { from: 'P5G2', to: 'P5S1', label: 'нет' },
+  ]);
+  const config = { quote_min: 25, cycles: [{ from: 5, to: 5, max: 3, reason: 'Три круга не сошлись' }] };
+  const state = { node: 'P5E1', history: [], counters: {}, denials: {} };
+
+  assert.equal(walk(state, graph, config, ['P5S1', 'P5G1', 'P5S2', 'P5G2', 'P5S1']).ok, true);
+  assert.equal(state.counters['cycle:5>5'], 1);
+  assert.equal(walk(state, graph, config, ['P5G1', 'P5S2', 'P5G2', 'P5S1']).ok, true);
+  assert.equal(state.counters['cycle:5>5'], 2, 'второй круг — +1, переход P5G1 → P5S2 не считается');
+});
+
+test('applyGoto: from == to — этап без узла входа: возврат — переход, замыкающий петлю', () => {
+  const ids = ['P3S1', 'P3G1', 'P3S2'];
+  const graph = makeGraph(ids.map((id) => stageNode(id, 'этап без входа')), [
+    { from: 'P3S1', to: 'P3G1' },
+    { from: 'P3G1', to: 'P3S1', label: 'нет' },
+    { from: 'P3G1', to: 'P3S2', label: 'да' },
+  ]);
+  const config = { quote_min: 25, cycles: [{ from: 3, to: 3, max: 3, reason: 'Три круга не сошлись' }] };
+  const state = { node: 'P3G1', history: [], counters: {}, denials: {} };
+
+  assert.equal(walk(state, graph, config, ['P3S2']).ok, true);
+  assert.equal(state.counters['cycle:3>3'], undefined, 'P3G1 → P3S2 петлю не замыкает');
+  state.node = 'P3G1';
+  assert.equal(walk(state, graph, config, ['P3S1']).ok, true);
+  assert.equal(state.counters['cycle:3>3'], 1);
+});
+
+test('applyGoto: from == to — гейт, куда приходят из другого этапа: возврат к шагу этапа считается', () => {
+  // P10E1 → P10S1 → P10S2 → P3E1 → P3Q1 → P10G1 (нет → P10S1, да → P5E1): петля идёт
+  // через этап 3, от входа этапа 10 по его рёбрам в P10G1 не попасть.
+  const ids = ['P10E1', 'P10S1', 'P10S2', 'P3E1', 'P3Q1', 'P10G1', 'P5E1'];
+  const graph = makeGraph(ids.map((id) => stageNode(id, 'узел валидации ветки')), [
+    { from: 'P10E1', to: 'P10S1' },
+    { from: 'P10S1', to: 'P10S2' },
+    { from: 'P10S2', to: 'P3E1' },
+    { from: 'P3E1', to: 'P3Q1' },
+    { from: 'P3Q1', to: 'P10G1' },
+    { from: 'P10G1', to: 'P10S1', label: 'нет' },
+    { from: 'P10G1', to: 'P5E1', label: 'да' },
+  ]);
+  const config = { quote_min: 25, cycles: [{ from: 10, to: 10, max: 3, reason: 'Валидация ветки не сошлась' }] };
+  const state = { node: 'P10E1', history: [], counters: {}, denials: {} };
+
+  assert.equal(walk(state, graph, config, ['P10S1', 'P10S2', 'P3E1', 'P3Q1', 'P10G1', 'P10S1']).ok, true);
+  assert.equal(state.counters['cycle:10>10'], 1);
+});
+
+// На настоящих графах скилов: каждый этап с потолком from == to проходится от входа
+// до выхода без единого возврата, и каждая петля этапа содержит считаемый возврат —
+// иначе потолок либо останавливает штатный проход, либо не ловит бесконечный круг.
+test('реальные скилы: этапы с потолком возвратов проходимы вперёд, и каждая их петля считается', () => {
+  const skillsDir = fileURLToPath(new URL('../skills/', import.meta.url));
+  let checked = 0;
+  for (const skill of readdirSync(skillsDir)) {
+    const dir = join(skillsDir, skill);
+    if (!existsSync(join(dir, 'rails.yaml'))) continue;
+    const config = loadRailsConfig(dir);
+    const graph = loadSkillGraph(dir, config);
+    for (const cap of (config.cycles || []).filter((c) => c.from === c.to)) {
+      const stage = cap.from;
+      const inStage = (id) => Number(/^P(\d+)/.exec(id)?.[1]) === stage;
+      const entry = `P${stage}E1`;
+      const where = `${skill}, этап ${stage}`;
+      assert.ok(graph.node(entry), `${where}: нет узла входа ${entry}`);
+
+      // Все узлы этапа, достижимые от входа скила, — включая гейты, куда приходят из
+      // другого этапа (валидация ветки после общего отчёта).
+      const all = new Set(['P0E1']);
+      const bfs = ['P0E1'];
+      while (bfs.length) {
+        for (const { to } of graph.outgoing(bfs.shift())) {
+          if (!all.has(to)) { all.add(to); bfs.push(to); }
+        }
+      }
+      const nodes = [...all].filter(inStage);
+
+      // Классификация каждого ребра этапа — через applyGoto, как в живой сессии.
+      const edges = [];
+      for (const from of nodes) {
+        for (const { to } of graph.outgoing(from)) {
+          if (!inStage(to)) continue;
+          const state = { node: from, history: [], counters: {}, denials: {} };
+          const r = applyGoto(state, graph, config, { node: to, quote: graph.node(to).label });
+          assert.equal(r.ok, true, `${where}: переход ${from} → ${to} отклонён: ${r.reason}`);
+          edges.push({ from, to, isReturn: state.counters[`cycle:${stage}>${stage}`] === 1 });
+        }
+      }
+
+      // Петля без считаемого возврата: цикл в подграфе этапа без рёбер-возвратов.
+      const forward = edges.filter((e) => !e.isReturn);
+      const color = new Map();
+      const visit = (id) => {
+        color.set(id, 'grey');
+        for (const e of forward.filter((f) => f.from === id)) {
+          assert.notEqual(color.get(e.to), 'grey', `${where}: петля через ${e.from} → ${e.to} не считается потолком`);
+          if (!color.has(e.to)) visit(e.to);
+        }
+        color.set(id, 'black');
+      };
+      for (const id of nodes) if (!color.has(id)) visit(id);
+
+      // Штатный проход: от входа до узла с ребром из этапа — только по рёбрам вперёд.
+      const reached = new Set([entry]);
+      const frontier = [entry];
+      while (frontier.length) {
+        const id = frontier.shift();
+        for (const e of forward.filter((f) => f.from === id && !reached.has(f.to))) {
+          reached.add(e.to);
+          frontier.push(e.to);
+        }
+      }
+      const exits = [...reached].filter((id) => graph.outgoing(id).some(({ to }) => !inStage(to)));
+      assert.ok(exits.length > 0, `${where}: выход из этапа недостижим без возврата`);
+      checked++;
+    }
+  }
+  assert.ok(checked >= 20, `проверено этапов: ${checked}`);
+});
+
+test('decompose-plan: штатный проход этапа разбиения доходит до записи тикетов без cycle_limit', () => {
+  const dir = fileURLToPath(new URL('../skills/decompose-plan/', import.meta.url));
+  const config = loadRailsConfig(dir);
+  const graph = loadSkillGraph(dir, config);
+  // Кратчайший путь P10E1 → P10S15 по рёбрам этапа 10 (BFS) — без хардкода цепочки.
+  const prev = new Map([['P10E1', null]]);
+  const queue = ['P10E1'];
+  while (queue.length && !prev.has('P10S15')) {
+    const id = queue.shift();
+    for (const { to } of graph.outgoing(id)) {
+      if (!/^P10[ERSGQ]\d+$/.test(to) || prev.has(to)) continue;
+      prev.set(to, id);
+      queue.push(to);
+    }
+  }
+  const path = [];
+  for (let id = 'P10S15'; id !== 'P10E1'; id = prev.get(id)) path.unshift(id);
+  assert.ok(path.includes('P10S14'), 'путь проходит через запись тикетов');
+
+  const state = { node: 'P10E1', history: [], counters: {}, denials: {} };
+  assert.deepEqual(walk(state, graph, config, path), { ok: true });
 });
 
 // --- loadState / saveState / deleteState ------------------------------------
