@@ -28,7 +28,7 @@
 import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
-import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, serializeFrontmatter } from 'workflow-ai/lib/utils.mjs';
+import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, serializeFrontmatter, replaceFileAtomicSync } from 'workflow-ai/lib/utils.mjs';
 
 const PROJECT_DIR = findProjectRoot();
 const WORKFLOW_DIR = path.join(PROJECT_DIR, '.workflow');
@@ -132,8 +132,12 @@ function demoteToBacklog(ticketId) {
     fs.mkdirSync(BACKLOG_DIR, { recursive: true });
   }
 
+  // Сначала переезд, потом содержимое: тикет всё время лежит ровно в одной
+  // колонке. Прямая запись обрезала только что переехавший файл до нуля, и
+  // следующий же readTickets в этом самом скрипте мог прочитать тикет с пустым
+  // frontmatter — то есть без зависимостей, из-за которых его сюда и отправили.
   fs.renameSync(sourcePath, targetPath);
-  fs.writeFileSync(targetPath, newContent, 'utf8');
+  replaceFileAtomicSync(targetPath, newContent);
   return true;
 }
 

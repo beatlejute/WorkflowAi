@@ -13,6 +13,7 @@
 
 import fs from "fs";
 import path from "path";
+import { replaceFileAtomicSync, approvalTempPath } from "../lib/utils.mjs";
 
 // Хук вызывается из CLI, где у каждого сообщения свой префикс, и из замеров, где
 // логи не нужны. Заглушка по умолчанию избавляет замеры от подмены консоли.
@@ -53,7 +54,16 @@ export function updateApprovalFilesHook(
             data.decided_by = "move-ticket";
             data.comment = `auto-approved on move to ${target}`;
             data.updated_at = new Date().toISOString();
-            fsModule.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
+            // Решение вписывается заменой файла целиком. Прямая запись обрезала
+            // approval-файл до нуля, и раннер в poll-цикле гейта читал пустую
+            // строку: readApprovalFile отвечает на это «corrupt approval file» и
+            // уводит стадию в goto.error ровно в тот момент, когда человек нажал
+            // approve (инцидент QA-37-003). Ретраи на стороне чтения (25 и 50 мс) —
+            // страховка, а не решение: под нагрузкой они не успевают.
+            replaceFileAtomicSync(filePath, JSON.stringify(data, null, 2), {
+              fsModule,
+              tmpPath: approvalTempPath(workflowDir),
+            });
             logger.info(`Approval file ${file} auto-approved on move to ${target}`);
           }
         } catch (err) {

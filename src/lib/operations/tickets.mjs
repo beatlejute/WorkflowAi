@@ -1,5 +1,5 @@
 import { findProjectRoot } from '../find-root.mjs';
-import { parseFrontmatter, serializeFrontmatter, getLastReviewStatus } from '../utils.mjs';
+import { parseFrontmatter, serializeFrontmatter, getLastReviewStatus, replaceFileAtomic, approvalTempPath } from '../utils.mjs';
 import { existsSync, readdirSync, promises as fs } from 'node:fs';
 import { resolve, join } from 'node:path';
 
@@ -175,7 +175,15 @@ export async function approveOpenGates(root, id, target) {
         data.decided_by = 'move-ticket';
         data.comment = `auto-approved on move to ${target}`;
         data.updated_at = new Date().toISOString();
-        await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
+        // Решение вписывается заменой файла целиком. Прямая запись обрезала
+        // approval-файл до нуля, и раннер в poll-цикле гейта читал пустую строку:
+        // readApprovalFile отвечает на это «corrupt approval file» и уводит
+        // стадию в goto.error ровно в тот момент, когда человек нажал approve
+        // (инцидент QA-37-003). Ретраи на стороне чтения (25 и 50 мс) — страховка,
+        // а не решение: под нагрузкой они не успевают.
+        await replaceFileAtomic(filePath, JSON.stringify(data, null, 2), {
+          tmpPath: approvalTempPath(join(root, '.workflow')),
+        });
         approved.push(file);
       } catch {
         // Битый или исчезнувший файл — пропускаем остальные не трогаем.
@@ -260,16 +268,22 @@ export async function moveTicket(projectRoot, id, target) {
     await fs.mkdir(targetDir, { recursive: true });
   }
 
-  // Перемещение файла
+  // Перемещение файла. Сначала переезд, потом содержимое: тикет всё время лежит
+  // ровно в одной колонке. rename на свободное имя проходит и когда исходный файл
+  // держит открытым читатель (проверено запуском на NTFS).
   try {
     await fs.rename(sourcePath, targetPath);
   } catch (e) {
     throw new Error(`Не удалось переместить файл: ${e.message}`);
   }
 
-  // Запись обновлённого контента
+  // Запись обновлённого контента. Прямая запись обрезала только что переехавший
+  // тикет до нуля. Этот путь зовут из MCP move_ticket — то есть человек или
+  // соседний агент может подвинуть тикет ровно в тот момент, когда стадия
+  // раннера читает колонку; читатель получал тикет с пустым frontmatter и
+  // молча считал, что зависимостей у него нет.
   try {
-    await fs.writeFile(targetPath, newContent, 'utf8');
+    await replaceFileAtomic(targetPath, newContent);
   } catch (e) {
     throw new Error(`Не удалось записать файл: ${e.message}`);
   }

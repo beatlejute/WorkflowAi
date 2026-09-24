@@ -9,7 +9,7 @@
  * настоящим, и незамеченный регресс в хуке.
  *
  * Здесь считается то, что от загрузки машины не зависит: число обращений к диску.
- * Хук обязан стоить фиксированные 4 операции независимо от того, сколько чужих
+ * Хук обязан стоить фиксированные 5 операций независимо от того, сколько чужих
  * approval-файлов лежит в каталоге. Часы остались в src/tests/perf-*.bench.mjs —
  * их гоняют отдельной целью (npm run bench:perf), одну за раз.
  *
@@ -53,7 +53,7 @@ function createApprovalsDir(noiseFiles) {
   return { tmpDir, workflowDir, pendingFile };
 }
 
-test('approval-hook: цена хука — 4 обращения к диску независимо от размера каталога approvals', () => {
+test('approval-hook: цена хука — 5 обращений к диску независимо от размера каталога approvals', () => {
   const { tmpDir, workflowDir, pendingFile } = createApprovalsDir(40);
   const counter = createCountingFs();
 
@@ -68,8 +68,15 @@ test('approval-hook: цена хука — 4 обращения к диску н
     assert.equal(counter.op('existsSync'), 1, `проверка каталога approvals — одна: ${counter.describe()}`);
     assert.equal(counter.op('readdirSync'), 1, `каталог читается один раз, второй проход — регресс: ${counter.describe()}`);
     assert.equal(counter.op('readFileSync'), 1, `читается только свой гейт, чужие 40 — нет: ${counter.describe()}`);
-    assert.equal(counter.op('writeFileSync'), 1, `свой гейт переписывается один раз: ${counter.describe()}`);
-    assert.equal(counter.total(), 4, `цена хука — ровно 4 операции: ${counter.describe()}`);
+    // Запись решения идёт через временный файл: writeFileSync во временный путь плюс
+    // renameSync поверх гейта. Пятая операция — цена атомарности, принятая осознанно
+    // 2026-09-24: прямая запись обрезала approval-файл до нуля, и раннер в poll-цикле
+    // читал пустую строку, уводя стадию в goto.error ровно в момент, когда человек
+    // нажал approve. Растёт цена на константу, а не на размер каталога — второй тест
+    // файла держит именно это.
+    assert.equal(counter.op('writeFileSync'), 1, `содержимое пишется один раз, во временный файл: ${counter.describe()}`);
+    assert.equal(counter.op('renameSync'), 1, `публикация решения — одна операция замены: ${counter.describe()}`);
+    assert.equal(counter.total(), 5, `цена хука — ровно 5 операций: ${counter.describe()}`);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

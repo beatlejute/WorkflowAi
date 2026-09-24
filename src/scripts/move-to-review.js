@@ -18,6 +18,7 @@ import { findProjectRoot } from "workflow-ai/lib/find-root.mjs";
 import {
   printResult,
   getLastReviewStatus,
+  replaceFileAtomicSync,
 } from "workflow-ai/lib/utils.mjs";
 
 // Корень проекта
@@ -106,8 +107,13 @@ function moveToReview(ticketId) {
     fs.mkdirSync(REVIEW_DIR, { recursive: true });
   }
 
+  // Сначала переезд, потом содержимое: тикет всё время лежит ровно в одной
+  // колонке. Содержимое здесь то же, что и было, но прямая запись всё равно
+  // обрезала файл до нуля — и стадии, читающие review/, видели тикет с пустым
+  // frontmatter. Запись оставлена (она поднимает mtime, на который смотрят
+  // verify-artifacts и восстановление completed_at в sync-ticket-status).
   fs.renameSync(sourcePath, targetPath);
-  fs.writeFileSync(targetPath, content, "utf8");
+  replaceFileAtomicSync(targetPath, content);
 
   return {
     status: "moved",

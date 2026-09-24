@@ -21,6 +21,7 @@ import {
   serializeFrontmatter,
   getLastReviewStatus,
   appendReviewEntry,
+  replaceFileAtomicSync,
 } from "workflow-ai/lib/utils.mjs";
 import { updateApprovalFilesHook as updateApprovalFilesHookCore } from "./move-ticket-core.js";
 
@@ -221,7 +222,10 @@ async function moveTicket(ticketId, target) {
     fs.mkdirSync(targetDir, { recursive: true });
   }
 
-  // Перемещение файла
+  // Перемещение файла. Порядок «сначала переезд, потом содержимое» сохранён
+  // намеренно: тикет всё время лежит ровно в одной колонке, и читатель не
+  // получает дубль в двух папках. rename на свободное имя проходит даже когда
+  // исходный файл держит открытым читатель (проверено запуском на NTFS).
   try {
     fs.renameSync(sourcePath, targetPath);
   } catch (e) {
@@ -232,9 +236,13 @@ async function moveTicket(ticketId, target) {
     };
   }
 
-  // Запись обновлённого контента
+  // Запись обновлённого контента. Прямая запись обрезала только что переехавший
+  // тикет до нуля, и pick-next-task читал его с пустым frontmatter: тикет без
+  // статуса и без зависимостей — checkDependencies(undefined) отвечает «зависимостей
+  // нет», и на работу мог уйти тикет с невыполненными зависимостями. Ни строки в
+  // журнале об этом не было.
   try {
-    fs.writeFileSync(targetPath, newContent, "utf8");
+    replaceFileAtomicSync(targetPath, newContent);
   } catch (e) {
     return {
       status: "error",

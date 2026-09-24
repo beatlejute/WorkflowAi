@@ -19,7 +19,7 @@ import fs from 'fs';
 import path from 'path';
 import YAML from 'workflow-ai/lib/js-yaml.mjs';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
-import { parseFrontmatter, serializeFrontmatter } from 'workflow-ai/lib/utils.mjs';
+import { parseFrontmatter, serializeFrontmatter, replaceFileAtomicSync } from 'workflow-ai/lib/utils.mjs';
 
 // Корень проекта
 const PROJECT_DIR = findProjectRoot();
@@ -68,8 +68,12 @@ function moveToReady(ticketId) {
     fs.mkdirSync(READY_DIR, { recursive: true });
   }
 
+  // Сначала переезд, потом содержимое: тикет всё время лежит ровно в одной
+  // колонке. Прямая запись поверх только что переехавшего файла обрезала его до
+  // нуля, и check-conditions/pick-next-task видели в ready/ тикет с пустым
+  // frontmatter — без статуса, без типа и без зависимостей.
   fs.renameSync(sourcePath, targetPath);
-  fs.writeFileSync(targetPath, newContent, 'utf8');
+  replaceFileAtomicSync(targetPath, newContent);
   return true;
 }
 

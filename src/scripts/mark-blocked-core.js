@@ -13,7 +13,7 @@
 
 import fs from "fs";
 import path from "path";
-import { parseFrontmatter, serializeFrontmatter } from "workflow-ai/lib/utils.mjs";
+import { parseFrontmatter, serializeFrontmatter, replaceFileAtomicSync } from "workflow-ai/lib/utils.mjs";
 
 /**
  * Рекурсивно ищет файл тикета по префиксу имени.
@@ -92,9 +92,33 @@ export function markBlockedTicket({
   frontmatter.auto_blocked_attempts = attempts;
   frontmatter.auto_blocked_at = now;
 
-  // Сериализация и запись обратно в файл
+  // Сериализация и запись обратно в файл.
+  //
+  // Не writeFileSync поверх тикета: он раскрывается в open(файл, 'w') и запись
+  // вторым шагом, то есть усекает файл сразу, а содержимое отдаёт позже. В этом
+  // окне сканер доски (pick-next-task readTicketsFromDir, check-conditions
+  // readTickets, sync-ticket-status, check-anomalies) получает тикет нулевой
+  // длины или с обрезанным хвостом — и молча считает неправду: id подставляется
+  // из имени файла, статус и parent_plan пропадают, секция Result теряется, и
+  // findCompletedInProgress перестаёт видеть тикет доделанным. Ни одна из этих
+  // функций при этом не падает. Проверено прогоном без единой правки боевого
+  // кода: конкурентный читатель за 4 с получил 3 пустых и 23 обрезанных чтения
+  // из 275.
+  //
+  // Имя временного файла берётся общее (tempSiblingPath). Своё здесь было
+  // заведено из-за длинных id: компонент пути длиннее 255 символов NTFS не
+  // создаёт, а id тикета бывает больше 200 (src/tests/edge-ticket-id-long.test.mjs),
+  // и общее имя выходило за предел — ENOENT на записи там, где прямая запись
+  // проходила. С 2026-09-24 общий помощник имя урезает сам, поэтому копия
+  // убрана: две формы временного имени означали бы, что исключение
+  // artifact-snapshot нужно держать в двух местах, и второе про это забыло бы.
+  //
+  // Операция — rename поверх (внутри replaceFileAtomicSync), а не link: тикет
+  // обновляется на месте, перезапись существующего файла здесь норма, и link
+  // падал бы EEXIST на каждой блокировке. Про повторы rename на NTFS — в
+  // комментарии к самому помощнику.
   const newContent = serializeFrontmatter(frontmatter) + body;
-  fsModule.writeFileSync(ticketFile, newContent, 'utf8');
+  replaceFileAtomicSync(ticketFile, newContent, { fsModule });
 
   const result = {
     ticketFile,

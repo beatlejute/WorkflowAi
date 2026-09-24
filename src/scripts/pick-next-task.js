@@ -21,7 +21,7 @@
 import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
-import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, getLastReviewStatus, serializeFrontmatter, loadTicketMovementRules, checkAndClosePlan } from 'workflow-ai/lib/utils.mjs';
+import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, getLastReviewStatus, serializeFrontmatter, loadTicketMovementRules, checkAndClosePlan, replaceFileAtomicSync } from 'workflow-ai/lib/utils.mjs';
 import { createLogger } from 'workflow-ai/lib/logger.mjs';
 import * as core from './pick-next-task-core.js';
 
@@ -88,7 +88,15 @@ function autoCorrectTickets(config) {
       }
 
       const newContent = serializeFrontmatter(frontmatter) + body;
-      fs.writeFileSync(toPath, newContent, 'utf8');
+      // Тикет появляется в целевой колонке целиком. Прямая запись создавала его
+      // пустым и только потом наполняла: в это окно тот же проход авто-коррекции
+      // и метрики читали тикет с пустым frontmatter — без completed_at, из-за
+      // которого закрытый тикет защищён от отката на новый круг.
+      // Цель — свободное имя в другой колонке, поэтому лестница повторов
+      // внутри помощника здесь не платится: rename на имя, которого нет,
+      // открытого файла не встречает и EPERM не даёт (проверено запуском:
+      // 300 публикаций под двумя сканерами каталога — 0 повторов).
+      replaceFileAtomicSync(toPath, newContent);
 
       fs.unlinkSync(fromPath);
 
@@ -221,7 +229,12 @@ function archiveTicketsOfArchivedPlans() {
       frontmatter.archived_at = new Date().toISOString();
 
       const destPath = path.join(ARCHIVE_DIR, file);
-      fs.writeFileSync(destPath, serializeFrontmatter(frontmatter) + body, 'utf8');
+      // Тикет появляется в archive/ целиком: иначе метрики и checkDependencies
+      // видели в архиве файл с пустым frontmatter. Цикл по всей done/ ничего не
+      // ждёт: имя в archive/ свободно, а лестница повторов платится только за
+      // замену существующего файла (проверено запуском, см. комментарий к
+      // лестнице в lib/utils.mjs).
+      replaceFileAtomicSync(destPath, serializeFrontmatter(frontmatter) + body);
       fs.unlinkSync(filePath);
 
       archived.push(ticketId);

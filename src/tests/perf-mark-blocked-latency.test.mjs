@@ -10,8 +10,9 @@
  *
  * Здесь считается число обращений к диску — от соседей по прогону оно не зависит.
  * Цена блокировки тикета: один обход дерева тикетов до находки, одно чтение, одна
- * запись, одна дозапись алерта. Часы остались в src/tests/perf-*.bench.mjs
- * (npm run bench:perf, по одному замеру за раз).
+ * запись во временный файл, одна замена тикета этим файлом и одна дозапись
+ * алерта. Часы остались в src/tests/perf-*.bench.mjs (npm run bench:perf, по
+ * одному замеру за раз).
  *
  * Запуск: node --test src/tests/perf-mark-blocked-latency.test.mjs
  */
@@ -82,7 +83,7 @@ function markBlockedCounted(board, counter, attempts = 6) {
   });
 }
 
-test('mark-blocked: цена блокировки — один обход дерева, одно чтение, одна запись, один алерт', () => {
+test('mark-blocked: цена блокировки — один обход дерева, одно чтение, одна публикация, один алерт', () => {
   const board = createBoard(0);
   const counter = createCountingFs();
 
@@ -96,9 +97,33 @@ test('mark-blocked: цена блокировки — один обход дер
     assert.equal(result.alertWritten, true, 'алерт должен быть дозаписан');
 
     assert.equal(counter.op('readFileSync'), 1, `тикет читается один раз: ${counter.describe()}`);
-    assert.equal(counter.op('writeFileSync'), 1, `тикет пишется один раз: ${counter.describe()}`);
+    // Публикация тикета идёт через временный файл: writeFileSync во временный путь
+    // плюс renameSync поверх тикета. Шестая операция — цена атомарности, принятая
+    // осознанно 2026-09-24: прямая запись усекала тикет до нуля, и сканеры доски
+    // (pick-next-task, check-conditions, sync-ticket-status, check-anomalies)
+    // читали тикет без статуса и без зависимостей, не падая и ничего не записывая
+    // в журнал. Формулировка «тикет пишется один раз» здесь была бы неправдой:
+    // единственная запись идёт во ВРЕМЕННЫЙ файл, а тикет получает её rename'ом.
+    assert.equal(counter.op('writeFileSync'), 1, `содержимое пишется один раз, во временный файл: ${counter.describe()}`);
+    assert.equal(counter.op('renameSync'), 1, `публикация тикета — одна операция замены: ${counter.describe()}`);
     assert.equal(counter.op('appendFileSync'), 1, `алерт дозаписывается один раз: ${counter.describe()}`);
     assert.equal(counter.op('existsSync'), 1, `наличие state/ проверяется один раз: ${counter.describe()}`);
+
+    // Потолок на всё остальное. Без него цена растёт молча: новое обращение к
+    // диску, которого нет в списке выше, ни один assert не заметил бы — именно так
+    // прошёл незамеченным renameSync, когда запись тикета переехала на временный
+    // файл. readdirSync вынесен из суммы: число обходов зависит от того, в каком
+    // порядке файловая система выдаёт колонки, и охраняется отдельным потолком ниже.
+    assert.deepEqual(
+      Object.keys(counter.counts).sort(),
+      ['appendFileSync', 'existsSync', 'readFileSync', 'readdirSync', 'renameSync', 'writeFileSync'],
+      `набор обращений к диску изменился: ${counter.describe()}`,
+    );
+    assert.equal(
+      counter.total() - counter.op('readdirSync'),
+      5,
+      `цена блокировки помимо обхода дерева — ровно 5 операций: ${counter.describe()}`,
+    );
 
     // Обход прекращается на найденном тикете, поэтому точное число readdir зависит
     // от порядка выдачи каталогов файловой системой. Потолок — один проход по дереву:

@@ -27,7 +27,7 @@
 import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
-import { parseFrontmatter, serializeFrontmatter, printResult } from 'workflow-ai/lib/utils.mjs';
+import { parseFrontmatter, serializeFrontmatter, printResult, replaceFileAtomicSync, createFileExclusiveSync } from 'workflow-ai/lib/utils.mjs';
 
 const PROJECT_DIR = findProjectRoot();
 const WORKFLOW_DIR = path.join(PROJECT_DIR, '.workflow');
@@ -117,7 +117,7 @@ export function generateNextPlanId(plansDir) {
  * @param {string} todayStr — сегодняшняя дата ISO
  * @returns {string} путь к созданному плану
  */
-function createPlanFromTemplate(templatePath, templateFm, templateBody, planId, todayStr) {
+export function createPlanFromTemplate(templatePath, templateFm, templateBody, planId, todayStr) {
   const planFm = {
     id: planId,
     title: `${templateFm.title} (${todayStr})`,
@@ -139,7 +139,16 @@ function createPlanFromTemplate(templatePath, templateFm, templateBody, planId, 
     fs.mkdirSync(PLANS_DIR, { recursive: true });
   }
 
-  fs.writeFileSync(planPath, planContent, 'utf8');
+  // План появляется в plans/current/ целиком. Прямая запись создавала его пустым
+  // и только потом наполняла: MCP get_plan/list_plans в это окно отдавали план
+  // без id, заголовка и статуса — молча, без ошибки, по которой это видно.
+  //
+  // Операция — link, а не rename: номер плана выдан сканированием каталога
+  // (generateNextPlanId), поэтому занятое имя означает, что тот же номер уже
+  // выдан соседнему прогону. rename затёр бы его план молча, link отказывает
+  // EEXIST — вызывающий main() ловит это как «не удалось обработать шаблон», не
+  // трогает last_triggered, и следующий запуск повторит попытку с новым номером.
+  createFileExclusiveSync(planPath, planContent);
   console.log(`[INFO] Created plan ${planId} from template ${templateFm.id}`);
 
   return planPath;
@@ -153,10 +162,14 @@ function createPlanFromTemplate(templatePath, templateFm, templateBody, planId, 
  * @param {string} body — тело шаблона
  * @param {string} todayStr — сегодняшняя дата ISO
  */
-function updateTemplateLastTriggered(templatePath, frontmatter, body, todayStr) {
+export function updateTemplateLastTriggered(templatePath, frontmatter, body, todayStr) {
   frontmatter.last_triggered = todayStr;
   const content = serializeFrontmatter(frontmatter) + '\n' + body;
-  fs.writeFileSync(templatePath, content, 'utf8');
+  // Шаблон заменяется целиком поверх существующего файла — здесь перезапись
+  // норма, поэтому rename, а не link. Прямая запись обрезала шаблон до нуля, и
+  // следующий проход по plans/templates/ видел файл без type, enabled и trigger:
+  // шаблон молча выпадал из проверки триггеров.
+  replaceFileAtomicSync(templatePath, content);
   console.log(`[INFO] Updated last_triggered for ${frontmatter.id} to ${todayStr}`);
 }
 
