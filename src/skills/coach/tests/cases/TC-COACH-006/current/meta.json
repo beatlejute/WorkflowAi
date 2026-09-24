@@ -1,0 +1,36 @@
+{
+  "date": "2026-09-24T10:43:07.066Z",
+  "skill_sha": "9991d5e",
+  "status": "passed",
+  "duration_ms": 1,
+  "per_model": {
+    "claude-sonnet": {
+      "passed": true,
+      "errored": false,
+      "pass_count": 2,
+      "error_count": 0,
+      "total": 3,
+      "threshold": 2
+    }
+  },
+  "rubric_scores": [
+    {
+      "agentId": "claude-sonnet",
+      "trial": 1,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "claude-sonnet",
+      "trial": 3,
+      "score": 1,
+      "errored": false
+    }
+  ]
+}

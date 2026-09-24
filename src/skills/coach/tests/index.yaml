@@ -42,3 +42,8 @@ cases:
     origin_chg: ["convert-2026-09-22"]
     tags: [rails, anatomy, regression-guard]
     severity: critical
+  - id: TC-COACH-006
+    file: cases/TC-COACH-006-rubric-scale-one-condition.yaml
+    origin_chg: ["ad-hoc-2026-09-24-judge-pilot"]
+    tags: [rubric-scale, test-authorship, anti-pattern]
+    severity: high
