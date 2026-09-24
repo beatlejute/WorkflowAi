@@ -4,7 +4,7 @@ import { initProject } from './init.mjs';
 import { runPipeline } from './runner.mjs';
 import { packageVersion } from './lib/package-version.mjs';
 import { join, dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { getGlobalDir, refreshGlobalDir, ensureGlobalDir } from './global-dir.mjs';
 import { createSkillJunctions, createScriptJunction, createConfigJunction, ejectSkill, ejectScripts, ejectConfigs, listSkillsWithStatus } from './junction-manager.mjs';
 
@@ -259,6 +259,11 @@ export function run(argv) {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Прямой запуск `node src/cli.mjs …`. Прежнее сравнение с `file://${argv[1]}` на
+// Windows не совпадало никогда: argv[1] там `D:\…` с обратными слэшами, а URL
+// модуля — `file:///D:/…`, и прямой запуск молча ничего не делал. pathToFileURL
+// строит тот же вид, что import.meta.url, на любой ОС. Обычный вход — bin/workflow.mjs,
+// он зовёт run() сам.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   run(process.argv.slice(2));
 }

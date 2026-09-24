@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import path from 'node:path';
+import { replaceFileAtomicSync } from './utils.mjs';
 
 const HISTORY_HEADER_4COL = '| Дата/время | Скил | Агент | Статус |';
 const HISTORY_SEP_4COL = '|------------|------|-------|--------|';
@@ -40,7 +40,6 @@ export function appendAgentRun(ticketPath, entry) {
     const headerIdx = lines.findIndex(l => /^\s*\|.*\|/.test(l) && !/^\s*\|[\s\-|]+\|\s*$/.test(l));
     if (headerIdx === -1) {
       // Section exists but no table — create table fresh
-      const beforeBlank = lines.slice(0, headerIdx === -1 ? lines.length : headerIdx);
       updated = content.replace(sectionRegex, `$1## История работы\n\n${HISTORY_HEADER_4COL}\n${HISTORY_SEP_4COL}\n${newRow}\n`);
     } else {
       const headerLine = lines[headerIdx];
@@ -84,15 +83,17 @@ export function appendAgentRun(ticketPath, entry) {
     }
   }
 
-  // Atomic write: temp file + rename
-  const dir = path.dirname(ticketPath);
-  const tmp = path.join(dir, `.${path.basename(ticketPath)}.tmp.${process.pid}.${Date.now()}`);
+  // Публикация — общим помощником, а не своим temp + rename: своя версия на NTFS
+  // падала EPERM, как только тикет держал открытым любой другой читатель (скан доски,
+  // MCP get_ticket), — rename поверх открытого файла там запрещён, а повторов не было.
+  // Проверено запуском 2026-09-24: при открытом дескрипторе чтения возвращался
+  // WRITE_ERROR, строка истории терялась, а раннер (src/runner.mjs, audit-log)
+  // только писал предупреждение в лог — журнал запусков агентов молча становился
+  // неполным. Тот же дефект закрыт в appendReviewEntry (src/lib/review-section.mjs).
   try {
-    fs.writeFileSync(tmp, updated, 'utf8');
-    fs.renameSync(tmp, ticketPath);
+    replaceFileAtomicSync(ticketPath, updated);
     return { ok: true };
   } catch (err) {
-    try { fs.unlinkSync(tmp); } catch {}
     return { ok: false, code: 'WRITE_ERROR', error: err.message };
   }
 }

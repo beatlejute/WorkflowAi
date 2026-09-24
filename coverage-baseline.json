@@ -8,10 +8,10 @@
   },
   "files": {
     "src/cli.mjs": {
-      "lines": 55.22,
-      "statements": 55.22,
-      "functions": 45,
-      "branches": 62.56
+      "lines": 91.28,
+      "statements": 91.28,
+      "functions": 95,
+      "branches": 77.45
     },
     "src/global-dir.mjs": {
       "lines": 88.75,
@@ -38,10 +38,10 @@
       "branches": 66.66
     },
     "src/lib/agent-history.mjs": {
-      "lines": 50.67,
-      "statements": 50.67,
+      "lines": 95.97,
+      "statements": 95.97,
       "functions": 100,
-      "branches": 65.9
+      "branches": 92.1
     },
     "src/lib/agent-spawner.mjs": {
       "lines": 72.19,
@@ -128,8 +128,8 @@
       "branches": 80.71
     },
     "src/lib/review-section.mjs": {
-      "lines": 97.25,
-      "statements": 97.25,
+      "lines": 97.28,
+      "statements": 97.28,
       "functions": 100,
       "branches": 94.66
     },
