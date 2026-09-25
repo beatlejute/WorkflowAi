@@ -169,8 +169,9 @@ describe('model-evaluate: chat', () => {
     });
   });
 
-  for (const level of [0, 6, 2.5, 'четыре']) {
-    it(`уровень ${JSON.stringify(level)} вне 1..5 — bad_response`, async () => {
+  // true, [3] и null не уровень: Number() превратил бы true в молчаливый уровень 1.
+  for (const level of [0, 6, 2.5, 'четыре', true, [3], null, '2.0']) {
+    it(`уровень ${JSON.stringify(level)} не из 1..5 — bad_response`, async () => {
       const reply = JSON.stringify({ answers: [{ id: 'q1', level }] });
       await withServer((req, res) => sendJson(res, 200, chatResponse(reply)), async (server) => {
         await rejectsWithClass(evaluate(agent('chat', server.url('/c')),
@@ -178,6 +179,22 @@ describe('model-evaluate: chat', () => {
       });
     });
   }
+
+  it('уровень строкой из цифр ("2") принимается', async () => {
+    const reply = JSON.stringify({ answers: [{ id: 'q1', level: '2' }] });
+    await withServer((req, res) => sendJson(res, 200, chatResponse(reply)), async (server) => {
+      const result = await evaluate(agent('chat', server.url('/c')), { data: 'x', questions: [question('q1')] }, OPTIONS);
+      assert.equal(result.answers.q1.level, 2);
+    });
+  });
+
+  it('объект без answers перед ответом (цитата данных) пропускается', async () => {
+    const reply = 'Данные: {"report": "отчёт", "id": "q1"}\nОтвет: {"answers":[{"id":"q1","level":4}]}';
+    await withServer((req, res) => sendJson(res, 200, chatResponse(reply)), async (server) => {
+      const result = await evaluate(agent('chat', server.url('/c')), { data: 'x', questions: [question('q1')] }, OPTIONS);
+      assert.equal(result.answers.q1.level, 4);
+    });
+  });
 
   it('изображения передаются частями image_url', async () => {
     const reply = JSON.stringify({ answers: [{ id: 'q1', level: 3 }] });

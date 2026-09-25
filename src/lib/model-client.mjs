@@ -15,14 +15,26 @@
  *     поле `kilo.access`). В вывод и в сообщения ошибок ключ не попадает.
  *   - Прокси — первая заданная из HTTPS_PROXY, https_proxy, HTTP_PROXY, http_proxy,
  *     ALL_PROXY, all_proxy; только для `https:`-адресов, туннелем CONNECT.
+ *   - `http:` — только для адреса своей машины (localhost, 127.0.0.1, ::1): ключ
+ *     уходит в заголовке, и опечатка в схеме отправила бы его открытым текстом.
  *   - Повторы — при HTTP 429, 500, 502, 503 и сетевой ошибке, до двух, с паузами
- *     2 и 4 с. Таймаут одной попытки — `timeout_s` агента, по умолчанию 120 с.
+ *     2 и 4 с. `timeout_s` агента (по умолчанию 120 с) ограничивает одну попытку:
+ *     с повторами вызов длится до 3 × timeout_s + 6 с.
+ *   - `options.signal` (AbortSignal) прерывает запрос и паузу повтора — так раннер
+ *     останавливает вызов модели по SIGINT/SIGTERM.
  *   - Ошибка — ModelClientError с полем `class` (MODEL_ERROR_CLASSES).
+ *
+ * Имена переменных окружения на Windows не зависят от регистра, но копия
+ * `{ ...process.env }` (так env собирает lib/agent-env.mjs) эту особенность теряет:
+ * `Openrouter_Api_Key` в системе не находился бы по имени `OPENROUTER_API_KEY`,
+ * хотя CLI-агенты эту переменную видят. Поэтому на win32 имя ищется без учёта
+ * регистра (envValue).
  */
 
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import net from 'node:net';
 import tls from 'node:tls';
 import path from 'node:path';
 
@@ -33,8 +45,9 @@ export const MODEL_ERROR_CLASSES = Object.freeze([
   'server',       // HTTP 5xx после повторов
   'timeout',      // истёк timeout_s
   'network',      // соединение не установлено (сервер, прокси) после повторов
-  'bad_request',  // прочие HTTP 4xx; изображения для decisions; вложение сверх ограничений
+  'bad_request',  // прочие HTTP 4xx; изображения для decisions; вложение сверх ограничений; http: не на свою машину
   'bad_response', // ответ не JSON; нет обязательных полей протокола
+  'aborted',      // запрос прерван через options.signal (остановка пайплайна)
 ]);
 
 export class ModelClientError extends Error {
@@ -68,21 +81,31 @@ const BODY_EXCERPT_LIMIT = 300;
 // Ключ
 // ---------------------------------------------------------------------------
 
-export function kiloAuthPath(env = process.env) {
-  return path.join(env.HOME || env.USERPROFILE || '', '.local', 'share', 'kilo', 'auth.json');
+/** Значение переменной окружения; на win32 имя сравнивается без учёта регистра. */
+export function envValue(env, name, platform = process.platform) {
+  if (env[name] !== undefined) return env[name];
+  if (platform !== 'win32') return undefined;
+  const upper = name.toUpperCase();
+  const match = Object.keys(env).find((key) => key.toUpperCase() === upper);
+  return match === undefined ? undefined : env[match];
 }
 
-export function resolveModelKey(agent, env = process.env, now = Date.now()) {
+export function kiloAuthPath(env = process.env, platform = process.platform) {
+  const home = envValue(env, 'HOME', platform) || envValue(env, 'USERPROFILE', platform) || '';
+  return path.join(home, '.local', 'share', 'kilo', 'auth.json');
+}
+
+export function resolveModelKey(agent, env = process.env, now = Date.now(), platform = process.platform) {
   const auth = agent.auth || {};
   if (typeof auth.env === 'string') {
-    const key = env[auth.env];
+    const key = envValue(env, auth.env, platform);
     if (!key) {
       throw new ModelClientError('no_key', `Agent "${agent.id || agent.model}": environment variable ${auth.env} is empty`);
     }
     return key;
   }
   if (auth.kilo_oauth === true) {
-    const file = kiloAuthPath(env);
+    const file = kiloAuthPath(env, platform);
     let parsed;
     try {
       parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
@@ -139,11 +162,28 @@ export function buildImageParts(images, { cwd = process.cwd(), limits = DEFAULT_
 // Транспорт
 // ---------------------------------------------------------------------------
 
-function proxyUrlFrom(env) {
+function proxyUrlFrom(env, platform) {
   for (const name of PROXY_ENV_NAMES) {
-    if (env[name]) return env[name];
+    const value = envValue(env, name, platform);
+    if (value) return value;
   }
   return null;
+}
+
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
+/** Адрес модели: https — любой, http — только своя машина. Иначе bad_request до вызова. */
+export function assertModelUrl(url) {
+  let target;
+  try {
+    target = new URL(String(url));
+  } catch {
+    throw new ModelClientError('bad_request', `Invalid model url: ${url}`);
+  }
+  if (target.protocol === 'https:') return target;
+  if (target.protocol === 'http:' && LOOPBACK_HOSTS.has(target.hostname)) return target;
+  throw new ModelClientError('bad_request',
+    `Model url must be https:// (http:// only for localhost, 127.0.0.1, ::1): ${target.protocol}//${target.host}`);
 }
 
 function scrub(text, secret) {
@@ -156,8 +196,12 @@ function excerpt(body, secret) {
   return clean.length > BODY_EXCERPT_LIMIT ? `${clean.slice(0, BODY_EXCERPT_LIMIT)}…` : clean;
 }
 
-/** Туннель CONNECT через HTTP-прокси; возвращает сокет до `host:port`. */
-function openProxyTunnel(proxyUrl, host, port) {
+/**
+ * Туннель CONNECT через HTTP-прокси; возвращает сокет до `host:port`. Запрос
+ * CONNECT кладётся в `handles.connect`, чтобы таймаут и прерывание могли его снять.
+ * Прокси без порта — 8080, как у скрипта исследования (perplexity-research.js).
+ */
+function openProxyTunnel(proxyUrl, host, port, handles) {
   return new Promise((resolve, reject) => {
     let proxy;
     try {
@@ -166,7 +210,10 @@ function openProxyTunnel(proxyUrl, host, port) {
       reject(Object.assign(new Error('invalid proxy URL in environment'), { network: true }));
       return;
     }
-    const headers = { Host: `${host}:${port}` };
+    // authority-form (RFC 7230 §5.3.3): IPv6-литерал — в скобках, иначе хост и порт
+    // в `::1:443` неразличимы.
+    const authority = net.isIPv6(host) ? `[${host}]:${port}` : `${host}:${port}`;
+    const headers = { Host: authority };
     if (proxy.username) {
       const credentials = `${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`;
       headers['Proxy-Authorization'] = `Basic ${Buffer.from(credentials).toString('base64')}`;
@@ -175,9 +222,10 @@ function openProxyTunnel(proxyUrl, host, port) {
       hostname: proxy.hostname,
       port: Number(proxy.port) || 8080,
       method: 'CONNECT',
-      path: `${host}:${port}`,
+      path: authority,
       headers,
     });
+    handles.connect = req;
     req.setTimeout(PROXY_CONNECT_TIMEOUT_MS, () => {
       req.destroy(Object.assign(new Error('proxy connection timeout'), { network: true }));
     });
@@ -196,85 +244,149 @@ function openProxyTunnel(proxyUrl, host, port) {
 
 /**
  * Одна попытка POST. Возвращает `{ status, body }`; сетевой сбой — исключение с
- * `network: true`, таймаут — с `timedOut: true`.
+ * `network: true`, таймаут — с `timedOut: true`, прерывание — с `aborted: true`.
+ * Таймаут и прерывание снимают запрос, CONNECT и сокет туннеля.
  */
-async function postOnce(url, headers, payload, { timeoutMs, env }) {
-  const target = new URL(url);
+async function postOnce(target, headers, payload, { timeoutMs, env, platform, signal, ca }) {
+  // Уже прерванный signal: запрос не отправляется вовсе (без этого `attempt` ниже
+  // синхронно доходил до req.end — платный вызов уходил, ответ выбрасывался).
+  if (signal?.aborted) throw Object.assign(new Error('request aborted'), { aborted: true });
   const isHttps = target.protocol === 'https:';
   const port = Number(target.port) || (isHttps ? 443 : 80);
-  const proxyUrl = isHttps ? proxyUrlFrom(env) : null;
+  const proxyUrl = isHttps ? proxyUrlFrom(env, platform) : null;
+  const hostname = target.hostname.replace(/^\[|\]$/g, '');
 
+  const handles = { connect: null, socket: null, req: null };
+  const destroyAll = () => {
+    handles.req?.destroy();
+    handles.socket?.destroy();
+    handles.connect?.destroy();
+  };
+  let settled = false;
   let timer;
-  let req = null;
-  let timedOut = false;
-  const timeout = new Promise((_, reject) => {
+  let onAbort = null;
+  const stop = new Promise((_, reject) => {
     timer = setTimeout(() => {
-      timedOut = true;
-      if (req) req.destroy();
+      settled = true;
+      destroyAll();
       reject(Object.assign(new Error(`request timed out after ${timeoutMs} ms`), { timedOut: true }));
     }, timeoutMs);
+    if (signal) {
+      onAbort = () => {
+        settled = true;
+        destroyAll();
+        reject(Object.assign(new Error('request aborted'), { aborted: true }));
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    }
   });
 
   const attempt = (async () => {
-    const socket = proxyUrl ? await openProxyTunnel(proxyUrl, target.hostname, port) : null;
-    if (timedOut) {
-      socket?.destroy();
+    if (proxyUrl && !settled) handles.socket = await openProxyTunnel(proxyUrl, hostname, port, handles);
+    // Таймаут или прерывание уже сработали — запрос не создаётся.
+    if (settled) {
+      handles.socket?.destroy();
       return null;
     }
     return new Promise((resolve, reject) => {
       const options = {
-        hostname: target.hostname,
+        hostname,
         port,
         path: `${target.pathname}${target.search}`,
         method: 'POST',
         headers: { ...headers, 'Content-Length': Buffer.byteLength(payload) },
       };
-      if (socket) {
-        options.createConnection = () => tls.connect({ socket, servername: target.hostname });
+      if (isHttps && ca) options.ca = ca;
+      if (handles.socket) {
+        const socket = handles.socket;
+        options.createConnection = () => tls.connect({
+          socket,
+          host: hostname,
+          ...(net.isIP(hostname) ? {} : { servername: hostname }),
+          ...(ca ? { ca } : {}),
+        });
       }
-      req = (isHttps ? https : http).request(options, (res) => {
+      const req = (isHttps ? https : http).request(options, (res) => {
         const chunks = [];
         res.on('data', (chunk) => chunks.push(chunk));
         res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf-8') }));
         res.on('error', (err) => reject(Object.assign(err, { network: true })));
       });
+      handles.req = req;
       req.on('error', (err) => reject(Object.assign(err, { network: true })));
       req.end(payload);
     });
   })();
 
   try {
-    return await Promise.race([attempt, timeout]);
+    return await Promise.race([attempt, stop]);
   } finally {
+    settled = true;
     clearTimeout(timer);
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+    // Ответ прочитан целиком или попытка снята — сокет туннеля больше не нужен.
+    handles.socket?.destroy();
     attempt.catch(() => {});
+    stop.catch(() => {});
   }
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** Пауза повтора; прерывание снимает её сразу. */
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(Object.assign(new Error('request aborted'), { aborted: true }));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(Object.assign(new Error('request aborted'), { aborted: true }));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function abortedError(attempts) {
+  return new ModelClientError('aborted', 'Model request aborted', { attempts });
 }
 
 /** POST JSON с повторами; возвращает разобранный JSON успешного ответа. */
 async function postJson(agent, body, options) {
+  const target = assertModelUrl(agent.url);
   const env = options.env || process.env;
-  const key = resolveModelKey(agent, env);
+  const platform = options.platform || process.platform;
+  const key = resolveModelKey(agent, env, Date.now(), platform);
   const retryDelays = options.retryDelaysMs || DEFAULT_RETRY_DELAYS_MS;
   const timeoutMs = Math.round((agent.timeout_s || DEFAULT_TIMEOUT_S) * 1000);
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` };
   const payload = JSON.stringify(body);
+  const transport = { timeoutMs, env, platform, signal: options.signal, ca: options.ca };
+
+  const pause = async (attempt) => {
+    try {
+      await sleep(retryDelays[attempt], options.signal);
+    } catch {
+      throw abortedError(attempt + 1);
+    }
+  };
 
   for (let attempt = 0; ; attempt++) {
     const canRetry = attempt < retryDelays.length;
     let response;
     try {
-      response = await postOnce(agent.url, headers, payload, { timeoutMs, env });
+      response = await postOnce(target, headers, payload, transport);
     } catch (err) {
+      if (err.aborted) throw abortedError(attempt + 1);
       if (err.timedOut) {
-        throw new ModelClientError('timeout', `Model request timed out after ${timeoutMs / 1000}s`);
+        throw new ModelClientError('timeout', `Model request timed out after ${timeoutMs / 1000}s`, { attempts: attempt + 1 });
       }
       if (canRetry) {
-        await sleep(retryDelays[attempt]);
+        await pause(attempt);
         continue;
       }
       throw new ModelClientError('network', `Model request failed: ${scrub(err.message, key)}`, { attempts: attempt + 1 });
@@ -289,7 +401,7 @@ async function postJson(agent, body, options) {
       }
     }
     if (RETRY_STATUSES.has(status) && canRetry) {
-      await sleep(retryDelays[attempt]);
+      await pause(attempt);
       continue;
     }
     const detail = `HTTP ${status}: ${excerpt(text, key)}`;

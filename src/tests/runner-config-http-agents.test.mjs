@@ -133,6 +133,20 @@ describe('validateConfig: запись агента kind: http', () => {
     });
   }
 
+  // Ключ уходит в заголовке Authorization: http допустим только до своей машины.
+  for (const url of ['http://openrouter.ai/api/v1/chat/completions', 'http://10.0.0.5:8080/v1', 'ftp://127.0.0.1/x', 'not a url']) {
+    it(`url ${url} — ошибка`, async () => {
+      const result = await runWithConfig(baseConfig({ 'vision-chat': { ...CHAT_AGENT, url } }));
+      assertRejected(result, '"vision-chat"', 'url');
+    });
+  }
+
+  for (const url of ['http://127.0.0.1:8080/v1', 'http://localhost/v1', 'http://[::1]:9/v1']) {
+    it(`url ${url} (своя машина) проходит проверку`, () => {
+      assert.deepEqual(validateConfig(baseConfig({ 'vision-chat': { ...CHAT_AGENT, url } }), makeProject()), []);
+    });
+  }
+
   it('kind: http с полем command — ошибка', async () => {
     const result = await runWithConfig(baseConfig({ 'vision-chat': { ...CHAT_AGENT, command: 'kilo' } }));
     assertRejected(result, '"vision-chat"', 'command');

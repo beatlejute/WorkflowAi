@@ -134,10 +134,12 @@ export function buildChatEvaluationMessage(input) {
 }
 
 /**
- * Первый JSON-объект в тексте: от первой `{`, для которой нашлась парная `}` и
- * JSON.parse прошёл. Строки в кавычках учитываются — скобки внутри них не считаются.
+ * Первый JSON-объект в тексте, для которого `accept` вернул true: от первой `{`,
+ * для которой нашлась парная `}` и JSON.parse прошёл. Строки в кавычках
+ * учитываются — скобки внутри них не считаются. Объект, который `accept`
+ * отклонил (модель процитировала данные `{"report": …}` перед ответом), пропускается.
  */
-export function extractFirstJsonObject(text) {
+export function extractFirstJsonObject(text, accept = () => true) {
   for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
     let depth = 0;
     let inString = false;
@@ -155,11 +157,14 @@ export function extractFirstJsonObject(text) {
       else if (ch === '}') {
         depth--;
         if (depth === 0) {
+          let parsed;
           try {
-            return JSON.parse(text.slice(start, i + 1));
+            parsed = JSON.parse(text.slice(start, i + 1));
           } catch {
             break;
           }
+          if (accept(parsed)) return parsed;
+          break;
         }
       }
     }
@@ -174,8 +179,8 @@ async function evaluateChat(agent, input, options) {
     images: input.images || [],
   }, options);
 
-  const parsed = extractFirstJsonObject(response.text);
-  if (!parsed || !Array.isArray(parsed.answers)) {
+  const parsed = extractFirstJsonObject(response.text, (value) => Array.isArray(value?.answers));
+  if (!parsed) {
     throw new ModelClientError('bad_response', 'Model reply has no JSON object with an answers array');
   }
   const byId = new Map();
@@ -189,7 +194,11 @@ async function evaluateChat(agent, input, options) {
     if (!answer) {
       throw new ModelClientError('bad_response', `Model gave no answer to question ${question.id}`);
     }
-    const level = Number(answer.level);
+    // Число или строка из цифр («2»); true, [3], 2.5 — не уровень: Number() дал бы
+    // из true молчаливый уровень 1.
+    const raw = answer.level;
+    const level = typeof raw === 'number' ? raw
+      : (typeof raw === 'string' && /^\s*\d+\s*$/.test(raw) ? Number(raw) : NaN);
     if (!Number.isInteger(level) || level < 1 || level > question.levels.length) {
       throw new ModelClientError('bad_response', `Answer to question ${question.id} has level ${answer.level} outside 1..${question.levels.length}`);
     }

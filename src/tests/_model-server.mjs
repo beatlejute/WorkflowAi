@@ -2,16 +2,19 @@
 // (model-client, model-evaluate, runner-model-io). Слушает 127.0.0.1 на
 // свободном порту; сеть наружу тесты не используют.
 import http from 'node:http';
+import https from 'node:https';
+import net from 'node:net';
 
 export const TEST_KEY = 'local-test-key-123';
 
 /**
  * handler(request, res, n) — request: { method, url, headers, body, json }, n — номер
- * запроса с 1. Возвращает { url(path), requests, close() }.
+ * запроса с 1. `tls: { key, cert }` — HTTPS-сервер (сертификат — _test-cert.mjs).
+ * Возвращает { url(path), requests, close() }.
  */
-export async function startModelServer(handler) {
+export async function startModelServer(handler, { tls } = {}) {
   const requests = [];
-  const server = http.createServer((req, res) => {
+  const listener = (req, res) => {
     const chunks = [];
     req.on('data', (chunk) => chunks.push(chunk));
     req.on('end', () => {
@@ -22,13 +25,14 @@ export async function startModelServer(handler) {
       requests.push(record);
       handler(record, res, requests.length);
     });
-  });
+  };
+  const server = tls ? https.createServer(tls, listener) : http.createServer(listener);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
   return {
     port,
     requests,
-    url: (path = '/') => `http://127.0.0.1:${port}${path}`,
+    url: (path = '/') => (tls ? `https://localhost:${port}${path}` : `http://127.0.0.1:${port}${path}`),
     close: () => new Promise((resolve) => {
       server.closeAllConnections?.();
       server.close(() => resolve());
@@ -65,5 +69,52 @@ export function chatResponse(content, { annotations, usage } = {}) {
     model: 'vendor/chat-model-20260901',
     choices: [{ index: 0, message }],
     ...(usage ? { usage } : {}),
+  };
+}
+
+/**
+ * HTTP-прокси с методом CONNECT. Запрошенный хост не резолвится: туннель всегда
+ * идёт на 127.0.0.1 и запрошенный порт — `localhost` мог бы уйти в ::1, где
+ * тестовый сервер не слушает. `status` ≠ 200 — прокси отказывает в туннеле.
+ * Возвращает { url, connects, openTunnels(), close() }; в url — логин и пароль.
+ */
+export async function startConnectProxy({ status = 200 } = {}) {
+  const connects = [];
+  const tunnels = new Set();
+  const server = http.createServer((req, res) => {
+    res.writeHead(405);
+    res.end();
+  });
+  server.on('connect', (req, clientSocket, head) => {
+    connects.push({ url: req.url, headers: req.headers });
+    tunnels.add(clientSocket);
+    clientSocket.on('close', () => tunnels.delete(clientSocket));
+    clientSocket.on('error', () => {});
+    if (status !== 200) {
+      clientSocket.end(`HTTP/1.1 ${status} Proxy Refused\r\n\r\n`);
+      return;
+    }
+    const port = Number(req.url.split(':').pop());
+    const upstream = net.connect(port, '127.0.0.1', () => {
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head?.length) upstream.write(head);
+      upstream.pipe(clientSocket);
+      clientSocket.pipe(upstream);
+    });
+    upstream.on('error', () => clientSocket.destroy());
+    clientSocket.on('close', () => upstream.destroy());
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  return {
+    port,
+    connects,
+    url: `http://user:pa%40ss@127.0.0.1:${port}`,
+    openTunnels: () => tunnels.size,
+    close: () => new Promise((resolve) => {
+      for (const socket of tunnels) socket.destroy();
+      server.closeAllConnections?.();
+      server.close(() => resolve());
+    }),
   };
 }

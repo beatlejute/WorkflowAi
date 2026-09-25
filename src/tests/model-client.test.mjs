@@ -14,8 +14,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chat, decide, ModelClientError } from '../lib/model-client.mjs';
 import {
-  TEST_KEY, startModelServer, sendJson, closedPort, decisionsResponse, chatResponse,
+  TEST_KEY, startModelServer, startConnectProxy, sendJson, closedPort, decisionsResponse, chatResponse,
 } from './_model-server.mjs';
+import { makeSelfSignedCert } from './_test-cert.mjs';
 
 const ENV = Object.freeze({ TEST_MODEL_KEY: TEST_KEY });
 // Паузы повторов укорочены: у клиента по умолчанию 2 и 4 с.
@@ -175,6 +176,24 @@ describe('model-client: ключ', () => {
     }
   });
 
+  // Windows: имена переменных не зависят от регистра, а копия { ...process.env }
+  // эту особенность теряет — клиент ищет имя сам.
+  it('win32: переменная ключа находится без учёта регистра имени', async () => {
+    const server = await startModelServer((req, res) => sendJson(res, 200, chatResponse('ok')));
+    try {
+      await chat(chatAgent(server.url('/chat')), { message: 'm' },
+        { retryDelaysMs: [1, 1], env: { Test_Model_Key: TEST_KEY }, platform: 'win32' });
+      assert.equal(server.requests[0].headers.authorization, `Bearer ${TEST_KEY}`);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('не win32: имя переменной ключа сравнивается точно', async () => {
+    await rejectsWithClass(chat(chatAgent('http://127.0.0.1:9/chat'), { message: 'm' },
+      { env: { Test_Model_Key: TEST_KEY }, platform: 'linux' }), 'no_key');
+  });
+
   it('kilo_oauth без файла авторизации — no_key', async () => {
     const home = mkdtempSync(join(root, 'home-'));
     await rejectsWithClass(chat(chatAgent('http://127.0.0.1:9/chat', { auth: { kilo_oauth: true } }),
@@ -257,6 +276,44 @@ describe('model-client: повторы и классы ошибок', () => {
     const server = await startModelServer(() => { /* не отвечает */ });
     try {
       await rejectsWithClass(chat(chatAgent(server.url('/chat'), { timeout_s: 0.3 }), { message: 'm' }, FAST), 'timeout');
+    } finally {
+      await server.close();
+    }
+  });
+
+  for (const url of ['http://openrouter.ai/api/v1/chat/completions', 'http://10.0.0.5:8080/chat', 'ftp://127.0.0.1/chat']) {
+    it(`${url} — bad_request до вызова: ключ не уходит открытым текстом`, async () => {
+      const err = await rejectsWithClass(chat(chatAgent(url), { message: 'm' }, FAST), 'bad_request');
+      assert.match(err.message, /https:\/\//);
+    });
+  }
+
+  it('signal прерывает запрос — aborted без ожидания таймаута', async () => {
+    const controller = new AbortController();
+    const server = await startModelServer(() => setImmediate(() => controller.abort()));
+    try {
+      const started = Date.now();
+      await rejectsWithClass(chat(chatAgent(server.url('/chat'), { timeout_s: 30 }), { message: 'm' },
+        { ...FAST, signal: controller.signal }), 'aborted');
+      assert.ok(Date.now() - started < 5000, 'запрос снят сразу, а не по timeout_s');
+      assert.equal(server.requests.length, 1);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('signal прерывает паузу повтора', async () => {
+    const controller = new AbortController();
+    const server = await startModelServer((req, res) => {
+      sendJson(res, 503, { error: 'busy' });
+      setTimeout(() => controller.abort(), 50);
+    });
+    try {
+      const started = Date.now();
+      await rejectsWithClass(chat(chatAgent(server.url('/chat')), { message: 'm' },
+        { env: ENV, retryDelaysMs: [60_000, 60_000], signal: controller.signal }), 'aborted');
+      assert.ok(Date.now() - started < 5000, 'пауза 60 с снята прерыванием');
+      assert.equal(server.requests.length, 1);
     } finally {
       await server.close();
     }
@@ -425,6 +482,128 @@ describe('model-client: протокол decisions', () => {
       assert.equal(server.requests.length, 0);
     } finally {
       await server.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Прокси: туннель CONNECT до https-адреса
+// ---------------------------------------------------------------------------
+
+// Боевой путь на машине, где провайдер доступен только через прокси
+// (lib/agent-env.mjs): CONNECT → TLS внутри туннеля → POST. Сервер модели —
+// локальный HTTPS с самоподписанным сертификатом (_test-cert.mjs), клиенту он
+// передан доверенным через options.ca.
+describe('model-client: прокси', () => {
+  let tlsOptions;
+  before(() => {
+    tlsOptions = makeSelfSignedCert('localhost');
+  });
+
+  function proxyOptions(proxyUrl, extra = {}) {
+    return { retryDelaysMs: [1, 1], env: { TEST_MODEL_KEY: TEST_KEY, HTTPS_PROXY: proxyUrl }, ca: tlsOptions.cert, ...extra };
+  }
+
+  it('https через прокси: CONNECT на host:port с Proxy-Authorization, ответ модели прочитан', async () => {
+    const server = await startModelServer((req, res) => sendJson(res, 200, chatResponse('через туннель')), { tls: tlsOptions });
+    const proxy = await startConnectProxy();
+    try {
+      const result = await chat(chatAgent(server.url('/api/v1/chat/completions')), { message: 'm' }, proxyOptions(proxy.url));
+
+      assert.equal(result.text, 'через туннель');
+      assert.equal(proxy.connects.length, 1);
+      assert.equal(proxy.connects[0].url, `localhost:${server.port}`);
+      assert.equal(proxy.connects[0].headers['proxy-authorization'],
+        `Basic ${Buffer.from('user:pa@ss').toString('base64')}`);
+      assert.equal(server.requests[0].headers.authorization, `Bearer ${TEST_KEY}`);
+      assert.equal(server.requests[0].url, '/api/v1/chat/completions');
+    } finally {
+      await proxy.close();
+      await server.close();
+    }
+  });
+
+  it('win32: переменная прокси находится без учёта регистра имени', async () => {
+    const server = await startModelServer((req, res) => sendJson(res, 200, chatResponse('ok')), { tls: tlsOptions });
+    const proxy = await startConnectProxy();
+    try {
+      await chat(chatAgent(server.url('/chat')), { message: 'm' }, {
+        retryDelaysMs: [1, 1],
+        env: { TEST_MODEL_KEY: TEST_KEY, Https_Proxy: proxy.url },
+        platform: 'win32',
+        ca: tlsOptions.cert,
+      });
+      assert.equal(proxy.connects.length, 1);
+    } finally {
+      await proxy.close();
+      await server.close();
+    }
+  });
+
+  it('прокси отказывает в туннеле (407) — два повтора, затем network', async () => {
+    const proxy = await startConnectProxy({ status: 407 });
+    try {
+      const err = await rejectsWithClass(chat(chatAgent('https://localhost:9/chat'), { message: 'm' }, proxyOptions(proxy.url)), 'network');
+      assert.match(err.message, /407/);
+      assert.equal(proxy.connects.length, 3);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it('таймаут внутри туннеля — timeout, туннель закрыт', async () => {
+    const server = await startModelServer(() => { /* не отвечает */ }, { tls: tlsOptions });
+    const proxy = await startConnectProxy();
+    try {
+      await rejectsWithClass(chat(chatAgent(server.url('/chat'), { timeout_s: 0.5 }), { message: 'm' }, proxyOptions(proxy.url)), 'timeout');
+      for (let i = 0; i < 50 && proxy.openTunnels() > 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(proxy.openTunnels(), 0, 'сокет туннеля снят вместе с запросом');
+    } finally {
+      await proxy.close();
+      await server.close();
+    }
+  });
+
+  it('сертификат сервера не доверен — network, ключ не уходит', async () => {
+    const server = await startModelServer((req, res) => sendJson(res, 200, chatResponse('ok')), { tls: tlsOptions });
+    const proxy = await startConnectProxy();
+    try {
+      await rejectsWithClass(chat(chatAgent(server.url('/chat')), { message: 'm' },
+        proxyOptions(proxy.url, { ca: undefined })), 'network');
+      assert.equal(server.requests.length, 0);
+    } finally {
+      await proxy.close();
+      await server.close();
+    }
+  });
+});
+
+describe('model-client: уже прерванный signal и IPv6 через прокси', () => {
+  it('уже прерванный signal — aborted, запрос не отправляется', async () => {
+    const server = await startModelServer((req, res) => sendJson(res, 200, chatResponse('ok')));
+    try {
+      const controller = new AbortController();
+      controller.abort();
+      await rejectsWithClass(chat(chatAgent(server.url('/chat')), { message: 'm' },
+        { ...FAST, signal: controller.signal }), 'aborted');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(server.requests.length, 0);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('IPv6-литерал в CONNECT — в скобках: [::1]:порт', async () => {
+    const proxy = await startConnectProxy({ status: 407 });
+    try {
+      await rejectsWithClass(chat(chatAgent('https://[::1]:9/chat'), { message: 'm' },
+        { retryDelaysMs: [], env: { TEST_MODEL_KEY: TEST_KEY, HTTPS_PROXY: proxy.url } }), 'network');
+      assert.equal(proxy.connects[0].url, '[::1]:9');
+      assert.equal(proxy.connects[0].headers.host, '[::1]:9');
+    } finally {
+      await proxy.close();
     }
   });
 });

@@ -2237,6 +2237,41 @@ describe('Безынструментный агент (kind: http) в теста
   const TARGET_SKILL = `__test-http-target-${Date.now()}`;
   const JUDGE_SKILL = `__test-http-judge-${Date.now()}`;
   const PLAIN_SKILL = `__test-http-plain-${Date.now()}`;
+  // Кейсы L2 с рубрикой: здесь раннер вызывает исполнителей. Агент-зонд пишет
+  // файл-метку при вызове — по ней видно, запускался ли кто-то до отказа.
+  const L2_CONTROL_SKILL = `__test-http-l2-control-${Date.now()}`;
+  const L2_TARGET_SKILL = `__test-http-l2-target-${Date.now()}`;
+  const PROBE_SCRIPT = join(HTTP_SKILLS_DIR, 'probe-agent.mjs');
+  const CONTROL_MARK = join(HTTP_SKILLS_DIR, 'probe-control.called');
+  const TARGET_MARK = join(HTTP_SKILLS_DIR, 'probe-target.called');
+  const yamlPath = (p) => p.replace(/\\/g, '/');
+
+  function writeL2Skill(name, targetAgents) {
+    const testsDir = join(HTTP_SKILLS_DIR, name, 'tests');
+    mkdirSync(join(testsDir, 'rubrics'), { recursive: true });
+    writeFileSync(join(HTTP_SKILLS_DIR, name, 'SKILL.md'), '# HTTP agent L2 check\n');
+    writeFileSync(join(testsDir, 'rubrics', 'probe.md'), '# Rubric\n\nScore ≥ 4: pass\n');
+    writeFileSync(join(testsDir, 'tc-l2.yaml'), [
+      'description: "probe"',
+      'prompt: "probe prompt"',
+      'severity: normal',
+      'assertions:',
+      '  rubric:',
+      '    - rubric_file: rubrics/probe.md',
+      '  static: []',
+      '  deterministic: []',
+      ''
+    ].join('\n'));
+    writeFileSync(join(testsDir, 'index.yaml'), [
+      'cases:',
+      '  - id: TC-L2-PROBE',
+      '    file: tc-l2.yaml',
+      'execution:',
+      `  target_agents: [${targetAgents.join(', ')}]`,
+      '  judge_agent: mock-judge',
+      ''
+    ].join('\n'));
+  }
 
   function writeSkill(name, execution) {
     const testsDir = join(HTTP_SKILLS_DIR, name, 'tests');
@@ -2271,8 +2306,31 @@ describe('Безынструментный агент (kind: http) в теста
       '      model: "typesafe/jev-1.13"',
       '      auth: { env: "TEST_MODEL_KEY" }',
       '      capabilities: [text]',
+      '    probe-control:',
+      '      command: "node"',
+      `      args: ["${yamlPath(PROBE_SCRIPT)}", "${yamlPath(CONTROL_MARK)}"]`,
+      '      capabilities: [text]',
+      '    probe-target:',
+      '      command: "node"',
+      `      args: ["${yamlPath(PROBE_SCRIPT)}", "${yamlPath(TARGET_MARK)}"]`,
+      '      capabilities: [text]',
+      '    mock-judge:',
+      '      command: "node"',
+      `      args: ["${yamlPath(join(PROJECT_ROOT, 'src', 'tests', 'fixtures', 'mock-judge.js'))}"]`,
+      '      capabilities: [text]',
       ''
     ].join('\n'));
+    writeFileSync(PROBE_SCRIPT, [
+      "import fs from 'node:fs';",
+      'fs.writeFileSync(process.argv[2], "called");',
+      "console.log('---RESULT---');",
+      "console.log('status: passed');",
+      "console.log('output: MOCK_HIGH_SCORE probe');",
+      "console.log('---RESULT---');",
+      ''
+    ].join('\n'));
+    writeL2Skill(L2_CONTROL_SKILL, ['probe-control']);
+    writeL2Skill(L2_TARGET_SKILL, ['probe-target', 'jev-judge']);
     writeSkill(TARGET_SKILL, ['target_agents: [agent-pass, jev-judge]']);
     writeSkill(JUDGE_SKILL, ['target_agents: [agent-pass]', 'judge_agent: jev-judge']);
     writeSkill(PLAIN_SKILL, ['target_agents: [agent-pass]']);
@@ -2302,6 +2360,22 @@ describe('Безынструментный агент (kind: http) в теста
 
     assert.notStrictEqual(exitCode, 0, `прогон должен упасть: ${stdout}`);
     assert.match(stdout, /error: .*jev-judge.*tool-less \(kind: http\)/);
+  });
+
+  // Критерий задачи 7 — «до первого вызова модели». Слой static агентов не
+  // вызывает вовсе, поэтому доказательство — на L2. Контроль: тот же кейс с одним
+  // зондом действительно запускает исполнителя (метка появляется).
+  it('L2: http-агент в target_agents отклоняется до запуска любого исполнителя', async () => {
+    const l2Args = (skill) => ['--skill', skill, '--layer', 'l2', '--skip-secret-scan', '--fast', '--yes',
+      '--skip-meta-write', '--pipeline', PIPELINE_PATH];
+
+    const control = await runRunner(l2Args(L2_CONTROL_SKILL), { WORKFLOW_SKILLS_DIR: HTTP_SKILLS_DIR });
+    assert.ok(existsSync(CONTROL_MARK), `контроль: зонд должен быть вызван на L2: ${control.stdout}`);
+
+    const { stdout, exitCode } = await runRunner(l2Args(L2_TARGET_SKILL), { WORKFLOW_SKILLS_DIR: HTTP_SKILLS_DIR });
+    assert.notStrictEqual(exitCode, 0, `прогон должен упасть: ${stdout}`);
+    assert.match(stdout, /error: .*jev-judge.*tool-less \(kind: http\)/);
+    assert.ok(!existsSync(TARGET_MARK), 'ни один исполнитель не запускался до отказа');
   });
 
   it('http-агент в judge_agent проходит проверку агентов', async () => {

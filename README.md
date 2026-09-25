@@ -193,10 +193,10 @@ pipeline:
 |------|----------|-------------|
 | `kind` | `cli` (по умолчанию) — агент с `command`; `http` — безынструментный | нет |
 | `protocol` | `chat` \| `decisions` | при `kind: http` |
-| `url` | адрес `https://` (`http://` — для локального сервера) | при `kind: http` |
+| `url` | адрес `https://`; `http://` — только localhost, 127.0.0.1, ::1 (ключ уходит в заголовке) | при `kind: http` |
 | `model` | id модели у провайдера | при `kind: http` |
 | `auth` | `{ env: <ИМЯ> }` \| `{ kilo_oauth: true }` | при `kind: http` |
-| `timeout_s` | число > 0, по умолчанию 120 | нет |
+| `timeout_s` | число > 0, по умолчанию 120; ограничивает одну попытку — с повторами вызов длится до 3 × `timeout_s` + 6 с | нет |
 | `capabilities` | как у остальных агентов; `multimodal` — модель принимает изображения | как сейчас |
 
 `command` и `args` у `kind: http` не задаются. Запись проверяется при старте
@@ -224,8 +224,9 @@ pipeline:
 | `server` | HTTP 5xx после повторов |
 | `timeout` | истёк `timeout_s` |
 | `network` | соединение с сервером или прокси не установлено после повторов |
-| `bad_request` | прочие HTTP 4xx; изображения для `decisions`; вложение сверх ограничений |
+| `bad_request` | прочие HTTP 4xx; изображения для `decisions`; вложение сверх ограничений; `http://` не на свою машину |
 | `bad_response` | ответ не JSON; нет полей протокола; нет ответа на вопрос; уровень вне 1..n |
+| `aborted` | запрос снят остановкой пайплайна (SIGINT/SIGTERM) |
 
 Реализация — `src/lib/model-client.mjs`.
 
@@ -236,7 +237,9 @@ pipeline:
 - `{ kilo_oauth: true }` — токен `kilo.access` из `~/.local/share/kilo/auth.json`;
   истёкший токен — ошибка `no_key` с подсказкой `kilo auth login`.
 
-Ключ не попадает ни в лог, ни в сообщения ошибок.
+Ключ не попадает ни в лог, ни в сообщения ошибок. На Windows имя переменной
+(ключа и прокси) ищется без учёта регистра, как его видят CLI-агенты:
+`Openrouter_Api_Key` в системе находится по `auth: { env: OPENROUTER_API_KEY }`.
 
 ### Слой оценки
 
@@ -255,8 +258,9 @@ pipeline:
 usage, cost_usd, duration_ms }`, `level` — номер уровня 1..n, уровней от 2 до 10.
 У `decisions` уровень — наибольшая вероятность (при равенстве — меньший уровень),
 `confidence` — из ответа. У `chat` модель отвечает JSON
-`{"answers":[{"id","level","reason"}]}`, `confidence` — `null`. Нет ответа на
-вопрос или уровень вне диапазона — `bad_response`, уровня по умолчанию нет.
+`{"answers":[{"id","level","reason"}]}`, `confidence` — `null`; из текста берётся
+первый JSON-объект с массивом `answers`, уровень — целое число или строка из цифр.
+Нет ответа на вопрос или уровень вне диапазона — `bad_response`, уровня по умолчанию нет.
 Порог прохода решает потребитель.
 
 ### Стадия с обменом model_io
@@ -276,23 +280,25 @@ usage, cost_usd, duration_ms }`, `level` — номер уровня 1..n, ур�
    `WORKFLOW_MODEL_CAPABILITIES` (JSON), `WORKFLOW_MODEL_IO_OPTIONS` (JSON `options`).
    Результат `status: ready` с `request_file: <путь к входу слоя оценки>` ведёт
    к шагу 2. Любой другой результат — результат стадии: так prepare сам закрывает
-   стадию, когда спрашивать нечего.
+   стадию, когда спрашивать нечего. `ready` без `request_file` или нечитаемый JSON —
+   `status: error` с `error_class: bad_prepare`: ошибка скрипта отличима от отказа модели.
 2. **Модель** — раннер зовёт слой оценки, ответ пишет в
-   `.workflow/state/model-io/<стадия>-<run>.json`. Ошибка — результат стадии
-   `status: error` с `error_class`, шаг 3 не выполняется.
+   `.workflow/state/model-io/<стадия>-<run_id пайплайна>-<id вызова>.json`. Ошибка —
+   результат стадии `status: error` с `error_class`, шаг 3 не выполняется.
 3. **apply** — `node <apply> "<промпт стадии>"` с теми же переменными плюс
    `WORKFLOW_MODEL_REQUEST` и `WORKFLOW_MODEL_RESPONSE` (пути файлов). Его
    `---RESULT---` — результат стадии.
 
-Таймаут prepare и apply — `execution.timeout_per_stage`, вызова модели — `timeout_s`
-агента. В лог пишется строка
+Таймаут prepare и apply — `execution.timeout_per_stage`, одной попытки вызова
+модели — `timeout_s` агента. Остановка пайплайна снимает запрос к модели сразу и
+не запускает apply: результат — `status: error`, `error_class: aborted`. В лог пишется строка
 `MODEL_IO agent="…" model="…" status=… prepare_ms=… model_ms=… apply_ms=… cost_usd=…`.
 
 Ошибки `auth`, `rate_limit`, `server`, `timeout`, `network` помечают агента в
 health-реестре, как падение CLI-агента, и стадия переходит к следующему агенту
-списка. `no_key`, `bad_request`, `bad_response` агента не помечают: стадия
+списка. `no_key`, `bad_request`, `bad_response`, `bad_prepare`, `aborted` агента не помечают: стадия
 уходит по `goto.error`, а следующая попытка стадии (по её счётчику) берёт
-следующего агента.
+следующего агента. В истории работы тикета такой запуск записывается как `error`.
 
 **Выбор модели.** Стадия перечисляет агентов по приоритету, контекст несёт
 `required_capabilities`. Нужны изображения (`["multimodal"]`) — остаются только

@@ -23,7 +23,7 @@ import { incrementMetrics } from './lib/metrics-incremental.mjs';
 import { loadRailsConfig } from './rails/rails-config.mjs';
 import { check as checkRailsOutput } from './rails/output-check.mjs';
 import { evaluate as evaluateWithModel } from './lib/model-evaluate.mjs';
-import { ModelClientError } from './lib/model-client.mjs';
+import { ModelClientError, assertModelUrl } from './lib/model-client.mjs';
 
 // Ошибка клиента безынструментного агента → запись health-реестра. Классы и TTL —
 // как у правил, которые ловят те же сбои CLI-агентов (configs/agent-health-rules.yaml):
@@ -1012,7 +1012,7 @@ export function truncateStderrLine(line, limit = STDERR_LOG_LINE_LIMIT) {
 }
 
 class StageExecutor {
-  constructor(config, context, counters, previousResults = {}, fileGuard = null, logger = null, projectRoot = process.cwd()) {
+  constructor(config, context, counters, previousResults = {}, fileGuard = null, logger = null, projectRoot = process.cwd(), options = {}) {
     this.config = config;
     this.context = context;
     this.counters = counters;
@@ -1028,6 +1028,20 @@ class StageExecutor {
 
     // Текущий дочерний процесс агента (для kill при shutdown)
     this.currentChild = null;
+
+    // Прерывание текущего вызова безынструментной модели (для shutdown): у него
+    // нет дочернего процесса, killCurrentChild снимает HTTP-запрос через signal.
+    this.currentModelAbort = null;
+
+    // Запрошена остановка (killCurrentChild): стадия не переходит к следующему
+    // агенту и не начинает новый вызов модели. Без флага убитый prepare/apply или
+    // CLI-агент выглядел как обычный сбой, и executeWithFallback брал следующего
+    // агента уже после запроса на остановку.
+    this.stopRequested = false;
+
+    // run_id пайплайна (PipelineRunner.runId): имя файла ответа модели в
+    // .workflow/state/model-io/ привязывает вызов к запуску и его логу.
+    this.pipelineRunId = options.runId || null;
 
     // Правила health-классификатора (инициализируются один раз в конструкторе)
     this.rules = loadRules(projectRoot);
@@ -1082,6 +1096,8 @@ class StageExecutor {
    * Убивает текущий дочерний процесс агента
    */
   killCurrentChild() {
+    this.stopRequested = true;
+    this.currentModelAbort?.abort();
     const child = this.currentChild;
     if (!child || !child.pid) return;
     if (process.platform === 'win32') {
@@ -1242,6 +1258,16 @@ class StageExecutor {
 
       const before = snapshotEnabled ? await snapshot(this.projectRoot, snapshotOpts) : null;
 
+      // Остановка пришла между агентами (во время аудита, снимков или
+      // классификации после сбоя предыдущего): следующего агента не запускать —
+      // убить его потом некому, обработчик сигнала уже отработал.
+      if (this.stopRequested) {
+        if (this.logger) this.logger.info(`stage stopped before agent ${agentId}`, stageId);
+        if (lastModelFailure) return lastModelFailure;
+        if (lastErr) throw lastErr;
+        throw Object.assign(new Error(`Stage "${stageId}" stopped before agent ${agentId}`), { code: 'STOPPED' });
+      }
+
       try {
         if (this.logger) {
           this.logger.info(
@@ -1261,6 +1287,7 @@ class StageExecutor {
             stdout: '',
             parsedResult: result.result,
           });
+          if (this.stopRequested) return result;
           if (this.logger) {
             this.logger.info(`agent ${agentId} model error ${result.modelError.class} — falling back in-stage`, stageId);
           }
@@ -1273,7 +1300,9 @@ class StageExecutor {
         // IMPL-83: audit-log hook (success path)
         await this._auditAgentRun(stageId, effectiveStage, agentId, {
           exitCode: result.exitCode ?? 0,
-          stderr: '',
+          // Ошибка безынструментной модели без смены агента (no_key, bad_response, …):
+          // текст ошибки — в stderr, иначе история тикета получила бы empty_response.
+          stderr: result.modelError ? (result.result?.error || '') : '',
           stdout: result.output || '',
           parsedResult: result.result || null,
           agentLabel: result.agentLabel || null,
@@ -1312,6 +1341,13 @@ class StageExecutor {
           signal: err.signal,
           agentLabel: err.agentLabel || null,
         });
+
+        // Агента убила остановка пайплайна: это не его сбой — без пометки в
+        // health-реестре и без перехода к следующему агенту.
+        if (this.stopRequested) {
+          if (this.logger) this.logger.info(`agent ${agentId} stopped by shutdown — no in-stage fallback`, stageId);
+          throw err;
+        }
 
         const after = snapshotEnabled ? await snapshot(this.projectRoot, snapshotOpts) : null;
         const diffResult = snapshotEnabled ? diff(before, after) : null;
@@ -1462,10 +1498,15 @@ class StageExecutor {
    *
    * 1. prepare — `node <prepare> "<промпт>"`; `status: ready` + `request_file`
    *    ведут к шагу 2, любой другой результат — результат стадии.
-   * 2. Модель — вход из request_file, ответ в `.workflow/state/model-io/<стадия>-<run>.json`.
+   *    `ready` без request_file или нечитаемый JSON — `status: error`, класс `bad_prepare`:
+   *    по нему goto.error отличает ошибку скрипта от отказа модели.
+   * 2. Модель — вход из request_file, ответ в
+   *    `.workflow/state/model-io/<стадия>-<run_id пайплайна>-<id вызова>.json`.
    *    Ошибка клиента или слоя — `status: error` с `error_class`, шаг 3 не выполняется.
    * 3. apply — `node <apply> "<промпт>"` + пути запроса и ответа; его RESULT — результат стадии.
    *
+   * Остановка пайплайна (killCurrentChild) прерывает вызов модели и не даёт
+   * запустить apply: результат — `status: error`, класс `aborted`.
    * Сбой скрипта prepare или apply (выход ≠ 0 без RESULT) бросается, как у CLI-агента.
    */
   async callModelAgent(agent, prompt, stageId, stage, agentId) {
@@ -1473,7 +1514,7 @@ class StageExecutor {
     if (!modelIo) {
       throw new Error(`Stage "${stageId}": agent "${agentId}" (kind: http) runs only stages with model_io`);
     }
-    const runId = crypto.randomUUID();
+    const callId = crypto.randomUUID();
     const scriptEnv = {
       WORKFLOW_MODEL_AGENT: agentId,
       WORKFLOW_MODEL_CAPABILITIES: JSON.stringify(Array.isArray(agent.capabilities) ? agent.capabilities : []),
@@ -1485,6 +1526,21 @@ class StageExecutor {
       workdir: '.',
     });
     const timing = { prepare_ms: null, model_ms: null, apply_ms: null };
+    const abort = new AbortController();
+    if (this.stopRequested) abort.abort();
+    this.currentModelAbort = abort;
+    try {
+      return await this._runModelIo({ agent, prompt, stageId, stage, agentId, callId, scriptEnv, scriptAgent, timing, signal: abort.signal });
+    } finally {
+      if (this.currentModelAbort === abort) this.currentModelAbort = null;
+    }
+  }
+
+  /** Шаги prepare → модель → apply для callModelAgent; `signal` — остановка пайплайна. */
+  async _runModelIo({ agent, prompt, stageId, stage, agentId, callId, scriptEnv, scriptAgent, timing, signal }) {
+    const stopped = (step) => this._modelIoFailure(agentId, stageId,
+      new ModelClientError('aborted', `stage stopped before ${step}`), timing);
+    if (signal.aborted) return stopped('prepare');
 
     let started = Date.now();
     const prepared = await this._callAgentOnce(scriptAgent('prepare'), prompt, stageId, stage.skill, null, scriptEnv);
@@ -1499,7 +1555,7 @@ class StageExecutor {
     const requestFile = prepared.result?.request_file;
     if (!requestFile) {
       return this._modelIoFailure(agentId, stageId,
-        new ModelClientError('bad_request', 'prepare returned status ready without request_file'), timing);
+        new ModelClientError('bad_prepare', 'prepare returned status ready without request_file'), timing);
     }
     const requestPath = path.resolve(this.projectRoot, requestFile);
     let input;
@@ -1507,8 +1563,9 @@ class StageExecutor {
       input = JSON.parse(fs.readFileSync(requestPath, 'utf-8'));
     } catch (err) {
       return this._modelIoFailure(agentId, stageId,
-        new ModelClientError('bad_request', `request_file is not readable JSON: ${requestFile} (${err.message})`), timing);
+        new ModelClientError('bad_prepare', `request_file is not readable JSON: ${requestFile} (${err.message})`), timing);
     }
+    if (signal.aborted) return stopped('model call');
 
     // Окружение модели — как у CLI-агентов: process.env + машинный agent.env
     // (прокси и т.п., lib/agent-env.mjs).
@@ -1516,7 +1573,7 @@ class StageExecutor {
     started = Date.now();
     let evaluation;
     try {
-      evaluation = await evaluateWithModel({ ...agent, id: agentId }, input, { env, cwd: this.projectRoot });
+      evaluation = await evaluateWithModel({ ...agent, id: agentId }, input, { env, cwd: this.projectRoot, signal });
     } catch (err) {
       if (!(err instanceof ModelClientError)) throw err;
       timing.model_ms = Date.now() - started;
@@ -1526,9 +1583,13 @@ class StageExecutor {
 
     const responseDir = path.join(this.projectRoot, '.workflow', 'state', 'model-io');
     const safeStage = String(stageId).replace(/[^\w.-]+/g, '_');
-    const responsePath = path.join(responseDir, `${safeStage}-${runId}.json`);
+    const responseName = this.pipelineRunId
+      ? `${safeStage}-${String(this.pipelineRunId).replace(/[^\w.-]+/g, '_')}-${callId.slice(0, 8)}.json`
+      : `${safeStage}-${callId}.json`;
+    const responsePath = path.join(responseDir, responseName);
     fs.mkdirSync(responseDir, { recursive: true });
     fs.writeFileSync(responsePath, JSON.stringify(evaluation, null, 2));
+    if (signal.aborted) return stopped('apply');
 
     started = Date.now();
     const applied = await this._callAgentOnce(scriptAgent('apply'), prompt, stageId, stage.skill, null, {
@@ -1590,7 +1651,8 @@ class StageExecutor {
       output: '',
       stderr: '',
       result: { error_class: err.class, error: err.message },
-      exitCode: 0,
+      // Не 0: аудит (classifyAgentResult) иначе записал бы «пустой ответ».
+      exitCode: -1,
       parsed: true,
       modelError: { class: err.class, fallback: Boolean(health) },
     };
@@ -2664,7 +2726,7 @@ class PipelineRunner {
          } else if (stage.type === 'manual-gate') {
            result = await this.executeManualGate(this.currentStage, stage);
          } else {
-           this.currentExecutor = new StageExecutor(this.config, this.context, this.counters, {}, this.fileGuard, this.logger, this.projectRoot);
+           this.currentExecutor = new StageExecutor(this.config, this.context, this.counters, {}, this.fileGuard, this.logger, this.projectRoot, { runId: this.runId });
            result = await this.currentExecutor.execute(this.currentStage);
            this.currentExecutor = null;
          }
@@ -3069,10 +3131,12 @@ function validateAgentEntry(agentId, agent, errors) {
     errors.push(`Agent "${agentId}" (kind: http) has invalid protocol: ${agent.protocol} (expected: ${HTTP_AGENT_PROTOCOLS.join(', ')})`);
   }
   if (agent.url != null && agent.url !== '') {
-    let parsed = null;
-    try { parsed = new URL(String(agent.url)); } catch { /* ниже — ошибка */ }
-    if (!parsed || !['https:', 'http:'].includes(parsed.protocol)) {
-      errors.push(`Agent "${agentId}" (kind: http) has invalid url: ${agent.url}`);
+    // http — только своя машина (локальный сервер): ключ уходит в заголовке, и
+    // опечатка в схеме отправила бы его открытым текстом. Та же проверка — в клиенте.
+    try {
+      assertModelUrl(agent.url);
+    } catch {
+      errors.push(`Agent "${agentId}" (kind: http) has invalid url: ${agent.url} (https://, or http:// only for localhost, 127.0.0.1, ::1)`);
     }
   }
   if (agent.model != null && agent.model !== '' && typeof agent.model !== 'string') {
