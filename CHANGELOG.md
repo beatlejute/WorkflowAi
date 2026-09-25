@@ -1,3 +1,67 @@
+## [1.7.3] — 2026-09-25
+
+> **Примечание:** первая публикация в npm после 1.5.1. Версии 1.5.2–1.7.2 в npm не выходили.
+> Записи журнала для 1.6.0–1.7.2 и история их коммитов утеряны при сбое рабочего каталога
+> 2026-09-21. Изменения этих версий ниже восстановлены по коду; остальное — по коммитам.
+
+### Added
+- **Рельсы для скилов** (`src/rails/`). Процедура скила записана mermaid-графом в `SKILL.md`, переходы между узлами идут через `node .workflow/src/rails/cli.mjs` (`start`, `goto --quote`, `status`, `reset`). Правила скила из `rails.yaml` принуждают хуки Claude Code и плагин Kilo: область записи, запреты shell-команд и MCP-вызовов, действия по этапам, потолки циклов, требования к итоговому ответу. Отказы пишутся в журнал. `workflow init` регистрирует хуки в `.claude/settings.local.json` и `.kilo/plugin/`, ядро копируется в `~/.workflow/rails`. Спецификация — `src/rails/README.md`.
+- **Девять скилов переведены на рельсы**: coach, analyze-report, execute-task, review-result, create-plan, decompose-plan, create-report, decompose-gaps, manual-testing. deep-research остался прозой. Правила скилов, которые раньше держались на тексте, стали гейтами и запретами:
+  - create-plan: каждое утверждение плана подтверждено источником — цитатой входного документа, `file:line` кода или выводом команды. У каждой задачи — критерий приёмки (результат и способ проверки), а не предписанный код;
+  - decompose-plan: четыре стоп-гейта до любой записи — дословный перенос критериев из плана, номера только из `id_ranges`, реестр `required_capabilities`, проверка занятости ID. DoD не строится из формулировки действия;
+  - create-report: отчёт охватывает один план (`related_plan`, тикеты с тем же `parent_plan`). У каждой проблемы отчёта — стейдж, строка и дословная причина из лога пайплайна;
+  - decompose-gaps: проверка scope до создания тикета, пробел вне scope уходит в «Новые требования». Пустой `parent_plan` отклоняется;
+  - review-result: ревьюер пишет только в тикет на ревью, статус — только `passed` или `failed`;
+  - manual-testing: скил не создаёт тикеты, UI-утверждения сверяются с источником истины;
+  - analyze-report и decompose-gaps: организационные наблюдения (план в draft, техдолг прошлых итераций, баги без тикетов) не считаются пробелами.
+- **Окружение агентов из `~/.workflow/agent.env`** (`<WORKFLOW_HOME>/agent.env`). Формат `KEY=VALUE`, строка с `#` — комментарий, пустое значение снимает переменную. Переменные получает каждый процесс агента — в пайплайне и в тестах скилов. Файл перечитывается на каждый запуск, в лог стадии попадают только имена переменных. Пример применения — прокси для агентов, когда раннер запущен из VS Code без прокси в окружении.
+- **Кооперативная пауза.** Раннер между стадиями проверяет `.workflow/state/pause-request.json`. Пока файл адресован pid раннера, следующая стадия не начинается; удаление файла снимает паузу. Текущая стадия доигрывает до конца. В лог пишутся `PAUSED before stage="…"` и `RESUMED stage="…"`.
+- **Новые поля в `.workflow/logs/.pipeline.lock`**: `started_by` (`cli`, `mcp` или `extension`, из переменной `WORKFLOW_STARTED_BY`), `started_by_id` (из `WORKFLOW_STARTED_BY_ID`), `project_root`, `pipeline_version`, `run_id`, `pipeline_log`, `capabilities: ["pause-request"]`.
+- **CLI**: `workflow --version` / `-v` и `workflow --help` / `-h`; справка показывает настоящую версию пакета.
+- **Экспорт** `workflow-ai/lib/operations/plans.mjs` и `workflow-ai/lib/operations/skills.mjs`. `createTicket` принимает `body` (тело тикета) и `plan_id` (синоним `parent_plan`).
+- **`sync-ticket-status.js`** — миграция рассинхрона между папкой тикета и полем `status`. По умолчанию dry-run, запись — с `--apply`.
+- **Тесты скилов**: каталог скилов задаётся переменной `WORKFLOW_SKILLS_DIR`; таймаут судьи — `execution.judge_timeout_s` (по умолчанию 180 с); вход сценария `kind: dir`. Агенты кейса пишут только в свою песочницу (`WORKFLOW_SANDBOX_ROOT`) и во временный каталог ОС.
+
+### Changed
+- **Длинный stderr агента** режется в логе пайплайна до 2 КБ на строку с пометкой `...[TRUNCATED N bytes]...`. Полный текст сохраняется в `.workflow/logs/stderr/<stage>-<ts>.log`, в лог попадает ссылка на файл.
+- **`workflow run` передаёт раннеру все аргументы.** Раньше CLI пропускал только `--plan`, `--config`, `--project`: `workflow run -h` или опечатка во флаге запускали пайплайн. Теперь это справка раннера или ошибка `Unknown option`.
+- **Перемещение тикета из любого клиента** (MCP, расширение VS Code) открывает ждущие его `manual-gate`. Раньше хук срабатывал только у `move-ticket.js`.
+- **`move-ticket` синхронизирует `status` во frontmatter с папкой.** Заполненный `completed_at` защищает закрытый тикет от автоотката из `done/`.
+- **Human-тикеты переходят в `ready/`**, откуда их забирает `manual-gate`. Раньше они навсегда оставались в `backlog/`, а цикл стадий крутился вхолостую до `max_steps`.
+- **Скилы для Kilo** берутся из каталога настроек Kilo: `<KILO_CONFIG_DIR | XDG_CONFIG_HOME/kilo | ~/.config/kilo>/skills` — ссылка на `~/.workflow/skills`. В `.kilocode/skills` остаются только скилы, скопированные в проект. Причина — kilo 7.7.x не загружает `SKILL.md`, чей настоящий путь лежит вне проекта.
+- **`configs/pipeline.yaml`**: агенты claude-haiku, claude-sonnet и claude-opus вызывают модели `claude-haiku-4-5-20251001`, `claude-sonnet-5` и `claude-opus-5`; deepseek-flash — `deepseek/deepseek-flash`; добавлен агент gpt-terra. Из `configs/agent-health-rules.yaml` убраны правила qwen-code.
+- **Шаблон `CLAUDE.md`** для `workflow init` сокращён. Убрана инструкция «бери задачи из ready/ и перемещай в done/»: она спорила с пайплайном и доходила до исполнителей claude.
+- **Файлы доски, планов и решений публикуются заменой**, а не перезаписью на месте: перемещение тикета, approval-файлы, планы, авто-блокировка, синхронизация статусов, история работы и ревью в тикете. Маркер пайплайна и approval-файл создаются атомарно. Читатель больше не видит пустой или обрезанный файл.
+- **На Windows агенты не открывают окна терминала**, когда раннер запущен из MCP. Закрытие такого окна раньше убивало агента посреди стадии.
+
+### Fixed
+- Раннер записывал успешный запуск агента как `auth_error`: фраза «permission denied» из текста скила принималась за отказ доступа. Незакрытый блок `---RESULT---` со строкой `status` теперь тоже разбирается.
+- `findProjectRoot` принимал глобальную установку `~/.workflow` за проект, в том числе при коротких именах путей 8.3 на Windows.
+- Второй запуск пайплайна при живом процессе теперь получает `PIPELINE_ALREADY_RUNNING`. Маркер от упавшего прогона снимается, а не блокирует проект сообщением «Failed to acquire lock».
+- `workflow stop` не работал на Linux и macOS: `ReferenceError` после отправки SIGTERM.
+- `check-relevance` не находил последнюю секцию тикета («Критерии готовности», «Блокировки»). Тикет с невыполненным критерием уходил в `irrelevant`.
+- `check-anomalies` объявлял аномалией каждый тикет в `in-progress`.
+- На Windows строка ревью или истории работы терялась с `EPERM`, если тикет держал открытым любой читатель. Без строки ревью закрытый тикет возвращался из `done/` в `review/`.
+- `verify-artifacts` ставил ложный `file_unchanged`, если агент записал `created_at` из будущего (локальное время с суффиксом `Z`).
+- `manual-gate` при повторном заходе на стадию пересоздавал approval-файл и затирал решение человека.
+- `listPlans` и `getPlan` искали планы в `plans/` вместо `.workflow/plans/` и выдавали `.gitkeep.md` как план. `listSkills` возвращал пустой список при обычной раскладке проектов и считал скилом любой подкаталог без `SKILL.md`.
+- Запрос паузы от убитого запуска останавливал следующий раннер с тем же pid.
+- Временный файл approval-записи от умершего прогона оставался в `.workflow/` навсегда.
+- `archive-plan-tickets` оставлял окно, в котором тикет лежал в двух колонках.
+- Прямой запуск `node src/cli.mjs …` на Windows ничего не делал.
+
+### Removed
+- `src/lib/ticket-finder.mjs` — неиспользуемый дубль поиска тикета, в экспорт пакета не входил.
+- `src/lib/test-error-classifier.mjs`, `test-extends.mjs`, `test-version.mjs` — черновые файлы, попадавшие в пакет.
+
+### Known issues
+- В пакет из каталогов скилов входит только `SKILL.md`. Нет `rails.yaml`, `workflows/`, `algorithms/`, `knowledge/`, `templates/` и `scripts/`. Стадии `configs/pipeline.yaml`, которые вызывают `.workflow/src/skills/review-result/scripts/verify-artifacts.js`, `decompose-plan/scripts/verify-atomicity.js` и `decompose-plan/scripts/check-atomicity-limit.js`, при установке из npm этих файлов не найдут.
+
+## [1.5.1] — 2026-05-02
+
+### Fixed
+- 1.5.0 был опубликован нерабочим: `runner.mjs` импортировал `agent-history.mjs` из каталога, который не входил в пакет. `agent-history.mjs`, `review-section.mjs` и `metrics-incremental.mjs` перенесены в `src/lib/`.
+
 ## [1.5.0] — 2026-05-02
 
 ### Added
