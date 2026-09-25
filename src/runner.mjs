@@ -14,6 +14,7 @@ import { processAlive } from './lib/process-alive.mjs';
 import { readPauseRequest, RUNNER_CAPABILITIES } from './lib/pause-request.mjs';
 import { packageVersion as pipelineVersion } from './lib/package-version.mjs';
 import { appendAgentRun, classifyAgentResult } from './lib/agent-history.mjs';
+import { buildAgentEnv } from './lib/agent-env.mjs';
 import { incrementMetrics } from './lib/metrics-incremental.mjs';
 import { loadRailsConfig } from './rails/rails-config.mjs';
 import { check as checkRailsOutput } from './rails/output-check.mjs';
@@ -1431,12 +1432,13 @@ class StageExecutor {
       // windowsHide: раннер, запущенный из MCP (detached), живёт без консоли,
       // и Windows открывает каждому агенту новое окно терминала. С флагом
       // консоль создаётся скрытой, а внуки агента наследуют её без окон.
+      // env: машинный agent.env (прокси и т.п.) — см. lib/agent-env.mjs.
       const child = spawn(agent.command, args, {
         cwd: path.resolve(this.projectRoot, agent.workdir || '.'),
         stdio: ['pipe', 'pipe', 'pipe'],
         shell: useShell,
         windowsHide: true,
-        env: { ...process.env, ...railsEnv }
+        env: buildAgentEnv(process.env, railsEnv, { logger: this.logger, stageId })
       });
       this.currentChild = child;
 

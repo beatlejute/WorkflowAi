@@ -3,6 +3,12 @@
 import { spawn, execSync } from 'child_process';
 import path from 'path';
 import { loadRules, scanStderrForFatalRule } from './error-classifier.mjs';
+import { buildAgentEnv } from './agent-env.mjs';
+
+const STDERR_WARN_LOGGER = {
+  info() {},
+  warn(message) { process.stderr.write(`[agent-spawner] ${message}\n`); }
+};
 
 const ResultParser = {
   STATUS_ALIASES: {
@@ -195,8 +201,13 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
 
     const startTime = Date.now();
 
-    // rails: env дочернего процесса, только заданные поля.
-    const childEnv = { ...process.env, ...(extraEnv || {}) };
+    // rails: env дочернего процесса, только заданные поля. Поверх process.env —
+    // машинный agent.env (прокси и т.п.), см. agent-env.mjs. Тесты скилов
+    // логгер не передают — проблемы файла тогда идут в stderr, а не в никуда.
+    const childEnv = buildAgentEnv(process.env, extraEnv, {
+      logger: logger || STDERR_WARN_LOGGER,
+      stageId
+    });
     if (railsRole) childEnv.WORKFLOW_RAILS_ROLE = railsRole;
     if (railsSkill) childEnv.WORKFLOW_RAILS_SKILL = railsSkill;
     if (railsRun) childEnv.WORKFLOW_RAILS_RUN = railsRun;
