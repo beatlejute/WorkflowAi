@@ -34,8 +34,48 @@ const REQUIRED_SECTIONS = [
 const RED_FLAG_PATTERNS = [
   { pattern: /см\.\s*ТЗ|по ссылке|см\.\s*документацию|описано в спецификации/gi, message: 'Отсылка к внешнему документу вместо содержания' },
   { pattern: /URL[а-яё]*\s*(уже создан|создан|получен)|credentials\s*(настроены|получены|готовы)/gi, message: 'Значение не указано (только упоминание)' },
-  { pattern: /^#\s*.+\n\n+$/gm, message: 'Пустая секция (только заголовок без содержания)', isEmptySection: true }
+  { message: 'Пустая секция (только заголовок без содержания)', isEmptySection: true }
 ];
+
+/**
+ * Заголовки секций без содержания.
+ *
+ * Секция пуста, если до следующего заголовка того же или старшего уровня в ней нет
+ * ни одной содержательной строки. Подзаголовок — содержание: «Справочные данные»
+ * состоит из подсекций. Подсказка шаблона `<!-- … -->` содержанием не считается —
+ * секция с одной подсказкой не заполнена. Frontmatter и блоки кода пропускаются:
+ * `# …` в них — комментарий (в шаблоне плана — `# Шаблон плана` во frontmatter), а
+ * не заголовок.
+ *
+ * Прежняя проверка смотрела только на строку сразу после заголовка и считала пустой
+ * любую секцию с пустой строкой после заголовка, то есть обычный markdown: на
+ * PLAN-002 — 59 предупреждений, по одному на каждый заголовок (2026-09-25).
+ */
+function findEmptySections(content) {
+  const body = content
+    .replace(/\r\n/g, '\n')
+    .replace(/^---\n[\s\S]*?\n---(\n|$)/, '')
+    .replace(/<!--[\s\S]*?-->/g, '');
+  const items = [];
+  let inFence = false;
+  for (const line of body.split('\n')) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      items.push({ heading: false });
+      continue;
+    }
+    const heading = inFence ? null : line.match(/^(#{1,6})\s+\S/);
+    if (heading) items.push({ heading: true, level: heading[1].length, text: line.trim() });
+    else if (line.trim()) items.push({ heading: false });
+  }
+  return items
+    .filter((item, i) => {
+      if (!item.heading) return false;
+      const next = items[i + 1];
+      return !next || (next.heading && next.level <= item.level);
+    })
+    .map((item) => item.text);
+}
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -111,21 +151,11 @@ function checkSections(content) {
 
 function checkRedFlags(content) {
   const warnings = [];
-  const lines = content.split('\n');
 
   for (const { pattern, message, isEmptySection } of RED_FLAG_PATTERNS) {
     if (isEmptySection) {
-      const matches = content.match(/^#+\s+.+$/gm);
-      if (matches) {
-        for (const heading of matches) {
-          const headingLineNum = content.split('\n').findIndex(l => l.trim() === heading.trim());
-          if (headingLineNum !== -1) {
-            const nextLine = lines[headingLineNum + 1];
-            if (!nextLine || !nextLine.trim()) {
-              warnings.push({ pattern: heading, message: `Пустая секция: ${heading}` });
-            }
-          }
-        }
+      for (const heading of findEmptySections(content)) {
+        warnings.push({ pattern: heading, message: `Пустая секция: ${heading}` });
       }
     } else {
       const matches = content.match(pattern);
