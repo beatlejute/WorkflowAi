@@ -134,3 +134,164 @@ stages:
 - `auto_blocked_reason` — причина автоматической блокировки
 - `auto_blocked_attempts` — количество попыток разблокировки
 - `auto_blocked_at` — время автоматической блокировки
+
+## Безынструментные агенты
+
+Безынструментный агент — модель, которую раннер вызывает по HTTP без инструментов
+и без работы с файлами. Файлы читают и пишут только скрипты стадии. Такая модель
+подключается правкой `configs/pipeline.yaml`, без правок кода.
+
+### Запись агента
+
+```yaml
+pipeline:
+  agents:
+    jev:
+      kind: http
+      protocol: decisions
+      url: "https://openrouter.ai/api/alpha/decisions"
+      model: "typesafe/jev-1.13"
+      auth: { env: OPENROUTER_API_KEY }
+      timeout_s: 120
+      capabilities: [text]
+    vision-chat:
+      kind: http
+      protocol: chat
+      url: "https://openrouter.ai/api/v1/chat/completions"
+      model: "<id мультимодальной модели>"
+      auth: { env: OPENROUTER_API_KEY }
+      capabilities: [text, multimodal]
+```
+
+| Поле | Значения | Обязательно |
+|------|----------|-------------|
+| `kind` | `cli` (по умолчанию) — агент с `command`; `http` — безынструментный | нет |
+| `protocol` | `chat` \| `decisions` | при `kind: http` |
+| `url` | адрес `https://` (`http://` — для локального сервера) | при `kind: http` |
+| `model` | id модели у провайдера | при `kind: http` |
+| `auth` | `{ env: <ИМЯ> }` \| `{ kilo_oauth: true }` | при `kind: http` |
+| `timeout_s` | число > 0, по умолчанию 120 | нет |
+| `capabilities` | как у остальных агентов; `multimodal` — модель принимает изображения | как сейчас |
+
+`command` и `args` у `kind: http` не задаются. Запись проверяется при старте
+пайплайна; ошибка останавливает запуск с кодом 1 и называет агента и поле.
+
+### Протоколы
+
+- `chat` — формат OpenAI chat completions: системное сообщение и сообщение
+  пользователя, поле `tools` не отправляется. Ответ — текст
+  `choices[0].message.content` и источники из `annotations` (`url_citation`).
+  Изображения — частями `image_url` с data URL: PNG, JPEG или WebP, до 5 МБ на
+  файл, до 8 на запрос. Приём `image_url` конкретной моделью OpenRouter не проверен.
+- `decisions` — типизированная оценка OpenRouter: тело `{ model, state, questions }`,
+  ответ — вероятности уровней и уверенность по каждому вопросу. Изображений не принимает.
+
+Общее: ключ `Authorization: Bearer`; прокси из `HTTPS_PROXY` / `HTTP_PROXY` /
+`ALL_PROXY` (туннель CONNECT, только для `https://`); до двух повторов с паузами
+2 и 4 с при HTTP 429, 500, 502, 503 и сетевой ошибке. Ошибка получает класс:
+
+| Класс | Когда |
+|-------|-------|
+| `no_key` | переменная из `auth.env` пуста; файла kilo нет; токен kilo истёк |
+| `auth` | HTTP 401, 403 |
+| `rate_limit` | HTTP 429 после повторов |
+| `server` | HTTP 5xx после повторов |
+| `timeout` | истёк `timeout_s` |
+| `network` | соединение с сервером или прокси не установлено после повторов |
+| `bad_request` | прочие HTTP 4xx; изображения для `decisions`; вложение сверх ограничений |
+| `bad_response` | ответ не JSON; нет полей протокола; нет ответа на вопрос; уровень вне 1..n |
+
+Реализация — `src/lib/model-client.mjs`.
+
+### Авторизация
+
+- `{ env: <ИМЯ> }` — ключ только из переменной окружения раннера или машинного
+  `~/.workflow/agent.env`. В репозиторий и в `pipeline.yaml` ключ не пишется.
+- `{ kilo_oauth: true }` — токен `kilo.access` из `~/.local/share/kilo/auth.json`;
+  истёкший токен — ошибка `no_key` с подсказкой `kilo auth login`.
+
+Ключ не попадает ни в лог, ни в сообщения ошибок.
+
+### Слой оценки
+
+Один вход и выход для обоих протоколов (`src/lib/model-evaluate.mjs`): скриптам
+стадии не нужно знать протокол выбранной модели.
+
+```json
+{
+  "data": "<строка или объект — что оценивается>",
+  "images": ["<путь к изображению>"],
+  "questions": [{ "id": "dod-3", "text": "<вопрос>", "levels": ["<уровень 1>", "…", "<уровень n>"] }]
+}
+```
+
+Выход — `{ answers: { <id>: { level, confidence, probabilities, reason } }, model,
+usage, cost_usd, duration_ms }`, `level` — номер уровня 1..n, уровней от 2 до 10.
+У `decisions` уровень — наибольшая вероятность (при равенстве — меньший уровень),
+`confidence` — из ответа. У `chat` модель отвечает JSON
+`{"answers":[{"id","level","reason"}]}`, `confidence` — `null`. Нет ответа на
+вопрос или уровень вне диапазона — `bad_response`, уровня по умолчанию нет.
+Порог прохода решает потребитель.
+
+### Стадия с обменом model_io
+
+```yaml
+    review:
+      agents: [vision-chat, jev, claude-sonnet]
+      model_io:
+        prepare: "<путь к node-скрипту от корня проекта>"
+        apply: "<путь к node-скрипту от корня проекта>"
+        options: { }          # необязательно; передаётся обоим скриптам
+```
+
+Если `resolveAgent` выбрал агента `kind: http`, стадия идёт в три шага:
+
+1. **prepare** — `node <prepare> "<промпт стадии>"`. Переменные: `WORKFLOW_MODEL_AGENT`,
+   `WORKFLOW_MODEL_CAPABILITIES` (JSON), `WORKFLOW_MODEL_IO_OPTIONS` (JSON `options`).
+   Результат `status: ready` с `request_file: <путь к входу слоя оценки>` ведёт
+   к шагу 2. Любой другой результат — результат стадии: так prepare сам закрывает
+   стадию, когда спрашивать нечего.
+2. **Модель** — раннер зовёт слой оценки, ответ пишет в
+   `.workflow/state/model-io/<стадия>-<run>.json`. Ошибка — результат стадии
+   `status: error` с `error_class`, шаг 3 не выполняется.
+3. **apply** — `node <apply> "<промпт стадии>"` с теми же переменными плюс
+   `WORKFLOW_MODEL_REQUEST` и `WORKFLOW_MODEL_RESPONSE` (пути файлов). Его
+   `---RESULT---` — результат стадии.
+
+Таймаут prepare и apply — `execution.timeout_per_stage`, вызова модели — `timeout_s`
+агента. В лог пишется строка
+`MODEL_IO agent="…" model="…" status=… prepare_ms=… model_ms=… apply_ms=… cost_usd=…`.
+
+Ошибки `auth`, `rate_limit`, `server`, `timeout`, `network` помечают агента в
+health-реестре, как падение CLI-агента, и стадия переходит к следующему агенту
+списка. `no_key`, `bad_request`, `bad_response` агента не помечают: стадия
+уходит по `goto.error`, а следующая попытка стадии (по её счётчику) берёт
+следующего агента.
+
+**Выбор модели.** Стадия перечисляет агентов по приоритету, контекст несёт
+`required_capabilities`. Нужны изображения (`["multimodal"]`) — остаются только
+мультимодальные агенты, иначе берётся первый по приоритету. CLI-агент в той же
+стадии исполняет её как раньше, через скил.
+
+### Защита от ошибочного назначения
+
+Проверка конфига при старте пайплайна (`validateConfig`) отклоняет:
+
+- агента `kind: http` в `stage.agent`, `stage.agents` или
+  `stage.agents_by_type.<тип>.agents` стадии без `model_io`;
+- агента `kind: http` в `pipeline.default_agents` и `pipeline.default_agent` — всегда.
+
+Тесты скилов (`run-skill-tests.js`) не берут агента `kind: http` исполнителем:
+`target_agents` скила или кейса и `--agent` с таким агентом завершают прогон
+ошибкой до первого вызова модели. Судьёй (`judge_agent`) он допустим.
+
+Способности от ошибочного назначения не защищают: фильтр `resolveAgent`
+пропускает агента, у которого есть все требуемые способности, а `[text]` есть почти
+у всех. Поэтому защита строится на виде записи.
+
+### Как добавить модель
+
+1. Добавить запись `kind: http` в `pipeline.agents` (пример выше).
+2. Положить ключ в переменную окружения, указанную в `auth.env`.
+3. Вписать агента в список `agents` стадии с `model_io` — по приоритету.
+4. Для модели с изображениями — добавить `multimodal` в `capabilities`.

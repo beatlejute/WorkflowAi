@@ -1,3 +1,12 @@
+## [Unreleased]
+
+### Added
+- **Безынструментные агенты (`kind: http`).** Модель, которая не пользуется инструментами, подключается записью в `pipeline.agents`, без правок кода: `kind: http`, `protocol` (`chat` или `decisions`), `url`, `model`, `auth` (`{ env: <ИМЯ> }` или `{ kilo_oauth: true }`), `timeout_s`. Протокол `chat` — формат OpenAI chat completions без `tools`, с изображениями (PNG, JPEG, WebP; до 5 МБ, до 8 на запрос); `decisions` — типизированная оценка OpenRouter. Общий клиент — `src/lib/model-client.mjs`: ключ только из переменной окружения или токена kilo, прокси из `HTTPS_PROXY` и соседних переменных, до двух повторов на 429/500/502/503 и сетевую ошибку, классы ошибок `no_key`, `auth`, `rate_limit`, `server`, `timeout`, `network`, `bad_request`, `bad_response`.
+- **Слой оценки** (`src/lib/model-evaluate.mjs`): вопросы с уровнями на входе, уровень 1..n по каждому вопросу на выходе — одинаково для обоих протоколов.
+- **Обмен стадии с моделью (`model_io`).** Стадия с `model_io: { prepare, apply, options }` исполняется агентом `kind: http` в три шага: скрипт prepare собирает вопросы, раннер спрашивает модель через слой оценки и пишет ответ в `.workflow/state/model-io/`, скрипт apply выдаёт статус стадии. Ошибка модели — `status: error` с `error_class`; `auth`, `rate_limit`, `server`, `timeout`, `network` помечают агента в health-реестре и передают стадию следующему агенту. В лог пишется строка `MODEL_IO` с моделью, длительностью шагов и `cost_usd`. Модель стадии выбирается по `required_capabilities`: для изображений — агент с `multimodal`.
+- **Защита от ошибочного назначения.** Проверка конфига при старте отклоняет агента `kind: http` в стадии без `model_io` (`agent`, `agents`, `agents_by_type`) и в `default_agents`/`default_agent`, а также неполную или противоречивую запись агента и `model_io` со ссылкой на несуществующий скрипт. Тесты скилов не берут такого агента исполнителем (`target_agents`, `--agent`); судьёй он допустим.
+- **Причина ошибки в выводе тестов скилов.** `run-skill-tests.js` со `status: error` печатает строку `error: …`.
+
 ## [1.7.4] — 2026-09-25
 
 ### Fixed
