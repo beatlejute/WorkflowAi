@@ -320,7 +320,9 @@ test('detectShellWrites: маркер "?" не теряется, когда в �
 // (round1-shell-writes.json, round3-writes-routed.json): ожидается '?' или путь вне области.
 // Пути фикстуры на диске не создаются (кроме теста с junction).
 
-const BASE = join(tmpdir(), 'rails-c2-probe');
+// Полная форма временного каталога: на раннере GitHub Windows он короткий (`RUNNER~1`), а `~`
+// в литерале значения флага (`--t=…`, `-Path:…`, `of=…`) детектор честно считает неизвестным.
+const BASE = join(realpathSync.native(tmpdir()), 'rails-c2-probe');
 const SCOPE = join(BASE, 'scope');
 const OUT = join(BASE, 'outside');
 const ROOT = join(BASE, 'root');
@@ -329,6 +331,8 @@ const S = fwd(SCOPE);
 const O = fwd(OUT);
 const writes = (command, opts = {}) => detectShellWrites(command, { cwd: SCOPE, env: {}, ...opts });
 const psWrites = (command, opts = {}) => writes(command, { dialect: 'powershell', ...opts });
+// Путь PowerShell с `\`: на Windows — как есть, на POSIX `\` — разделитель (pwsh 7.6 на Linux).
+const psPath = (p) => (process.platform === 'win32' ? p : p.replace(/\\/g, '/'));
 const at = (...p) => resolvePathAbs(...p);
 
 // «Поймано»: запись вне области видна ядру — путь снаружи или маркер '?'.
@@ -457,6 +461,9 @@ test('detectShellWrites (C2, инцидент): cd <skillDir> && sed -i … SKIL
   assert.deepEqual(writes('cd ./a && cd ./b && touch c.txt'), [at(SCOPE, 'a', 'b', 'c.txt')]);
   assert.deepEqual(writes('cd a && touch c.txt'), [at(SCOPE, 'a', 'c.txt')]);
   assert.deepEqual(psWrites('Set-Location src\\skills; Remove-Item plan.md'), [at(SCOPE, 'src', 'skills', 'plan.md'), at(SCOPE, 'plan.md')]);
+  // `\` — разделитель PowerShell и на POSIX (pwsh 7.6 на Linux удаляет файл двумя каталогами
+  // выше, проверено запуском 2026-09-25): выход из области не выглядит именем файла внутри
+  assert.deepEqual(psWrites('Remove-Item ..\\..\\x.txt'), [at(SCOPE, '..', '..', 'x.txt')]);
 });
 
 test('detectShellWrites (C2, инцидент): S=<abs>; sed -i … "$S/f" — переменная раскрывается; одинарные кавычки — литерал', () => {
@@ -471,10 +478,10 @@ test('detectShellWrites (C2, инцидент): S=<abs>; sed -i … "$S/f" — �
 });
 
 test('detectShellWrites (C2): PowerShell — $x = \'…\', $env:X, $HOME; $X без присваивания — не переменная окружения', () => {
-  assert.deepEqual(psWrites(`$D = '${S}'; Remove-Item "$D\\a.txt"`), [`${S}\\a.txt`]);
-  assert.deepEqual(psWrites(`$env:D = '${S}'; Remove-Item "$env:D\\a.txt"`), [`${S}\\a.txt`]);
-  assert.deepEqual(psWrites('Remove-Item "$env:MYROOT\\a.txt"', { env: { MYROOT: S } }), [`${S}\\a.txt`]);
-  assert.deepEqual(psWrites('Remove-Item "$HOME\\a"'), [`${homedir()}\\a`]);
+  assert.deepEqual(psWrites(`$D = '${S}'; Remove-Item "$D\\a.txt"`), [psPath(`${S}\\a.txt`)]);
+  assert.deepEqual(psWrites(`$env:D = '${S}'; Remove-Item "$env:D\\a.txt"`), [psPath(`${S}\\a.txt`)]);
+  assert.deepEqual(psWrites('Remove-Item "$env:MYROOT\\a.txt"', { env: { MYROOT: S } }), [psPath(`${S}\\a.txt`)]);
+  assert.deepEqual(psWrites('Remove-Item "$HOME\\a"'), [psPath(`${homedir()}\\a`)]);
   assert.deepEqual(psWrites('Remove-Item "$MYROOT\\a.txt"', { env: { MYROOT: S } }), ['?'], '$MYROOT в PowerShell пуста (проверено запуском)');
   assert.deepEqual(psWrites('Remove-Item "$env:MISSING\\a.txt"'), ['?']);
 });
@@ -499,7 +506,7 @@ test('detectShellWrites (C2): "~" — домашний каталог (POSIX в�
   assert.deepEqual(writes('touch ~/scratch.txt', home), [`${homedir()}/scratch.txt`]);
   assert.deepEqual(writes('cd ~/proj && touch a.txt', home), [at(homedir(), 'proj', 'a.txt')]);
   assert.deepEqual(writes('touch "~/x"', home), [at(SCOPE, '~', 'x')], 'в кавычках bash не раскрывает ~ (проверено запуском)');
-  assert.deepEqual(psWrites("Set-Content -LiteralPath '~\\x' -Value 1"), [`${homedir()}\\x`], 'PowerShell: $HOME — автоматическая переменная, не env:HOME (проверено запуском PS 5.1)');
+  assert.deepEqual(psWrites("Set-Content -LiteralPath '~\\x' -Value 1"), [psPath(`${homedir()}\\x`)], 'PowerShell: $HOME — автоматическая переменная, не env:HOME (проверено запуском PS 5.1)');
   assert.deepEqual(writes('touch ~other/x', home), ['?']);
 });
 
@@ -724,6 +731,8 @@ test('detectShellWrites (C2 r2, LOW): вложенный интерпретат�
   assert.deepEqual(writes(`find . -exec sh -c "rm ${O}/fx" \\;`), [`${O}/fx`]);
   assert.deepEqual(psWrites(`bash -c 'rm ${O}/q'`), [`${O}/q`]);
   assert.deepEqual(writes(`powershell.exe -NoProfile -Command "Remove-Item ${O}/z"`), [`${O}/z`]);
+  // регистр имени .exe не важен и на POSIX: WSL запускает `PowerShell.EXE` (проверено запуском)
+  assert.deepEqual(writes(`PowerShell.EXE -Command "Remove-Item ${O}/z2"`), [`${O}/z2`]);
   const b64 = Buffer.from(`Remove-Item ${O}/enc.txt`, 'utf16le').toString('base64');
   assert.deepEqual(writes(`powershell -e ${b64}`), [`${O}/enc.txt`]);
   assert.deepEqual(writes(`powershell -EncodedCommand ${b64}`), [`${O}/enc.txt`]);

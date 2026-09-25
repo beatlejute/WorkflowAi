@@ -7,7 +7,9 @@ import os from 'node:os';
 // Прежде импорт шёл из корня репозитория и работал только там, где в нём лежит
 // рабочая `.workflow/`; на чистом клоне (CI) файл падал целиком ещё до первого
 // теста. Импорт делается из временного проекта, дальше `cwd` возвращается.
-const importRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'check-plan-templates-'));
+// realpath: на macOS tmpdir — ссылка /var → /private/var, а `cwd` после chdir — настоящий
+// путь; без него корень скрипта и пути теста расходились (CI macOS 2026-09-25).
+const importRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'check-plan-templates-')));
 fs.mkdirSync(path.join(importRoot, '.workflow'), { recursive: true });
 process.on('exit', () => fs.rmSync(importRoot, { recursive: true, force: true }));
 const cwdBeforeImport = process.cwd();

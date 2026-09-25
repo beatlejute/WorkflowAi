@@ -73,7 +73,8 @@ function addSession(db, id, title, parentId = null, steps = []) {
 describe('разбор аргументов kilo', () => {
   test('isKiloRun: kilo с подкомандой run, в том числе kilo.cmd по пути', () => {
     assert.equal(isKiloRun({ command: 'kilo', args: ['-m', 'kilo/openrouter/free', 'run', '--auto'] }), true);
-    assert.equal(isKiloRun({ command: 'C:\\tools\\kilo.cmd', args: ['run'] }), true);
+    // путь в записи своей ОС: на POSIX `C:\tools\kilo.cmd` — одно имя файла, а не путь
+    assert.equal(isKiloRun({ command: path.resolve('tools', 'kilo.cmd'), args: ['run'] }), true);
     assert.equal(isKiloRun({ command: 'kilo', args: ['db', 'path'] }), false);
     assert.equal(isKiloRun({ command: 'claude', args: ['run'] }), false);
     assert.equal(isKiloRun({ command: 'node', args: ['stub.mjs'] }), false);

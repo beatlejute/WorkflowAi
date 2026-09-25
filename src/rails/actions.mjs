@@ -589,11 +589,20 @@ export function shellAbsolutePath(value) {
   return absoluteForm(value, '', { ps: false });
 }
 
+// PowerShell на POSIX: `\` в пути — разделитель, как `/`. Проверено запуском pwsh 7.6.6 на Linux
+// (2026-09-25): `Set-Location src\skills` уходит в src/skills, `New-Item ..\..\x` создаёт и
+// `Remove-Item ..\..\x` удаляет файл двумя каталогами выше. node:path на POSIX читал `..\..\x`
+// как имя файла в текущем каталоге — запись вне области выглядела записью внутри.
+function psPosixPath(value, ctx) {
+  return ctx.ps && !IS_WIN32 && typeof value === 'string' ? value.replace(/\\/g, '/') : value;
+}
+
 // Пути, в которые может уйти запись `value` из каталога `dir`; null — не вычислить.
 // `..` после cd в junction/symlink: Git Bash разрешает физически (touch ../x и > ../x пишут
 // рядом с ЦЕЛЬЮ ссылки), PowerShell — логически от строки каталога (проверено запуском) —
 // для POSIX отдаются оба пути, ядро проверит каждый.
 function resolveTarget(dir, value, ctx) {
+  value = psPosixPath(value, ctx);
   if (!value || /[\0\r\n]/.test(value)) return null;
   const abs = absoluteForm(value, dir, ctx);
   if (abs === null) return null;
@@ -633,6 +642,7 @@ function resolveTarget(dir, value, ctx) {
 // deny→allow). Проверено запуском bash 5.2: `pushd w && pushd +1` печатает исходный каталог,
 // `pushd -- +1` — каталог `+1`; различать их трекер не будет, каталог неизвестен в обоих.
 function cdTargets(dir, value, ctx) {
+  value = psPosixPath(value, ctx);
   if (!value || /[\0\r\n*?[\]{}`]/.test(value) || /^[-+]/.test(value)) return null;
   if (!ctx.ps && value.startsWith('~')) return null;
   const abs = absoluteForm(value, dir, ctx);
@@ -999,6 +1009,10 @@ function commandName(v, ctx) {
   // Windows: регистр имени и расширение не важны (`TOUCH x`, `Touch.exe x` в Git Bash создают
   // файл — проверено запуском).
   if (ctx.ps || IS_WIN32) n = n.toLowerCase().replace(/\.(?:exe|com|cmd|bat)$/, '');
+  // POSIX: `X.exe` — программа Windows через interop WSL, имя без учёта регистра
+  // (`powershell.exe -Command …`, `PowerShell.EXE …`, `cmd.exe /c …` в WSL выполняются —
+  // проверено запуском 2026-09-25). Без этого вложенный интерпретатор на POSIX не разбирался.
+  else if (/\.exe$/i.test(n)) n = n.toLowerCase().slice(0, -'.exe'.length);
   return n;
 }
 

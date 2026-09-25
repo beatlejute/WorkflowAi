@@ -247,10 +247,12 @@ describe('цена атомарной публикации и слышимост
   /** fs, у которого rename не проходит НИКОГДА: так выглядит исчерпанная лестница. */
   function busyFs() {
     const writes = [];
+    const renames = [];
     return {
       writes,
+      renames,
       writeFileSync: (file) => { writes.push(String(file)); },
-      renameSync: () => { const err = new Error('rename отклонён'); err.code = 'EPERM'; throw err; },
+      renameSync: (from) => { renames.push(String(from)); const err = new Error('rename отклонён'); err.code = 'EPERM'; throw err; },
       unlinkSync: () => {},
     };
   }
@@ -276,11 +278,18 @@ describe('цена атомарной публикации и слышимост
     const elapsed = Date.now() - started;
 
     assert.equal(result.atomic, false, 'при вечном EPERM публикация обязана уйти на запасной путь');
-    // Потолок с запасом: под полным набором Atomics.wait перелетает заказанную
-    // паузу, а проверяется здесь не точность паузы, а сама ограниченность.
+    // Ограниченность — числом попыток: по одной на ступень лестницы, не больше.
+    assert.equal(
+      fsModule.renames.length,
+      7,
+      `попыток замены ${fsModule.renames.length} — лестница перестала быть ограниченной`
+    );
+    // Время — только грубый потолок: под полным набором Atomics.wait перелетает
+    // заказанную паузу, и на CI macOS 2026-09-25 88 мс ожидания заняли 271 мс.
+    // Потолок ловит ожидание на порядок длиннее бюджета, а не точность паузы.
     assert.ok(
-      elapsed <= RENAME_RETRY_BUDGET_MS * 3,
-      `ожидание ${elapsed} мс при бюджете ${RENAME_RETRY_BUDGET_MS} мс — лестница перестала быть ограниченной`
+      elapsed <= RENAME_RETRY_BUDGET_MS * 10,
+      `ожидание ${elapsed} мс при бюджете ${RENAME_RETRY_BUDGET_MS} мс — пауза ступени перестала быть заказанной`
     );
     assert.equal(
       fsModule.writes.length,

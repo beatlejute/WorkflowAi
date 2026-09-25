@@ -5,7 +5,15 @@ import path from 'path';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { printResult } from 'workflow-ai/lib/utils.mjs';
 
-const PROJECT_DIR = findProjectRoot();
+// Корень проекта нужен только для путей по умолчанию и относительного --path. Поиск при импорте
+// ронял сканер без .workflow/ даже на абсолютном --path: в чистом клоне — «Could not find
+// .workflow/» и ни строки ---RESULT--- (проверено запуском 2026-09-25). Тесты сканера на CI
+// ubuntu в тот день падали именно без ---RESULT--- (parseOutput → null).
+let projectDir = null;
+function getProjectDir() {
+  if (projectDir === null) projectDir = findProjectRoot();
+  return projectDir;
+}
 
 const DEFAULT_ALLOWLIST = [
   'localhost',
@@ -63,7 +71,7 @@ function parseArgs() {
 }
 
 function getDefaultScanPaths() {
-  const skillsDir = path.join(PROJECT_DIR, 'src', 'skills');
+  const skillsDir = path.join(getProjectDir(), 'src', 'skills');
   if (!fs.existsSync(skillsDir)) {
     return [];
   }
@@ -212,7 +220,7 @@ async function main() {
   if (options.path) {
     const absolutePath = path.isAbsolute(options.path)
       ? options.path
-      : path.join(PROJECT_DIR, options.path);
+      : path.join(getProjectDir(), options.path);
     scanPaths.push(absolutePath);
   } else {
     scanPaths = getDefaultScanPaths();

@@ -29,7 +29,9 @@ import { getLastReviewStatus } from 'workflow-ai/lib/utils.mjs';
 
 // Каталоги вычисляются от корня проекта при импорте — импорт из временного проекта,
 // cwd возвращается назад (приём из check-plan-templates.test.mjs).
-const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'check-relevance-'));
+// realpath: на macOS tmpdir — ссылка /var → /private/var, а `cwd` после chdir — настоящий
+// путь; без него каталоги скрипта и пути теста расходились (CI macOS 2026-09-25).
+const ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'check-relevance-')));
 const WF = path.join(ROOT, '.workflow');
 const TICKETS = path.join(WF, 'tickets');
 for (const dir of ['backlog', 'ready', 'in-progress', 'blocked', 'review', 'done', 'archive']) {
