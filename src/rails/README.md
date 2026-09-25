@@ -540,7 +540,11 @@ export const WorkflowRails = async ({ directory }) => ({
 
 ## 11. Интеграция в workflow-ai
 
-- `src/global-dir.mjs`: копировать `src/rails/` → `~/.workflow/rails/` вместе со skills/scripts/configs.
+- `src/global-dir.mjs`: `~/.workflow/` — копия `src/` пакета без тестов (rails, lib, scripts,
+  skills и модули верхнего уровня) плюс `configs/` и `package.json` с именем и `exports` пакета.
+  Ядро импортирует `../lib/…` и `../global-dir.mjs`, скрипты скилов — `workflow-ai/lib/…`; Node
+  разрешает их от настоящего пути файла, поэтому копия самодостаточна. Установка без
+  `package.json` в `~/.workflow/` считается устаревшей и копируется заново.
 - `src/junction-manager.mjs`: `createRailsJunction(globalDir, projectRailsDir)` → `<root>/.workflow/src/rails`.
 - `src/init.mjs`: шаг «rails» — junction; `.claude/settings.local.json`: слить ключ `hooks`
   (записи помечены `"_workflow_rails": true`, повторный init заменяет только их; чужие

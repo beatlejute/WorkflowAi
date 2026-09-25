@@ -270,6 +270,7 @@ describe('init.mjs — rails junction и хуки', () => {
     try {
       fs.mkdirSync(path.join(globalDir, 'rails'), { recursive: true }); // без claude-hook.mjs внутри
       fs.writeFileSync(path.join(globalDir, '.version'), JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8')).version);
+      fs.writeFileSync(path.join(globalDir, 'package.json'), '{}');
 
       const result = initProject(projectRoot, { force: true });
 
@@ -344,6 +345,7 @@ describe('global-dir.mjs — копирование src/rails → <globalDir>/ra
       const packageVersion = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8')).version;
       fs.mkdirSync(path.join(globalDir, 'rails'), { recursive: true });
       fs.writeFileSync(path.join(globalDir, '.version'), packageVersion);
+      fs.writeFileSync(path.join(globalDir, 'package.json'), '{}');
 
       assert.equal(isGlobalDirStale(PROJECT_ROOT), false);
     } finally {

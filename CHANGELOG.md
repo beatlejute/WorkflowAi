@@ -1,3 +1,9 @@
+## [1.7.4] — 2026-09-25
+
+### Fixed
+- **Установка из npm давала нерабочие скилы и рельсы.** В пакет 1.7.3 от скилов попали только `SKILL.md`: без `rails.yaml`, knowledge/, workflows/, algorithms/, templates/ и scripts/ скилов. Теперь пакет несёт скилы целиком, кроме тестов.
+- **`~/.workflow/` из установки npm не запускался.** Туда копировались только skills, scripts, rails и configs, а их код импортирует `../lib/…`, `../global-dir.mjs` и `workflow-ai/lib/…`. Хук rails, rails CLI и скрипты скилов падали с `ERR_MODULE_NOT_FOUND`. Теперь `~/.workflow/` получает копию `src/` пакета без тестов и `package.json` с `exports` пакета. Установка без `package.json` в `~/.workflow/` считается устаревшей: `workflow init` или `workflow update` копирует её заново.
+
 ## [1.7.3] — 2026-09-25
 
 > **Примечание:** первая публикация в npm после 1.5.1. Версии 1.5.2–1.7.2 в npm не выходили.

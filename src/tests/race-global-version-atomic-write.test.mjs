@@ -12,7 +12,7 @@
  * Цена. getGlobalVersion() читает файл и делает .trim(); на пустом файле он
  * отдаёт не null, а пустую строку, поэтому isGlobalDirStale() сравнивает '' с
  * версией пакета, не совпадает — и объявляет установку устаревшей. Следствие:
- * лишний copySkillsScriptsAndConfigs в общий каталог, а при неудачном совпадении
+ * лишний copyPackageRuntime в общий каталог, а при неудачном совпадении
  * два одновременных копирования в один каталог, где каждое начинается с
  * rmSync(dest). Тикеты и планы при этом не теряются — цена в избыточной работе
  * и в риске, что один прогон сносит каталог, пока другой в него копирует.
@@ -175,12 +175,13 @@ test('версия общей установки: временный файл н
 
       // Имя временного файла берётся из самой записи, а не угадывается.
       const versionFile = path.join(home, '.version');
-      const tempPaths = written.filter((file) => file !== versionFile);
+      // package.json копии пакета пишется рядом тем же способом — его записи не про версию.
+      const tempPaths = written.filter((file) => file !== versionFile && !path.basename(file).startsWith('.package.json.'));
       assert.equal(tempPaths.length, 1, `ожидалась ровно одна запись во временный файл: ${written.join(', ')}`);
       assert.equal(path.dirname(tempPaths[0]), home, 'временный файл должен лежать на том же томе, рядом с версией');
       assert.notEqual(path.basename(tempPaths[0]), '.version', 'временный файл не должен занимать имя версии');
 
-      const leftovers = fs.readdirSync(home).filter((name) => name !== '.version');
+      const leftovers = fs.readdirSync(home).filter((name) => name !== '.version' && name !== 'package.json');
       assert.deepEqual(leftovers, [], `в общем каталоге остался мусор: ${leftovers.join(', ')}`);
     });
   } finally {

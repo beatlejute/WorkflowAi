@@ -70,32 +70,51 @@ function copyDirectory(src, dest) {
   fs.cpSync(src, dest, { recursive: true, filter: (from) => !isTemporaryTestEntry(from) });
 }
 
-function copySkillsScriptsAndConfigs(packageRoot) {
+/**
+ * globalDir — копия `src/` пакета (без тестов) плюс `configs/` и package.json.
+ *
+ * Проекты ссылаются на `<globalDir>/skills|scripts|rails`, а Node разрешает
+ * импорты от настоящего пути файла, то есть внутри globalDir. Код оттуда
+ * импортирует соседей по дереву `src/` (`../lib/…`, `../global-dir.mjs`,
+ * `../init.mjs`) и сам пакет по имени (`workflow-ai/lib/…`). Пока копировались
+ * только skills/scripts/rails, установка из npm падала ERR_MODULE_NOT_FOUND на
+ * первом же хуке rails и скрипте скила (проверено установкой 1.7.3 во временный
+ * каталог); работало лишь там, где globalDir — ссылки на рабочую копию пакета.
+ * Поэтому копируется `src/` целиком, а package.json с именем и `exports` пакета
+ * даёт импорту `workflow-ai/…` разрешиться внутри копии (self-reference Node).
+ */
+function copyPackageRuntime(packageRoot) {
   const globalDir = getGlobalDir();
-  const srcSkills = join(packageRoot, 'src', 'skills');
-  const srcScripts = join(packageRoot, 'src', 'scripts');
-  const srcConfigs = join(packageRoot, 'configs');
-  const srcRails = join(packageRoot, 'src', 'rails');
-  const destSkills = join(globalDir, 'skills');
-  const destScripts = join(globalDir, 'scripts');
-  const destConfigs = join(globalDir, 'configs');
-  const destRails = join(globalDir, 'rails');
+  const srcRoot = join(packageRoot, 'src');
+  if (fs.existsSync(srcRoot)) {
+    for (const entry of fs.readdirSync(srcRoot, { withFileTypes: true })) {
+      if (entry.name === 'tests' || isTemporaryTestEntry(entry.name)) {
+        continue;
+      }
+      const from = join(srcRoot, entry.name);
+      const to = join(globalDir, entry.name);
+      if (entry.isDirectory()) {
+        copyDirectory(from, to);
+      } else if (entry.isFile() && !isJunctionOrSymlink(to)) {
+        fs.copyFileSync(from, to);
+      }
+    }
+  }
+  copyDirectory(join(packageRoot, 'configs'), join(globalDir, 'configs'));
+  writeRuntimePackageJson(packageRoot, globalDir);
+}
 
-  if (fs.existsSync(srcSkills)) {
-    copyDirectory(srcSkills, destSkills);
+/** package.json копии: имя, тип модулей и `exports` пакета с путями без `src/`. */
+function writeRuntimePackageJson(packageRoot, globalDir) {
+  const pkg = JSON.parse(fs.readFileSync(join(packageRoot, 'package.json'), 'utf-8'));
+  const exportsMap = {};
+  for (const [key, target] of Object.entries(pkg.exports || {})) {
+    if (typeof target === 'string' && target.startsWith('./src/')) {
+      exportsMap[key] = `./${target.slice('./src/'.length)}`;
+    }
   }
-  if (fs.existsSync(srcScripts)) {
-    copyDirectory(srcScripts, destScripts);
-  }
-  if (fs.existsSync(srcConfigs)) {
-    copyDirectory(srcConfigs, destConfigs);
-  }
-  // rails/README.md §11: ядро rails копируется в глобальную установку тем же
-  // путём, что skills/scripts/configs — проектная junction (createRailsJunction)
-  // указывает именно сюда.
-  if (fs.existsSync(srcRails)) {
-    copyDirectory(srcRails, destRails);
-  }
+  const runtime = { name: pkg.name, version: pkg.version, private: true, type: pkg.type, exports: exportsMap };
+  replaceFileAtomicSync(join(globalDir, 'package.json'), `${JSON.stringify(runtime, null, 2)}\n`);
 }
 
 export function isGlobalDirStale(packageRoot) {
@@ -119,6 +138,11 @@ export function isGlobalDirStale(packageRoot) {
   if (fs.existsSync(join(packageRoot, 'src', 'rails')) && !fs.existsSync(join(globalDir, 'rails'))) {
     return true;
   }
+  // Установки до 1.7.4 копировали только skills/scripts/rails/configs и
+  // package.json не писали — без полной копии код в них не запускается.
+  if (!fs.existsSync(join(globalDir, 'package.json'))) {
+    return true;
+  }
   return false;
 }
 
@@ -136,7 +160,7 @@ export function isGlobalDirStale(packageRoot) {
  * getGlobalVersion делает readFileSync(...).trim(): на пустом файле выходит не
  * null, а пустая строка, поэтому isGlobalDirStale сравнивает '' с версией
  * пакета и объявляет установку устаревшей. Init или update соседнего проекта в
- * этот момент зря повторяет copySkillsScriptsAndConfigs, а два таких копирования
+ * этот момент зря повторяет copyPackageRuntime, а два таких копирования
  * разом лезут в один каталог, где каждое начинается с rmSync(dest). Тикеты и
  * планы не страдают — цена в избыточной работе и в риске, что один прогон сносит
  * каталог, пока другой в него копирует.
@@ -153,7 +177,7 @@ export function ensureGlobalDir(packageRoot) {
   const globalDir = getGlobalDir();
   if (!fs.existsSync(globalDir)) {
     fs.mkdirSync(globalDir, { recursive: true });
-    copySkillsScriptsAndConfigs(packageRoot);
+    copyPackageRuntime(packageRoot);
     const version = getPackageVersion(packageRoot);
     writeGlobalVersion(globalDir, version);
     return;
@@ -161,7 +185,7 @@ export function ensureGlobalDir(packageRoot) {
   if (isGlobalDirStale(packageRoot)) {
     const version = getPackageVersion(packageRoot);
     writeGlobalVersion(globalDir, version);
-    copySkillsScriptsAndConfigs(packageRoot);
+    copyPackageRuntime(packageRoot);
   }
 }
 
@@ -172,5 +196,5 @@ export function refreshGlobalDir(packageRoot) {
   }
   const version = getPackageVersion(packageRoot);
   writeGlobalVersion(globalDir, version);
-  copySkillsScriptsAndConfigs(packageRoot);
+  copyPackageRuntime(packageRoot);
 }
