@@ -6,18 +6,18 @@
       "trials": [
         {
           "trial": 1,
-          "score": 5,
+          "score": 4,
           "passed": true
         },
         {
           "trial": 2,
-          "score": null,
-          "passed": false
+          "score": 4,
+          "passed": true
         },
         {
           "trial": 3,
-          "score": 5,
-          "passed": true
+          "score": null,
+          "passed": false
         }
       ]
     },
@@ -27,7 +27,7 @@
       "trials": [
         {
           "trial": 1,
-          "score": 3,
+          "score": 2,
           "passed": false
         },
         {
@@ -37,7 +37,7 @@
         },
         {
           "trial": 3,
-          "score": 3,
+          "score": 2,
           "passed": false
         }
       ]
@@ -85,23 +85,23 @@
       ]
     },
     "gpt-luna": {
-      "pass_count": 1,
+      "pass_count": 3,
       "total": 3,
       "trials": [
         {
           "trial": 1,
-          "score": 3,
-          "passed": false
-        },
-        {
-          "trial": 2,
           "score": 5,
           "passed": true
         },
         {
+          "trial": 2,
+          "score": 4,
+          "passed": true
+        },
+        {
           "trial": 3,
-          "score": 3,
-          "passed": false
+          "score": 4,
+          "passed": true
         }
       ]
     }
@@ -146,7 +146,7 @@
     {
       "agentId": "claude-haiku",
       "trial": 1,
-      "score": 3,
+      "score": 2,
       "errored": false
     },
     {
@@ -158,46 +158,46 @@
     {
       "agentId": "claude-haiku",
       "trial": 3,
-      "score": 3,
+      "score": 2,
       "errored": false
     },
     {
       "agentId": "gpt-luna",
       "trial": 1,
-      "score": 3,
+      "score": 5,
       "errored": false
     },
     {
       "agentId": "gpt-luna",
       "trial": 2,
-      "score": 5,
+      "score": 4,
       "errored": false
     },
     {
       "agentId": "gpt-luna",
       "trial": 3,
-      "score": 3,
+      "score": 4,
       "errored": false
     },
     {
       "agentId": "kilo-free",
       "trial": 1,
-      "score": 5,
+      "score": 4,
       "errored": false
     },
     {
       "agentId": "kilo-free",
       "trial": 2,
+      "score": 4,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 3,
       "score": null,
       "errored": true,
       "error": "Agent exited with code 1"
-    },
-    {
-      "agentId": "kilo-free",
-      "trial": 3,
-      "score": 5,
-      "errored": false
     }
   ],
-  "timestamp": "2026-09-25T16:29:27.822Z"
+  "timestamp": "2026-09-25T19:47:03.914Z"
 }

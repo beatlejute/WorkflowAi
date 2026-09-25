@@ -11,7 +11,7 @@
 ### 1. Инвентаризация
 
 1. `wc -l` всех файлов скила; список `workflows/`, `knowledge/`, `algorithms/`, `templates/`.
-2. Тесты скила: L0-anchors (`tests/cases/*.yaml` → `assertions.static`), L2-рубрики (`tests/rubrics/`). Они обязаны остаться зелёными или быть перепривязаны в той же правке.
+2. Тесты скила: L0-anchors (`tests/cases/*.yaml` → `assertions.static`), L2-рубрики (`tests/rubrics/`). Они обязаны остаться зелёными или быть перепривязаны в той же правке. Тексты заданий кейсов (`prompt`, `scenario.extra_instructions`) — в опись: их сверка с графом — узел П70S6.
 3. Фразы-инварианты: `node .workflow/src/scripts/check-rails-coverage.js --skill <name> --baseline <ref>` — печатает список предложений из строк с `⛔`, `⚠️`, жирным, датами, строк таблиц маршрутизации и загрузки.
 
 ### 2. Матрица переноса
@@ -64,6 +64,7 @@ entries:
 3. `node .workflow/src/scripts/check-rails-coverage.js --skill <name> --baseline <ref> --map rails-migration.yaml` — ноль пропусков.
 4. L0-anchors и L2-рубрики скила зелёные (`run-skill-tests.js --skill <name>`); анchor на файл, которого больше нет, перепривязывается к узлу в той же правке.
 5. Бюджет: ядро ≤ 400 строк; ядро + любой один фрагмент + его справочники ≤ 800.
+6. Тексты заданий кейсов сверены с графом (узел П70S6).
 
 ## Выход
 
