@@ -769,6 +769,30 @@ describe('L2 Rubric Layer — Trials & Aggregation', () => {
     assert.match(stdout, /status: passed/, 'судья обязан получить корень песочницы');
   });
 
+  // 2026-09-23 и 2026-09-25: раннер, запущенный из Git Bash, отдавал агенту PWD каталога
+  // запуска, и `kilo run` 7.7.x работал в настоящем проекте вместо песочницы.
+  it('исполнитель получает PWD = рабочий каталог прогона, а не каталог запуска раннера', async () => {
+    const caseId = 'TC-L2-016';
+    writeFileSync(join(TESTS_DIR_L2, `${caseId}.yaml`), buildL2CaseYaml({
+      description: 'PWD probe',
+      prompt: 'PWD probe'
+    }));
+    writeFileSync(join(TESTS_DIR_L2, 'index.yaml'),
+      createIndexYaml(['agent-pwd-probe'], 'mock-judge', [{ id: caseId, file: `${caseId}.yaml` }]));
+
+    await runRunner([
+      '--skill', TEST_SKILL_L2, '--layer', 'l2',
+      '--skip-secret-scan', '--fast', '--yes',
+      '--pipeline', TEST_PIPELINE_PATH
+    ], { PWD: PROJECT_ROOT });
+
+    const trial = readFileSync(
+      join(TESTS_DIR_L2, 'cases', caseId, 'current', 'agent-pwd-probe', 'trial-1.md'),
+      'utf8'
+    );
+    assert.match(trial, /MOCK_HIGH_SCORE/, 'PWD исполнителя обязан совпасть с его рабочим каталогом');
+  });
+
   it('незнакомый вид входа сценария — trial с ошибкой, а не молчаливый пропуск', async () => {
     writeDirInputCase('TC-L2-014', [
       '- kind: folder',
@@ -2393,6 +2417,105 @@ describe('Безынструментный агент (kind: http) в теста
 // каноне попадали в репозиторий, а каталоги в %TEMP% копились с каждого
 // прогона, где блок не дошёл до своего after().
 // ============================================================================
+
+// ============================================================================
+// Скил на рельсах: попытка, в которой рельсы не зацепились, видна в выводе.
+//
+// Раньше отсутствие состояния сессии в песочнице молча отключало output-check:
+// 2026-09-25 gpt-luna получила высший балл без единого вызова инструмента, а
+// Kilo-агенты 2026-09-23 и 2026-09-25 работали мимо песочницы — в выводе и
+// meta.json об этом не было ни слова.
+// ============================================================================
+
+describe('Скил на рельсах: рельсы не зацепились — предупреждение', () => {
+  const RAILS_SKILLS_DIR = makeSkillsDir('wf-skills-rails-');
+  const RAILS_SKILL = `__test-rails-engage-${Date.now()}`;
+  const CASE_ID = 'TC-RAILS-ENGAGE-001';
+  const skillDir = join(RAILS_SKILLS_DIR, RAILS_SKILL);
+  const RUN_ARGS = ['--layer', 'l2', '--skip-secret-scan', '--fast', '--yes', '--pipeline', TEST_PIPELINE_PATH];
+
+  before(() => {
+    mkdirSync(join(skillDir, 'tests', 'rubrics'), { recursive: true });
+    writeFileSync(join(skillDir, 'SKILL.md'), '# Rails engage probe\n');
+    // final_requires не выполняет ни один мок: зацепившийся запуск всегда уходит в повтор.
+    writeFileSync(join(skillDir, 'rails.yaml'), [
+      'version: 1',
+      `skill: ${RAILS_SKILL}`,
+      'entry: P0E1',
+      'terminal: [P0S1]',
+      'output:',
+      '  final_requires: ["RAILS_ENGAGE_TOKEN_NEVER_PRINTED"]',
+      ''
+    ].join('\n'));
+    writeFileSync(join(skillDir, 'tests', 'rubrics', 'r.md'), '# Rubric\nScore ≥ 4: pass\n');
+    writeFileSync(join(skillDir, 'tests', `${CASE_ID}.yaml`), [
+      'description: "Rails engage probe"',
+      'prompt: "Rails engage probe"',
+      'severity: normal',
+      'assertions:',
+      '  rubric:',
+      '    - rubric_file: rubrics/r.md',
+      '  static: []',
+      '  deterministic: []'
+    ].join('\n'));
+  });
+
+  function useAgent(agentId) {
+    writeFileSync(join(skillDir, 'tests', 'index.yaml'), [
+      'cases:',
+      `  - id: ${CASE_ID}`,
+      `    file: ${CASE_ID}.yaml`,
+      '    tags: [l2]',
+      'execution:',
+      `  target_agents: [${agentId}]`,
+      '  judge_agent: mock-judge'
+    ].join('\n'));
+  }
+
+  function lastResultBlock(stdout) {
+    return stdout.slice(stdout.lastIndexOf('---RESULT---', stdout.lastIndexOf('---RESULT---') - 1));
+  }
+
+  function readMeta() {
+    return JSON.parse(readFileSync(join(skillDir, 'tests', 'cases', CASE_ID, 'current', 'meta.json'), 'utf8'));
+  }
+
+  it('мок-агент без вызовов инструментов — предупреждение, строка rails_warnings в RESULT и счётчик в meta.json', async () => {
+    useAgent('agent-a');
+    // Улики прошлого прогона той же попытки: без состояния в новом прогоне их быть не должно.
+    const agentDir = join(skillDir, 'tests', 'cases', CASE_ID, 'current', 'agent-a');
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(agentDir, 'rails-state-trial-1.json'), '{"run":"stale"}');
+    writeFileSync(join(agentDir, 'rails-trial-1.jsonl'), '{"type":"denial","run":"stale"}\n');
+
+    const { stdout } = await runRunner(['--skill', RAILS_SKILL, ...RUN_ARGS], { WORKFLOW_SKILLS_DIR: RAILS_SKILLS_DIR });
+
+    assert.equal(existsSync(join(agentDir, 'rails-state-trial-1.json')), false, 'состояние прошлого прогона снято');
+    assert.equal(existsSync(join(agentDir, 'rails-trial-1.jsonl')), false, 'журнал прошлого прогона снят');
+
+    assert.match(stdout, /⚠ rails: \S*agent-a\S* — состояния сессии этого запуска нет ни в песочнице/, stdout);
+    assert.match(lastResultBlock(stdout), new RegExp(`^rails_warnings: ${CASE_ID} agent-a: рельсы не зацепились 1/1$`, 'm'), stdout);
+    assert.equal(readMeta().per_model['agent-a'].rails_not_engaged, 1);
+    assert.equal(readMeta().per_model['agent-a'].rails_escaped, 0);
+  });
+
+  it('повтор по output-check без состояния в песочнице — отмечен по повтору, а не по первой попытке', async () => {
+    useAgent('agent-rails-once');
+    const { stdout } = await runRunner(['--skill', RAILS_SKILL, ...RUN_ARGS], { WORKFLOW_SKILLS_DIR: RAILS_SKILLS_DIR });
+
+    assert.match(stdout, /output-check нарушен/, stdout);
+    assert.match(stdout, /⚠ rails: \S*agent-rails-once\S* \(повтор по output-check\) — состояния сессии этого запуска нет/, stdout);
+    assert.match(lastResultBlock(stdout), new RegExp(`^rails_warnings: ${CASE_ID} agent-rails-once: рельсы не зацепились 1/1$`, 'm'), stdout);
+    assert.equal(readMeta().per_model['agent-rails-once'].rails_not_engaged, 1);
+  });
+
+  it('режим --all — строка rails_warnings с именем скила в итоговом RESULT', async () => {
+    useAgent('agent-a');
+    const { stdout } = await runRunner(['--all', ...RUN_ARGS], { WORKFLOW_SKILLS_DIR: RAILS_SKILLS_DIR });
+
+    assert.match(lastResultBlock(stdout), new RegExp(`^rails_warnings: ${RAILS_SKILL} ${CASE_ID} agent-a: рельсы не зацепились 1/1$`, 'm'), stdout);
+  });
+});
 
 describe('гигиена прогона', () => {
   it('sweepStaleFixtures убирает только каталоги __test-* и не ходит по ссылкам', () => {

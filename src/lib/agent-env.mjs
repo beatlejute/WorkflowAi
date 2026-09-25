@@ -21,10 +21,19 @@
  * и в лог ничего не пишется; нечитаемый файл и строки не по формату — WARN с
  * путём и номерами строк (иначе опечатка молча возвращает те же 403).
  *
- * Порядок: process.env < agent.env < extra. Файл перекрывает окружение раннера
+ * Порядок: process.env < agent.env < extra < PWD. Файл перекрывает окружение раннера
  * намеренно: это явное объявление окружения агентов на этой машине (у обёртки
  * kilo.mod.cmd та же семантика). Доплата вызывающего кода (WORKFLOW_RAILS_*)
  * главнее файла — её выставляет сам раннер.
+ *
+ * PWD агента — его рабочий каталог (`opts.cwd`), поверх всего остального.
+ * `kilo run` 7.7.x берёт каталог проекта как `path.resolve(process.env.PWD ??
+ * process.cwd())` (строка в kilo.exe 7.7.9; в 7.2.31 — `process.cwd()`), а Git Bash
+ * отдаёт нативным потомкам PWD своего каталога. Раннер, запущенный из Git Bash в
+ * D:/Dev/workflowAi, задавал агенту cwd = песочница теста, но PWD наследовался:
+ * 2026-09-23 и 2026-09-25 все Kilo-агенты тестов скилов работали в настоящем
+ * проекте — читали его файлы, писали туда состояние рельс, а раннер искал улики
+ * в песочнице и output-check для них не запускал.
  */
 
 import fs from 'node:fs';
@@ -131,9 +140,10 @@ function applyLayer(env, layer, isWin) {
  * Окружение дочернего процесса агента.
  * @param {object} [baseEnv=process.env]
  * @param {object} [extra] — доплата вызывающего кода, главнее файла
- * @param {{ filePath?: string, platform?: string, logger?: object, stageId?: string }} [opts]
+ * @param {{ filePath?: string, platform?: string, logger?: object, stageId?: string, cwd?: string }} [opts]
  *   logger — логгер раннера (info/warn(message, stageId)): имена применённых
  *   переменных и проблемы файла; без логгера — молча.
+ *   cwd — рабочий каталог агента: становится его PWD (см. шапку модуля).
  */
 export function buildAgentEnv(baseEnv = process.env, extra = null, opts = {}) {
   const isWin = (opts.platform || process.platform) === 'win32';
@@ -146,5 +156,6 @@ export function buildAgentEnv(baseEnv = process.env, extra = null, opts = {}) {
     applyLayer(env, file.set, isWin);
   }
   if (extra) applyLayer(env, extra, isWin);
+  if (opts.cwd) applyLayer(env, { PWD: opts.cwd }, isWin);
   return env;
 }

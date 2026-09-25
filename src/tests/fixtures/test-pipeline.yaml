@@ -9,6 +9,8 @@
 #   agent-b      — алиас agent-fail (для тестов AND-логики где одна модель падает)
 #   agent-dir-probe — pass, только если вход kind: dir разложен в рабочий каталог
 #   agent-sandbox-probe — pass, только если WORKFLOW_SANDBOX_ROOT = рабочий каталог
+#   agent-pwd-probe     — pass, только если PWD = рабочий каталог
+#   agent-rails-once    — пишет состояние rails только при первом запуске (повтор без состояния)
 #   mock-judge-sandbox  — score 5, только если судье передан WORKFLOW_SANDBOX_ROOT
 
 pipeline:
@@ -57,6 +59,20 @@ pipeline:
       workdir: "."
       capabilities: [text]
       description: "Mock agent — pass, только если WORKFLOW_SANDBOX_ROOT указывает на рабочий каталог"
+
+    agent-pwd-probe:
+      command: "node"
+      args: ["src/tests/fixtures/mock-agent-pwd-probe.js"]
+      workdir: "."
+      capabilities: [text]
+      description: "Mock agent — pass, только если PWD указывает на рабочий каталог"
+
+    agent-rails-once:
+      command: "node"
+      args: ["src/tests/fixtures/mock-agent-rails-once.js"]
+      workdir: "."
+      capabilities: [text]
+      description: "Mock agent — состояние rails в рабочем каталоге только при первом запуске"
 
     mock-judge-sandbox:
       command: "node"

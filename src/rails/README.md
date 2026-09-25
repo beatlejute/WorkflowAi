@@ -566,6 +566,13 @@ export const WorkflowRails = async ({ directory }) => ({
   `WORKFLOW_RAILS_ROLE` (`coordinator` для целевого агента стадии/теста, `executor` для судьи),
   `WORKFLOW_RAILS_SKILL`, `WORKFLOW_RAILS_RUN` (uuid запуска); после завершения — `output-check`
   по состоянию с этим `run`, при нарушении один повтор с вердиктом в начале промпта.
+  `PWD` агента — его рабочий каталог (`buildAgentEnv`, `opts.cwd`): `kilo run` 7.7.x берёт каталог
+  проекта из `PWD`, а раннер из Git Bash наследует `PWD` каталога запуска.
+  В тестах скилов состояния с этим `run` в песочнице нет (у попытки или у её повтора по
+  output-check) — предупреждение `⚠ rails` в выводе, строка `rails_warnings` в блоке ---RESULT---
+  (в `--all` — с именем скила) и счётчики `rails_not_engaged` / `rails_escaped` по модели в
+  `meta.json` (`escaped` — состояние нашлось в настоящем проекте, агент ушёл из песочницы);
+  output-check у такой попытки не выполняется. Логика — `src/lib/rails-run-state.mjs`.
 - Песочница тестов скилов: `run-skill-tests.js` передаёт исполнителю кейса и судье
   `WORKFLOW_SANDBOX_ROOT` — корень изолированного workdir прогона. `decide()` проверяет его
   первым, до корня проекта, скила и роли:

@@ -187,12 +187,92 @@ describe('buildAgentEnv', () => {
     assert.deepEqual(base, { B: 'x' });
   }));
 
+  // `kilo run` 7.7.x берёт каталог проекта из PWD, Git Bash отдаёт потомкам PWD своего
+  // каталога: 2026-09-23 и 2026-09-25 Kilo-агенты тестов работали в настоящем проекте.
+  test('cwd становится PWD агента — поверх окружения, файла и доплаты', withHome((home) => {
+    writeAgentEnv(home, 'PWD=/from-file\n');
+    const env = buildAgentEnv({ PWD: '/d/Dev/workflowAi' }, { PWD: '/from-extra' }, { platform: 'linux', cwd: '/tmp/sandbox' });
+    assert.equal(env.PWD, '/tmp/sandbox');
+  }));
+
+  test('win32: PWD из cwd вытесняет регистровые варианты', withHome(() => {
+    const env = buildAgentEnv({ PWD: 'D:/Dev/workflowAi', pwd: 'x', Path: 'C:\\bin' }, null, { platform: 'win32', cwd: 'C:\\Temp\\wf-test-1' });
+    assert.deepEqual(env, { Path: 'C:\\bin', PWD: 'C:\\Temp\\wf-test-1' });
+  }));
+
+  test('без cwd PWD не трогается', withHome(() => {
+    assert.equal(buildAgentEnv({ PWD: '/keep' }, null, { platform: 'linux' }).PWD, '/keep');
+  }));
+
   test('файл перечитывается на каждый вызов', withHome((home) => {
     writeAgentEnv(home, 'A=1\n');
     assert.equal(buildAgentEnv({}, null, { platform: 'linux' }).A, '1');
     writeAgentEnv(home, 'A=2\n');
     assert.equal(buildAgentEnv({}, null, { platform: 'linux' }).A, '2');
   }));
+});
+
+// Раннер, запущенный из Git Bash, наследует PWD каталога запуска; агент обязан получить
+// PWD своего рабочего каталога, иначе `kilo run` 7.7.x работает не там (инцидент выше).
+function withForeignPwd(fn) {
+  return async (...args) => {
+    const saved = process.env.PWD;
+    const foreign = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-env-foreign-pwd-'));
+    process.env.PWD = foreign;
+    try {
+      await fn(...args, foreign);
+    } finally {
+      if (saved === undefined) delete process.env.PWD;
+      else process.env.PWD = saved;
+      fs.rmSync(foreign, { recursive: true, force: true });
+    }
+  };
+}
+
+describe('PWD агента — его рабочий каталог, а не каталог запуска раннера', () => {
+  test('agent-spawner.mjs (тесты скилов)', withHome(withForeignPwd(async (home, foreign) => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-env-pwd-spawner-'));
+    try {
+      const script = writeEchoEnvScript(tmp, ['PWD']);
+      const result = await spawnAgent({ command: 'node', args: [script], workdir: '.' }, 'prompt', {
+        timeout: 10,
+        projectRoot: tmp
+      });
+      const { PWD } = extractReport(result.output);
+      assert.notEqual(PWD, foreign);
+      assert.equal(path.resolve(PWD), path.resolve(tmp));
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  })));
+
+  test('runner.mjs (стадия pipeline)', withHome(withForeignPwd(async (home, foreign) => {
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-env-pwd-runner-'));
+    try {
+      const marker = path.join(projectRoot, 'env-report.json');
+      const script = writeEchoEnvScript(projectRoot, ['PWD'], marker);
+      const config = {
+        pipeline: {
+          name: 'agent-env',
+          version: '1.0',
+          agents: { stub: { command: 'node', args: [script], capabilities: ['text'] } },
+          execution: { timeout_per_stage: 30 },
+          stages: {},
+          entry: 'none',
+          context: {}
+        }
+      };
+      const executor = new StageExecutor(config, {}, {}, {}, null, null, projectRoot);
+      const result = await executor.executeWithFallback('execute-task', { agents: ['stub'], instructions: 'Test', skill: 'test-skill' });
+
+      assert.equal(result.status, 'passed');
+      const { PWD } = JSON.parse(fs.readFileSync(marker, 'utf8'));
+      assert.notEqual(PWD, foreign);
+      assert.equal(path.resolve(PWD), path.resolve(projectRoot));
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+  })));
 });
 
 describe('agent.env доходит до дочернего процесса агента', () => {

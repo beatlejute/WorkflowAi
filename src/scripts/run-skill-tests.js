@@ -11,6 +11,7 @@ import { spawnAgent } from '../lib/agent-spawner.mjs';
 import { writeClaudeHooks, writeKiloPluginLoader, userHasRailsHooks } from '../init.mjs';
 import { loadRailsConfig } from '../rails/rails-config.mjs';
 import { check as checkRailsOutput } from '../rails/output-check.mjs';
+import { railsEngagement, railsNotEngagedMessage, railsCounters, describeRailsEngagement } from '../lib/rails-run-state.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -84,41 +85,22 @@ function railsYamlExists(root, skill) {
   }
 }
 
-/** Файл состояния сессии rails с данным `run` (§5: поле `run`), или null. */
-function findRailsStateByRun(root, run) {
-  if (!run) return null;
-  const dir = path.join(root, '.workflow', 'state', 'rails');
-  let entries;
-  try {
-    entries = fs.readdirSync(dir);
-  } catch {
-    return null;
-  }
-  for (const name of entries) {
-    if (!name.endsWith('.json') || name.startsWith('.')) continue;
-    try {
-      const state = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
-      if (state && state.run === run) return state;
-    } catch {
-      // повреждённый/недописанный файл состояния — пропускаем.
-    }
-  }
-  return null;
-}
-
 /**
  * Вызывает целевого агента (`WORKFLOW_RAILS_ROLE=coordinator`) и, если у
  * скила есть `rails.yaml`, проверяет финальный ответ через output-check по
  * состоянию с этим `run`; при нарушении — один повтор с вердиктом в начале
- * промпта (§8, §11). Без rails.yaml у скила или без найденного состояния
- * (рельсы не были задействованы в этом запуске) — поведение как раньше.
+ * промпта (§8, §11). Без rails.yaml у скила — поведение как раньше.
  *
- * Открытый вопрос (спецификация не уточняет): отсутствие состояния при
- * наличии rails.yaml трактуется как «рельсы не зацепились» и check не
- * запускается — простое решение без риска ложных повторов, когда хуки в
- * workdir по какой-то причине не сработали.
+ * Состояния с этим `run` в песочнице нет — рельсы не зацепились: check не
+ * запускается (повтор без состояния нечем обосновать), но раннер пишет
+ * предупреждение и отмечает попытку в `result.rails`: `escaped` — состояние
+ * нашлось в настоящем проекте, агент работал мимо песочницы; иначе причина
+ * раннеру не видна (railsNotEngagedMessage). То же — для повтора: судится его
+ * вывод, поэтому `result.rails` повтора — по его собственному `run`. Прежде
+ * такие попытки проходили молча: 2026-09-23 и 2026-09-25 Kilo-агенты работали в
+ * настоящем проекте, а gpt-luna получала высший балл без единого вызова инструмента.
  *
- * @returns {Promise<object>} результат spawnAgent (плюс railsRetried/railsVerdict при повторе)
+ * @returns {Promise<object>} результат spawnAgent (плюс rails, railsRetried/railsVerdict при повторе)
  */
 async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, root, skill) {
   const hasRails = railsYamlExists(root, skill);
@@ -137,8 +119,13 @@ async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, ro
     return result;
   }
 
-  const state = findRailsStateByRun(root, runId);
-  if (!state) return result;
+  const who = spawnOpts.stageId || agentConfig.command;
+  const { state, engaged, escaped } = railsEngagement({ sandboxRoot: root, projectRoot, run: runId });
+  result.rails = { engaged, escaped };
+  if (!state) {
+    console.log(railsNotEngagedMessage({ who, escaped, projectRoot }));
+    return result;
+  }
 
   const verdict = checkRailsOutput(result.output || '', config, state);
   if (verdict.ok) return result;
@@ -146,14 +133,20 @@ async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, ro
   console.log(`[Runner] rails: output-check нарушен для ${skill}, повтор с вердиктом — отсутствует: ${verdict.missing.join('; ')}`);
 
   const verdictText = `RAILS: предыдущий ответ отклонён output-check — отсутствует: ${verdict.missing.join('; ')}. Исправь и ответь заново.\n\n`;
+  const retryRunId = crypto.randomUUID();
   const retryResult = await spawnAgent(agentConfig, verdictText + prompt, {
     ...spawnOpts,
     railsRole: 'coordinator',
     railsSkill: skill,
-    railsRun: crypto.randomUUID()
+    railsRun: retryRunId
   });
   retryResult.railsRetried = true;
   retryResult.railsVerdict = verdict;
+  const retry = railsEngagement({ sandboxRoot: root, projectRoot, run: retryRunId });
+  retryResult.rails = { engaged: retry.engaged, escaped: retry.escaped };
+  if (!retry.state) {
+    console.log(railsNotEngagedMessage({ who: `${who} (повтор по output-check)`, escaped: retry.escaped, projectRoot }));
+  }
   return retryResult;
 }
 
@@ -1031,6 +1024,11 @@ async function writeTrialOutput(skillName, caseId, agentId, trialNum, output) {
  * правки графа): журнал `rails-denials.jsonl` → `current/<agent>/rails-trial-N.jsonl`,
  * состояние сессии → `current/<agent>/rails-state-trial-N.json`. Без них workdir
  * уносил с собой всю историю отказов прогона.
+ *
+ * Улики прошлого прогона той же попытки снимаются всегда: попытка без журнала и
+ * состояния иначе оставляла чужие файлы, и они читались как улики текущего прогона
+ * (2026-09-25: rails-state-trial-1.json claude-haiku от прогона 14:13 лежал рядом с
+ * trial-1.md прогона 16:09, у которого состояния не было вовсе).
  */
 function persistRailsArtifacts(taskWorkdir, skillName, caseId, agentId, trialNum) {
   try {
@@ -1038,17 +1036,21 @@ function persistRailsArtifacts(taskWorkdir, skillName, caseId, agentId, trialNum
     const agentDir = path.join(skillsDir, skillName, 'tests', 'cases', caseId, 'current', agentId);
     const journal = path.join(taskWorkdir, '.workflow', 'logs', 'rails-denials.jsonl');
     const stateDir = path.join(taskWorkdir, '.workflow', 'state', 'rails');
+    const journalCopy = path.join(agentDir, `rails-trial-${trialNum}.jsonl`);
+    const stateCopy = path.join(agentDir, `rails-state-trial-${trialNum}.json`);
+    fs.rmSync(journalCopy, { force: true });
+    fs.rmSync(stateCopy, { force: true });
     const hasJournal = fs.existsSync(journal);
     const states = fs.existsSync(stateDir) ? fs.readdirSync(stateDir).filter((f) => f.endsWith('.json')) : [];
     if (!hasJournal && states.length === 0) return;
     ensureDir(agentDir);
-    if (hasJournal) fs.copyFileSync(journal, path.join(agentDir, `rails-trial-${trialNum}.jsonl`));
+    if (hasJournal) fs.copyFileSync(journal, journalCopy);
     if (states.length > 0) {
       // Один прогон — одна сессия целевого агента; при нескольких берём самую свежую.
       const newest = states
         .map((f) => ({ f, m: fs.statSync(path.join(stateDir, f)).mtimeMs }))
         .sort((a, b) => b.m - a.m)[0].f;
-      fs.copyFileSync(path.join(stateDir, newest), path.join(agentDir, `rails-state-trial-${trialNum}.json`));
+      fs.copyFileSync(path.join(stateDir, newest), stateCopy);
     }
   } catch (err) {
     console.log(`[Runner] rails: не удалось сохранить улики workdir (${err.message})`);
@@ -1317,6 +1319,7 @@ reason: <brief explanation>
           judge_output: judgeResult.output || '',
           passed: score >= 4,
           l1: evaluateTrialL1(targetOutput.output || '', task.testCase),
+          ...(targetOutput.rails ? { rails: targetOutput.rails } : {}),
           errored: false
         };
       } catch (err) {
@@ -1504,6 +1507,10 @@ function aggregateResults(results, testCase) {
       total,
       threshold: useAll ? total : threshold
     };
+
+    // Скил на рельсах: попытки, где рельсы не зацепились (см. spawnTargetAgentWithRailsCheck).
+    const counters = railsCounters(modelData.trials);
+    if (counters) Object.assign(perModelResults[agentId], counters);
   }
   
   const allModelsPassed = Object.values(perModelResults).every(m => m.passed);
@@ -1596,7 +1603,8 @@ async function runTestsForSkill(skillName, opts) {
     current_run: { passed: 0, failed: 0, no_coverage: 0 },
     baseline_ref: 'origin/main',
     target_agents: [],
-    judge_agent: null
+    judge_agent: null,
+    rails_warnings: []
   };
   let cases = [];
   const currentRunStatuses = {};
@@ -1802,6 +1810,7 @@ async function runTestsForSkill(skillName, opts) {
 
               const aggregated = aggregateResults(l2Results, testCase);
               console.log(`[Runner] L2 Results for ${caseDef.id}:`, JSON.stringify(aggregated, null, 2));
+              result.rails_warnings.push(...describeRailsEngagement(caseDef.id, aggregated));
 
               await writeJudgeResults(skillName, caseDef.id, l2Results);
 
@@ -1880,6 +1889,7 @@ async function runTestsForSkill(skillName, opts) {
 
             const aggregated = aggregateResults(l2Results, testCase);
             console.log(`[Runner] L2 Results for ${caseDef.id}:`, JSON.stringify(aggregated, null, 2));
+            result.rails_warnings.push(...describeRailsEngagement(caseDef.id, aggregated));
 
             await writeJudgeResults(skillName, caseDef.id, l2Results);
 
@@ -1962,6 +1972,7 @@ async function runSkillTests(opts) {
       results.judge_agent = skillResult.judge_agent;
       if (skillResult.error) results.error = skillResult.error;
       if (skillResult.calibration) results.calibration = skillResult.calibration;
+      if (skillResult.rails_warnings?.length) results.rails_warnings = skillResult.rails_warnings;
 
       // Prepare for git comparison (if applicable)
       const cases = skillResult.cases;
@@ -2013,6 +2024,7 @@ async function runSkillTests(opts) {
       let passed = 0;
       let failed = 0;
       let overallStatus = 'passed';
+      const railsWarnings = [];
 
       for (const skillName of skillNames) {
         const skillResult = await runTestsForSkill(skillName, opts);
@@ -2022,7 +2034,10 @@ async function runSkillTests(opts) {
         if (skillResult.status !== 'passed') {
           overallStatus = 'failed';
         }
+        // Имя скила префиксом: одноимённые TC разных скилов иначе неразличимы.
+        for (const w of skillResult.rails_warnings || []) railsWarnings.push(`${skillName} ${w}`);
       }
+      if (railsWarnings.length) results.rails_warnings = railsWarnings;
 
       results.total = total;
       results.current_run.passed = passed;
@@ -2079,6 +2094,12 @@ function printResult(result) {
 
   if (result.outcome_message) {
     console.log(`outcome_message: ${result.outcome_message}`);
+  }
+
+  // Скил на рельсах: попытки, где рельсы не зацепились или агент ушёл из песочницы.
+  // Балл таких попыток получен без принуждения рельс — строка в блоке, а не только в логе.
+  if (result.rails_warnings?.length) {
+    console.log(`rails_warnings: ${result.rails_warnings.join('; ')}`);
   }
 
   // Причина status: error (агент не найден, агент без инструментов, …) — без неё

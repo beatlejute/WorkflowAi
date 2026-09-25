@@ -204,9 +204,11 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
     // rails: env дочернего процесса, только заданные поля. Поверх process.env —
     // машинный agent.env (прокси и т.п.), см. agent-env.mjs. Тесты скилов
     // логгер не передают — проблемы файла тогда идут в stderr, а не в никуда.
+    const cwd = path.resolve(projectRoot, agentConfig.workdir || '.');
     const childEnv = buildAgentEnv(process.env, extraEnv, {
       logger: logger || STDERR_WARN_LOGGER,
-      stageId
+      stageId,
+      cwd
     });
     if (railsRole) childEnv.WORKFLOW_RAILS_ROLE = railsRole;
     if (railsSkill) childEnv.WORKFLOW_RAILS_SKILL = railsSkill;
@@ -215,7 +217,7 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
     // windowsHide: без него у раннера без консоли (запуск из MCP) каждый
     // агент открывает своё окно терминала — см. callAgent в runner.mjs.
     const child = spawn(agentConfig.command, args, {
-      cwd: path.resolve(projectRoot, agentConfig.workdir || '.'),
+      cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: useShell,
       windowsHide: true,

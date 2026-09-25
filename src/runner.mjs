@@ -15,6 +15,7 @@ import { readPauseRequest, RUNNER_CAPABILITIES } from './lib/pause-request.mjs';
 import { packageVersion as pipelineVersion } from './lib/package-version.mjs';
 import { appendAgentRun, classifyAgentResult } from './lib/agent-history.mjs';
 import { buildAgentEnv } from './lib/agent-env.mjs';
+import { findRailsStateByRun } from './lib/rails-run-state.mjs';
 import { isKiloRun, kiloRunTitle, withKiloTitle, requestedKiloModel, kiloDbPath, readKiloModels, formatKiloModels, kiloAgentLabel } from './lib/kilo-models.mjs';
 
 // Как часто, пока kilo-агент работает, смотреть в базу kilo, какие модели ответили.
@@ -60,29 +61,6 @@ function railsYamlExists(root, skill) {
   } catch {
     return false;
   }
-}
-
-/** Файл состояния сессии rails с данным `run` (§5: поле `run`), или null. */
-function findRailsStateByRun(root, run) {
-  if (!run) return null;
-  const dir = path.join(root, '.workflow', 'state', 'rails');
-  let entries;
-  try {
-    entries = fs.readdirSync(dir);
-  } catch {
-    return null;
-  }
-  for (const name of entries) {
-    if (!name.endsWith('.json') || name.startsWith('.')) continue;
-    try {
-      const state = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
-      if (state && state.run === run) return state;
-    } catch {
-      // повреждённый/недописанный файл состояния — пропускаем, как и
-      // остальные читатели rails (journal.mjs, state.mjs).
-    }
-  }
-  return null;
 }
 
 function findTicketPathForId(ticketId, projectRoot) {
@@ -1704,13 +1682,14 @@ class StageExecutor {
       // windowsHide: раннер, запущенный из MCP (detached), живёт без консоли,
       // и Windows открывает каждому агенту новое окно терминала. С флагом
       // консоль создаётся скрытой, а внуки агента наследуют её без окон.
-      // env: машинный agent.env (прокси и т.п.) — см. lib/agent-env.mjs.
+      // env: машинный agent.env (прокси и т.п.) и PWD = cwd агента — см. lib/agent-env.mjs.
+      const agentCwd = path.resolve(this.projectRoot, agent.workdir || '.');
       const child = spawn(agent.command, args, {
-        cwd: path.resolve(this.projectRoot, agent.workdir || '.'),
+        cwd: agentCwd,
         stdio: ['pipe', 'pipe', 'pipe'],
         shell: useShell,
         windowsHide: true,
-        env: buildAgentEnv(process.env, railsEnv, { logger: this.logger, stageId })
+        env: buildAgentEnv(process.env, railsEnv, { logger: this.logger, stageId, cwd: agentCwd })
       });
       this.currentChild = child;
 
