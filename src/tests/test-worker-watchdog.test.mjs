@@ -19,7 +19,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
-import { readdirSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveWorkerCapMs, DEFAULT_WORKER_CAP_MS } from './_rails-home.mjs';
@@ -33,7 +33,7 @@ const FIXTURES = path.join(__dirname, 'fixtures');
 // завершится никогда, поэтому по истечении бюджета убиваем его и валим тест.
 const SELF_EXIT_BUDGET_MS = 25_000;
 
-function runNodeTest(fixture, capMs, { budgetMs = SELF_EXIT_BUDGET_MS } = {}) {
+function runNodeTest(fixture, capMs, { budgetMs = SELF_EXIT_BUDGET_MS, tmp = null } = {}) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
     // NODE_TEST_CONTEXT выставлен в нашем собственном воркере; унаследованный
@@ -41,6 +41,8 @@ function runNodeTest(fixture, capMs, { budgetMs = SELF_EXIT_BUDGET_MS } = {}) {
     // («run() is being called recursively»), поэтому убираем его.
     const env = { ...process.env, WORKFLOW_TEST_WORKER_CAP_MS: String(capMs) };
     delete env.NODE_TEST_CONTEXT;
+    // свой временный каталог дочернего прогона: его tmpdir() — только его
+    if (tmp) Object.assign(env, { TMPDIR: tmp, TEMP: tmp, TMP: tmp });
     const child = spawn(
       process.execPath,
       ['--test', '--import', PRELOAD, path.join(FIXTURES, fixture)],
@@ -231,14 +233,18 @@ test('преднагрузка убирает свой каталог, даже 
   // подменивший WORKFLOW_HOME на собственный дом (так делают тесты хука,
   // плагина Kilo и CLI), уводил хук на чужой каталог: свой оставался в %TEMP%
   // навсегда. За один прогон набора так накапливалось 9 каталогов.
-  const homes = () => new Set(
-    readdirSync(tmpdir()).filter(name => name.startsWith('rails-test-home-'))
-  );
-  const before = homes();
+  //
+  // Дочерний прогон получает собственный временный каталог. В общем %TEMP% в это
+  // же время заводят свои дома соседние файлы набора, и под `npm run coverage` на
+  // CI Windows 2026-09-25 чужой живой каталог засчитался утечкой.
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watchdog-tmp-'));
+  try {
+    const run = await runNodeTest('worker-overrides-home.mjs', 60_000, { tmp });
+    assert.equal(run.code, 0, `фикстура должна быть зелёной; вывод:\n${run.output}`);
 
-  const run = await runNodeTest('worker-overrides-home.mjs', 60_000);
-  assert.equal(run.code, 0, `фикстура должна быть зелёной; вывод:\n${run.output}`);
-
-  const leaked = [...homes()].filter(name => !before.has(name));
-  assert.deepEqual(leaked, [], `каталоги остались в %TEMP%: ${leaked.join(', ')}`);
+    const leaked = readdirSync(tmp).filter(name => name.startsWith('rails-test-home-'));
+    assert.deepEqual(leaked, [], `каталоги остались во временном каталоге: ${leaked.join(', ')}`);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });

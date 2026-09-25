@@ -18,7 +18,11 @@ import {
   railsEngagement,
   railsNotEngagedMessage,
   railsCounters,
-  describeRailsEngagement
+  describeRailsEngagement,
+  railsHost,
+  railsHooksPresent,
+  railsNotEngagedVerdict,
+  outputCheckVerdict
 } from '../lib/rails-run-state.mjs';
 
 function makeRoot(prefix) {
@@ -105,19 +109,93 @@ describe('railsNotEngagedMessage', () => {
 });
 
 describe('railsCounters', () => {
-  test('считает попытки без состояния и побеги', () => {
+  test('считает попытки без состояния, побеги и проваленные без рельс', () => {
     assert.deepEqual(railsCounters([
       { rails: { engaged: false, escaped: true } },
-      { rails: { engaged: false, escaped: false } },
+      { rails: { engaged: false, escaped: false, failed: true } },
       { rails: { engaged: true, escaped: false } },
       { errored: true }
-    ]), { rails_not_engaged: 2, rails_escaped: 1 });
+    ]), { rails_not_engaged: 2, rails_escaped: 1, rails_failed: 1 });
   });
 
   test('попыток с отметкой rails нет — null (скил не на рельсах)', () => {
     assert.equal(railsCounters([{ score: 5 }, { errored: true }]), null);
     assert.equal(railsCounters(undefined), null);
   });
+});
+
+describe('railsHost', () => {
+  test('kilo run, claude по имени команды, явный rails_host; прочее — null', () => {
+    assert.equal(railsHost({ command: 'kilo', args: ['run', '--auto'] }), 'kilo');
+    assert.equal(railsHost({ command: 'kilo', args: ['db', 'path'] }), null, 'kilo без run — не агент');
+    assert.equal(railsHost({ command: 'C:\\nvm4w\\nodejs\\claude.cmd', args: ['-p'] }), 'claude');
+    assert.equal(railsHost({ command: '/usr/local/bin/claude', args: [] }), 'claude');
+    assert.equal(railsHost({ command: 'node', args: ['stub.mjs'], rails_host: 'kilo' }), 'kilo');
+    assert.equal(railsHost({ command: 'node', args: ['stub.mjs'] }), null);
+    assert.equal(railsHost({ command: 'qwen', args: [], rails_host: 'other' }), null);
+  });
+});
+
+describe('railsHooksPresent', () => {
+  test('kilo — загрузчик плагина в каталоге агента и ядро, на которое он ссылается', withRoots(({ sandbox }) => {
+    assert.equal(railsHooksPresent('kilo', sandbox), false);
+    fs.mkdirSync(path.join(sandbox, '.kilo', 'plugin'), { recursive: true });
+    fs.writeFileSync(path.join(sandbox, '.kilo', 'plugin', 'workflow-rails.js'), '', 'utf8');
+    assert.equal(railsHooksPresent('kilo', sandbox), false, 'загрузчик без ядра — плагин не грузится');
+    fs.mkdirSync(path.join(sandbox, '.workflow', 'src', 'rails'), { recursive: true });
+    fs.writeFileSync(path.join(sandbox, '.workflow', 'src', 'rails', 'kilo-plugin.mjs'), '', 'utf8');
+    assert.equal(railsHooksPresent('kilo', sandbox), true);
+  }));
+
+  test('claude — запись _workflow_rails в настройках пользователя или проекта, скрипт хука существует', withRoots(({ sandbox, project }) => {
+    const script = path.join(project, 'claude-hook.mjs');
+    const hooks = (s) => JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: `node "${s}"`, _workflow_rails: true }] }] } });
+    const user = path.join(project, 'user-settings.json');
+    assert.equal(railsHooksPresent('claude', sandbox, { userSettingsPath: user }), false, 'файла нет');
+    fs.writeFileSync(user, hooks(script), 'utf8');
+    assert.equal(railsHooksPresent('claude', sandbox, { userSettingsPath: user }), false, 'скрипта хука нет — хук упадёт');
+    fs.writeFileSync(script, '', 'utf8');
+    assert.equal(railsHooksPresent('claude', sandbox, { userSettingsPath: user }), true);
+    fs.mkdirSync(path.join(sandbox, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(sandbox, '.claude', 'settings.local.json'), hooks(script), 'utf8');
+    assert.equal(railsHooksPresent('claude', sandbox, { userSettingsPath: path.join(project, 'none.json') }), true);
+  }));
+
+  test('хост неизвестен — false', withRoots(({ sandbox }) => {
+    assert.equal(railsHooksPresent(null, sandbox), false);
+  }));
+});
+
+describe('вердикты повтора', () => {
+  test('без единого вызова инструмента — команда start и терминальный узел', () => {
+    const v = railsNotEngagedVerdict({ skill: 'deep-research', config: { terminal: ['P9S1'] } });
+    assert.ok(v.startsWith('RAILS: предыдущий ответ отклонён — скил «deep-research» идёт по рельсам'), v);
+    assert.match(v, /`node \.workflow\/src\/rails\/cli\.mjs start deep-research`/);
+    assert.match(v, /Финальный ответ — только в P9S1\.\n\n$/);
+    assert.match(railsNotEngagedVerdict({ skill: 'x', config: {} }), /только в терминальном узле графа/);
+  });
+
+  test('output-check — что отсутствует, где числится и команды переходов оттуда', withRoots(({ sandbox }) => {
+    const skillDir = path.join(sandbox, 'skill');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), [
+      '```mermaid',
+      'graph TD',
+      '    P1E1["П1 ВХОД: начало этапа проверки вердикта повтора раннера"]',
+      '    P1S1["П1 ШАГ: выдать результат проверки и остановиться на этом шаге"]',
+      '    P1E1 --> P1S1',
+      '```',
+      ''
+    ].join('\n'), 'utf8');
+    const config = { skill: 'skill', entry: 'P1E1', terminal: ['P1S1'], quote_min: 25 };
+    const v = outputCheckVerdict({ verdict: { ok: false, missing: ['position:P1E1 не входит в terminal/pause_nodes'] }, state: { node: 'P1E1' }, config, skillDir });
+    assert.match(v, /^RAILS: предыдущий ответ отклонён output-check — отсутствует: position:P1E1/);
+    assert.match(v, /Числишься в P1E1\. Переходы оттуда:\n {2}P1S1: .* → node \.workflow\/src\/rails\/cli\.mjs goto P1S1 --quote '/);
+    assert.match(v, /Финальный ответ — только в P1S1\. Исправь и ответь заново\.\n\n$/);
+
+    const noGraph = outputCheckVerdict({ verdict: { ok: false, missing: ['x'] }, state: { node: 'P1E1' }, config, skillDir: path.join(sandbox, 'nope') });
+    assert.match(noGraph, /Числишься в P1E1\. Финальный ответ/, 'граф не читается — без переходов');
+  }));
 });
 
 describe('describeRailsEngagement', () => {

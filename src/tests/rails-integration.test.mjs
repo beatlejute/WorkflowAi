@@ -634,6 +634,72 @@ describe('runner.mjs — StageExecutor.callAgent и rails output-check', () => {
     }
   });
 
+  // Агент без единого вызова инструмента: хук не создаёт состояния. Прогон deep-research
+  // 2026-09-25 — gpt-luna так отвечала во всех попытках, и output-check молчал.
+  function writeSilentStub(projectRoot) {
+    const scriptPath = path.join(projectRoot, 'stub-silent.mjs');
+    fs.writeFileSync(scriptPath, [
+      "import fs from 'node:fs';",
+      "import path from 'node:path';",
+      "const counterPath = path.join(process.cwd(), 'call-count.txt');",
+      "const prev = fs.existsSync(counterPath) ? parseInt(fs.readFileSync(counterPath, 'utf8'), 10) : 0;",
+      "fs.writeFileSync(counterPath, String(prev + 1));",
+      "fs.writeFileSync(path.join(process.cwd(), `prompt-${prev + 1}.txt`), process.argv[process.argv.length - 1] || '');",
+      "process.stdout.write('---RESULT---\\nstatus: passed\\n---RESULT---\\n');"
+    ].join('\n'));
+    return scriptPath;
+  }
+
+  it('хуки рельс на месте, состояния нет — повтор с вердиктом «пройди граф от start»', async () => {
+    const projectRoot = makeTmpDir('wf-rails-callagent-silent-');
+    try {
+      const skill = 'demo-skill';
+      writeRailsYaml(projectRoot, skill);
+      fs.mkdirSync(path.join(projectRoot, '.kilo', 'plugin'), { recursive: true });
+      fs.writeFileSync(path.join(projectRoot, '.kilo', 'plugin', 'workflow-rails.js'), '// loader\n');
+      fs.mkdirSync(path.join(projectRoot, '.workflow', 'src', 'rails'), { recursive: true });
+      fs.writeFileSync(path.join(projectRoot, '.workflow', 'src', 'rails', 'kilo-plugin.mjs'), '// core\n');
+      const stubPath = writeSilentStub(projectRoot);
+
+      const executor = new StageExecutor(makeConfig(projectRoot), {}, {}, {}, null, null, projectRoot);
+      const agent = { command: 'node', args: [stubPath], workdir: '.', rails_host: 'kilo' };
+
+      const result = await executor.callAgent(agent, 'do the task', 'stage-1', skill, 'agent-1');
+
+      assert.equal(result.railsRetried, true);
+      assert.deepEqual(result.railsVerdict.missing, ['ни одного вызова инструмента под рельсами']);
+      assert.equal(fs.readFileSync(path.join(projectRoot, 'call-count.txt'), 'utf8'), '2');
+      const retryPrompt = fs.readFileSync(path.join(projectRoot, 'prompt-2.txt'), 'utf8');
+      assert.match(retryPrompt, /^RAILS: предыдущий ответ отклонён — скил «demo-skill» идёт по рельсам/);
+      assert.match(retryPrompt, /`node \.workflow\/src\/rails\/cli\.mjs start demo-skill`/);
+      assert.match(retryPrompt, /Финальный ответ — только в P1S1\./);
+      assert.match(retryPrompt, /do the task$/, 'исходный промпт — после вердикта');
+    } finally {
+      cleanupDir(projectRoot);
+    }
+  });
+
+  it('состояния нет и хуков рельс для агента нет — без повтора: повтором не обосновать', async () => {
+    const projectRoot = makeTmpDir('wf-rails-callagent-nohooks-');
+    try {
+      const skill = 'demo-skill';
+      writeRailsYaml(projectRoot, skill);
+      const stubPath = writeSilentStub(projectRoot);
+      const executor = new StageExecutor(makeConfig(projectRoot), {}, {}, {}, null, null, projectRoot);
+
+      for (const agent of [
+        { command: 'node', args: [stubPath], workdir: '.', rails_host: 'kilo' }, // загрузчика плагина нет
+        { command: 'node', args: [stubPath], workdir: '.' } // хост не claude/kilo
+      ]) {
+        const result = await executor.callAgent(agent, 'do the task', 'stage-1', skill, 'agent-1');
+        assert.equal(result.railsRetried, undefined);
+      }
+      assert.equal(fs.readFileSync(path.join(projectRoot, 'call-count.txt'), 'utf8'), '2', 'по одному вызову на агента');
+    } finally {
+      cleanupDir(projectRoot);
+    }
+  });
+
   it('без rails.yaml у скила — поведение прежнее, output-check не запускается, вызов один', async () => {
     const projectRoot = makeTmpDir('wf-rails-callagent-plain-');
     try {

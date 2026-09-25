@@ -275,6 +275,27 @@ describe('PWD агента — его рабочий каталог, а не к�
   })));
 });
 
+describe('agent-spawner без логгера — проблемы agent.env уходят в stderr', () => {
+  test('строка не по формату — предупреждение с префиксом [agent-spawner]', withHome(async (home) => {
+    writeAgentEnv(home, 'строка без знака равенства\n');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-env-stderr-'));
+    const seen = [];
+    const original = process.stderr.write;
+    process.stderr.write = (chunk, ...rest) => {
+      seen.push(String(chunk));
+      return original.call(process.stderr, chunk, ...rest);
+    };
+    try {
+      const script = writeEchoEnvScript(tmp, []);
+      await spawnAgent({ command: 'node', args: [script], workdir: '.' }, 'prompt', { timeout: 10, projectRoot: tmp });
+    } finally {
+      process.stderr.write = original;
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+    assert.ok(seen.some((s) => s.startsWith('[agent-spawner] agent.env: строки 1 не по формату KEY=VALUE')), seen.join(''));
+  }));
+});
+
 describe('agent.env доходит до дочернего процесса агента', () => {
   test('agent-spawner.mjs (тесты скилов)', withHome(async (home) => {
     writeAgentEnv(home, 'WF_AGENT_ENV_TEST=from-file\nWF_AGENT_ENV_OVERRIDE=from-file\n');

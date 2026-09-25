@@ -24,7 +24,7 @@ import {
   startState,
   deleteState,
   applyGoto,
-  allowedTransitions,
+  describeTransitions,
   currentNodeInfo,
   newestSessionId,
   listSessionIds,
@@ -60,9 +60,11 @@ function parseArgs(argv) {
   return { positional, flags };
 }
 
-function formatTransitions(transitions) {
-  if (!Array.isArray(transitions) || transitions.length === 0) return 'Переходы: нет';
-  return `Переходы: ${transitions.map((t) => `${t.id}: ${t.label}`).join('; ')}`;
+// Переход — строкой «id: лейбл → готовая команда» (state.describeTransitions).
+function formatTransitions(state, graph, config) {
+  const lines = describeTransitions(state, graph, config);
+  if (lines.length === 0) return 'Переходы: нет';
+  return `Переходы:\n${lines.map((l) => `  ${l}`).join('\n')}`;
 }
 
 // §5: --session, иначе WORKFLOW_RAILS_SESSION, иначе самый свежий файл
@@ -138,7 +140,7 @@ function cmdStart(root, positional, flags, env) {
   const lines = [
     `Старт: скил "${skill}", сессия ${sessionId}`,
     `${config.entry}: «${label}»`,
-    formatTransitions(allowedTransitions(state, graph)),
+    formatTransitions(state, graph, config),
   ];
   return { code: 0, stdout: `${lines.join('\n')}\n` };
 }
@@ -193,14 +195,14 @@ function cmdGoto(root, positional, flags, env) {
     const reason = buildDenyReason({
       what: `goto ${node}`,
       why: result.reason,
-      allowed: result.allowed.map((t) => `${t.id}: ${t.label}`),
+      allowed: describeTransitions(state, graph, config),
     });
     return { code: 2, stdout: `${reason}\n` };
   }
 
   const currentNode = graph.node(state.node);
   const label = currentNode ? currentNode.label : '';
-  const lines = [`RAILS: числится ${state.node} «${label}»`, formatTransitions(result.allowed)];
+  const lines = [`RAILS: числится ${state.node} «${label}»`, formatTransitions(state, graph, config)];
   return { code: 0, stdout: `${lines.join('\n')}\n` };
 }
 

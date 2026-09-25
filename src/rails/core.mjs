@@ -27,7 +27,7 @@ import {
   startState,
   currentNodeInfo,
   checkActionLimit,
-  allowedTransitions,
+  describeTransitions,
 } from './state.mjs';
 import { appendDenial, appendEvent } from './journal.mjs';
 import { realpathDeep, isInside, matchesGlob } from './paths.mjs';
@@ -711,7 +711,7 @@ function describeWhat(action) {
 // часть подсказки либо опускается, либо помечается «после перехода».
 function describeAllowed(state, graph, config) {
   const info = currentNodeInfo(state);
-  const transitions = allowedTransitions(state, graph).map((t) => `${t.id}: ${t.label}`);
+  const transitions = describeTransitions(state, graph, config);
 
   const parts = [];
   if (transitions.length > 0) parts.push(`переходы: ${transitions.join('; ')}`);

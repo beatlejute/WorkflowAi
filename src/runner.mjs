@@ -15,7 +15,7 @@ import { readPauseRequest, RUNNER_CAPABILITIES } from './lib/pause-request.mjs';
 import { packageVersion as pipelineVersion } from './lib/package-version.mjs';
 import { appendAgentRun, classifyAgentResult } from './lib/agent-history.mjs';
 import { buildAgentEnv } from './lib/agent-env.mjs';
-import { findRailsStateByRun } from './lib/rails-run-state.mjs';
+import { findRailsStateByRun, railsHost, railsHooksPresent, railsNotEngagedVerdict, outputCheckVerdict } from './lib/rails-run-state.mjs';
 import { isKiloRun, kiloRunTitle, withKiloTitle, requestedKiloModel, kiloDbPath, readKiloModels, formatKiloModels, kiloAgentLabel } from './lib/kilo-models.mjs';
 
 // Как часто, пока kilo-агент работает, смотреть в базу kilo, какие модели ответили.
@@ -1953,12 +1953,12 @@ class StageExecutor {
    * начале промпта (§8). Ошибка/таймаут агента rails не касаются — пробрасываются
    * как есть, ретрая на них нет.
    *
-   * Открытый вопрос (спецификация не уточняет): если `rails.yaml` у скила
-   * есть, а состояние с этим `run` не найдено (хуки не зарегистрированы в
-   * проекте, либо агент не выполнил ни одного отслеживаемого действия) —
-   * output-check пропускается молча, как если бы rails.yaml не было. Другого
-   * детерминированного поведения без риска ложных повторов на пустом месте
-   * не просматривается.
+   * Состояния с этим `run` нет, а хуки рельс для хоста агента на месте
+   * (railsHost/railsHooksPresent) — агент не вызвал ни одного инструмента под
+   * рельсами: это нарушение, повтор с вердиктом «пройди граф от start». Прежде
+   * такой ответ проходил молча (прогон deep-research 2026-09-25: gpt-luna без
+   * единого вызова инструмента). Хуков нет или хост не claude/kilo — повтором
+   * не обосновать: предупреждение в лог, ответ как есть.
    *
    * @returns {Promise<{status: string, output: string, stderr: string, result: object, exitCode: number, parsed: boolean}>}
    */
@@ -1979,17 +1979,32 @@ class StageExecutor {
       return result;
     }
 
+    const skillDir = path.join(this.projectRoot, '.workflow', 'src', 'skills', skillId);
     const state = findRailsStateByRun(this.projectRoot, runId);
-    if (!state) return result;
-
-    const verdict = checkRailsOutput(result.output || '', config, state);
-    if (verdict.ok) return result;
+    let verdict;
+    let verdictText;
+    if (!state) {
+      const host = railsHost(agent);
+      const agentCwd = path.resolve(this.projectRoot, agent.workdir || '.');
+      if (!host || !railsHooksPresent(host, agentCwd)) {
+        if (this.logger) {
+          const whose = host ? `(${host}) в ${agentCwd}` : '(хост не claude/kilo)';
+          this.logger.warn(`rails: состояния сессии нет, а хуков рельс для агента ${whose} нет — output-check не выполнен`, stageId);
+        }
+        return result;
+      }
+      verdict = { ok: false, missing: ['ни одного вызова инструмента под рельсами'] };
+      verdictText = railsNotEngagedVerdict({ skill: skillId, config });
+    } else {
+      verdict = checkRailsOutput(result.output || '', config, state);
+      if (verdict.ok) return result;
+      verdictText = outputCheckVerdict({ verdict, state, config, skillDir });
+    }
 
     if (this.logger) {
       this.logger.warn(`rails: output-check нарушен, повтор с вердиктом — отсутствует: ${verdict.missing.join('; ')}`, stageId);
     }
 
-    const verdictText = `RAILS: предыдущий ответ отклонён output-check — отсутствует: ${verdict.missing.join('; ')}. Исправь и ответь заново.\n\n`;
     const retryEnv = {
       WORKFLOW_RAILS_ROLE: 'coordinator',
       WORKFLOW_RAILS_RUN: crypto.randomUUID(),
@@ -1998,6 +2013,9 @@ class StageExecutor {
     const retryResult = await this._callAgentTracked(agent, verdictText + prompt, stageId, skillId, agentId, retryEnv);
     retryResult.railsRetried = true;
     retryResult.railsVerdict = verdict;
+    if (!state && !findRailsStateByRun(this.projectRoot, retryEnv.WORKFLOW_RAILS_RUN) && this.logger) {
+      this.logger.warn('rails: повтор тоже без единого вызова инструмента под рельсами — ответ принят без процедуры скила', stageId);
+    }
     return retryResult;
   }
 
@@ -3092,6 +3110,10 @@ function validateAgentEntry(agentId, agent, errors) {
   if (kind === 'cli') {
     if (typeof agent.command !== 'string' || agent.command.trim() === '') {
       errors.push(`Agent "${agentId}" missing required field: command`);
+    }
+    // Опечатка молча выключила бы проверку «ответ без единого вызова инструмента» (railsHost).
+    if (agent.rails_host !== undefined && !['kilo', 'claude'].includes(agent.rails_host)) {
+      errors.push(`Agent "${agentId}" has invalid rails_host: ${agent.rails_host} (expected: kilo, claude)`);
     }
     return;
   }

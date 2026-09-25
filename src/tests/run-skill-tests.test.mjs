@@ -2509,6 +2509,24 @@ describe('Скил на рельсах: рельсы не зацепились �
     assert.equal(readMeta().per_model['agent-rails-once'].rails_not_engaged, 1);
   });
 
+  it('хуки рельс на месте, а вызовов инструментов нет — повтор с командой start; повтор тоже без них — попытка не проходит', async () => {
+    // agent-rails-silent: rails_host kilo, загрузчик плагина kilo песочница получает всегда
+    // (createTestWorkdir). Ответ — высший балл судьи, но процедура скила не пройдена.
+    useAgent('agent-rails-silent');
+    const { stdout } = await runRunner(['--skill', RAILS_SKILL, ...RUN_ARGS], { WORKFLOW_SKILLS_DIR: RAILS_SKILLS_DIR });
+
+    assert.match(stdout, /хуки рельс \(kilo\) на месте, а вызовов инструментов под рельсами нет: повтор с вердиктом/, stdout);
+    assert.match(stdout, /✖ rails: \S*agent-rails-silent\S* — повтор тоже без единого вызова инструмента под рельсами: попытка не проходит/, stdout);
+    assert.match(lastResultBlock(stdout), new RegExp(`^rails_warnings: ${CASE_ID} agent-rails-silent: рельсы не зацепились 1/1, провалено без рельс 1$`, 'm'), stdout);
+    const meta = readMeta();
+    assert.equal(meta.per_model['agent-rails-silent'].rails_failed, 1);
+    assert.equal(meta.per_model['agent-rails-silent'].pass_count, 0, 'высший балл судьи попытку не спасает');
+    assert.equal(meta.per_model['agent-rails-silent'].passed, false);
+
+    const trialOut = readFileSync(join(skillDir, 'tests', 'cases', CASE_ID, 'current', 'agent-rails-silent', 'trial-1.md'), 'utf8');
+    assert.match(trialOut, new RegExp(`SAW_START_VERDICT node \\.workflow/src/rails/cli\\.mjs start ${RAILS_SKILL}`), 'повтор получил вердикт с командой start');
+  });
+
   it('режим --all — строка rails_warnings с именем скила в итоговом RESULT', async () => {
     useAgent('agent-a');
     const { stdout } = await runRunner(['--all', ...RUN_ARGS], { WORKFLOW_SKILLS_DIR: RAILS_SKILLS_DIR });

@@ -11,6 +11,7 @@
 #   agent-sandbox-probe — pass, только если WORKFLOW_SANDBOX_ROOT = рабочий каталог
 #   agent-pwd-probe     — pass, только если PWD = рабочий каталог
 #   agent-rails-once    — пишет состояние rails только при первом запуске (повтор без состояния)
+#   agent-rails-silent  — хост рельс kilo (rails_host), состояния rails не пишет никогда
 #   mock-judge-sandbox  — score 5, только если судье передан WORKFLOW_SANDBOX_ROOT
 
 pipeline:
@@ -73,6 +74,14 @@ pipeline:
       workdir: "."
       capabilities: [text]
       description: "Mock agent — состояние rails в рабочем каталоге только при первом запуске"
+
+    agent-rails-silent:
+      command: "node"
+      args: ["src/tests/fixtures/mock-agent-rails-silent.js"]
+      workdir: "."
+      rails_host: kilo
+      capabilities: [text]
+      description: "Mock agent — хост рельс kilo, ни одного вызова инструмента (состояния rails нет)"
 
     mock-judge-sandbox:
       command: "node"

@@ -1,5 +1,5 @@
 {
-  "_comment": "Порог покрытия каждого файла — его измеренное покрытие. Проверяет scripts/check-coverage-ratchet.mjs после npm run coverage; переписывается им же с --update. Файл, которого здесь нет, держит default. Замер 2026-09-24 сделан на Windows: в WSL этой машины нет node, а прошлый двойной замер (Windows и Linux, коммит 1156f42) нашёл расхождение только в run-skill-tests.js и на доли процента. Файлам, которые ветвятся по платформе (process.platform, win32, EPERM, ENOTSUP, junction), порог опущен на 5 пунктов — это запас на непроверенный Linux, а не измеренный уровень; после первого зелёного прогона CI на ubuntu запас снимается повторным --update по минимуму двух систем.",
+  "_comment": "Порог покрытия каждого файла — его измеренное покрытие. Проверяет scripts/check-coverage-ratchet.mjs после npm run coverage; переписывается им же с --update. Файл, которого здесь нет, держит default. Первый замер 2026-09-24 — Windows, Node 25; файлам, которые ветвятся по платформе (process.platform, win32, EPERM, ENOTSUP, junction), порог опущен на 5 пунктов как запас на непроверенный Linux. 2026-09-25 CI впервые дошёл до храповика на ubuntu и macOS: восемь порогов оказались выше замера на Node 22, на котором идёт CI (agent-spawner functions 88.88 при базе 95 — и на Windows, session-memo branches 94.11 при 94.28, js-yaml, shell-scan, artifact-snapshot — на долю процента). Эти пороги опущены до минимума трёх замеров на Node 22: Windows, Linux (WSL, чистый клон) и Linux с TMPDIR через символическую ссылку, как /var на macOS. Остальные пороги не менялись; запас на платформу снимается после зелёного CI на всех трёх ОС.",
   "default": {
     "lines": 80,
     "statements": 80,
@@ -46,14 +46,14 @@
     "src/lib/agent-spawner.mjs": {
       "lines": 72.19,
       "statements": 72.19,
-      "functions": 95,
+      "functions": 88.88,
       "branches": 62.36
     },
     "src/lib/artifact-snapshot.mjs": {
       "lines": 85.59,
       "statements": 85.59,
       "functions": 100,
-      "branches": 83.33
+      "branches": 83.01
     },
     "src/lib/error-classifier.mjs": {
       "lines": 82.9,
@@ -68,8 +68,8 @@
       "branches": 81.66
     },
     "src/lib/js-yaml.mjs": {
-      "lines": 65.68,
-      "statements": 65.68,
+      "lines": 65.56,
+      "statements": 65.56,
       "functions": 65.69,
       "branches": 68.18
     },
@@ -215,13 +215,13 @@
       "lines": 97.22,
       "statements": 97.22,
       "functions": 100,
-      "branches": 94.28
+      "branches": 94.11
     },
     "src/rails/shell-scan.mjs": {
-      "lines": 92.77,
-      "statements": 92.77,
+      "lines": 92.71,
+      "statements": 92.71,
       "functions": 100,
-      "branches": 89.31
+      "branches": 89.2
     },
     "src/rails/state.mjs": {
       "lines": 99.51,

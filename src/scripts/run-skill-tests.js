@@ -11,7 +11,16 @@ import { spawnAgent } from '../lib/agent-spawner.mjs';
 import { writeClaudeHooks, writeKiloPluginLoader, userHasRailsHooks } from '../init.mjs';
 import { loadRailsConfig } from '../rails/rails-config.mjs';
 import { check as checkRailsOutput } from '../rails/output-check.mjs';
-import { railsEngagement, railsNotEngagedMessage, railsCounters, describeRailsEngagement } from '../lib/rails-run-state.mjs';
+import {
+  railsEngagement,
+  railsNotEngagedMessage,
+  railsCounters,
+  describeRailsEngagement,
+  railsHost,
+  railsHooksPresent,
+  railsNotEngagedVerdict,
+  outputCheckVerdict
+} from '../lib/rails-run-state.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -91,14 +100,17 @@ function railsYamlExists(root, skill) {
  * состоянию с этим `run`; при нарушении — один повтор с вердиктом в начале
  * промпта (§8, §11). Без rails.yaml у скила — поведение как раньше.
  *
- * Состояния с этим `run` в песочнице нет — рельсы не зацепились: check не
- * запускается (повтор без состояния нечем обосновать), но раннер пишет
- * предупреждение и отмечает попытку в `result.rails`: `escaped` — состояние
- * нашлось в настоящем проекте, агент работал мимо песочницы; иначе причина
- * раннеру не видна (railsNotEngagedMessage). То же — для повтора: судится его
- * вывод, поэтому `result.rails` повтора — по его собственному `run`. Прежде
- * такие попытки проходили молча: 2026-09-23 и 2026-09-25 Kilo-агенты работали в
- * настоящем проекте, а gpt-luna получала высший балл без единого вызова инструмента.
+ * Состояния с этим `run` в песочнице нет — рельсы не зацепились; попытка
+ * отмечается в `result.rails` (`escaped` — состояние нашлось в настоящем
+ * проекте, агент работал мимо песочницы). Если хуки рельс для хоста агента в
+ * песочнице на месте (railsHost/railsHooksPresent), это нарушение: агент не
+ * вызвал ни одного инструмента под рельсами — повтор с вердиктом «пройди граф
+ * от start». Иначе повтор не обосновать — только предупреждение
+ * (railsNotEngagedMessage). Судится вывод повтора, поэтому `result.rails`
+ * повтора — по его собственному `run`; повтор без состояния при хуках на месте —
+ * `rails.failed`: попытка не проходит при любой оценке судьи. Прежде такие
+ * попытки проходили молча: 2026-09-25 gpt-luna без единого вызова инструмента
+ * получила высший балл.
  *
  * @returns {Promise<object>} результат spawnAgent (плюс rails, railsRetried/railsVerdict при повторе)
  */
@@ -120,19 +132,26 @@ async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, ro
   }
 
   const who = spawnOpts.stageId || agentConfig.command;
+  const host = railsHost(agentConfig);
+  // хуки ищутся там же, где агент запускается (spawnAgent: projectRoot + workdir)
+  const hooks = Boolean(host) && railsHooksPresent(host, path.resolve(root, agentConfig.workdir || '.'));
   const { state, engaged, escaped } = railsEngagement({ sandboxRoot: root, projectRoot, run: runId });
   result.rails = { engaged, escaped };
+  let verdict;
+  let verdictText;
   if (!state) {
     console.log(railsNotEngagedMessage({ who, escaped, projectRoot }));
-    return result;
+    if (!hooks || escaped) return result;
+    verdict = { ok: false, missing: ['ни одного вызова инструмента под рельсами'] };
+    verdictText = railsNotEngagedVerdict({ skill, config });
+    console.log(`[Runner] rails: ${who} — хуки рельс (${host}) на месте, а вызовов инструментов под рельсами нет: повтор с вердиктом`);
+  } else {
+    verdict = checkRailsOutput(result.output || '', config, state);
+    if (verdict.ok) return result;
+    verdictText = outputCheckVerdict({ verdict, state, config, skillDir: path.join(root, '.workflow', 'src', 'skills', skill) });
+    console.log(`[Runner] rails: output-check нарушен для ${skill}, повтор с вердиктом — отсутствует: ${verdict.missing.join('; ')}`);
   }
 
-  const verdict = checkRailsOutput(result.output || '', config, state);
-  if (verdict.ok) return result;
-
-  console.log(`[Runner] rails: output-check нарушен для ${skill}, повтор с вердиктом — отсутствует: ${verdict.missing.join('; ')}`);
-
-  const verdictText = `RAILS: предыдущий ответ отклонён output-check — отсутствует: ${verdict.missing.join('; ')}. Исправь и ответь заново.\n\n`;
   const retryRunId = crypto.randomUUID();
   const retryResult = await spawnAgent(agentConfig, verdictText + prompt, {
     ...spawnOpts,
@@ -146,6 +165,10 @@ async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, ro
   retryResult.rails = { engaged: retry.engaged, escaped: retry.escaped };
   if (!retry.state) {
     console.log(railsNotEngagedMessage({ who: `${who} (повтор по output-check)`, escaped: retry.escaped, projectRoot }));
+    if (hooks && !retry.escaped) {
+      retryResult.rails.failed = true;
+      console.log(`[Runner] ✖ rails: ${who} — повтор тоже без единого вызова инструмента под рельсами: попытка не проходит`);
+    }
   }
   return retryResult;
 }
@@ -1317,7 +1340,8 @@ reason: <brief explanation>
           score,
           output: targetOutput.output || '',
           judge_output: judgeResult.output || '',
-          passed: score >= 4,
+          // rails.failed — ответ без процедуры скила при хуках на месте: оценка судьи не спасает
+          passed: score >= 4 && !targetOutput.rails?.failed,
           l1: evaluateTrialL1(targetOutput.output || '', task.testCase),
           ...(targetOutput.rails ? { rails: targetOutput.rails } : {}),
           errored: false

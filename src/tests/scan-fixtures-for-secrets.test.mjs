@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -462,4 +463,73 @@ test('DoD: Exit codes are correct', async () => {
   assert.notStrictEqual(failResult.code, 0);
 
   cleanupTemp(emptyDir);
+});
+
+// ============ Корень проекта: только для путей по умолчанию и относительного --path ============
+// До 2026-09-25 корень искался при импорте, и без .workflow/ сканер падал даже на
+// абсолютном --path (тесты выше в чистом клоне на CI остались без ---RESULT---).
+
+function runScannerIn(cwd, args = []) {
+  return new Promise((resolve) => {
+    const child = spawn('node', [SCRIPT_PATH, ...args], { cwd, stdio: 'pipe' });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+function makeScanProject({ workflow = true } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'scan-secrets-project-'));
+  if (workflow) fs.mkdirSync(path.join(root, '.workflow'), { recursive: true });
+  const fixtures = path.join(root, 'src', 'skills', 'demo', 'tests', 'fixtures');
+  fs.mkdirSync(fixtures, { recursive: true });
+  fs.writeFileSync(path.join(fixtures, 'leak.txt'), 'password=hunter2', 'utf8');
+  return root;
+}
+
+test('без --path сканируются фикстуры скилов проекта из cwd', async () => {
+  const root = makeScanProject();
+  try {
+    const result = await runScannerIn(root);
+    const parsed = parseOutput(result.stdout);
+    assert.ok(parsed, `нет ---RESULT---: ${result.stdout}${result.stderr}`);
+    assert.strictEqual(parsed.status, 'failed');
+    assert.strictEqual(result.code, 1);
+    assert.ok(parsed.findings.some((f) => f.pattern === 'password' && f.file.endsWith('leak.txt')));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('относительный --path — от корня проекта', async () => {
+  const root = makeScanProject();
+  try {
+    fs.mkdirSync(path.join(root, 'sub'), { recursive: true });
+    const result = await runScannerIn(path.join(root, 'sub'), ['--path', 'src/skills/demo/tests/fixtures']);
+    const parsed = parseOutput(result.stdout);
+    assert.ok(parsed, `нет ---RESULT---: ${result.stdout}${result.stderr}`);
+    assert.strictEqual(parsed.status, 'failed');
+    assert.ok(parsed.findings.some((f) => f.pattern === 'password'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('без .workflow/: абсолютный --path работает, путь по умолчанию — ошибка с причиной', async () => {
+  const root = makeScanProject({ workflow: false });
+  try {
+    const fixtures = path.join(root, 'src', 'skills', 'demo', 'tests', 'fixtures');
+    const abs = await runScannerIn(root, ['--path', fixtures]);
+    const parsed = parseOutput(abs.stdout);
+    assert.ok(parsed, `нет ---RESULT---: ${abs.stdout}${abs.stderr}`);
+    assert.strictEqual(parsed.status, 'failed');
+
+    const def = await runScannerIn(root);
+    assert.strictEqual(def.code, 1);
+    assert.match(def.stderr, /Could not find \.workflow/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

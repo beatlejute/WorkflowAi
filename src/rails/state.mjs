@@ -219,6 +219,74 @@ export function allowedTransitions(state, graph) {
   });
 }
 
+/** Путь CLI рельс от корня проекта — так его вызывает агент (§10). */
+export const RAILS_CLI = '.workflow/src/rails/cli.mjs';
+
+/**
+ * Цитата лейбла, которую `goto` примет как есть: подстрока лейбла без разметки и пиктограмм
+ * (их normalizeLabel всё равно снимает), не короче `quoteMin` после нормализации, до ~60
+ * символов с обрезкой по слову, без одиночных кавычек — команда кладёт цитату в '…', а `'`
+ * закрыл бы строку и в bash, и в PowerShell. Не нашлось — null.
+ *
+ * Зачем: отказ и вывод CLI называли допустимые переходы, но не команду. Прогон deep-research
+ * 2026-09-25: haiku после отказа писала «пройду граф правильно» и снова не делала ни одного
+ * перехода — из текста рельс не было видно, какой командой двигаться.
+ *
+ * @param {string} label сырой лейбл узла
+ * @param {number} [quoteMin]
+ * @returns {string|null}
+ */
+export function readyQuote(label, quoteMin = 25) {
+  const clean = String(label ?? '')
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/[`*]/g, '')
+    .replace(/(?!©)[\p{Extended_Pictographic}️‍]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const target = normalizeLabel(label);
+  // PowerShell закрывает '…' и типографскими одиночными кавычками U+2018–U+201B
+  // (`'a’b c'` — ParserError в PowerShell 5.1 и pwsh 7.6, проверено запуском 2026-09-25)
+  for (const chunk of clean.split(/['‘-‛]/)) {
+    let q = chunk.replace(/^[\s-]+/, '').trimEnd();
+    if (q.length > 60) {
+      const cut = q.lastIndexOf(' ', 60);
+      q = (cut > 0 && normalizeLabel(q.slice(0, cut)).length >= quoteMin ? q.slice(0, cut) : q.slice(0, 60)).trimEnd();
+    }
+    const norm = normalizeLabel(q);
+    if (norm.length >= quoteMin && target.includes(norm)) return q;
+  }
+  return null;
+}
+
+/**
+ * Готовая команда перехода в узел `id`. Без подходящей цитаты — шаблон с местом под неё.
+ *
+ * @param {string} id
+ * @param {string} label сырой лейбл узла `id`
+ * @param {number} [quoteMin]
+ * @returns {string}
+ */
+export function gotoCommand(id, label, quoteMin = 25) {
+  const q = readyQuote(label, quoteMin);
+  return `node ${RAILS_CLI} goto ${id} --quote '${q ?? `<дословная цитата лейбла ${id}>`}'`;
+}
+
+/**
+ * Допустимые переходы строками «id: лейбл → команда» для отказа и вывода CLI.
+ *
+ * @param {object} state
+ * @param {object} graph
+ * @param {object} [config] rails.yaml (quote_min)
+ * @returns {string[]}
+ */
+export function describeTransitions(state, graph, config) {
+  const quoteMin = config?.quote_min ?? 25;
+  return allowedTransitions(state, graph).map((t) => {
+    const full = graph.node(t.id)?.label ?? t.label;
+    return `${t.id}: ${t.label} → ${gotoCommand(t.id, full, quoteMin)}`;
+  });
+}
+
 /**
  * Потолок действия (`stage_actions.<rule>.max_per_session`, §4/§5): счётчик
  * `action:<ruleName>` в `state.counters`. Инкремент — только при успехе

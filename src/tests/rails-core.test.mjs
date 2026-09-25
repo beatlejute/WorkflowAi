@@ -17,6 +17,7 @@ import { execSync, execFileSync } from 'node:child_process';
 import { decide, buildDenyReason, loadSkillRuntime, analyzeCliCommand } from '../rails/core.mjs';
 import { startState, saveState, loadState } from '../rails/state.mjs';
 import { readJournal } from '../rails/journal.mjs';
+import { run as runCli } from '../rails/cli.mjs';
 import { createJunction } from '../junction-manager.mjs';
 import { fromClaude, fromKilo } from '../rails/actions.mjs';
 
@@ -2727,5 +2728,24 @@ test('decide (G0): apply_patch со вторым путём в каталоге 
     } finally {
       if (prev !== undefined) process.env.WORKFLOW_RAILS_SKILL = prev;
     }
+  });
+});
+
+// --- готовая команда перехода в отказе (2026-09-25) ------------------------------------
+//
+// Прогон deep-research 2026-09-25: haiku после отказа писала «пройду граф правильно» и снова
+// не делала ни одного перехода — отказ перечислял допустимые узлы, но не команду.
+test('decide: отказ даёт готовую команду перехода, и goto принимает её цитату', () => {
+  withProject(({ root }) => {
+    const { sessionId } = makeState(root, 'P4R1');
+    const r = decideAs('posix', `touch ${join(root, 'outside.txt').replace(/\\/g, '/')}`, join(root, '.workflow', 'work'), sessionId);
+    assert.equal(r.decision, 'deny');
+    const m = /P4S1: [^\n]*→ node \.workflow\/src\/rails\/cli\.mjs goto P4S1 --quote '([^']+)'/.exec(r.reason);
+    assert.ok(m, r.reason);
+    const out = runCli(['goto', 'P4S1', '--quote', m[1], '--session', sessionId], { cwd: root, env: {} });
+    assert.equal(out.code, 0, out.stdout);
+    assert.match(out.stdout, /RAILS: числится P4S1/);
+    assert.match(out.stdout, /Переходы:\n {2}P5E1: [^\n]*→ node \.workflow\/src\/rails\/cli\.mjs goto P5E1 --quote '/, 'вывод goto — тоже с готовой командой');
+    assert.equal(loadState(root, sessionId).node, 'P4S1');
   });
 });

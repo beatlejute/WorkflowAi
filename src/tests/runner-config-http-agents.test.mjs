@@ -177,6 +177,13 @@ describe('validateConfig: запись агента kind: http', () => {
     assert.deepEqual(validateConfig(baseConfig({ jev: { ...DECISIONS_AGENT } }), makeProject()), []);
   });
 
+  it('rails_host вне kilo и claude — ошибка: опечатка молча выключила бы проверку ответа без инструментов', async () => {
+    const result = await runWithConfig(baseConfig({ wrapped: { command: 'my-kilo.cmd', args: ['run'], rails_host: 'Kilo' } }));
+    assertRejected(result, '"wrapped"', 'rails_host');
+    const ok = baseConfig({ wrapped: { command: 'my-kilo.cmd', args: ['run'], rails_host: 'kilo', capabilities: ['text'] } });
+    assert.deepEqual(validateConfig(ok, makeProject()), []);
+  });
+
   it('запись без kind с command проходит проверку', () => {
     const config = baseConfig({ plain: { command: 'kilo', args: ['run'], capabilities: ['text'] } });
     assert.deepEqual(validateConfig(config, makeProject()), []);
