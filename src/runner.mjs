@@ -15,6 +15,10 @@ import { readPauseRequest, RUNNER_CAPABILITIES } from './lib/pause-request.mjs';
 import { packageVersion as pipelineVersion } from './lib/package-version.mjs';
 import { appendAgentRun, classifyAgentResult } from './lib/agent-history.mjs';
 import { buildAgentEnv } from './lib/agent-env.mjs';
+import { isKiloRun, kiloRunTitle, withKiloTitle, requestedKiloModel, kiloDbPath, readKiloModels, formatKiloModels, kiloAgentLabel } from './lib/kilo-models.mjs';
+
+// Как часто, пока kilo-агент работает, смотреть в базу kilo, какие модели ответили.
+const KILO_MODELS_POLL_MS = 15000;
 import { incrementMetrics } from './lib/metrics-incremental.mjs';
 import { loadRailsConfig } from './rails/rails-config.mjs';
 import { check as checkRailsOutput } from './rails/output-check.mjs';
@@ -1233,6 +1237,7 @@ class StageExecutor {
           stderr: '',
           stdout: result.output || '',
           parsedResult: result.result || null,
+          agentLabel: result.agentLabel || null,
         });
 
         // IMPL-86: normalize agent_id in ## Ревью after review-result stage
@@ -1266,6 +1271,7 @@ class StageExecutor {
           parsedResult: err.parsedResult || null,
           timedOut: err.timedOut === true,
           signal: err.signal,
+          agentLabel: err.agentLabel || null,
         });
 
         const after = snapshotEnabled ? await snapshot(this.projectRoot, snapshotOpts) : null;
@@ -1347,7 +1353,9 @@ class StageExecutor {
       };
 
       try {
-        const r = appendAgentRun(ticketPath, entry);
+        // В истории — подпись с фактической моделью kilo (`kilo-free(dots-3-note-preview)`),
+        // в метриках — id агента из конфига: по нему они группируются.
+        const r = appendAgentRun(ticketPath, { ...entry, agent: callResult.agentLabel || entry.agent });
         if (!r?.ok && this.logger) {
           this.logger.warn(`audit-log appendAgentRun failed: ${r?.code || 'unknown'} ${r?.error || ''}`, stageId);
         }
@@ -1416,7 +1424,12 @@ class StageExecutor {
       const hasAgentRules = Boolean(
         healthRules && agentId && healthRules.agents.get(agentId)?.length
       );
-      const args = [...agent.args];
+      // kilo: метка сессии по run id — по ней после запуска находится фактическая
+      // модель (lib/kilo-models.mjs, _trackKiloModels).
+      const kiloTitle = railsEnv.WORKFLOW_RAILS_RUN && isKiloRun(agent)
+        ? kiloRunTitle(railsEnv.WORKFLOW_RAILS_RUN)
+        : null;
+      const args = kiloTitle ? withKiloTitle(agent.args, kiloTitle) : [...agent.args];
       const finalPrompt = prompt;
 
       // На Windows shell: true обрезает многострочные аргументы на \n (cmd.exe).
@@ -1729,7 +1742,7 @@ class StageExecutor {
     const railsEnv = { WORKFLOW_RAILS_ROLE: 'coordinator', WORKFLOW_RAILS_RUN: runId };
     if (skillId) railsEnv.WORKFLOW_RAILS_SKILL = skillId;
 
-    const result = await this._callAgentOnce(agent, prompt, stageId, skillId, agentId, railsEnv);
+    const result = await this._callAgentTracked(agent, prompt, stageId, skillId, agentId, railsEnv);
 
     if (!railsYamlExists(this.projectRoot, skillId)) return result;
 
@@ -1757,10 +1770,93 @@ class StageExecutor {
       WORKFLOW_RAILS_RUN: crypto.randomUUID(),
       WORKFLOW_RAILS_SKILL: skillId
     };
-    const retryResult = await this._callAgentOnce(agent, verdictText + prompt, stageId, skillId, agentId, retryEnv);
+    const retryResult = await this._callAgentTracked(agent, verdictText + prompt, stageId, skillId, agentId, retryEnv);
     retryResult.railsRetried = true;
     retryResult.railsVerdict = verdict;
     return retryResult;
+  }
+
+  /**
+   * `_callAgentOnce` + фактическая модель kilo-агента (lib/kilo-models.mjs). Пока агент
+   * работает — опрос базы kilo и строка `AGENT_MODELS`, когда подпись агента меняется
+   * (по ней панель pipeline в расширении показывает `openrouter-free(nemotron, ling)`);
+   * после выхода — финальная строка с числом шагов. Результат (или ошибка) получает
+   * `agentLabel` — для столбца «Агент» истории работы тикета.
+   */
+  async _callAgentTracked(agent, prompt, stageId, skillId, agentId, railsEnv) {
+    const tracker = this._trackKiloModels(agent, agentId, railsEnv.WORKFLOW_RAILS_RUN, stageId);
+    let result;
+    let error = null;
+    try {
+      result = await this._callAgentOnce(agent, prompt, stageId, skillId, agentId, railsEnv);
+    } catch (err) {
+      error = err;
+    }
+    const agentLabel = tracker ? await tracker.finish() : null;
+    if (error) {
+      if (agentLabel && typeof error === 'object') error.agentLabel = agentLabel;
+      throw error;
+    }
+    if (agentLabel) result.agentLabel = agentLabel;
+    return result;
+  }
+
+  /**
+   * Опрос базы kilo на время запуска агента. null — агент не kilo (или нет run id).
+   * `finish()` останавливает опрос, пишет финальную строку и отдаёт подпись агента
+   * (null — модели не определены). Сбой чтения базы на агента не влияет.
+   */
+  _trackKiloModels(agent, agentId, runId, stageId) {
+    if (!runId || !isKiloRun(agent)) return null;
+    const title = kiloRunTitle(runId);
+    const requested = requestedKiloModel(agent.args) || '?';
+    const dbPathReady = kiloDbPath(agent.command);
+    let lastLabel = null;
+    let stopped = false;
+
+    const report = (models) => {
+      lastLabel = kiloAgentLabel(agentId, requested, models);
+      if (this.logger) {
+        this.logger.info(`AGENT_MODELS agent="${lastLabel}" requested="${requested}" models="${formatKiloModels(models)}"`, stageId);
+      }
+    };
+
+    const poll = async () => {
+      const dbPath = await dbPathReady;
+      if (!dbPath || stopped) return;
+      const models = await readKiloModels(dbPath, title);
+      if (stopped || !models?.length) return;
+      if (kiloAgentLabel(agentId, requested, models) !== lastLabel) report(models);
+    };
+    const timer = setInterval(() => { poll().catch(() => {}); }, this.kiloModelsPollMs || KILO_MODELS_POLL_MS);
+    timer.unref?.();
+
+    return {
+      finish: async () => {
+        stopped = true;
+        clearInterval(timer);
+        try {
+          const dbPath = await dbPathReady;
+          if (!dbPath) {
+            if (!this._kiloDbPathWarned && this.logger) {
+              this._kiloDbPathWarned = true;
+              this.logger.warn('kilo: `kilo db path` не дал путь базы — фактическая модель kilo-агентов не определяется', stageId);
+            }
+            return null;
+          }
+          const models = await readKiloModels(dbPath, title);
+          if (!models?.length) {
+            if (this.logger) this.logger.info('kilo: шагов с моделью в базе kilo нет — фактическая модель неизвестна', stageId);
+            return null;
+          }
+          report(models);
+          return lastLabel;
+        } catch (err) {
+          if (this.logger) this.logger.warn(`kilo: фактическая модель не прочитана: ${err.message}`, stageId);
+          return null;
+        }
+      },
+    };
   }
 
 }
