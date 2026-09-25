@@ -604,20 +604,32 @@ function loadPipelineConfig(pipelinePath = null) {
   return config.pipeline || config;
 }
 
-function validateAgents(agentIds, pipelineConfig) {
-  const availableAgents = Object.keys(pipelineConfig.agents || {});
+// role: 'target' — исполнитель кейса (target_agents скила или кейса, --agent);
+// 'judge' — судья. Безынструментный агент (`kind: http`) выполнить скил не может:
+// у него нет ни инструментов, ни файлов. Исполнителем он отклоняется до первого
+// вызова модели; судьёй допустим (PLAN-001).
+function validateAgents(agentIds, pipelineConfig, { role = 'target' } = {}) {
+  const agents = pipelineConfig.agents || {};
+  const availableAgents = Object.keys(agents);
   const invalid = [];
-  
+
   for (const agentId of agentIds) {
     if (!availableAgents.includes(agentId)) {
       invalid.push(agentId);
     }
   }
-  
+
   if (invalid.length > 0) {
     throw new Error(`Agent(s) '${invalid.join(', ')}' from target_agents[] not found in pipeline.yaml → agents[]`);
   }
-  
+
+  if (role === 'target') {
+    const toolLess = agentIds.filter(id => agents[id]?.kind === 'http');
+    if (toolLess.length > 0) {
+      throw new Error(`Agent(s) '${toolLess.join(', ')}' are tool-less (kind: http) and cannot execute skill test cases: no tools, no files`);
+    }
+  }
+
   return true;
 }
 
@@ -1603,7 +1615,7 @@ async function runTestsForSkill(skillName, opts) {
     }
 
     if (judgeAgent) {
-      validateAgents([judgeAgent], pipelineConfig);
+      validateAgents([judgeAgent], pipelineConfig, { role: 'judge' });
       console.log(`[Runner] judge_agent from index.yaml: ${judgeAgent}`);
     }
 
@@ -1660,7 +1672,7 @@ async function runTestsForSkill(skillName, opts) {
         }
         if (testCase.execution?.judge_agent) {
           const caseJudgeAgent = testCase.execution.judge_agent;
-          validateAgents([caseJudgeAgent], pipelineConfig);
+          validateAgents([caseJudgeAgent], pipelineConfig, { role: 'judge' });
           console.log(`[Runner] Override judge_agent in case ${opts.caseId}: ${caseJudgeAgent}`);
         }
         cases = [caseDef];
@@ -2067,6 +2079,12 @@ function printResult(result) {
 
   if (result.outcome_message) {
     console.log(`outcome_message: ${result.outcome_message}`);
+  }
+
+  // Причина status: error (агент не найден, агент без инструментов, …) — без неё
+  // вывод говорил только «error».
+  if (result.error) {
+    console.log(`error: ${String(result.error).replace(/\s*\n\s*/g, ' ')}`);
   }
 
   console.log('---RESULT---');

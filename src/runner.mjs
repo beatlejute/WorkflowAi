@@ -22,6 +22,21 @@ const KILO_MODELS_POLL_MS = 15000;
 import { incrementMetrics } from './lib/metrics-incremental.mjs';
 import { loadRailsConfig } from './rails/rails-config.mjs';
 import { check as checkRailsOutput } from './rails/output-check.mjs';
+import { evaluate as evaluateWithModel } from './lib/model-evaluate.mjs';
+import { ModelClientError } from './lib/model-client.mjs';
+
+// Ошибка клиента безынструментного агента → запись health-реестра. Классы и TTL —
+// как у правил, которые ловят те же сбои CLI-агентов (configs/agent-health-rules.yaml):
+// auth — http-auth, rate_limit — claude-rate-limit, server — http-5xx-transient,
+// timeout и network — net-econnreset. Прочие классы (no_key, bad_request,
+// bad_response) агента не помечают: стадия уходит по goto.error.
+const MODEL_ERROR_HEALTH = Object.freeze({
+  auth: { class: 'misconfigured', ttl: '1h' },
+  rate_limit: { class: 'unavailable', ttl: '1h' },
+  server: { class: 'transient', ttl: '5m' },
+  timeout: { class: 'transient', ttl: '5m' },
+  network: { class: 'transient', ttl: '5m' },
+});
 
 // ============================================================================
 // Audit-log helpers (used by executeWithFallback hook — IMPL-83)
@@ -1193,6 +1208,9 @@ class StageExecutor {
 
     const triedInThisAttempt = [];
     let lastErr = null;
+    // Результат последней ошибки безынструментного агента (callModelAgent): её не
+    // бросают, а возвращают стадии как status: error с error_class.
+    let lastModelFailure = null;
 
     const snapshotEnabled = this.pipeline.execution?.artifact_snapshot_enabled !== false;
     const snapshotOpts = {
@@ -1210,6 +1228,10 @@ class StageExecutor {
         // → возвращаем blocked, чтобы конфиг мог развести goto.blocked vs goto.error.
         if (resolved.blocked === 'all_unhealthy' && lastErr) {
           throw lastErr;
+        }
+        // Безынструментный агент последним в списке: status: error с error_class.
+        if (resolved.blocked === 'all_unhealthy' && lastModelFailure) {
+          return lastModelFailure;
         }
         return { status: 'blocked', blocked_reason: resolved.blocked, reason: resolved.reason };
       }
@@ -1229,7 +1251,24 @@ class StageExecutor {
           this.logger.stageStart(stageId, agentId, effectiveStage.skill);
         }
 
-        const result = await this.callAgent(agent, prompt, stageId, effectiveStage.skill, agentId);
+        const result = agent.kind === 'http'
+          ? await this.callModelAgent(agent, prompt, stageId, effectiveStage, agentId)
+          : await this.callAgent(agent, prompt, stageId, effectiveStage.skill, agentId);
+        if (result.modelError?.fallback) {
+          await this._auditAgentRun(stageId, effectiveStage, agentId, {
+            exitCode: -1,
+            stderr: result.result?.error || '',
+            stdout: '',
+            parsedResult: result.result,
+          });
+          if (this.logger) {
+            this.logger.info(`agent ${agentId} model error ${result.modelError.class} — falling back in-stage`, stageId);
+          }
+          triedInThisAttempt.push(agentId);
+          lastErr = null;
+          lastModelFailure = result;
+          continue;
+        }
 
         // IMPL-83: audit-log hook (success path)
         await this._auditAgentRun(stageId, effectiveStage, agentId, {
@@ -1309,6 +1348,7 @@ class StageExecutor {
 
         triedInThisAttempt.push(agentId);
         lastErr = err;
+        lastModelFailure = null;
       }
     }
   }
@@ -1398,7 +1438,9 @@ class StageExecutor {
       const skipGuard = this.fileGuard && this.fileGuard.isTrusted(stage.agent, stageId);
       if (this.fileGuard && !skipGuard) this.fileGuard.takeSnapshot();
 
-      const result = await this.callAgent(agent, prompt, stageId, stage.skill, stage.agent);
+      const result = agent.kind === 'http'
+        ? await this.callModelAgent(agent, prompt, stageId, stage, stage.agent)
+        : await this.callAgent(agent, prompt, stageId, stage.skill, stage.agent);
 
       if (this.logger) this.logger.stageComplete(stageId, result.status, result.exitCode);
       if (this.fileGuard && !skipGuard) {
@@ -1410,6 +1452,148 @@ class StageExecutor {
 
     // Новая ветка: список кандидатов с фильтром по capabilities → executeWithFallback
     return this.executeWithFallback(stageId);
+  }
+
+  /**
+   * Исполняет стадию безынструментным агентом (`kind: http`) по обмену `model_io`
+   * (README, «Безынструментные агенты»): prepare → слой оценки → apply. Процесс
+   * `command` не запускается — модель не касается файлов: вход собирает prepare,
+   * статус и артефакты выдаёт apply, вызов модели делает раннер.
+   *
+   * 1. prepare — `node <prepare> "<промпт>"`; `status: ready` + `request_file`
+   *    ведут к шагу 2, любой другой результат — результат стадии.
+   * 2. Модель — вход из request_file, ответ в `.workflow/state/model-io/<стадия>-<run>.json`.
+   *    Ошибка клиента или слоя — `status: error` с `error_class`, шаг 3 не выполняется.
+   * 3. apply — `node <apply> "<промпт>"` + пути запроса и ответа; его RESULT — результат стадии.
+   *
+   * Сбой скрипта prepare или apply (выход ≠ 0 без RESULT) бросается, как у CLI-агента.
+   */
+  async callModelAgent(agent, prompt, stageId, stage, agentId) {
+    const modelIo = stage.model_io;
+    if (!modelIo) {
+      throw new Error(`Stage "${stageId}": agent "${agentId}" (kind: http) runs only stages with model_io`);
+    }
+    const runId = crypto.randomUUID();
+    const scriptEnv = {
+      WORKFLOW_MODEL_AGENT: agentId,
+      WORKFLOW_MODEL_CAPABILITIES: JSON.stringify(Array.isArray(agent.capabilities) ? agent.capabilities : []),
+      WORKFLOW_MODEL_IO_OPTIONS: JSON.stringify(modelIo.options || {}),
+    };
+    const scriptAgent = (step) => ({
+      command: 'node',
+      args: [path.resolve(this.projectRoot, modelIo[step])],
+      workdir: '.',
+    });
+    const timing = { prepare_ms: null, model_ms: null, apply_ms: null };
+
+    let started = Date.now();
+    const prepared = await this._callAgentOnce(scriptAgent('prepare'), prompt, stageId, stage.skill, null, scriptEnv);
+    timing.prepare_ms = Date.now() - started;
+    if (prepared.status !== 'ready') {
+      if (this.logger) {
+        this.logger.info(`MODEL_IO agent="${agentId}" prepare closed stage: status=${prepared.status} prepare_ms=${timing.prepare_ms}`, stageId);
+      }
+      return prepared;
+    }
+
+    const requestFile = prepared.result?.request_file;
+    if (!requestFile) {
+      return this._modelIoFailure(agentId, stageId,
+        new ModelClientError('bad_request', 'prepare returned status ready without request_file'), timing);
+    }
+    const requestPath = path.resolve(this.projectRoot, requestFile);
+    let input;
+    try {
+      input = JSON.parse(fs.readFileSync(requestPath, 'utf-8'));
+    } catch (err) {
+      return this._modelIoFailure(agentId, stageId,
+        new ModelClientError('bad_request', `request_file is not readable JSON: ${requestFile} (${err.message})`), timing);
+    }
+
+    // Окружение модели — как у CLI-агентов: process.env + машинный agent.env
+    // (прокси и т.п., lib/agent-env.mjs).
+    const env = buildAgentEnv(process.env, {}, { logger: this.logger, stageId });
+    started = Date.now();
+    let evaluation;
+    try {
+      evaluation = await evaluateWithModel({ ...agent, id: agentId }, input, { env, cwd: this.projectRoot });
+    } catch (err) {
+      if (!(err instanceof ModelClientError)) throw err;
+      timing.model_ms = Date.now() - started;
+      return this._modelIoFailure(agentId, stageId, err, timing);
+    }
+    timing.model_ms = Date.now() - started;
+
+    const responseDir = path.join(this.projectRoot, '.workflow', 'state', 'model-io');
+    const safeStage = String(stageId).replace(/[^\w.-]+/g, '_');
+    const responsePath = path.join(responseDir, `${safeStage}-${runId}.json`);
+    fs.mkdirSync(responseDir, { recursive: true });
+    fs.writeFileSync(responsePath, JSON.stringify(evaluation, null, 2));
+
+    started = Date.now();
+    const applied = await this._callAgentOnce(scriptAgent('apply'), prompt, stageId, stage.skill, null, {
+      ...scriptEnv,
+      WORKFLOW_MODEL_REQUEST: requestPath,
+      WORKFLOW_MODEL_RESPONSE: responsePath,
+    });
+    timing.apply_ms = Date.now() - started;
+
+    if (this.logger) {
+      this.logger.info(
+        `MODEL_IO agent="${agentId}" model="${evaluation.model}" status=${applied.status} ` +
+        `prepare_ms=${timing.prepare_ms} model_ms=${timing.model_ms} apply_ms=${timing.apply_ms} ` +
+        `cost_usd=${evaluation.cost_usd ?? 'unknown'}`,
+        stageId
+      );
+    }
+    applied.modelIo = {
+      agent: agentId,
+      model: evaluation.model,
+      cost_usd: evaluation.cost_usd,
+      response_file: path.relative(this.projectRoot, responsePath).split(path.sep).join('/'),
+      ...timing,
+    };
+    return applied;
+  }
+
+  /**
+   * Ошибка клиента или слоя оценки → результат стадии `status: error` с `error_class`.
+   * Классы MODEL_ERROR_HEALTH помечают агента в health-реестре и просят
+   * executeWithFallback взять следующего агента (`modelError.fallback`).
+   */
+  _modelIoFailure(agentId, stageId, err, timing) {
+    const health = MODEL_ERROR_HEALTH[err.class] || null;
+    if (health) {
+      try {
+        markUnhealthy(this.projectRoot, agentId, {
+          class: health.class,
+          ttl: health.ttl,
+          rule_id: `model-client-${err.class}`,
+          reason: err.message,
+        });
+        if (this.logger) {
+          this.logger.info(`agent ${agentId} marked unhealthy: class=${health.class} (model error ${err.class})`, stageId);
+        }
+      } catch (markErr) {
+        if (this.logger) this.logger.warn(`health mark failed for ${agentId}: ${markErr.message}`, stageId);
+      }
+    }
+    if (this.logger) {
+      this.logger.error(
+        `MODEL_IO agent="${agentId}" error_class=${err.class} prepare_ms=${timing.prepare_ms} ` +
+        `model_ms=${timing.model_ms ?? '-'}: ${err.message}`,
+        stageId
+      );
+    }
+    return {
+      status: 'error',
+      output: '',
+      stderr: '',
+      result: { error_class: err.class, error: err.message },
+      exitCode: 0,
+      parsed: true,
+      modelError: { class: err.class, fallback: Boolean(health) },
+    };
   }
 
   /**
@@ -2832,7 +3016,139 @@ function loadConfig(configPath) {
   return config;
 }
 
-function validateConfig(config) {
+// Безынструментный агент (`kind: http`) — модель по HTTP без инструментов и без
+// работы с файлами: файлы читают и пишут скрипты стадии (`model_io`). Запись
+// без `kind` — прежний CLI-агент с `command`. README, «Безынструментные агенты».
+const AGENT_KINDS = ['cli', 'http'];
+const HTTP_AGENT_PROTOCOLS = ['chat', 'decisions'];
+const HTTP_AGENT_REQUIRED_FIELDS = ['protocol', 'url', 'model', 'auth'];
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** `{ env: <ИМЯ> }` или `{ kilo_oauth: true }` — ровно одна форма. */
+function isValidHttpAuth(auth) {
+  if (!isPlainObject(auth)) return false;
+  const keys = Object.keys(auth);
+  if (keys.length !== 1) return false;
+  if (keys[0] === 'env') return typeof auth.env === 'string' && ENV_NAME_RE.test(auth.env);
+  if (keys[0] === 'kilo_oauth') return auth.kilo_oauth === true;
+  return false;
+}
+
+function validateAgentEntry(agentId, agent, errors) {
+  if (!isPlainObject(agent)) {
+    errors.push(`Agent "${agentId}" must be an object`);
+    return;
+  }
+  const kind = agent.kind ?? 'cli';
+  if (!AGENT_KINDS.includes(kind)) {
+    errors.push(`Agent "${agentId}" has unknown kind: ${kind} (expected: ${AGENT_KINDS.join(', ')})`);
+    return;
+  }
+  if (kind === 'cli') {
+    if (typeof agent.command !== 'string' || agent.command.trim() === '') {
+      errors.push(`Agent "${agentId}" missing required field: command`);
+    }
+    return;
+  }
+
+  for (const field of ['command', 'args']) {
+    if (agent[field] !== undefined) {
+      errors.push(`Agent "${agentId}" (kind: http) must not have field: ${field}`);
+    }
+  }
+  for (const field of HTTP_AGENT_REQUIRED_FIELDS) {
+    if (agent[field] === undefined || agent[field] === null || agent[field] === '') {
+      errors.push(`Agent "${agentId}" (kind: http) missing required field: ${field}`);
+    }
+  }
+  if (agent.protocol != null && agent.protocol !== '' && !HTTP_AGENT_PROTOCOLS.includes(agent.protocol)) {
+    errors.push(`Agent "${agentId}" (kind: http) has invalid protocol: ${agent.protocol} (expected: ${HTTP_AGENT_PROTOCOLS.join(', ')})`);
+  }
+  if (agent.url != null && agent.url !== '') {
+    let parsed = null;
+    try { parsed = new URL(String(agent.url)); } catch { /* ниже — ошибка */ }
+    if (!parsed || !['https:', 'http:'].includes(parsed.protocol)) {
+      errors.push(`Agent "${agentId}" (kind: http) has invalid url: ${agent.url}`);
+    }
+  }
+  if (agent.model != null && agent.model !== '' && typeof agent.model !== 'string') {
+    errors.push(`Agent "${agentId}" (kind: http) has invalid model: expected string`);
+  }
+  if (agent.auth != null && agent.auth !== '' && !isValidHttpAuth(agent.auth)) {
+    errors.push(`Agent "${agentId}" (kind: http) has invalid auth: expected { env: <NAME> } or { kilo_oauth: true }`);
+  }
+  if (agent.timeout_s !== undefined
+    && !(typeof agent.timeout_s === 'number' && Number.isFinite(agent.timeout_s) && agent.timeout_s > 0)) {
+    errors.push(`Agent "${agentId}" (kind: http) has invalid timeout_s: must be a number > 0`);
+  }
+}
+
+/** Обмен стадии с моделью: `model_io: { prepare, apply, options? }`, пути от корня проекта. */
+function validateModelIo(stageId, modelIo, projectRoot, errors) {
+  if (!isPlainObject(modelIo)) {
+    errors.push(`Stage "${stageId}" has invalid model_io: expected object with prepare and apply`);
+    return;
+  }
+  for (const step of ['prepare', 'apply']) {
+    const script = modelIo[step];
+    if (typeof script !== 'string' || script.trim() === '') {
+      errors.push(`Stage "${stageId}" model_io missing required field: ${step}`);
+    } else if (projectRoot && !fs.existsSync(path.resolve(projectRoot, script))) {
+      errors.push(`Stage "${stageId}" model_io.${step} script not found: ${script}`);
+    }
+  }
+  if (modelIo.options !== undefined && !isPlainObject(modelIo.options)) {
+    errors.push(`Stage "${stageId}" model_io.options must be an object`);
+  }
+}
+
+/**
+ * Агент `kind: http` исполняет стадию только через обмен `model_io`: без него
+ * раннер отдал бы безынструментной модели скил, который она выполнить не может.
+ * Способности от этого не защищают: фильтр resolveAgent пропускает агента, у
+ * которого есть все требуемые способности, а `[text]` есть почти у всех.
+ */
+function validateHttpAgentPlacement(pipeline, errors) {
+  const httpAgents = new Set(
+    Object.entries(pipeline.agents)
+      .filter(([, agent]) => isPlainObject(agent) && agent.kind === 'http')
+      .map(([id]) => id)
+  );
+  if (httpAgents.size === 0) return;
+
+  const because = 'tool-less agents run only stages with model_io';
+  if (httpAgents.has(pipeline.default_agent)) {
+    errors.push(`pipeline.default_agent is tool-less agent "${pipeline.default_agent}" (kind: http): ${because}`);
+  }
+  for (const id of Array.isArray(pipeline.default_agents) ? pipeline.default_agents : []) {
+    if (httpAgents.has(id)) {
+      errors.push(`pipeline.default_agents contains tool-less agent "${id}" (kind: http): ${because}`);
+    }
+  }
+
+  for (const [stageId, stage] of Object.entries(pipeline.stages)) {
+    if (!isPlainObject(stage) || stage.model_io !== undefined) continue;
+    const places = [];
+    if (stage.agent) places.push(['agent', stage.agent]);
+    for (const id of Array.isArray(stage.agents) ? stage.agents : []) places.push(['agents', id]);
+    for (const [type, byType] of Object.entries(isPlainObject(stage.agents_by_type) ? stage.agents_by_type : {})) {
+      for (const id of Array.isArray(byType?.agents) ? byType.agents : []) {
+        places.push([`agents_by_type.${type}.agents`, id]);
+      }
+    }
+    for (const [where, id] of places) {
+      if (httpAgents.has(id)) {
+        errors.push(`Stage "${stageId}" assigns tool-less agent "${id}" (kind: http) in ${where}, but has no model_io`);
+      }
+    }
+  }
+}
+
+function validateConfig(config, projectRoot = null) {
   const errors = [];
 
   if (!config) {
@@ -2863,6 +3179,12 @@ function validateConfig(config) {
     errors.push('Missing or invalid required field: pipeline.stages (object)');
   }
 
+  if (pipeline.agents && typeof pipeline.agents === 'object') {
+    for (const [agentId, agent] of Object.entries(pipeline.agents)) {
+      validateAgentEntry(agentId, agent, errors);
+    }
+  }
+
   if (pipeline.agents && pipeline.stages) {
     const agentIds = Object.keys(pipeline.agents);
     const stageIds = Object.keys(pipeline.stages);
@@ -2871,6 +3193,10 @@ function validateConfig(config) {
       const resolvedAgent = stage.agent || pipeline.default_agent;
       if (resolvedAgent && !agentIds.includes(resolvedAgent)) {
         errors.push(`Stage "${stageId}" references non-existent agent: ${resolvedAgent}`);
+      }
+
+      if (stage.model_io !== undefined) {
+        validateModelIo(stageId, stage.model_io, projectRoot, errors);
       }
 
       // Валидация для manual-gate стадии
@@ -2898,6 +3224,8 @@ function validateConfig(config) {
         }
       }
     }
+
+    validateHttpAgentPlacement(pipeline, errors);
   }
 
   return errors;
@@ -2970,7 +3298,7 @@ async function runPipeline(argv = process.argv.slice(2)) {
     return { exitCode: 1, error: err.message, stack: err.stack };
   }
 
-  const configErrors = validateConfig(config);
+  const configErrors = validateConfig(config, projectRoot);
   if (configErrors.length > 0) {
     console.error('Configuration validation failed:');
     configErrors.forEach(err => console.error(`  - ${err}`));
@@ -3058,5 +3386,5 @@ async function runPipeline(argv = process.argv.slice(2)) {
 }
 
 // Export for use as ES module
-export { runPipeline, parseArgs, PipelineRunner, FileGuard, StageExecutor };
-export default { runPipeline, parseArgs, PipelineRunner, FileGuard, StageExecutor };
+export { runPipeline, parseArgs, validateConfig, PipelineRunner, FileGuard, StageExecutor };
+export default { runPipeline, parseArgs, validateConfig, PipelineRunner, FileGuard, StageExecutor };

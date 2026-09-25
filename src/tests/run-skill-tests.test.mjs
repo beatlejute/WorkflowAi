@@ -2226,6 +2226,94 @@ describe('WORKFLOW_SKILLS_DIR — каталог скилов раннера', (
 });
 
 // ============================================================================
+// Безынструментный агент (kind: http) не исполняет кейсы. У него нет ни
+// инструментов, ни файлов — выполнить скил он не может. validateAgents
+// отклоняет его исполнителем до первого вызова модели; судьёй он допустим (PLAN-001).
+// ============================================================================
+
+describe('Безынструментный агент (kind: http) в тестах скилов', () => {
+  const HTTP_SKILLS_DIR = makeSkillsDir('wf-skills-http-agent-');
+  const PIPELINE_PATH = join(HTTP_SKILLS_DIR, 'pipeline.yaml');
+  const TARGET_SKILL = `__test-http-target-${Date.now()}`;
+  const JUDGE_SKILL = `__test-http-judge-${Date.now()}`;
+  const PLAIN_SKILL = `__test-http-plain-${Date.now()}`;
+
+  function writeSkill(name, execution) {
+    const testsDir = join(HTTP_SKILLS_DIR, name, 'tests');
+    mkdirSync(testsDir, { recursive: true });
+    writeFileSync(join(HTTP_SKILLS_DIR, name, 'SKILL.md'), '# HTTP agent check\nSIGNATURE_HTTP\n');
+    writeFileSync(join(testsDir, 'tc-http.yaml'),
+      buildCaseYaml([{ kind: 'skill_contains', pattern: 'SIGNATURE_HTTP', reason: 'L0 без вызова агентов' }])
+    );
+    writeFileSync(join(testsDir, 'index.yaml'), [
+      ...(execution ? ['execution:', ...execution.map(line => `  ${line}`)] : []),
+      'cases:',
+      '  - id: TC-HTTP',
+      '    file: tc-http.yaml',
+      ''
+    ].join('\n'));
+  }
+
+  before(() => {
+    writeFileSync(PIPELINE_PATH, [
+      'pipeline:',
+      '  name: "http-agent-skill-tests"',
+      '  version: "1.0"',
+      '  agents:',
+      '    agent-pass:',
+      '      command: "node"',
+      '      args: ["src/tests/fixtures/mock-agent-pass.js"]',
+      '      capabilities: [text]',
+      '    jev-judge:',
+      '      kind: http',
+      '      protocol: decisions',
+      '      url: "http://127.0.0.1:9/api/alpha/decisions"',
+      '      model: "typesafe/jev-1.13"',
+      '      auth: { env: "TEST_MODEL_KEY" }',
+      '      capabilities: [text]',
+      ''
+    ].join('\n'));
+    writeSkill(TARGET_SKILL, ['target_agents: [agent-pass, jev-judge]']);
+    writeSkill(JUDGE_SKILL, ['target_agents: [agent-pass]', 'judge_agent: jev-judge']);
+    writeSkill(PLAIN_SKILL, ['target_agents: [agent-pass]']);
+  });
+
+  after(() => {
+    rmSync(HTTP_SKILLS_DIR, { recursive: true, force: true });
+  });
+
+  function run(args) {
+    return runRunner(
+      [...args, '--layer', 'static', '--skip-meta-write', '--pipeline', PIPELINE_PATH],
+      { WORKFLOW_SKILLS_DIR: HTTP_SKILLS_DIR }
+    );
+  }
+
+  it('http-агент в target_agents скила — ненулевой код, в выводе агент и причина', async () => {
+    const { stdout, exitCode } = await run(['--skill', TARGET_SKILL]);
+
+    assert.notStrictEqual(exitCode, 0, `прогон должен упасть: ${stdout}`);
+    assert.match(stdout, /status: error/);
+    assert.match(stdout, /error: .*jev-judge.*tool-less \(kind: http\)/);
+  });
+
+  it('http-агент в --agent — ненулевой код, в выводе агент и причина', async () => {
+    const { stdout, exitCode } = await run(['--skill', PLAIN_SKILL, '--agent', 'jev-judge']);
+
+    assert.notStrictEqual(exitCode, 0, `прогон должен упасть: ${stdout}`);
+    assert.match(stdout, /error: .*jev-judge.*tool-less \(kind: http\)/);
+  });
+
+  it('http-агент в judge_agent проходит проверку агентов', async () => {
+    const { stdout, exitCode } = await run(['--skill', JUDGE_SKILL]);
+
+    assert.strictEqual(exitCode, 0, `судья kind: http допустим: ${stdout}`);
+    assert.match(stdout, /status: passed/);
+    assert.doesNotMatch(stdout, /tool-less/);
+  });
+});
+
+// ============================================================================
 // Гигиена самого файла тестов: после прогона не должно оставаться ни фикстур в
 // каноне, ни каталогов в %TEMP%. Оба класса мусора уже случались: фикстуры в
 // каноне попадали в репозиторий, а каталоги в %TEMP% копились с каждого
