@@ -576,12 +576,25 @@ class ResultParser {
       markerPositions.push(m.index);
     }
 
-    const endIdx = markerPositions.length >= 2 ? markerPositions[markerPositions.length - 1] : -1;
-    const startIdx = markerPositions.length >= 2 ? markerPositions[markerPositions.length - 2] : -1;
+    const count = markerPositions.length;
+    let resultBlock = null;
 
-    if (startIdx !== -1 && endIdx !== -1 && startIdx !== endIdx) {
+    // Незакрытый финальный блок: последний маркер без пары, после него — строка status.
+    // Рельсы такой ответ принимают (final_requires execute-task — маркер и status, без
+    // закрывающего маркера), а парсер видел «нет RESULT»: 2026-09-25 PulseProxy, gpt-luna
+    // через kilo выполнил IMPL-107 и завершил ответ так — запуск ушёл в ошибку. Хвост
+    // берётся только при нечётном числе маркеров и со строкой status: одиночный маркер
+    // из эха тикета или лога перед закрытым блоком не перехватывает результат.
+    if (count % 2 === 1) {
+      const tail = output.substring(markerPositions[count - 1] + marker.length).trim();
+      if (/^status:[ \t]*\S/m.test(tail)) resultBlock = tail;
+    }
+    if (resultBlock === null && count >= 2) {
+      resultBlock = output.substring(markerPositions[count - 2] + marker.length, markerPositions[count - 1]).trim();
+    }
+
+    if (resultBlock !== null) {
       // Найдены маркеры — парсим структурированный блок
-      const resultBlock = output.substring(startIdx + marker.length, endIdx).trim();
       const data = this.parseResultBlock(resultBlock);
 
       const normalizedStatus = this.normalizeStatus(data.status || 'default');
@@ -1643,8 +1656,13 @@ class StageExecutor {
         // получает status=default и идёт дальше, а стейдж фактически не выполнен
         // (см. incident 2026-04-22: create-report/analyze-report в PulseProxy).
         // Маппим в ошибку, чтобы executeWithFallback переключился на следующего агента.
+        // Считается только строка, которую kilo 7.7.9 печатает перед каждым авто-отказом
+        // (и для субагента): «permission requested: <что> (<шаблоны>); auto-rejecting».
+        // Прежний шаблон искал ещё «permission denied» и «rejected permission» где угодно
+        // в stderr и ловил текст скила execute-task, который рельсы печатают там на шагах:
+        // 2026-09-25 PulseProxy kilo-free и gpt-luna получили 6 и 7 «отказов», которых не было.
         if (code === 0 && !result.parsed && stderr) {
-          const rejectMatches = stderr.match(/(?:auto-rejecting|rejected permission|permission denied)/gi) || [];
+          const rejectMatches = stderr.match(/permission requested: [^\n]*; auto-rejecting/gi) || [];
           if (rejectMatches.length > 0) {
             const err = new Error(
               `Agent "${agentId}" exited 0 but auto-rejected ${rejectMatches.length} permission request(s) and produced no RESULT`

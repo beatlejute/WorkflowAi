@@ -188,6 +188,114 @@ process.exit(0);
   }
 });
 
+// ============================================================================
+// 2026-09-25 PulseProxy, IMPL-107: gpt-luna через kilo выполнил тикет и закончил ответ
+// блоком ---RESULT--- без закрывающего маркера; рельсы печатали в stderr узлы скила
+// execute-task со словами «permission denied». Раннер решил «нет RESULT» и насчитал
+// 7 отказов в правах, которых не было, — успешный запуск ушёл в ошибку.
+// ============================================================================
+const RAILS_ECHO_STDERR = [
+  'RAILS: числится P2R2 «П2 ПРАВИЛО: Permission-гейт — если при чтении context.files получена ошибка permission denied»',
+  'RAILS: числится P2G1 «П2 ГЕЙТ: Все обязательные файлы контекста прочитаны без permission denied?»',
+].join('\n');
+
+function writeStub(projectRoot, name, { stdout, stderr }) {
+  const stubPath = path.join(projectRoot, name);
+  fs.writeFileSync(stubPath, `#!/usr/bin/env node
+process.stderr.write(${JSON.stringify(stderr)});
+process.stdout.write(${JSON.stringify(stdout)});
+process.exit(0);
+`);
+  return stubPath;
+}
+
+async function runWithFallback(projectRoot, firstStub) {
+  createRulesFile(projectRoot);
+  const marker = path.join(projectRoot, 'success-called.txt');
+  const successStub = writeSuccessStub(projectRoot, marker);
+  const config = makeConfig({
+    'kilo-agent': { command: 'node', args: [firstStub], capabilities: ['text'] },
+    'claude-sonnet': { command: 'node', args: [successStub], capabilities: ['text'] },
+  });
+  const executor = makeExecutor(config, projectRoot);
+  const stage = { agents: ['kilo-agent', 'claude-sonnet'], instructions: 'Execute', skill: 'execute-task' };
+  const result = await executor.executeWithFallback('execute-task', stage);
+  return { result, fallbackCalled: fs.existsSync(marker) };
+}
+
+test('незакрытый блок RESULT со status — результат агента, fallback не нужен', async () => {
+  const projectRoot = makeTmpDir();
+  try {
+    const stub = writeStub(projectRoot, 'unclosed-result-stub.mjs', {
+      stdout: 'выполнено: guard popup разрешает pool-пресет\n---RESULT---\nstatus: default\n',
+      stderr: RAILS_ECHO_STDERR,
+    });
+    const { result, fallbackCalled } = await runWithFallback(projectRoot, stub);
+    assert.strictEqual(result.parsed, true, 'блок распознан');
+    assert.strictEqual(result.status, 'default');
+    assert.ok(!fallbackCalled, 'второй агент не вызван');
+  } finally {
+    cleanupDir(projectRoot);
+  }
+});
+
+test('незакрытый блок после закрытой пары берётся; одиночный маркер эха перед парой — нет', async () => {
+  const projectRoot = makeTmpDir();
+  try {
+    const stub = writeStub(projectRoot, 'pair-then-unclosed-stub.mjs', {
+      stdout: 'эхо тикета:\n---RESULT---\nstatus: failed\n---RESULT---\nитог\n---RESULT---\nstatus: blocked\nreason: нет доступа\n',
+      stderr: '',
+    });
+    const { result } = await runWithFallback(projectRoot, stub);
+    assert.strictEqual(result.status, 'blocked', 'взят последний, незакрытый блок');
+    assert.strictEqual(result.result.reason, 'нет доступа');
+  } finally {
+    cleanupDir(projectRoot);
+  }
+  const root2 = makeTmpDir();
+  try {
+    const stub = writeStub(root2, 'stray-marker-stub.mjs', {
+      stdout: 'эхо заголовка тикета:\n---RESULT---\nитог\n---RESULT---\nstatus: passed\n---RESULT---\n',
+      stderr: '',
+    });
+    const { result } = await runWithFallback(root2, stub);
+    // Хвост после последнего маркера пуст — прежнее правило «последняя пара».
+    assert.strictEqual(result.status, 'passed');
+  } finally {
+    cleanupDir(root2);
+  }
+});
+
+test('«permission denied» из текста скила без RESULT — не отказ в правах, fallback не нужен', async () => {
+  const projectRoot = makeTmpDir();
+  try {
+    const stub = writeStub(projectRoot, 'rails-echo-no-result-stub.mjs', {
+      stdout: 'Секция Result уже заполнена. Иду к финальной проверке.\n',
+      stderr: RAILS_ECHO_STDERR,
+    });
+    const { result, fallbackCalled } = await runWithFallback(projectRoot, stub);
+    assert.strictEqual(result.parsed, false);
+    assert.ok(!fallbackCalled, 'настоящих отказов kilo нет — silent-failure не срабатывает');
+  } finally {
+    cleanupDir(projectRoot);
+  }
+});
+
+test('отказ в правах субагенту kilo 7.7.9 без RESULT — silent-failure и fallback', async () => {
+  const projectRoot = makeTmpDir();
+  try {
+    const stub = writeStub(projectRoot, 'subagent-reject-stub.mjs', {
+      stdout: 'Starting work...\n',
+      stderr: '! subagent permission requested: external_directory (D:\\Dev\\other\\*); auto-rejecting\n',
+    });
+    const { result, fallbackCalled } = await runWithFallback(projectRoot, stub);
+    assert.strictEqual(result.status, 'passed', 'итог от второго агента');
+    assert.ok(fallbackCalled);
+  } finally {
+    cleanupDir(projectRoot);
+  }
+});
+
 test('QA-24-E2E-002: qwen записал артефакт + упал → fallback заблокирован, re-throw', async () => {
   const projectRoot = makeTmpDir();
   try {

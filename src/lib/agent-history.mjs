@@ -136,7 +136,10 @@ export function classifyAgentResult({ exitCode, stderr, stdout, timedOut, signal
   if (/ECONNREFUSED|ENETUNREACH|ETIMEDOUT|EHOSTUNREACH|getaddrinfo|network/i.test(stderr)) {
     return 'network_error';
   }
-  if (/\b401\b|\b403\b|invalid api key|unauthor|permission denied/i.test(stderr)) {
+  // Без «permission denied»: это не отказ провайдера, а файловая ошибка или текст скила
+  // execute-task, который рельсы печатают в stderr. 2026-09-25 PulseProxy: gpt-luna
+  // выполнил IMPL-107 и получил в истории auth_error. Настоящий отказ kilo — 403.
+  if (/\b401\b|\b403\b|invalid api key|unauthor/i.test(stderr)) {
     return 'auth_error';
   }
   if (exitCode === 0 && agentType === 'ai' && (stdout.trim().length === 0 || !parsedResult)) {

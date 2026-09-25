@@ -190,7 +190,10 @@ test('классификатор: каждый исход распознаётс
     [{ exitCode: 1, stderr: 'connect ECONNREFUSED 127.0.0.1:443' }, 'network_error'],
     [{ exitCode: 1, stderr: 'getaddrinfo ENOTFOUND api.example' }, 'network_error'],
     [{ exitCode: 1, stderr: 'Error 401: invalid api key' }, 'auth_error'],
-    [{ exitCode: 1, stderr: 'permission denied' }, 'auth_error'],
+    [{ exitCode: 1, stderr: 'Error: Forbidden: {"error":{"code":"403","message":"Forbidden"}}' }, 'auth_error'],
+    // Текст скила execute-task в stderr (рельсы печатают узлы) — не отказ доступа.
+    [{ exitCode: -1, stderr: 'RAILS: числится P2G1 «П2 ГЕЙТ: Все обязательные файлы контекста прочитаны без permission denied?»' }, 'error'],
+    [{ exitCode: 1, stderr: "EACCES: permission denied, open 'x'" }, 'error'],
     [{ stdout: '   ', parsedResult: null }, 'empty_response'],
     [{ parsedResult: null }, 'empty_response'],
     [{}, 'ok'],
