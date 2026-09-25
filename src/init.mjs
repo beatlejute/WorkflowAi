@@ -1,7 +1,6 @@
-import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, appendFileSync, symlinkSync, statSync, readdirSync, unlinkSync } from 'node:fs';
-import { join, resolve, dirname, basename } from 'node:path';
+import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, appendFileSync, symlinkSync, readdirSync, unlinkSync, lstatSync, realpathSync } from 'node:fs';
+import { join, resolve, dirname, basename, relative, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
-import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getGlobalDir, ensureGlobalDir } from './global-dir.mjs';
 import { createSkillJunctions, createScriptJunction, createConfigJunction, createRailsJunction } from './junction-manager.mjs';
@@ -39,38 +38,6 @@ function copyFile(src, dest) {
   const destDir = dirname(dest);
   ensureDir(destDir);
   copyFileSync(src, dest);
-}
-
-/**
- * Рекурсивно копирует директорию.
- *
- * @param {string} srcDir - Исходная директория
- * @param {string} destDir - Директория назначения
- */
-function copyDirRecursive(srcDir, destDir) {
-  ensureDir(destDir);
-  
-  const entries = [];
-  try {
-    const dirEntries = readdirSync(srcDir, { withFileTypes: true });
-    for (const entry of dirEntries) {
-      entries.push(entry);
-    }
-  } catch (e) {
-    // Directory doesn't exist, skip
-    return;
-  }
-  
-  for (const entry of entries) {
-    const srcPath = join(srcDir, entry.name);
-    const destPath = join(destDir, entry.name);
-    
-    if (entry.isDirectory()) {
-      copyDirRecursive(srcPath, destPath);
-    } else {
-      copyFile(srcPath, destPath);
-    }
-  }
 }
 
 /**
@@ -436,63 +403,137 @@ export function writeKiloPluginLoader(projectRoot) {
   return loaderPath;
 }
 
-/**
- * Создаёт симлинки .kilocode.
- *
- * @param {string} projectRoot - Путь к корню проекта
- * @param {boolean} force - Принудительное создание
- * @returns {{ success: boolean, warning?: string }} Результат операции
- */
-function createKilocodeSymlinks(projectRoot, force = false) {
-  const kilocodeDir = join(projectRoot, '.kilocode');
-  const skillsTarget = join(projectRoot, '.workflow', 'src', 'skills');
-  const skillsLink = join(kilocodeDir, 'skills');
-  
-  ensureDir(kilocodeDir);
-  
-  const isWindows = process.platform === 'win32';
-  
+// Скилы для kilo (инцидент 2026-09-24, PulseProxy). kilo CLI 7.7.x читает
+// SKILL.md из проектного `.kilocode/skills` только если настоящий путь файла
+// (после раскрытия всех ссылок) лежит внутри проекта, иначе пишет
+// «failed to load skill … blocked file reference outside project config scope»
+// и продолжает без скила. Скилы канона приходят в проект цепочкой junction'ов
+// в workflowAi — kilo-агенты во всех проектах, кроме самого workflowAi,
+// получали только имя скила без текста (раннер SKILL.md в промпт не
+// вставляет). Своему каталогу глобальных настроек kilo доверяет без этой
+// проверки, поэтому канон отдаётся kilo оттуда одной ссылкой на все проекты,
+// а в `.kilocode/skills` проекта остаются только скилы, физически лежащие в
+// проекте (эжектнутые и проектные) — их проверка kilo пропускает.
+
+const isWin = process.platform === 'win32';
+
+function realpathOrNull(p) {
   try {
-    // Remove existing link if exists
-    if (existsSync(skillsLink)) {
-      const stats = statSync(skillsLink);
-      if (stats.isSymbolicLink() || stats.isDirectory()) {
-        try {
-          if (isWindows) {
-            execSync(`rmdir "${skillsLink}"`);
-          } else {
-            unlinkSync(skillsLink);
-          }
-        } catch (e) {
-          // Ignore errors
-        }
+    return realpathSync.native(p);
+  } catch {
+    return null;
+  }
+}
+
+function isInside(child, parent) {
+  const rel = relative(parent, child);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function lstatOrNull(p) {
+  try {
+    return lstatSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Каталог глобальных настроек kilo — так же, как его вычисляет kilo CLI 7.7.x:
+ * `KILO_CONFIG_DIR`, иначе `<XDG_CONFIG_HOME || ~/.config>/kilo`.
+ */
+export function getKiloConfigDir(env = process.env) {
+  if (env.KILO_CONFIG_DIR) return env.KILO_CONFIG_DIR;
+  return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'kilo');
+}
+
+/**
+ * Ссылка `<каталог настроек kilo>/skills` → `<globalDir>/skills`: канон скилов
+ * для kilo во всех проектах. Чужое не трогает: обычный каталог или ссылка в
+ * другое место остаются как есть (status `foreign` с предупреждением).
+ *
+ * @returns {{ status: 'created'|'exists'|'foreign'|'skipped', path: string, warning?: string }}
+ */
+export function ensureKiloGlobalSkillsLink(globalDir, env = process.env) {
+  const target = join(globalDir, 'skills');
+  const link = join(getKiloConfigDir(env), 'skills');
+  if (!existsSync(target)) return { status: 'skipped', path: link };
+
+  const st = lstatOrNull(link);
+  if (st) {
+    if (!st.isSymbolicLink()) {
+      return { status: 'foreign', path: link, warning: `${link} — обычный каталог, не ссылка на ${target}: оставлен как есть` };
+    }
+    const current = realpathOrNull(link);
+    if (current && current === realpathOrNull(target)) return { status: 'exists', path: link };
+    return { status: 'foreign', path: link, warning: `${link} ведёт не в ${target}${current ? '' : ' (цель ссылки недоступна)'}: оставлен как есть` };
+  }
+
+  ensureDir(dirname(link));
+  symlinkSync(target, link, isWin ? 'junction' : 'dir');
+  return { status: 'created', path: link };
+}
+
+/**
+ * `.kilocode/skills` проекта — обычный каталог со ссылками на скилы из
+ * `.workflow/src/skills`, которые физически лежат в проекте и не являются
+ * каноном (канон kilo берёт из глобальной ссылки, см. ensureKiloGlobalSkillsLink).
+ * Прежняя раскладка — ссылка на весь `.workflow/src/skills` — снимается
+ * (удаляется только сама ссылка, не цель). В каталоге удаляются только ссылки,
+ * которых нет в нужном наборе; обычные каталоги не трогаются.
+ *
+ * @returns {{ success: boolean, linked: string[], removed: string[], warning?: string }}
+ */
+export function createKilocodeSymlinks(projectRoot, globalDir = getGlobalDir()) {
+  const skillsDir = join(projectRoot, '.kilocode', 'skills');
+  const sourceDir = join(projectRoot, '.workflow', 'src', 'skills');
+  const result = { success: true, linked: [], removed: [] };
+
+  try {
+    const old = lstatOrNull(skillsDir);
+    if (old && old.isSymbolicLink()) {
+      unlinkSync(skillsDir);
+      result.removed.push('.kilocode/skills');
+    }
+    ensureDir(skillsDir);
+
+    const root = realpathSync.native(projectRoot);
+    const canon = realpathOrNull(join(globalDir, 'skills'));
+    const wanted = new Map();
+    if (existsSync(sourceDir)) {
+      for (const name of readdirSync(sourceDir)) {
+        const src = join(sourceDir, name);
+        if (!existsSync(join(src, 'SKILL.md'))) continue;
+        const real = realpathOrNull(src);
+        if (!real || !isInside(real, root)) continue;
+        if (canon && isInside(real, canon)) continue;
+        wanted.set(name, src);
       }
     }
-    
-    if (isWindows) {
-      // Windows: use Junction Point
-      try {
-        execSync(`mklink /J "${skillsLink}" "${skillsTarget}"`);
-        return { success: true };
-      } catch (e) {
-        // Fallback: copy directory
-        copyDirRecursive(skillsTarget, skillsLink);
-        return { 
-          success: true, 
-          warning: 'Junction Point creation failed, copied files instead' 
-        };
+
+    for (const name of readdirSync(skillsDir)) {
+      const p = join(skillsDir, name);
+      if (!lstatOrNull(p)?.isSymbolicLink()) continue;
+      const src = wanted.get(name);
+      if (src && realpathOrNull(p) === realpathOrNull(src)) {
+        wanted.delete(name);
+        result.linked.push(name);
+        continue;
       }
-    } else {
-      // Linux/macOS: use symlink
-      symlinkSync(skillsTarget, skillsLink);
-      return { success: true };
+      unlinkSync(p);
+      result.removed.push(name);
+    }
+
+    for (const [name, src] of wanted) {
+      const p = join(skillsDir, name);
+      if (existsSync(p)) continue;
+      symlinkSync(src, p, isWin ? 'junction' : 'dir');
+      result.linked.push(name);
     }
   } catch (e) {
-    return { 
-      success: false, 
-      warning: `Failed to create symlink: ${e.message}` 
-    };
+    return { ...result, success: false, warning: `Failed to set up .kilocode/skills: ${e.message}` };
   }
+  return result;
 }
 
 /**
@@ -610,15 +651,20 @@ export function initProject(targetPath = process.cwd(), options = {}) {
   createConfigJunction(globalDir, configDest);
   result.steps.push('Created config junction from global dir → .workflow/config/');
 
-  // Step 7: Create .kilocode symlinks
-  const symlinkResult = createKilocodeSymlinks(projectRoot, force);
+  // Step 7: skills for kilo — canon via kilo's global config dir, project-local
+  // skills via .kilocode/skills (see createKilocodeSymlinks)
+  try {
+    const kiloLink = ensureKiloGlobalSkillsLink(globalDir);
+    if (kiloLink.status === 'created') result.steps.push(`Linked skills canon for kilo: ${kiloLink.path} → ${join(globalDir, 'skills')}`);
+    if (kiloLink.warning) result.warnings.push(kiloLink.warning);
+  } catch (e) {
+    result.errors.push(`Failed to link skills canon for kilo: ${e.message}`);
+  }
+  const symlinkResult = createKilocodeSymlinks(projectRoot, globalDir);
   if (symlinkResult.success) {
-    result.steps.push('Created .kilocode symlinks (Junction Point on Windows)');
-    if (symlinkResult.warning) {
-      result.warnings.push(symlinkResult.warning);
-    }
+    result.steps.push(`Set up .kilocode/skills (project-local skills: ${symlinkResult.linked.join(', ') || 'none'})`);
   } else {
-    result.errors.push(symlinkResult.warning || 'Failed to create .kilocode symlinks');
+    result.errors.push(symlinkResult.warning || 'Failed to set up .kilocode/skills');
   }
   
   // Step 8: Generate CLAUDE.md, QWEN.md and .kilocodemodes

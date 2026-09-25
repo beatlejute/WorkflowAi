@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { initProject } from './init.mjs';
+import { initProject, ensureKiloGlobalSkillsLink, createKilocodeSymlinks } from './init.mjs';
 import { runPipeline } from './runner.mjs';
 import { packageVersion } from './lib/package-version.mjs';
 import { join, dirname, resolve } from 'node:path';
@@ -122,6 +122,20 @@ function runUpdate(args) {
   const configDir = join(workflowRoot, 'config');
   createConfigJunction(globalDir, configDir);
   console.log('✅ Config junction recreated');
+
+  syncKiloSkills(projectRoot, globalDir);
+}
+
+// Скилы для kilo: канон — ссылкой из каталога настроек kilo, в
+// .kilocode/skills — только скилы, лежащие в проекте (init.mjs,
+// createKilocodeSymlinks). После eject скил становится проектным — без
+// пересборки kilo продолжал бы брать версию канона.
+function syncKiloSkills(projectRoot, globalDir) {
+  const link = ensureKiloGlobalSkillsLink(globalDir);
+  if (link.warning) console.warn(`⚠️  ${link.warning}`);
+  const r = createKilocodeSymlinks(projectRoot, globalDir);
+  if (r.success) console.log(`✅ .kilocode/skills synced (project-local: ${r.linked.join(', ') || 'none'})`);
+  else console.warn(`⚠️  ${r.warning}`);
 }
 
 function runEject(args) {
@@ -137,6 +151,7 @@ function runEject(args) {
 
   ejectSkill(skillName, globalDir, skillsDir);
   console.log(`✅ Skill "${skillName}" ejected (copied to project)`);
+  syncKiloSkills(projectRoot, globalDir);
 }
 
 function runEjectScripts(args) {

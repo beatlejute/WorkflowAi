@@ -47,6 +47,7 @@ const PROJECT = path.join(BASE, 'project');
 const SKILLS = path.join(PROJECT, '.workflow', 'src', 'skills');
 const SCRIPTS = path.join(PROJECT, '.workflow', 'src', 'scripts');
 const CONFIG = path.join(PROJECT, '.workflow', 'config');
+const KILOCODE_SKILLS = path.join(PROJECT, '.kilocode', 'skills');
 
 function isLink(p) {
   try {
@@ -80,8 +81,10 @@ before(() => {
 });
 
 after(() => {
-  if (fs.existsSync(SKILLS)) {
-    for (const name of fs.readdirSync(SKILLS)) unlinkOnly(path.join(SKILLS, name));
+  for (const dir of [SKILLS, KILOCODE_SKILLS]) {
+    if (fs.existsSync(dir)) {
+      for (const name of fs.readdirSync(dir)) unlinkOnly(path.join(dir, name));
+    }
   }
   unlinkOnly(SCRIPTS);
   unlinkOnly(CONFIG);
@@ -131,6 +134,13 @@ test('eject: ссылка заменена копией, общая копия �
 
   const listed = run(['list', PROJECT]);
   assert.match(listed.out, /^coach\s+(?!shared)\S+/m, 'статус скила сменился');
+
+  // kilo 7.7.x читает проектный .kilocode/skills только внутри проекта: без
+  // ссылки на копию он брал бы версию канона из своего каталога настроек.
+  const kiloSkill = path.join(KILOCODE_SKILLS, 'coach');
+  assert.ok(isLink(kiloSkill), '.kilocode/skills/coach — ссылка на проектную копию');
+  assert.equal(fs.realpathSync.native(kiloSkill), fs.realpathSync.native(projectSkill));
+  assert.match(r.out, /\.kilocode\/skills synced \(project-local: coach\)/);
 });
 
 test('eject без имени скила — код 1 и понятная ошибка', () => {

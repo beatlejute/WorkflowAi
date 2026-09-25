@@ -2,25 +2,30 @@ import { test, beforeEach, afterEach } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, statSync, readdirSync, rmSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
-import { initProject } from '../init.mjs';
+import { existsSync, statSync, readdirSync, rmSync, readFileSync, mkdirSync, writeFileSync, lstatSync, realpathSync, symlinkSync } from 'node:fs';
+import { initProject, ensureKiloGlobalSkillsLink, getKiloConfigDir, createKilocodeSymlinks } from '../init.mjs';
 import { getGlobalDir } from '../global-dir.mjs';
 import { isJunction } from '../junction-manager.mjs';
 
 let testGlobalDir;
 let originalWorkflowHome;
+let originalKiloConfigDir;
 
+// KILO_CONFIG_DIR — рядом с WORKFLOW_HOME теста: initProject ставит туда
+// ссылку на канон скилов, а без подмены (запуск файла без преднагрузки)
+// это был бы настоящий ~/.config/kilo.
 beforeEach(() => {
   originalWorkflowHome = process.env.WORKFLOW_HOME;
+  originalKiloConfigDir = process.env.KILO_CONFIG_DIR;
   testGlobalDir = join(tmpdir(), `workflow-init-global-${Date.now()}`);
   process.env.WORKFLOW_HOME = testGlobalDir;
+  process.env.KILO_CONFIG_DIR = join(testGlobalDir, 'kilo-config');
 });
 
 afterEach(() => {
-  if (originalWorkflowHome === undefined) {
-    delete process.env.WORKFLOW_HOME;
-  } else {
-    process.env.WORKFLOW_HOME = originalWorkflowHome;
+  for (const [key, value] of [['WORKFLOW_HOME', originalWorkflowHome], ['KILO_CONFIG_DIR', originalKiloConfigDir]]) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
   }
   rmSync(testGlobalDir, { recursive: true, force: true });
 });
@@ -159,26 +164,95 @@ test('initProject creates CLAUDE.md and QWEN.md', () => {
   }
 });
 
-test('initProject creates .kilocode/skills as junction/symlink', () => {
+// Инцидент 2026-09-24 (PulseProxy): kilo 7.7.x не читает SKILL.md, настоящий
+// путь которого вне проекта, — проектная ссылка .kilocode/skills на канон
+// давала kilo-агентам только имя скила. Канон теперь идёт из каталога
+// настроек kilo, в .kilocode/skills — только скилы, лежащие в проекте.
+test('initProject: канон скилов для kilo — ссылкой из каталога настроек kilo', () => {
   const tmpDir = join(tmpdir(), `workflow-init-kilocode-test-${Date.now()}`);
 
   try {
     const result = initProject(tmpDir, { force: true });
 
-    const kilocodeDir = join(tmpDir, '.kilocode');
-    const skillsLink = join(kilocodeDir, 'skills');
+    const kiloLink = join(process.env.KILO_CONFIG_DIR, 'skills');
+    assert.ok(lstatSync(kiloLink).isSymbolicLink(), 'ссылка в каталоге настроек kilo');
+    assert.equal(realpathSync.native(kiloLink), realpathSync.native(join(testGlobalDir, 'skills')));
+    assert.ok(existsSync(join(kiloLink, 'execute-task', 'SKILL.md')), 'канон виден через ссылку');
 
-    assert.ok(existsSync(kilocodeDir), '.kilocode directory should exist');
-    assert.ok(existsSync(skillsLink), '.kilocode/skills should exist');
-
-    const stats = statSync(skillsLink);
-    assert.ok(
-      stats.isSymbolicLink() || stats.isDirectory(),
-      '.kilocode/skills should be symlink/junction/directory'
-    );
+    const skillsDir = join(tmpDir, '.kilocode', 'skills');
+    assert.ok(!lstatSync(skillsDir).isSymbolicLink(), '.kilocode/skills — обычный каталог, не ссылка на канон');
+    assert.deepEqual(readdirSync(skillsDir), [], 'скилы канона в .kilocode/skills не дублируются');
+    assert.deepEqual(result.errors.filter(e => /kilo/i.test(e)), []);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test('ensureKiloGlobalSkillsLink: повторный вызов — exists, чужой каталог и чужая ссылка не трогаются', () => {
+  const skills = join(testGlobalDir, 'skills');
+  mkdirSync(join(skills, 'demo'), { recursive: true });
+
+  assert.equal(ensureKiloGlobalSkillsLink(testGlobalDir).status, 'created');
+  assert.equal(ensureKiloGlobalSkillsLink(testGlobalDir).status, 'exists');
+
+  const otherDir = join(testGlobalDir, 'other-kilo');
+  mkdirSync(join(otherDir, 'skills', 'mine'), { recursive: true });
+  const own = ensureKiloGlobalSkillsLink(testGlobalDir, { KILO_CONFIG_DIR: otherDir });
+  assert.equal(own.status, 'foreign');
+  assert.ok(existsSync(join(otherDir, 'skills', 'mine')), 'обычный каталог пользователя цел');
+
+  const elsewhere = join(testGlobalDir, 'elsewhere');
+  mkdirSync(elsewhere);
+  const linkedDir = join(testGlobalDir, 'linked-kilo');
+  mkdirSync(linkedDir);
+  symlinkSync(elsewhere, join(linkedDir, 'skills'), process.platform === 'win32' ? 'junction' : 'dir');
+  assert.equal(ensureKiloGlobalSkillsLink(testGlobalDir, { KILO_CONFIG_DIR: linkedDir }).status, 'foreign');
+  assert.equal(realpathSync.native(join(linkedDir, 'skills')), realpathSync.native(elsewhere), 'чужая ссылка не перенаправлена');
+
+  assert.equal(ensureKiloGlobalSkillsLink(join(testGlobalDir, 'no-such-global')).status, 'skipped');
+});
+
+test('getKiloConfigDir: KILO_CONFIG_DIR, затем XDG_CONFIG_HOME/kilo', () => {
+  assert.equal(getKiloConfigDir({ KILO_CONFIG_DIR: '/k', XDG_CONFIG_HOME: '/x' }), '/k');
+  assert.equal(getKiloConfigDir({ XDG_CONFIG_HOME: '/x' }), join('/x', 'kilo'));
+});
+
+test('createKilocodeSymlinks: прежняя ссылка снимается без вреда цели, в каталоге — только проектные скилы', () => {
+  const project = join(testGlobalDir, 'project');
+  const canon = join(testGlobalDir, 'skills');
+  mkdirSync(join(canon, 'canon-skill'), { recursive: true });
+  writeFileSync(join(canon, 'canon-skill', 'SKILL.md'), 'canon');
+
+  const src = join(project, '.workflow', 'src', 'skills');
+  mkdirSync(join(src, 'local-skill'), { recursive: true });
+  writeFileSync(join(src, 'local-skill', 'SKILL.md'), 'local');
+  mkdirSync(join(src, 'shared'), { recursive: true });
+  const kind = process.platform === 'win32' ? 'junction' : 'dir';
+  symlinkSync(join(canon, 'canon-skill'), join(src, 'canon-skill'), kind);
+
+  // прежняя раскладка: .kilocode/skills → .workflow/src/skills целиком
+  mkdirSync(join(project, '.kilocode'), { recursive: true });
+  symlinkSync(src, join(project, '.kilocode', 'skills'), kind);
+
+  const r = createKilocodeSymlinks(project, testGlobalDir);
+  assert.equal(r.success, true, r.warning);
+  const skillsDir = join(project, '.kilocode', 'skills');
+  assert.ok(!lstatSync(skillsDir).isSymbolicLink());
+  assert.deepEqual(readdirSync(skillsDir), ['local-skill'], 'канон и каталог без SKILL.md не попадают');
+  assert.ok(lstatSync(join(skillsDir, 'local-skill')).isSymbolicLink());
+  assert.equal(readFileSync(join(skillsDir, 'local-skill', 'SKILL.md'), 'utf8'), 'local');
+  assert.ok(existsSync(join(src, 'local-skill', 'SKILL.md')), 'цель прежней ссылки цела');
+  assert.ok(existsSync(join(canon, 'canon-skill', 'SKILL.md')), 'канон цел');
+
+  // повтор идемпотентен; устаревшая ссылка снимается, обычный каталог остаётся
+  const stalePath = join(skillsDir, 'gone');
+  symlinkSync(join(canon, 'canon-skill'), stalePath, kind);
+  mkdirSync(join(skillsDir, 'user-dir'));
+  const again = createKilocodeSymlinks(project, testGlobalDir);
+  assert.equal(again.success, true, again.warning);
+  assert.deepEqual(again.removed, ['gone']);
+  assert.deepEqual(readdirSync(skillsDir).sort(), ['local-skill', 'user-dir']);
+  assert.ok(existsSync(join(canon, 'canon-skill', 'SKILL.md')), 'канон цел после снятия ссылки');
 });
 
 test('initProject updates .gitignore', () => {

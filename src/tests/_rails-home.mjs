@@ -24,6 +24,10 @@ if (isMainThread) {
   // Проверено запуском: за один прогон набора в %TEMP% оставалось 9 каталогов.
   const home = mkdtempSync(join(tmpdir(), 'rails-test-home-'));
   process.env.WORKFLOW_HOME = home;
+  // initProject ставит ссылку на канон скилов в каталог настроек kilo
+  // (init.mjs, ensureKiloGlobalSkillsLink) — без изоляции тесты init
+  // писали бы в настоящий ~/.config/kilo ссылку на временный WORKFLOW_HOME.
+  process.env.KILO_CONFIG_DIR = join(home, 'kilo-config');
   process.on('exit', () => rmSync(home, { recursive: true, force: true }));
 
   armWorkerWatchdog();
