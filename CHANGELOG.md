@@ -1,4 +1,4 @@
-## [Unreleased]
+## [1.8.0] — 2026-09-25
 
 ### Added
 - **Безынструментные агенты (`kind: http`).** Модель, которая не пользуется инструментами, подключается записью в `pipeline.agents`, без правок кода: `kind: http`, `protocol` (`chat` или `decisions`), `url` (`https://`; `http://` — только localhost, 127.0.0.1, ::1), `model`, `auth` (`{ env: <ИМЯ> }` или `{ kilo_oauth: true }`), `timeout_s` (на одну попытку). Протокол `chat` — формат OpenAI chat completions без `tools`, с изображениями (PNG, JPEG, WebP; до 5 МБ, до 8 на запрос); `decisions` — типизированная оценка OpenRouter. Общий клиент — `src/lib/model-client.mjs`: ключ только из переменной окружения или токена kilo (на Windows имя переменной — без учёта регистра), прокси из `HTTPS_PROXY` и соседних переменных (туннель CONNECT), до двух повторов на 429/500/502/503 и сетевую ошибку, прерывание через `AbortSignal`, классы ошибок `no_key`, `auth`, `rate_limit`, `server`, `timeout`, `network`, `bad_request`, `bad_response`, `aborted`.
