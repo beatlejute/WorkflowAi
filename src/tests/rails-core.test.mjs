@@ -18,7 +18,7 @@ import { decide, buildDenyReason, loadSkillRuntime, analyzeCliCommand } from '..
 import { startState, saveState, loadState } from '../rails/state.mjs';
 import { readJournal } from '../rails/journal.mjs';
 import { createJunction } from '../junction-manager.mjs';
-import { fromClaude } from '../rails/actions.mjs';
+import { fromClaude, fromKilo } from '../rails/actions.mjs';
 
 // Память «сессия → корень» (session-memo.mjs) живёт в <WORKFLOW_HOME>/state —
 // тесты изолируют её, иначе временные корни вытесняют реальные сессии
@@ -2678,6 +2678,54 @@ test('bash (C2 r3): pushd +1 возвращает в исходный катал
     sh('function fn { touch fn.txt; }; fn', root);
     for (const f of ['hd.txt', 'hd2.txt', 'hs.txt', 'co.txt', 'tr.txt', 'fn.txt']) {
       assert.equal(existsSync(join(root, f)), true, `bash выполнил запись: ${f}`);
+    }
+  });
+});
+
+// Ревью 2026-09-24: apply_patch Kilo правит несколько файлов, а правило этапа и гард скилов
+// смотрели только первый путь патча — второй проходил без проверки этапа.
+test('decide: apply_patch — правило этапа срабатывает по любому пути патча, не только по первому', () => {
+  withProject(({ root }) => {
+    const { sessionId } = makeState(root, 'P5S1');
+    const scratch = mkdtempSync(join(tmpdir(), 'rails-core-patch-'));
+    try {
+      const patch = fromKilo({ tool: 'apply_patch' }, { args: { patchText: [
+        '*** Begin Patch',
+        `*** Add File: ${join(scratch, 'first.txt')}`,
+        '+x',
+        `*** Add File: ${join(root, '.workflow', 'work', 'second.txt')}`,
+        '+y',
+        '*** End Patch',
+      ].join('\n') } });
+      const r = decide({ action: patch, ctx: { cwd: root, sessionId } });
+      assert.equal(r.decision, 'deny');
+      assert.match(r.reason, /разрешено только на этапах/);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+test('decide (G0): apply_patch со вторым путём в каталоге скилов — отказ', () => {
+  withProject(({ root }) => {
+    const patch = fromKilo({ tool: 'apply_patch' }, { args: { patchText: [
+      '*** Begin Patch',
+      `*** Add File: ${join(root, 'notes.txt')}`,
+      '+x',
+      `*** Update File: ${join(root, '.workflow', 'src', 'skills', 'coretest', 'SKILL.md')}`,
+      '@@',
+      '-a',
+      '+b',
+      '*** End Patch',
+    ].join('\n') } });
+    const prev = process.env.WORKFLOW_RAILS_SKILL;
+    delete process.env.WORKFLOW_RAILS_SKILL;
+    try {
+      const r = decide({ action: patch, ctx: { cwd: root, sessionId: uuid() } });
+      assert.equal(r.decision, 'deny');
+      assert.match(r.reason, /коуча/);
+    } finally {
+      if (prev !== undefined) process.env.WORKFLOW_RAILS_SKILL = prev;
     }
   });
 });

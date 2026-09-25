@@ -8,6 +8,8 @@
 #   agent-a      — алиас agent-pass (для совместимости)
 #   agent-b      — алиас agent-fail (для тестов AND-логики где одна модель падает)
 #   agent-dir-probe — pass, только если вход kind: dir разложен в рабочий каталог
+#   agent-sandbox-probe — pass, только если WORKFLOW_SANDBOX_ROOT = рабочий каталог
+#   mock-judge-sandbox  — score 5, только если судье передан WORKFLOW_SANDBOX_ROOT
 
 pipeline:
   name: "test-pipeline"
@@ -48,6 +50,20 @@ pipeline:
       workdir: "."
       capabilities: [text]
       description: "Mock agent — pass, только если вход kind: dir разложен в рабочий каталог"
+
+    agent-sandbox-probe:
+      command: "node"
+      args: ["src/tests/fixtures/mock-agent-sandbox-probe.js"]
+      workdir: "."
+      capabilities: [text]
+      description: "Mock agent — pass, только если WORKFLOW_SANDBOX_ROOT указывает на рабочий каталог"
+
+    mock-judge-sandbox:
+      command: "node"
+      args: ["src/tests/fixtures/mock-judge-sandbox-probe.js"]
+      workdir: "."
+      capabilities: [text]
+      description: "Mock judge — score 5, только если судье передан WORKFLOW_SANDBOX_ROOT"
 
     mock-judge:
       command: "node"

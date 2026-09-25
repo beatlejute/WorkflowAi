@@ -562,6 +562,37 @@ export const WorkflowRails = async ({ directory }) => ({
   `WORKFLOW_RAILS_ROLE` (`coordinator` для целевого агента стадии/теста, `executor` для судьи),
   `WORKFLOW_RAILS_SKILL`, `WORKFLOW_RAILS_RUN` (uuid запуска); после завершения — `output-check`
   по состоянию с этим `run`, при нарушении один повтор с вердиктом в начале промпта.
+- Песочница тестов скилов: `run-skill-tests.js` передаёт исполнителю кейса и судье
+  `WORKFLOW_SANDBOX_ROOT` — корень изолированного workdir прогона. `decide()` проверяет его
+  первым, до корня проекта, скила и роли:
+  - запись (edit/write и цели записи shell) разрешена внутри песочницы по realpath — сквозь
+    junction'ы workdir на настоящие `src/scripts`, `src/rails`, `configs` запись запрещена;
+  - во временный каталог ОС — разрешена, кроме чужих песочниц `wf-test-*`;
+  - путь записи не определён — отказ; корня песочницы нет на диске — отказ на любую запись;
+  - MCP-сервер `workflow` — только `get_*`, `list_*`, `cross_project_search`, `aggregate_metrics`;
+  - встроенные инструменты Kilo, запускающие работу вне взгляда хука (`agent_manager`,
+    `cron_create`, `schedule_wakeup`, `background_process restart`), — отказ;
+  - создание ссылок в shell-команде (`mklink`, `ln`, `fsutil`, `New-Item -ItemType
+    Junction|SymbolicLink|HardLink`, `cp -l/-s`) — отказ: созданная и использованная одной
+    командой ссылка на момент проверки не существует, realpath её не видит;
+  - запись в существующий файл с несколькими именами (жёсткая ссылка) — отказ.
+
+  Диалект shell-команды Kilo хук выбирает так же, как Kilo: `shell` из
+  `~/.config/kilo/kilo.jsonc|json`, затем `SHELL`, иначе PowerShell; не разобрал конфиг — оба
+  диалекта. `workdir` в записи Git Bash (`/d/x`, `/tmp`) переводится в путь диска. У
+  `apply_patch` правила этапа и гард скилов проверяют каждый путь патча.
+
+  Судьи калибровки получают пустую временную песочницу. Для Kilo действие строится с учётом
+  встроенных инструментов (ревью 2026-09-24): `bash` и `background_process` — shell с каталогом
+  запуска `workdir`, `apply_patch` — правка всех путей патча (`*** Add/Update/Delete File:`,
+  `*** Move to:`; нераспознанный патч — отказ), прочие встроенные с `_` в имени — не MCP.
+  `/tmp` Git Bash разбирается как временный каталог ОС.
+
+  Отказ пишется в журнал песочницы (если её корень существует) и уходит в улики
+  `rails-trial-N.jsonl`. Основание —
+  2026-09-23: агенты кейсов create-plan и decompose-plan (скилы ещё без rails.yaml) записали
+  планы и тикеты в настоящий проект. Граница — на уровне хука: запись, которую хук не видит
+  (например, `node -e` с `fs.writeFileSync`), она не ловит.
 - `package.json` → `files`: добавить `src/rails/`.
 
 ## 12. Покрытие при конверсии (`coverage`)

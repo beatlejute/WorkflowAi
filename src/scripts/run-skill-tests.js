@@ -926,10 +926,20 @@ reason: <brief explanation>
   const goodOutput = extractGoodResponse(goodContent);
   const badOutput = extractGoodResponse(badContent);
 
-  const [goodResult, badResult] = await Promise.all([
-    spawnAgent(judgeAgentConfig, judgePrompt(goodOutput, 'Evaluate the good response'), { timeout: JUDGE_TIMEOUT_S, railsRole: 'executor' }),
-    spawnAgent(judgeAgentConfig, judgePrompt(badOutput, 'Evaluate the bad response'), { timeout: JUDGE_TIMEOUT_S, railsRole: 'executor' })
-  ]);
+  // Судьи калибровки идут в каталоге раннера, то есть в настоящем проекте. Писать им
+  // незачем: граница записи — пустой временный каталог, снимается после вызова.
+  const calibSandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-calib-'));
+  const calibOpts = { timeout: JUDGE_TIMEOUT_S, railsRole: 'executor', env: { WORKFLOW_SANDBOX_ROOT: calibSandbox } };
+  let goodResult;
+  let badResult;
+  try {
+    [goodResult, badResult] = await Promise.all([
+      spawnAgent(judgeAgentConfig, judgePrompt(goodOutput, 'Evaluate the good response'), calibOpts),
+      spawnAgent(judgeAgentConfig, judgePrompt(badOutput, 'Evaluate the bad response'), calibOpts)
+    ]);
+  } finally {
+    try { fs.rmSync(calibSandbox, { recursive: true, force: true }); } catch {}
+  }
 
   const goodScore = parseJudgeResult(goodResult.output)?.score || 3;
   const badScore = parseJudgeResult(badResult.output)?.score || 3;
@@ -1224,10 +1234,14 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
       try {
         taskWorkdir = createTestWorkdir(skillName, taskSuffix);
         const targetPrompt = buildTargetPrompt(taskWorkdir);
+        // WORKFLOW_SANDBOX_ROOT — граница записи для хука рельс (core.decide,
+        // «песочница тестов»): 2026-09-23 агенты кейсов create-plan и decompose-plan
+        // записали планы и тикеты в настоящий проект.
         const targetOutput = await spawnTargetAgentWithRailsCheck(task.agentConfig, targetPrompt, {
           timeout,
           stageId: `${caseId}-${task.agentId}-trial-${task.trial}`,
-          projectRoot: taskWorkdir
+          projectRoot: taskWorkdir,
+          env: { WORKFLOW_SANDBOX_ROOT: taskWorkdir }
         }, taskWorkdir, skillName);
 
         // Snapshot ticket files after target-run (for judge to inspect actual file state).
@@ -1266,10 +1280,13 @@ score: <number 1-5>
 reason: <brief explanation>
 ---RESULT---`;
 
+        // Судья запускается в каталоге раннера, то есть в настоящем проекте, и пишет
+        // ему незачем: та же граница записи, что у исполнителя.
         const judgeResult = await spawnAgent(task.judgeAgentConfig, judgePrompt, {
           timeout: JUDGE_TIMEOUT_S,
           stageId: `${caseId}-judge-${task.agentId}-trial-${task.trial}`,
-          railsRole: 'executor'
+          railsRole: 'executor',
+          env: { WORKFLOW_SANDBOX_ROOT: taskWorkdir }
         });
 
         let score = 3;

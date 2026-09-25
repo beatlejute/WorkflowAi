@@ -18,7 +18,8 @@
  * Строку команды разбирает только shell-scan.mjs (ЗАДАЧА C2, 2026-09-22).
  */
 
-import { homedir } from 'node:os';
+import { readFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, parse as parsePath, resolve as resolvePath } from 'node:path';
 import { realpathDeep } from './paths.mjs';
 import { expandWord, nestedScripts, scanCommand, splitRedirects, wordAfterPrefix } from './shell-scan.mjs';
@@ -28,6 +29,71 @@ const READ_TOOLS_KILO = new Set(['read', 'glob', 'grep', 'list']);
 const EDIT_TOOLS_CLAUDE = new Set(['Edit', 'MultiEdit', 'NotebookEdit']);
 const EDIT_TOOLS_KILO = new Set(['edit', 'patch', 'multiedit']);
 const AGENT_TOOLS_CLAUDE = new Set(['Agent', 'Task']);
+// Встроенные инструменты Kilo 7.7.9 с «_» в имени (kilo.exe, ревью 2026-09-24). Без этого
+// списка fromKilo делил имя по «_» и принимал их за MCP-сервер «apply», «background» и т. д.:
+// apply_patch (правка файлов у моделей gpt-*) и background_process (запуск команды) проходили
+// мимо write_scope и песочницы тестов.
+const KILO_BUILTIN_OTHER = new Set(['agent_manager', 'cron_create', 'schedule_wakeup', 'send_file', 'kilo_memory_recall']);
+const PATCH_PATH_RE = /^\*\*\* (?:Add File|Update File|Delete File|Move to):\s*(.+?)\s*$/gm;
+
+// Shell-действие Kilo (bash, background_process).
+// - workdir — каталог запуска вместо cd (схема инструмента в kilo.exe, проверено 2026-09-24):
+//   без него цели записи разрешались от каталога проекта, а команда шла в workdir.
+// - dialects: на Windows Kilo сам выбирает shell — shell из конфига, SHELL, затем pwsh →
+//   powershell → Git Bash (kilo.exe; журнал kilo 2026-09-22 и 2026-09-24 — powershell.exe).
+//   Какой выбран, хук не знает, поэтому цели записи берутся по обоим диалектам: разбор только
+//   как POSIX пропускал `Set-Location D:\…; Set-Content f x` (ревью 2026-09-24).
+function kiloShellAction(tool, args) {
+  const dialects = kiloShellDialects();
+  const action = { tool, kind: 'shell', command: args.command, shell: dialects[0] };
+  if (dialects.length > 1) action.dialects = dialects;
+  if (args.workdir !== undefined && args.workdir !== '') action.workdir = args.workdir;
+  return action;
+}
+
+// Какой shell Kilo возьмёт для bash-инструмента — порядок модуля Shell в kilo.exe: `shell` из
+// конфига, затем SHELL, затем pwsh → powershell → Git Bash. Плагин работает в процессе kilo,
+// поэтому SHELL и глобальный конфиг (~/.config/kilo/kilo.jsonc|json) хуку те же. Не удалось
+// понять — оба диалекта: разбор PowerShell-команды как POSIX даёт «?», и отказ вместо обхода.
+function kiloShellDialects() {
+  if (!IS_WIN32) return ['posix'];
+  const configured = kiloConfiguredShell();
+  if (configured === null) return ['posix', 'powershell'];
+  const sh = String(configured ?? process.env.SHELL ?? '').toLowerCase().trim();
+  if (sh === '') return ['powershell'];
+  if (/(?:pwsh|powershell)(?:\.exe)?$/.test(sh)) return ['powershell'];
+  if (/(?:^|[\\/])(?:ba|z|da|k)?sh(?:\.exe)?$/.test(sh)) return ['posix'];
+  return ['posix', 'powershell'];
+}
+
+// `shell` из глобального конфига Kilo: строка; undefined — не задан; null — конфиг есть, но не
+// разобран. Комментарии JSONC снимаются грубо — при сбое разбора решение «не удалось понять».
+function kiloConfiguredShell() {
+  for (const name of ['kilo.jsonc', 'kilo.json']) {
+    const file = join(homedir(), '.config', 'kilo', name);
+    let text;
+    try {
+      text = readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    try {
+      const json = JSON.parse(text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '').replace(/,(\s*[}\]])/g, '$1'));
+      return typeof json?.shell === 'string' && json.shell ? json.shell : undefined;
+    } catch {
+      return null;
+    }
+  }
+  return undefined;
+}
+
+// Пути файлов из текста apply_patch Kilo: строки `*** Add/Update/Delete File:` и `*** Move to:`.
+// Пустой или нераспознанный патч — null: цели записи неизвестны.
+function patchPaths(patchText) {
+  if (typeof patchText !== 'string') return null;
+  const paths = [...patchText.matchAll(PATCH_PATH_RE)].map((m) => m[1]);
+  return paths.length > 0 ? paths : null;
+}
 
 const MCP_NAME_RE = /^mcp__(.+?)__(.+)$/;
 
@@ -91,7 +157,22 @@ export function fromKilo(input, output) {
   const args = output?.args ?? {};
 
   if (tool === 'bash') {
-    return { tool, kind: 'shell', command: args.command, shell: 'posix' };
+    return kiloShellAction(tool, args);
+  }
+  // background_process: start и monitor запускают command; restart перезапускает прежнюю
+  // команду по id — её текста хук не видит (opaque → маркер); list/status/logs/stop — не запись.
+  if (tool === 'background_process') {
+    const act = String(args.action ?? 'start');
+    if (act === 'start' || act === 'monitor') return kiloShellAction(tool, args);
+    if (act === 'restart') return { tool, kind: 'shell', command: undefined, shell: 'posix', opaque: true };
+    return { tool, kind: 'other' };
+  }
+  if (tool === 'apply_patch') {
+    const paths = patchPaths(args.patchText);
+    return { tool, kind: 'edit', path: paths ? paths[0] : undefined, paths };
+  }
+  if (KILO_BUILTIN_OTHER.has(tool)) {
+    return { tool, kind: 'other' };
   }
   if (EDIT_TOOLS_KILO.has(tool)) {
     return { tool, kind: 'edit', path: args.filePath ?? args.file_path ?? args.notebook_path };
@@ -479,6 +560,10 @@ function absoluteForm(value, dir, ctx) {
     if (/^[A-Za-z]:/.test(value)) return null;
     if (/^[\\/]/.test(value)) {
       if (ctx.ps) return isFullAbs(dir) ? resolvePath(dir, value) : null;
+      // `/tmp` Git Bash — это %TEMP% (cygpath -w, см. выше); без этого запись в /tmp давала
+      // маркер «путь не определён» и отказ, хотя песочница тестов временный каталог разрешает.
+      const tmp = /^\/tmp(\/.*)?$/.exec(value);
+      if (tmp) return DOT_DOT_RE.test(value) ? null : join(tmpdir(), tmp[1] ?? '');
       const m = /^\/([A-Za-z])(\/.*)?$/.exec(value);
       if (!m || DOT_DOT_RE.test(value)) return null;
       return `${m[1].toUpperCase()}:${m[2] ?? '/'}`;
@@ -489,6 +574,19 @@ function absoluteForm(value, dir, ctx) {
   if (value.startsWith('/')) return value;
   if (ctx.ps && value.includes(':')) return null;
   return undefined;
+}
+
+/**
+ * Абсолютная форма пути в записи Git Bash — для каталога запуска Kilo (`workdir`) в ядре.
+ * `/d/x` → `D:/x`, `/tmp/x` → временный каталог ОС, `D:\x` — как есть; прочие `/…`
+ * (каталоги самого Git) — null: куда ведут, не вычислить. Относительный путь — undefined.
+ *
+ * @param {string} value
+ * @returns {string|null|undefined}
+ */
+export function shellAbsolutePath(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  return absoluteForm(value, '', { ps: false });
 }
 
 // Пути, в которые может уйти запись `value` из каталога `dir`; null — не вычислить.

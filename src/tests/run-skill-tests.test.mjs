@@ -743,6 +743,32 @@ describe('L2 Rubric Layer — Trials & Aggregation', () => {
     }
   });
 
+  // Регрессия 2026-09-23: агенты кейсов create-plan и decompose-plan записали планы
+  // и тикеты в настоящий проект. Граница записи для хука рельс — WORKFLOW_SANDBOX_ROOT;
+  // раннер обязан передать её и исполнителю, и судье (тот работает в каталоге раннера).
+  it('исполнитель и судья получают WORKFLOW_SANDBOX_ROOT = рабочий каталог прогона', async () => {
+    const caseId = 'TC-L2-015';
+    writeFileSync(join(TESTS_DIR_L2, `${caseId}.yaml`), buildL2CaseYaml({
+      description: 'Sandbox root probe',
+      prompt: 'Sandbox root probe'
+    }));
+    writeFileSync(join(TESTS_DIR_L2, 'index.yaml'),
+      createIndexYaml(['agent-sandbox-probe'], 'mock-judge-sandbox', [{ id: caseId, file: `${caseId}.yaml` }]));
+
+    const { stdout } = await runRunner([
+      '--skill', TEST_SKILL_L2, '--layer', 'l2',
+      '--skip-secret-scan', '--fast', '--yes',
+      '--pipeline', TEST_PIPELINE_PATH
+    ]);
+
+    const trial = readFileSync(
+      join(TESTS_DIR_L2, 'cases', caseId, 'current', 'agent-sandbox-probe', 'trial-1.md'),
+      'utf8'
+    );
+    assert.match(trial, /MOCK_HIGH_SCORE/, 'исполнитель обязан получить корень песочницы = свой cwd');
+    assert.match(stdout, /status: passed/, 'судья обязан получить корень песочницы');
+  });
+
   it('незнакомый вид входа сценария — trial с ошибкой, а не молчаливый пропуск', async () => {
     writeDirInputCase('TC-L2-014', [
       '- kind: folder',

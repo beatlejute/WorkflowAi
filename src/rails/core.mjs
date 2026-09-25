@@ -15,7 +15,7 @@
 
 import { existsSync, lstatSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, parse as parsePath, resolve as resolvePathAbs } from 'node:path';
+import { dirname, isAbsolute, join, parse as parsePath, relative as relativePath, resolve as resolvePathAbs } from 'node:path';
 
 import { findProjectRoot } from '../lib/find-root.mjs';
 import { rememberSessionRoot, recallSessionRoot } from './session-memo.mjs';
@@ -31,7 +31,7 @@ import {
 } from './state.mjs';
 import { appendDenial, appendEvent } from './journal.mjs';
 import { realpathDeep, isInside, matchesGlob } from './paths.mjs';
-import { detectShellWrites } from './actions.mjs';
+import { detectShellWrites, shellAbsolutePath } from './actions.mjs';
 import { scanCommand, toSingleQuoted } from './shell-scan.mjs';
 
 // --- cli.mjs: узнаём вызов служебной команды (§7.4.1) -----------------------
@@ -636,16 +636,32 @@ function safeRealpath(p) {
   }
 }
 
+// Каталог, в котором исполнитель запустит shell-команду: `workdir` действия (Kilo bash,
+// fromKilo), разрешённый от ctx.cwd, иначе ctx.cwd. `workdir` не строкой — undefined
+// (вызывающий превращает это в маркер: каталог запуска неизвестен).
+function shellCwd(action, ctx) {
+  if (action?.workdir === undefined) return ctx?.cwd;
+  if (typeof action.workdir !== 'string' || action.workdir.length === 0) return undefined;
+  // Kilo принимает workdir и в записи Git Bash (`/d/Dev/x`): как путь Windows он дал бы
+  // `C:\d\Dev\x` — не тот каталог (ревью 2026-09-24). Прочие `/…` не вычислить — undefined.
+  const abs = shellAbsolutePath(action.workdir);
+  if (abs === null) return undefined;
+  return abs === undefined ? resolveMaybeRelative(action.workdir, ctx?.cwd) : resolvePathAbs(abs);
+}
+
 // Цели записи действия: одна для edit/write (по `action.path`), несколько для
 // shell (по `detectShellWrites`, §6). Маркер `"?"` (путь не удалось извлечь) —
 // отдельный элемент `{ marker: true }`, без realpath (его негде взять).
 function collectWriteTargets(action, ctx) {
   if (!action) return [];
   if (action.kind === 'edit' || action.kind === 'write') {
-    if (!action.path) return [];
-    const real = safeRealpath(resolveMaybeRelative(action.path, ctx?.cwd));
-    if (real === null) return [{ marker: true, display: action.path }];
-    return [{ real, display: action.path }];
+    // apply_patch Kilo правит несколько файлов: `paths` — все пути патча, null — патч не разобран.
+    if (action.paths === null) return [{ marker: true, display: `${action.tool ?? 'patch'}: пути патча не разобраны` }];
+    const paths = Array.isArray(action.paths) ? action.paths : (action.path ? [action.path] : []);
+    return paths.map((p) => {
+      const real = safeRealpath(resolveMaybeRelative(p, ctx?.cwd));
+      return real === null ? { marker: true, display: p } : { real, display: p };
+    });
   }
   if (action.kind === 'shell') {
     // ЗАДАЧА C2 (2026-09-22): cwd/dialect — detectShellWrites сама отслеживает cd,
@@ -653,15 +669,26 @@ function collectWriteTargets(action, ctx) {
     // ctx.cwd — относительными, их разрешает resolveMaybeRelative ниже.
     // Объединение по вариантам текста (с CR и без — commandTextVariants): цели только
     // добавляются, отказов от этого больше, разрешений — нет.
+    // Каталог запуска — shellCwd: у Kilo bash он задаётся аргументом workdir (2026-09-24).
+    // opaque — команду исполнитель берёт не из вызова (background_process restart Kilo).
+    if (action.opaque) return [{ marker: true, display: `${action.tool ?? 'shell'}: команда не видна хуку` }];
+    const cwd = shellCwd(action, ctx);
+    if (action.workdir !== undefined && cwd === undefined) {
+      return [{ marker: true, display: `workdir ${JSON.stringify(action.workdir)}` }];
+    }
+    // dialects — если shell исполнителя неизвестен (Kilo на Windows), цели по каждому диалекту.
+    const dialects = Array.isArray(action.dialects) && action.dialects.length > 0 ? action.dialects : [action.shell];
     const writes = [];
     for (const text of commandTextVariants(action.command)) {
-      for (const w of detectShellWrites(text, { cwd: ctx?.cwd, dialect: action.shell })) {
-        if (!writes.includes(w)) writes.push(w);
+      for (const dialect of dialects) {
+        for (const w of detectShellWrites(text, { cwd, dialect })) {
+          if (!writes.includes(w)) writes.push(w);
+        }
       }
     }
     return writes.map((w) => {
       if (w === '?') return { marker: true, display: '?' };
-      const real = safeRealpath(resolveMaybeRelative(w, ctx?.cwd));
+      const real = safeRealpath(resolveMaybeRelative(w, cwd));
       if (real === null) return { marker: true, display: w };
       return { real, display: w };
     });
@@ -799,9 +826,13 @@ function ruleMatches(action, rule, root, editRealPath) {
 
 function decideNoSkillMode(root, action, ctx) {
   if (action?.kind === 'edit' || action?.kind === 'write') {
-    const real = action.path ? safeRealpath(resolveMaybeRelative(action.path, ctx?.cwd)) : null;
+    // apply_patch Kilo правит несколько файлов — проверяется каждый путь, а не первый (ревью 2026-09-24).
+    const paths = Array.isArray(action.paths) ? action.paths : (action.path ? [action.path] : []);
     const skillsDir = join(root, '.workflow', 'src', 'skills');
-    if (real && isInside(real, skillsDir)) {
+    const real = paths
+      .map((p) => safeRealpath(resolveMaybeRelative(p, ctx?.cwd)))
+      .find((r) => r && isInside(r, skillsDir));
+    if (real) {
       const reason = 'правки скилов только через коуча на рельсах: `node .workflow/src/rails/cli.mjs start coach`';
       try {
         appendDenial(root, {
@@ -865,7 +896,7 @@ function decideSkillMode({ root, action, ctx, state, config, graph }) {
   // переписаны в одинарные кавычки (2026-09-22), при отсутствии --session он вставлен —
   // обе правки в одном updatedCommand (analyzeCliCommand, разбор — shell-scan.mjs).
   if (action?.kind === 'shell') {
-    const cli = analyzeCliCommand(action.command, action.shell, ctx?.sessionId, { root, cwd: ctx?.cwd });
+    const cli = analyzeCliCommand(action.command, action.shell, ctx?.sessionId, { root, cwd: shellCwd(action, ctx) });
     if (cli.isCli) {
       const result = { decision: 'allow' };
       if (cli.command !== action.command) result.updatedCommand = cli.command;
@@ -932,9 +963,14 @@ function decideSkillMode({ root, action, ctx, state, config, graph }) {
   }
 
   // 7. stage_actions.
-  const editRealPath = (action?.kind === 'edit' || action?.kind === 'write') && targets[0] && !targets[0].marker
-    ? targets[0].real
-    : null;
+  // Все цели правки: apply_patch Kilo меняет несколько файлов, правило этапа срабатывает,
+  // если под него попадает любой из них (ревью 2026-09-24; прежде смотрели только первый).
+  const editRealPaths = (action?.kind === 'edit' || action?.kind === 'write')
+    ? targets.filter((t) => !t.marker).map((t) => t.real)
+    : [];
+  const matchesRule = (rule) => (editRealPaths.length > 0
+    ? editRealPaths.some((real) => ruleMatches(action, rule, root, real))
+    : ruleMatches(action, rule, root, null));
   const info = currentNodeInfo(state);
 
   // Два прохода: сначала проверяем ВСЕ совпавшие правила (этап/E-прозрачность/
@@ -945,7 +981,7 @@ function decideSkillMode({ root, action, ctx, state, config, graph }) {
   const nodeLabel = currentNodeLabel(state, graph);
   const matchedRuleNames = [];
   for (const [name, rule] of Object.entries(config.stage_actions || {})) {
-    if (!ruleMatches(action, rule, root, editRealPath)) continue;
+    if (!matchesRule(rule)) continue;
 
     if (!Array.isArray(rule.stages) || !rule.stages.includes(info.stage)) {
       return deny(
@@ -1063,6 +1099,106 @@ function decideInProject(root, action, ctx) {
   return result;
 }
 
+// --- песочница тестов скилов ------------------------------------------------------
+//
+// run-skill-tests кладёт агентам кейса (исполнителю и судье) WORKFLOW_SANDBOX_ROOT —
+// корень их изолированного workdir. 2026-09-23 агенты тестов create-plan и
+// decompose-plan записали планы и тикеты в настоящий проект (PLAN-003/004/007,
+// IMPL-41, QA-18): у этих скилов ещё не было rails.yaml, а режим без скила запись
+// не ограничивает. Проверка песочницы не зависит ни от скила, ни от роли, ни от cwd
+// агента и идёт до них. Запись внутри песочницы — дальше по обычным правилам.
+//
+// Разрешено писать: внутрь песочницы (по realpath — сквозь junction'ы
+// .workflow/src/scripts, .workflow/src/rails и .workflow/config запись уходит в
+// репозиторий и запрещена) и во временный каталог ОС, кроме чужих песочниц
+// (wf-test-*). Путь записи, который не удалось определить, — отказ: в песочнице
+// ошибаться в сторону разрешения нельзя.
+//
+// MCP-сервер workflow в песочнице — только чтение (get_*, list_* и два поисковых):
+// инструменты с параметром project пишут в любой проект по его пути.
+const SANDBOX_MCP_READONLY = new Set(['cross_project_search', 'aggregate_metrics']);
+// Встроенные инструменты Kilo, которые запускают работу вне взгляда хука (другой агент,
+// отложенный запуск): что и куда она запишет, проверить нельзя (ревью 2026-09-24).
+const SANDBOX_DENY_OTHER = new Set(['agent_manager', 'cron_create', 'schedule_wakeup']);
+// Создание ссылок в песочнице запрещено целиком: ссылка, созданная и использованная одной
+// командой, на момент проверки ещё не существует, и realpath цели записи остаётся внутри
+// песочницы (ревью 2026-09-24: `New-Item -ItemType Junction … ; Set-Content j\…` дописал
+// файл в проект). Ложный отказ на слове в тексте команды допустим, ложное разрешение — нет.
+const SANDBOX_LINK_RES = [
+  /\bmklink\b/i,
+  /\bfsutil\b/i,
+  /\b(?:Junction|SymbolicLink|HardLink)\b/i,
+  /Create(?:Symbolic|Hard)Link/i,
+  /(?:^|[\s;&|(])(?:ln|link)(?:\.exe)?(?=\s)/i,
+  /(?:^|[\s;&|(])cp(?:\.exe)?\s[^;&|\n]*(?:\s-[A-Za-z]*[ls][A-Za-z]*(?=\s|$)|--link\b|--symbolic-link\b)/i,
+];
+
+function sandboxDenyReason(sandbox, why) {
+  return buildDenyReason({
+    what: 'запись вне песочницы теста',
+    why: `${why}; корень песочницы «${sandbox}»`,
+    allowed: 'запись внутри рабочего каталога прогона и во временный каталог ОС',
+  });
+}
+
+function decideSandbox(sandboxRoot, action, ctx) {
+  if (action?.kind === 'mcp') {
+    if (action.server !== 'workflow') return null;
+    const name = String(action.mcpTool ?? '');
+    if (name.startsWith('get_') || name.startsWith('list_') || SANDBOX_MCP_READONLY.has(name)) return null;
+    return { decision: 'deny', reason: sandboxDenyReason(sandboxRoot, `MCP-инструмент «${name}» меняет проект, в песочнице он запрещён`) };
+  }
+  if (action?.kind === 'other' && SANDBOX_DENY_OTHER.has(action.tool)) {
+    return { decision: 'deny', reason: sandboxDenyReason(sandboxRoot, `инструмент «${action.tool}» запускает работу, которую хук не видит`) };
+  }
+  if (action?.kind !== 'edit' && action?.kind !== 'write' && action?.kind !== 'shell') return null;
+
+  if (action.kind === 'shell' && commandTextVariants(action.command).some((text) => SANDBOX_LINK_RES.some((re) => re.test(text)))) {
+    return { decision: 'deny', reason: sandboxDenyReason(sandboxRoot, 'создание ссылок (junction, symlink, hardlink) в песочнице запрещено') };
+  }
+
+  const targets = collectWriteTargets(action, ctx);
+  if (targets.length === 0) return null;
+
+  // realpathDeep разрешает и несуществующий путь (по ближайшему предку), поэтому
+  // существование каталога проверяется отдельно: без него граница бессмысленна.
+  let sandboxReal;
+  try {
+    sandboxReal = realpathDeep(sandboxRoot);
+    if (!existsSync(sandboxReal) || !statSync(sandboxReal).isDirectory()) sandboxReal = null;
+  } catch {
+    sandboxReal = null;
+  }
+  if (!sandboxReal) {
+    return { decision: 'deny', reason: sandboxDenyReason(sandboxRoot, 'корня песочницы нет на диске') };
+  }
+  const tmpReal = safeRealpath(tmpdir());
+
+  for (const t of targets) {
+    if (t.marker) {
+      return { decision: 'deny', reason: sandboxDenyReason(sandboxRoot, 'команда похожа на запись, но путь не удалось определить — в песочнице пиши явным путём') };
+    }
+    // Жёсткая ссылка неотличима от файла по realpath: запись в неё меняет и файл вне
+    // песочницы (ревью 2026-09-24). Существующий файл с несколькими именами — отказ.
+    try {
+      const st = statSync(t.real);
+      if (st.isFile() && st.nlink > 1) {
+        return { decision: 'deny', reason: sandboxDenyReason(sandboxRoot, `файл «${t.display}» — жёсткая ссылка (имён: ${st.nlink})`) };
+      }
+    } catch {
+      // файла ещё нет — жёсткой ссылкой он быть не может
+    }
+    if (isInside(t.real, sandboxReal, { followLinks: false })) continue;
+    if (tmpReal && isInside(t.real, tmpReal, { followLinks: false })) {
+      const first = relativePath(tmpReal, t.real).split(/[\\/]/).filter(Boolean)[0] ?? '';
+      if (!first.toLowerCase().startsWith('wf-test-')) continue;
+      return { decision: 'deny', reason: sandboxDenyReason(sandboxRoot, `путь «${t.display}» ведёт в чужую песочницу`) };
+    }
+    return { decision: 'deny', reason: sandboxDenyReason(sandboxRoot, `путь «${t.display}» (${t.real}) вне песочницы`) };
+  }
+  return null;
+}
+
 /**
  * Единая логика решений (§7). Никогда не бросает исключений — любая ошибка
  * (включая «нет корня проекта», что не ошибка, а штатный silent-allow) в
@@ -1073,6 +1209,42 @@ function decideInProject(root, action, ctx) {
  * @returns {{decision: 'allow'|'deny', reason?: string, context?: string, updatedCommand?: string}}
  */
 export function decide({ action, ctx } = {}) {
+  // Песочница тестов — до всего остального: и до поиска корня проекта по cwd, который
+  // агент может сменить, и до роли executor, которой рельсы разрешают всё.
+  const sandboxRoot = ctx?.sandboxRoot ?? process.env.WORKFLOW_SANDBOX_ROOT;
+  if (sandboxRoot) {
+    let verdict;
+    try {
+      verdict = decideSandbox(sandboxRoot, action, ctx);
+    } catch (err) {
+      // Ошибка проверки — не повод снять защиту: запись в песочнице без проверки не проходит.
+      const writes = ['edit', 'write', 'shell', 'mcp'].includes(action?.kind);
+      verdict = writes
+        ? { decision: 'deny', reason: sandboxDenyReason(sandboxRoot, `проверка песочницы упала: ${err && err.message ? err.message : err}`) }
+        : null;
+    }
+    if (verdict) {
+      // Журнал — только в существующую песочницу: appendDenial создал бы каталоги и тем
+      // самым «вернул» отсутствующий корень, после чего следующая запись прошла бы.
+      try {
+        if (!existsSync(sandboxRoot)) throw new Error('sandbox root missing');
+        appendDenial(sandboxRoot, {
+          session: ctx?.sessionId ?? null,
+          skill: null,
+          node: null,
+          run: ctx?.run ?? null,
+          reason: verdict.reason,
+          tool: action?.tool,
+          path: action?.path,
+          command: action?.command,
+        });
+      } catch {
+        // журнал не должен ронять decide()
+      }
+      return verdict;
+    }
+  }
+
   let root;
   try {
     root = findProjectRoot(ctx?.cwd);
@@ -1081,8 +1253,14 @@ export function decide({ action, ctx } = {}) {
     // (D:\Dev) над проектами — тогда корень берётся от пути цели edit/write
     // (регистрация хука на уровне зонтика, 2026-09-22). Нет и его — allow без текста.
     root = null;
-    if ((action?.kind === 'edit' || action?.kind === 'write') && typeof action.path === 'string' && action.path) {
-      root = projectRootFromPath(resolveMaybeRelative(action.path, ctx?.cwd));
+    if (action?.kind === 'edit' || action?.kind === 'write') {
+      // Корень — от первого пути, ведущего в проект (у apply_patch путей несколько).
+      const paths = Array.isArray(action.paths) ? action.paths : [action.path];
+      for (const p of paths) {
+        if (typeof p !== 'string' || !p) continue;
+        root = projectRootFromPath(resolveMaybeRelative(p, ctx?.cwd));
+        if (root) break;
+      }
       if (root) rememberSessionRoot(ctx?.sessionId, root);
     }
     // Команда без пути (shell, mcp, read): корень — из памяти «сессия → корень»,

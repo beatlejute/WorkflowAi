@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve as resolvePathAbs } from 'node:path';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fromClaude, fromKilo, detectShellWrites } from '../rails/actions.mjs';
 
@@ -81,9 +81,48 @@ test('fromClaude: пустой вход не падает', () => {
 
 // --- fromKilo ----------------------------------------------------------------
 
-test('fromKilo: bash -> shell, shell: posix', () => {
-  const a = fromKilo({ tool: 'bash' }, { args: { command: 'echo hi' } });
-  assert.deepEqual(a, { tool: 'bash', kind: 'shell', command: 'echo hi', shell: 'posix' });
+// Kilo на Windows сам выбирает shell: `shell` из ~/.config/kilo/kilo.jsonc, затем SHELL, затем
+// pwsh → powershell → Git Bash (kilo.exe). Хук повторяет этот выбор; домашний каталог и SHELL
+// подменяются на время теста, конфиг пользователя не читается.
+function withKiloEnv({ shell, config }, fn) {
+  const home = mkdtempSync(join(tmpdir(), 'rails-kilo-home-'));
+  const saved = { SHELL: process.env.SHELL, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  try {
+    if (config !== undefined) {
+      mkdirSync(join(home, '.config', 'kilo'), { recursive: true });
+      writeFileSync(join(home, '.config', 'kilo', 'kilo.jsonc'), config, 'utf8');
+    }
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    if (shell === undefined) delete process.env.SHELL; else process.env.SHELL = shell;
+    fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test('fromKilo: bash -> shell; диалект — как выберет Kilo', () => {
+  const bash = () => fromKilo({ tool: 'bash' }, { args: { command: 'echo hi' } });
+  if (process.platform !== 'win32') {
+    assert.deepEqual(bash(), { tool: 'bash', kind: 'shell', command: 'echo hi', shell: 'posix' });
+    return;
+  }
+  withKiloEnv({}, () => assert.deepEqual(bash(), { tool: 'bash', kind: 'shell', command: 'echo hi', shell: 'powershell' }));
+  withKiloEnv({ shell: '/bin/bash.exe' }, () => assert.equal(bash().shell, 'posix'));
+  withKiloEnv({ shell: '/bin/bash.exe', config: '{\n  // shell\n  "shell": "pwsh",\n}' }, () => assert.equal(bash().shell, 'powershell'));
+  withKiloEnv({ config: '{ broken' }, () => assert.deepEqual(bash().dialects, ['posix', 'powershell']));
+});
+
+// Kilo bash запускает команду в workdir (вместо cd): без него в действии хук считал цели
+// записи от каталога проекта и пропускал запись в чужой каталог (ревью 2026-09-24).
+test('fromKilo: bash с workdir — каталог запуска сохраняется в действии, пустой отбрасывается', () => {
+  const a = fromKilo({ tool: 'bash' }, { args: { command: 'echo x > f', workdir: 'D:/elsewhere' } });
+  assert.equal(a.workdir, 'D:/elsewhere');
+  const b = fromKilo({ tool: 'bash' }, { args: { command: 'echo hi', workdir: '' } });
+  assert.equal('workdir' in b, false);
 });
 
 test('fromKilo: edit/patch/multiedit -> edit c filePath', () => {
@@ -527,7 +566,10 @@ test('detectShellWrites (C2): исключение внутри разбора �
 test('detectShellWrites (C2): Git Bash — /c/… это диск C:, прочие /… (каталоги Git) — "?"', { skip: process.platform !== 'win32' ? 'msys-пути — только Git for Windows' : false }, () => {
   assert.deepEqual(writes('touch /d/tmp/x'), ['D:/tmp/x']);
   assert.deepEqual(writes('S=/d/abs; sed -i "s/a/b/" "$S/f"'), ['D:/abs/f']);
-  assert.deepEqual(writes('touch /tmp/x'), ['?'], '/tmp под Git Bash — %TEMP%, не корень диска (cygpath -w)');
+  // /tmp под Git Bash — %TEMP% (cygpath -w). До 2026-09-24 отдавался маркер «?», и песочница
+  // тестов отказывала в записи во временный каталог, который сама разрешает.
+  assert.deepEqual(writes('touch /tmp/x'), [join(tmpdir(), 'x')], '/tmp под Git Bash — %TEMP%, не корень диска');
+  assert.deepEqual(writes('touch /tmp/../x'), ['?'], '`..` из /tmp не вычисляется');
   assert.deepEqual(writes('touch /c/../x'), ['?']);
   assert.deepEqual(psWrites('Remove-Item \\x'), [at(SCOPE, '\\x')], 'PowerShell: от корня диска текущего каталога');
 });
