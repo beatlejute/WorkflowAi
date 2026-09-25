@@ -1,0 +1,114 @@
+id: TC-DEEP-RESEARCH-004
+title: "deep-research на рельсах: граф ядра и шести веток, гарды по инцидентам, выходной слой без суррогатов"
+origin:
+  chg: ["convert-2026-09-25"]
+  incidents:
+    - "Решение стейкхолдера 2026-09-21: единый подход «Рельсы для агента» — все скилы переводятся на граф + хуки-отказы через коуча (CONVERT). Запрос стейкхолдера 2026-09-25: перевести deep-research."
+    - "Прогон TC-DEEP-RESEARCH-001 2026-09-21 (claude-haiku, trial 1): «…требует верификации через …» в Executive Summary, а self-check того же ответа отметил «Нет суррогатов». Теперь — final_forbids выходного слоя."
+    - "Инцидент 2026-03-22: исследовательский тикет выполнен без вызова perplexity-research.js, результат возвращён в работу. Гарда нет (веб-инструменты — kind other, stage_actions их не сопоставляет) — правило держится узлом P0R4."
+    - "Инцидент 2026-03-22: исследовательский тикет пришёл на ревью с пустым Result — узел self-check P5S1."
+  principle: "Концепция рельс: принцип 1 (граф — единственный источник процедуры), 9 (выходной слой), 10 (потолки циклов), 11 (дата и цена у правила), 15 (гард доказан тестом, канарейка)."
+  backlog_sources: []
+tags: [rails, anatomy, regression-guard]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    # 1. Ядро — граф с входом, маршрутизацией по веткам, возвратом в проверку ветки и терминалом
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "rails: rails\\.yaml"
+      reason: "Frontmatter объявляет конфиг гардов — признак скила на рельсах."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "```mermaid[\\s\\S]*graph TD[\\s\\S]*P0E1\\[\"П0 ВХОД"
+      reason: "Процедура записана mermaid-графом с входным узлом этапа 0."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0Q1 -->\\|\"MARKET\"\\| P10E1[\\s\\S]*P0Q1 -->\\|\"COMPETITOR\"\\| P20E1[\\s\\S]*P0Q1 -->\\|\"TREND\"\\| P30E1[\\s\\S]*P0Q1 -->\\|\"BENCHMARK\"\\| P40E1[\\s\\S]*P0Q1 -->\\|\"TECHNOLOGY\"\\| P50E1[\\s\\S]*P0Q1 -->\\|\"CUSTOM\"\\| P60E1"
+      reason: "Маршрутизация — Q-узел с рёбрами на входы всех шести веток, а не таблица прозы."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0Q1\\{\"[^\\n]*Если тип не определяется — используй CUSTOM"
+      reason: "Тип по умолчанию — CUSTOM, записан в лейбле выбора."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0S1\\[\"П0 ШАГ: Канарейка живости[^\\n]*echo RAILS_CANARY"
+      reason: "Проверка живости рельс — узел графа (принцип 15)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P3Q1 -->\\|\"MARKET\"\\| P10G1[\\s\\S]*P3Q1 -->\\|\"COMPETITOR\"\\| P20G1[\\s\\S]*P3Q1 -->\\|\"TREND\"\\| P30G1[\\s\\S]*P3Q1 -->\\|\"BENCHMARK\"\\| P40G1[\\s\\S]*P3Q1 -->\\|\"TECHNOLOGY\"\\| P50G1[\\s\\S]*P3Q1 -->\\|\"CUSTOM\"\\| P60G1"
+      reason: "Отчёт ядра уходит в дополнительную проверку своей ветки — мимо неё в self-check не пройти."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P5G1 -->\\|\"да\"\\| P9E1[\\s\\S]*P9E1 --> P9S1\\s*\\n\\s*```"
+      reason: "Результат выдаётся только после self-check; узел выдачи — последний в графе (ответ и остановка — один узел, прогон 2026-09-25)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R2\\[\"[^\\n]*не пишутся в каталог скилов[^\\n]*прогон 2026-09-25"
+      reason: "Запрет записи артефактов в каталог скилов — узел с датой прогона, в котором отчёт писался в каталог скила."
+    # 2. Правила с датой и ценой инцидента в лейбле узла
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R4\\[\"[^\\n]*⛔[^\\n]*кроме документированного fallback[^\\n]*Инцидент 2026-03-22[^\\n]*дважды"
+      reason: "Обязательность perplexity-research.js с исключением fallback — узел с датой и ценой инцидента."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0R5\\[\"[^\\n]*Source-First[^\\n]*«требует верификации» как заглушку[^\\n]*2026-09-21"
+      reason: "Запрет суррогата вместо маркера пробела — узел с датой прогона, в котором самопроверка подписала ложь."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P5S1\\[\"[^\\n]*Result заполнена[^\\n]*Инцидент 2026-03-22"
+      reason: "Проверка Result в self-check несёт дату инцидента пустого Result."
+    # 3. Конфиг хука: терминал, принцип 17, потолки, выходной слой
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "terminal: \\[P9S1\\][\\s\\S]*write_deny:\\s*\\n\\s*- \"\\.workflow/src/skills/\\*\\*\"[\\s\\S]*- \"\\.workflow/src/rails/\\*\\*\""
+      reason: "Терминальный узел — узел выдачи результата; каталог скилов (включая собственные гарды, принцип 17) и ядро рельс закрыты для записи."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "cycles:[\\s\\S]*from: 3, to: 3, max: 3[\\s\\S]*from: 5, to: 5, max: 3[\\s\\S]*from: 10, to: 10[\\s\\S]*from: 20, to: 20[\\s\\S]*from: 30, to: 30[\\s\\S]*from: 40, to: 40[\\s\\S]*from: 50, to: 50[\\s\\S]*from: 60, to: 60"
+      reason: "У каждого возврата из гейта есть потолок (принцип 10)."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "final_forbids:\\s*\\n\\s*- \"[^\\n]*требует[^\\n]*верификации"
+      reason: "Выходной слой отклоняет суррогат «требует верификации» в финальном ответе."
+    # 4. Ветки — фрагменты графа с выходом через гейт ветки в self-check ядра
+    - kind: skill_contains
+      file: "workflows/market.md"
+      pattern: "P10E1\\[\"П10 ВХОД: MARKET[\\s\\S]*--> P3E1[\\s\\S]*P10G1 -->\\|\"да\"\\| P5E1"
+      reason: "Ветка MARKET — фрагмент графа: шаги в базовое завершение, гейт ветки в self-check."
+    - kind: skill_contains
+      file: "workflows/competitor.md"
+      pattern: "P20E1\\[\"П20 ВХОД: COMPETITOR[\\s\\S]*--> P3E1[\\s\\S]*P20G1 -->\\|\"да\"\\| P5E1"
+      reason: "Ветка COMPETITOR — фрагмент графа."
+    - kind: skill_contains
+      file: "workflows/trend.md"
+      pattern: "P30E1\\[\"П30 ВХОД: TREND[\\s\\S]*--> P3E1[\\s\\S]*P30G1 -->\\|\"да\"\\| P5E1"
+      reason: "Ветка TREND — фрагмент графа."
+    - kind: skill_contains
+      file: "workflows/benchmark.md"
+      pattern: "P40E1\\[\"П40 ВХОД: BENCHMARK[\\s\\S]*--> P3E1[\\s\\S]*P40G1 -->\\|\"да\"\\| P5E1"
+      reason: "Ветка BENCHMARK — фрагмент графа."
+    - kind: skill_contains
+      file: "workflows/technology.md"
+      pattern: "P50E1\\[\"П50 ВХОД: TECHNOLOGY[\\s\\S]*--> P3E1[\\s\\S]*P50G1 -->\\|\"да\"\\| P5E1"
+      reason: "Ветка TECHNOLOGY — фрагмент графа."
+    - kind: skill_contains
+      file: "workflows/custom.md"
+      pattern: "P60E1\\[\"П60 ВХОД: CUSTOM[\\s\\S]*--> P3E1[\\s\\S]*P60G1 -->\\|\"да\"\\| P5E1"
+      reason: "Ветка CUSTOM — фрагмент графа."
+    # 5. Прозы, дублирующей граф, в ядре нет
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "^(?![\\s\\S]*## (Принципы|Маршрутизация тикетов|Self-check перед завершением тикета|Загрузка знаний|Формат вывода))"
+      reason: "Прежние секции прозы не возвращаются рядом с графом (принцип 1)."
+
+execution:
+  timeout_s: 60

@@ -21,7 +21,7 @@ node .workflow/src/skills/deep-research/scripts/perplexity-research.js "тема
 
 ## Workflow
 
-1. Сформируй запрос из тикета → запусти скрипт через bash → оформи отчёт в `reports/`
+1. Сформируй запрос из тикета → запусти скрипт через bash → оформи отчёт в файл по пути, который называет тикет (DoD, описание); каталог скилов `.workflow/src/skills/` — не место для отчёта (узел P0R2)
 2. В «Agent used» укажи `perplexity-research.js` + модель
 3. Требуется Kilo OAuth-токен (`kilo auth login`); HTTPS_PROXY — опционально, используется автоматически если задан в env
 

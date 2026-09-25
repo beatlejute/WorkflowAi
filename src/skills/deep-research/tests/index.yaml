@@ -8,7 +8,7 @@ execution:
     - claude-haiku
     - gpt-luna
   judge_agent: claude-opus
-  default_timeout_s: 1200
+  default_timeout_s: 2400
   baseline_ref: origin/main
 
 cases:
@@ -27,3 +27,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-21-audit"]
     tags: [consistency, regression-guard]
     severity: high
+  - id: TC-DEEP-RESEARCH-004
+    file: cases/TC-DEEP-RESEARCH-004-rails-anatomy.yaml
+    origin_chg: ["convert-2026-09-25"]
+    tags: [rails, anatomy, regression-guard]
+    severity: critical

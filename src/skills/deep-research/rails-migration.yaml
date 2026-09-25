@@ -1,0 +1,21 @@
+# Карта переноса прозы deep-research в граф (CONVERT 2026-09-25).
+# Используется check-rails-coverage.js (по умолчанию — этот файл): фраза считается покрытой,
+# если её подстрока ≥ 25 символов есть в текущих файлах скила или она перечислена здесь.
+#
+# Судьбы фраз-инвариантов baseline (51):
+# - роль, «Ты делаешь», «Ты НЕ делаешь», границы компетенции, взаимодействие -> P0E1, P0R1–P0R3;
+# - ⛔ perplexity-research.js и fallback -> P0R4, загрузка knowledge/perplexity-config.md -> P0S4;
+# - принципы Source-First, Multi-Source, Recency, честность неопределённости, Scope -> P0R5–P0R8;
+# - маршрутизация MARKET…CUSTOM -> P0Q1 (рёбра на входы фрагментов П10–П60);
+# - загрузка knowledge/research-methodology.md -> P0S3, shared -> P0S2 (каноническая строка);
+# - source-evaluation, source-scoring, data-validation -> шаги веток; synthesis и шаблоны -> П3;
+# - Structured Output, Actionable Insights, формат вывода -> P3R1–P3R2;
+# - self-check перед завершением тикета -> П5 (P5E1, P5S1–P5S4, P5G1);
+# - строка регрессионных тестов -> подвал SKILL.md.
+# Воркфлоу: шаги каждого — S-узлы своего фрагмента, «Дополнительно проверь» — гейт ветки
+# (P10G1…P60G1); workflows/base-checklist.md — этап П3 ядра (синтез, отчёт, валидация).
+# Все фразы легли в лейблы дословно — записи карты не понадобились.
+version: 1
+skill: deep-research
+baseline: 436de6b
+entries: []

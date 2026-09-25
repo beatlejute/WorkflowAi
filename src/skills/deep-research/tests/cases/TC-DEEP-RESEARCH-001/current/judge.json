@@ -1,13 +1,13 @@
 {
   "per_model": {
     "kilo-free": {
-      "pass_count": 0,
+      "pass_count": 2,
       "total": 3,
       "trials": [
         {
           "trial": 1,
-          "score": null,
-          "passed": false
+          "score": 5,
+          "passed": true
         },
         {
           "trial": 2,
@@ -16,13 +16,13 @@
         },
         {
           "trial": 3,
-          "score": null,
-          "passed": false
+          "score": 5,
+          "passed": true
         }
       ]
     },
     "claude-haiku": {
-      "pass_count": 2,
+      "pass_count": 0,
       "total": 3,
       "trials": [
         {
@@ -32,13 +32,13 @@
         },
         {
           "trial": 2,
-          "score": 4,
-          "passed": true
+          "score": 2,
+          "passed": false
         },
         {
           "trial": 3,
-          "score": 4,
-          "passed": true
+          "score": 3,
+          "passed": false
         }
       ]
     },
@@ -83,6 +83,27 @@
           "passed": true
         }
       ]
+    },
+    "gpt-luna": {
+      "pass_count": 1,
+      "total": 3,
+      "trials": [
+        {
+          "trial": 1,
+          "score": 3,
+          "passed": false
+        },
+        {
+          "trial": 2,
+          "score": 5,
+          "passed": true
+        },
+        {
+          "trial": 3,
+          "score": 3,
+          "passed": false
+        }
+      ]
     }
   },
   "rubric_scores": [
@@ -123,27 +144,6 @@
       "errored": false
     },
     {
-      "agentId": "kilo-free",
-      "trial": 1,
-      "score": null,
-      "errored": true,
-      "error": "Stage \"TC-DEEP-RESEARCH-001-kilo-free-trial-1\" timed out after 1200s"
-    },
-    {
-      "agentId": "kilo-free",
-      "trial": 2,
-      "score": null,
-      "errored": true,
-      "error": "Stage \"TC-DEEP-RESEARCH-001-kilo-free-trial-2\" timed out after 1200s"
-    },
-    {
-      "agentId": "kilo-free",
-      "trial": 3,
-      "score": null,
-      "errored": true,
-      "error": "Stage \"TC-DEEP-RESEARCH-001-kilo-free-trial-3\" timed out after 1200s"
-    },
-    {
       "agentId": "claude-haiku",
       "trial": 1,
       "score": 3,
@@ -152,15 +152,52 @@
     {
       "agentId": "claude-haiku",
       "trial": 2,
-      "score": 4,
+      "score": 2,
       "errored": false
     },
     {
       "agentId": "claude-haiku",
       "trial": 3,
-      "score": 4,
+      "score": 3,
+      "errored": false
+    },
+    {
+      "agentId": "gpt-luna",
+      "trial": 1,
+      "score": 3,
+      "errored": false
+    },
+    {
+      "agentId": "gpt-luna",
+      "trial": 2,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "gpt-luna",
+      "trial": 3,
+      "score": 3,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 1,
+      "score": 5,
+      "errored": false
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 2,
+      "score": null,
+      "errored": true,
+      "error": "Agent exited with code 1"
+    },
+    {
+      "agentId": "kilo-free",
+      "trial": 3,
+      "score": 5,
       "errored": false
     }
   ],
-  "timestamp": "2026-09-21T17:55:48.248Z"
+  "timestamp": "2026-09-25T16:29:27.822Z"
 }
