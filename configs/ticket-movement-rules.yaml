@@ -12,27 +12,14 @@ version: "1.0"
 #   - null — ревью отсутствует (не заполнено)
 # to_dir: целевая директория перемещения
 # reason: причина перемещения (для логирования)
+#
+# Правил «passed/skipped → done» нет ни для одной колонки (PLAN-002): таблица
+# «## Ревью» в тексте тикета — запись для человека, строку passed в неё может
+# дописать и сам исполнитель. В done/ пайплайн переносит тикет стадией
+# move-ticket по результату своих стадий, а не по тексту тикета. Направление
+# «из done/» ниже осталось: оно только возвращает тикет на новый круг.
 
 rules:
-  # Правила для backlog/ — защита от ошибочного перемещения завершённых тикетов
-  backlog:
-    - condition: passed
-      to_dir: done
-      reason: "review passed"
-    - condition: skipped
-      to_dir: done
-      reason: "review skipped"
-
-  # Правила для blocked/
-  blocked:
-    - condition: passed
-      to_dir: done
-      reason: "review passed"
-    - condition: skipped
-      to_dir: done
-      reason: "review skipped"
-    # failed и null — не перемещаем
-
   # Правила для done/
   done:
     - condition: failed
@@ -42,33 +29,6 @@ rules:
       to_dir: backlog
       reason: "no review"
     # passed или skipped — не перемещаем
-
-  # Правила для review/
-  review:
-    - condition: passed
-      to_dir: done
-      reason: "review passed"
-    - condition: skipped
-      to_dir: done
-      reason: "review skipped"
-
-  # Правила для in-progress/
-  in_progress:
-    - condition: passed
-      to_dir: done
-      reason: "review passed"
-    - condition: skipped
-      to_dir: done
-      reason: "review skipped"
-
-  # Правила для ready/
-  ready:
-    - condition: passed
-      to_dir: done
-      reason: "review passed"
-    - condition: skipped
-      to_dir: done
-      reason: "review skipped"
 
 # Директории тикетов (относительно .workflow/tickets/)
 directories:

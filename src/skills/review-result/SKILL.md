@@ -101,6 +101,7 @@ graph TD
 | `algorithms/verification.md` | верификация реальных изменений (узел P4R2) |
 | `templates/verdict.md` | формирование вердикта (узел P6E1) |
 | `.workflow/src/skills/shared/*` | индекс `README.md` перед началом работы (узел P0S2) |
+| `knowledge/dod-evidence-scale.md` | агентом не загружается: шкалу читает `scripts/prepare-review.js` стадии ревью тикетов `dod_format: 2` |
 
 ---
 

@@ -5,7 +5,11 @@
  *
  * Проверяет тикеты на соответствие критериям атомарности:
  * - Title: количество глаголов-инфинитивов (>1 → WARNING)
- * - DoD: количество пунктов (>7 → FAIL, >5 → WARNING)
+ * - DoD: количество пунктов (>7 → FAIL, >5 → WARNING); вложенные строки проверок
+ *   пунктами не считаются
+ * - DoD тикета с `dod_format: 2`: есть хотя бы один пункт, у каждого пункта ровно
+ *   одна полная форма проверки (check + expect, prose, visual), и не все пункты —
+ *   регрессионные проверки (`regression: true`); иначе FAIL
  * - Шаги: количество шагов в "Детали задачи" (>5 → FAIL, отсутствует → SKIP)
  * - Файлы: количество файлов в context.files (>3 → WARNING, отсутствует → SKIP)
  *
@@ -27,6 +31,7 @@ import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { parseFrontmatter } from 'workflow-ai/lib/utils.mjs';
+import { parseDodChecks, isDodFormat2 } from 'workflow-ai/lib/check-runner.mjs';
 
 function resolvePlanAbsolutePath(planFile, projectDir) {
   if (path.isAbsolute(planFile)) return planFile;
@@ -197,6 +202,39 @@ function countDoDItems(body) {
   return matches ? matches.length : 0;
 }
 
+/**
+ * Проверки пунктов DoD тикета с `dod_format: 2`.
+ *
+ * У пункта ровно одна форма (PLAN-002, «Формат записи проверки»): пункт без полной
+ * формы или с несколькими — FAIL с id тикета, номером пункта и кодом ошибки разбора
+ * (parseDodChecks, check-runner.mjs). Тикет, все пункты которого — регрессионные
+ * проверки, ничего не утверждает о результате работы: такие проверки зелёные и до
+ * неё, а гейт move-to-ready их не запускает, — FAIL `only_regression_checks`. Тикет
+ * без пунктов DoD (секция пуста или её нет) тоже ничего не утверждает, и гейту
+ * move-to-ready нечего запускать, — FAIL `no_dod_items`. Как и
+ * порог DoD, FAIL ведёт на повторную декомпозицию (increment-atomicity-counter →
+ * decompose-plan).
+ */
+function checkDodForms(id, body) {
+  const items = parseDodChecks(body);
+  if (items.length === 0) {
+    return [{ check: 'dod_check_form', result: 'FAIL', detail: 'no_dod_items' }];
+  }
+
+  const checks = items
+    .filter(item => item.error)
+    .map(item => ({
+      check: 'dod_check_form',
+      result: 'FAIL',
+      detail: `${id}: пункт DoD ${item.index} без ровно одной полной формы проверки (${item.error})`
+    }));
+
+  if (items.every(item => item.kind === 'check' && item.regression && !item.error)) {
+    checks.push({ check: 'dod_check_form', result: 'FAIL', detail: 'only_regression_checks' });
+  }
+  return checks;
+}
+
 function countContextFiles(frontmatter) {
   if (!frontmatter.context || !frontmatter.context.files) {
     return 0;
@@ -238,6 +276,10 @@ function checkTicket(ticket) {
       result: 'WARNING',
       detail: `DoD содержит ${dodCount} пунктов (порог: ${DOD_THRESHOLD_WARN})`
     });
+  }
+
+  if (isDodFormat2(frontmatter)) {
+    checks.push(...checkDodForms(id, body));
   }
 
   const steps = extractDetailsTasks(body);

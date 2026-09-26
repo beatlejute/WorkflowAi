@@ -9,6 +9,7 @@
  * Проверяет:
  * - Обязательные поля frontmatter (id, title, status, author, created_at)
  * - Обязательные секции (# Цель, ## Контекст, ## Справочные данные, ## Scope, ## Высокоуровневые задачи, ## Риски, ## Критерии успеха)
+ * - Строку **Проверка:** у каждой задачи «Высокоуровневых задач» и формат её записей
  * - Красные флаги (отсылки вместо содержания, пустые секции)
  *
  * Вывод: JSON {errors, warnings, valid} через ---RESULT---
@@ -18,6 +19,7 @@ import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { printResult } from 'workflow-ai/lib/utils.mjs';
+import { parseCheckRecord } from 'workflow-ai/lib/check-runner.mjs';
 
 const REQUIRED_FRONTMATTER_FIELDS = ['id', 'title', 'status', 'author', 'created_at'];
 
@@ -149,6 +151,109 @@ function checkSections(content) {
   return errors;
 }
 
+const TASKS_HEADING = /^##\s+Высокоуровневые задачи/i;
+const TASK_HEADING = /^###\s+(\d+)\./;
+const VERIFICATION_LINE = /^\*\*Проверка:\*\*(.*)$/;
+const LIST_ITEM = /^\s*[-*]\s+(.*)$/;
+
+/**
+ * Строка `**Проверка:**` у каждой задачи «Высокоуровневых задач».
+ *
+ * Задача — подзаголовок `### N.` секции до следующего подзаголовка `###` или конца
+ * секции. Записи проверки — остаток строки `**Проверка:**` или, если он пуст, пункты
+ * списка сразу под ней; пустые строки между пунктами (свободный список markdown)
+ * список не закрывают. Запись в строке и список под ней вместе — ошибка: шаблон плана
+ * разрешает одну из двух форм. При декомпозиции каждая запись становится проверкой
+ * одного пункта DoD тикета, поэтому разбирается тем же разбором, что пункт тикета
+ * (parseCheckRecord, check-runner.mjs): ровно одна форма — check с expect (regression
+ * только со значением `true`), prose с причиной или visual с путём. Задача из одних
+ * регрессионных проверок — ошибка: о результате они не говорят, а декомпозитор
+ * переносит проверки без изменений, и verify-atomicity отклоняет такие тикеты
+ * (`only_regression_checks`) на каждом проходе.
+ *
+ * Подсказки `<!-- … -->` и блоки кода пропускаются: пример записи в них — не проверка
+ * задачи (в шаблоне плана подсказка секции перечисляет все формы). Секции нет — ошибок
+ * здесь нет: её отсутствие называет checkSections.
+ */
+function checkTaskVerifications(content) {
+  const tasks = [];
+  let inSection = false;
+  let inFence = false;
+  let task = null;
+  let collecting = false;
+
+  const lines = content.replace(/\r\n/g, '\n').replace(/<!--[\s\S]*?-->/g, '').split('\n');
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      collecting = false;
+      continue;
+    }
+    if (inFence) continue;
+
+    if (/^##\s/.test(line)) {
+      inSection = TASKS_HEADING.test(line);
+      task = null;
+      collecting = false;
+      continue;
+    }
+    if (!inSection) continue;
+
+    if (/^###\s/.test(line)) {
+      const heading = TASK_HEADING.exec(line);
+      task = heading ? { number: Number(heading[1]), hasLine: false, inline: false, listed: false, records: [] } : null;
+      if (task) tasks.push(task);
+      collecting = false;
+      continue;
+    }
+    if (!task) continue;
+
+    const verification = VERIFICATION_LINE.exec(line);
+    if (verification) {
+      task.hasLine = true;
+      const record = verification[1].trim();
+      if (record) {
+        task.records.push(record);
+        task.inline = true;
+      }
+      collecting = true;
+      continue;
+    }
+    if (!collecting) continue;
+    const item = LIST_ITEM.exec(line);
+    if (item) {
+      task.records.push(item[1]);
+      task.listed = true;
+    } else if (line.trim()) {
+      // Пустые строки до списка и между его пунктами пропускаются, первая строка не
+      // из списка его закрывает.
+      collecting = false;
+    }
+  }
+
+  const errors = [];
+  for (const { number, hasLine, inline, listed, records } of tasks) {
+    if (!hasLine) {
+      errors.push({ task: number, message: `Задача ${number}: нет строки **Проверка:**` });
+    } else if (records.length === 0) {
+      errors.push({ task: number, message: `Задача ${number}: строка **Проверка:** без записи проверки` });
+    }
+    if (inline && listed) {
+      errors.push({ task: number, message: `Задача ${number}: запись и в строке **Проверка:**, и списком под ней` });
+    }
+    const parsed = records.map((record) => parseCheckRecord(record));
+    parsed.forEach(({ error }, i) => {
+      if (error) {
+        errors.push({ task: number, message: `Задача ${number}: запись проверки ${i + 1} не по формату (${error})` });
+      }
+    });
+    if (parsed.length > 0 && parsed.every(({ kind, regression, error }) => kind === 'check' && regression && !error)) {
+      errors.push({ task: number, message: `Задача ${number}: только регрессионные проверки, нужна и запись другой формы` });
+    }
+  }
+  return errors;
+}
+
 function checkRedFlags(content) {
   const warnings = [];
 
@@ -186,6 +291,9 @@ function validatePlan(planPath) {
 
   const sectionErrors = checkSections(content);
   errors.push(...sectionErrors);
+
+  const verificationErrors = checkTaskVerifications(content);
+  errors.push(...verificationErrors);
 
   const redFlagWarnings = checkRedFlags(content);
   warnings.push(...redFlagWarnings);

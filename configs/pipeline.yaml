@@ -79,8 +79,26 @@ pipeline:
       escalate_below: 0.8
       escalation_share: 0.292
       cost_per_call: 0.0001
+      # Обёртка ничего в проекте не читает: промпт из stdin, ключ из файла. Поэтому
+      # запись годится для стадии ревью по evidence (review-result, PLAN-002).
+      tool_less: true
       capabilities: [text]
-      description: "Jev (TypeSafe) через OpenRouter — судья тестов скилов"
+      description: "Jev (TypeSafe) через OpenRouter — судья тестов скилов и модель ревью по evidence"
+
+    # Claude без инструментов для пунктов DoD со скриншотами (visual) в стадии ревью по
+    # evidence. Решение стейкхолдера 2026-09-26: скриншоты оценивает Claude Haiku.
+    # Обёртка claude-judge.js запускает claude без инструментов, MCP и пользовательских
+    # настроек в пустом временном каталоге и передаёт изображения из промпта блоками
+    # base64 — модель видит только вопрос, evidence и изображения (проверено запуском
+    # 2026-09-26: верный скриншот — 5, чужой — 2).
+    claude-haiku-vision:
+      command: "node"
+      args: [".workflow/src/scripts/claude-judge.js", "--model", "claude-haiku-4-5-20251001"]
+      workdir: "."
+      prompt_stdin: true
+      tool_less: true
+      capabilities: [text, multimodal]
+      description: "Claude Haiku без инструментов — оценка пунктов DoD со скриншотами в стадии ревью"
 
     kilo-code:
       command: "kilo"
@@ -770,17 +788,41 @@ pipeline:
     # сразу failed → increment-task-attempts, без вызова дорогой модели.
     # Критерии failed: result_filled==false | dod_completion_pct==0 | missing_files.
     # Runner нормализует ok→passed, fail→failed через STATUS_ALIASES.
+    # Исходы по тикетам dod_format: 2 (PLAN-002): all_green — все пункты DoD
+    # закрыты зелёными проверками → move-ticket done без модели; passed и default →
+    # review-result с evidence_file и required_capabilities из результата.
+    # legacy (тикет без dod_format: 2) и error → review-result-legacy, агент со
+    # скилом. Обе ветки явно обнуляют evidence_file: updateContext только
+    # присваивает ключи из params и ничего не удаляет, а переходы pick-* его не
+    # задают — без пустого значения в промпт review-result-legacy попал бы файл
+    # evidence предыдущего тикета прогона. Пустое значение в промпт не попадает.
+    # required_capabilities задают переходы pick-* выбранного тикета; ветка error
+    # его обнуляет (PLAN-002, задача 16) — review-result-legacy выбирает агента
+    # без фильтра по способностям тикета, ветка legacy фильтр сохраняет.
     # -------------------------------------------------------------------------
     verify-artifacts:
       description: "Механическая предпроверка артефактов тикета перед AI-ревью"
       agent: script-verify-artifacts
       timeout: 60
       goto:
+        all_green:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: done
         passed:
           stage: review-result
           params:
             ticket_id: "$context.ticket_id"
             attempt: "$counter.task_attempts"
+            evidence_file: "$result.evidence_file"
+            required_capabilities: "$result.required_capabilities"
+        legacy:
+          stage: review-result-legacy
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+            evidence_file: ""
         failed:
           stage: increment-task-attempts
           params:
@@ -790,19 +832,61 @@ pipeline:
           params:
             ticket_id: "$context.ticket_id"
             attempt: "$counter.task_attempts"
+            evidence_file: "$result.evidence_file"
+            required_capabilities: "$result.required_capabilities"
         error:
-          stage: review-result
+          stage: review-result-legacy
           params:
             ticket_id: "$context.ticket_id"
             attempt: "$counter.task_attempts"
+            evidence_file: ""
+            required_capabilities: ""
 
     # -------------------------------------------------------------------------
     # 4. review-result
-    # Проверяет результат выполнения на соответствие DoD тикета.
-    # При failed — переходит на increment-task-attempts для учёта попытки.
+    # Ревью тикета dod_format: 2 по собранным evidence (PLAN-002): prepare-review.js
+    # задаёт вопросы по пунктам prose и visual, модель отвечает уровнем по шкале,
+    # apply-review.js выносит вердикт и пишет строку ревью. В списке — только агенты
+    # без инструментов (kind: http или tool_less: true): модель видит только evidence.
+    # Скриншоты — первый агент списка с multimodal (required_capabilities от
+    # verify-artifacts). При failed — increment-task-attempts для учёта попытки.
     # -------------------------------------------------------------------------
     review-result:
-      description: "Проверить результат выполнения на соответствие DoD тикета"
+      description: "Оценить прозаические пункты и пункты со скриншотами по собранным evidence"
+      agents: [jev, claude-haiku-vision]
+      counter: task_attempts
+      model_io:
+        prepare: ".workflow/src/skills/review-result/scripts/prepare-review.js"
+        apply: ".workflow/src/skills/review-result/scripts/apply-review.js"
+        options: { pass_level: 4, min_confidence: 0.8 }
+      goto:
+        passed:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: done
+        failed:
+          stage: increment-task-attempts
+          params:
+            ticket_id: "$context.ticket_id"
+        default:
+          stage: move-ticket
+          params:
+            ticket_id: "$context.ticket_id"
+            target: backlog
+        error:
+          stage: increment-task-attempts
+          params:
+            ticket_id: "$context.ticket_id"
+
+    # -------------------------------------------------------------------------
+    # 4'. review-result-legacy
+    # Прежнее ревью агентом со скилом review-result — для тикетов без
+    # dod_format: 2 и для ветки error предпроверки (PLAN-002). Копия записи
+    # review-result, какой она была до PLAN-002: агенты, скил, счётчик, переходы.
+    # -------------------------------------------------------------------------
+    review-result-legacy:
+      description: "Проверить результат выполнения на соответствие DoD тикета (тикеты без dod_format: 2)"
       agents: [claude-haiku, gpt-luna, gemini-flash-lite, claude-sonnet]
       skill: review-result
       counter: task_attempts

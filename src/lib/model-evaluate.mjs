@@ -25,7 +25,12 @@ import { chat, decide, ModelClientError } from './model-client.mjs';
 export const MIN_LEVELS = 2;
 export const MAX_LEVELS = 10;
 
-function validateInput(input) {
+/**
+ * Проверка входа: вопросы с непустыми уникальными id, текстом и уровнями.
+ * `minLevels`/`maxLevels` сужают диапазон 2..10 — раннер задаёт ровно пять для
+ * агента с командой (промпт судьи фиксирован на баллах 1..5). Нарушение — bad_request.
+ */
+export function validateInput(input, { minLevels = MIN_LEVELS, maxLevels = MAX_LEVELS } = {}) {
   if (input === null || typeof input !== 'object') {
     throw new ModelClientError('bad_request', 'Evaluation input must be an object');
   }
@@ -50,9 +55,10 @@ function validateInput(input) {
       throw new ModelClientError('bad_request', `Question ${id} has no text`);
     }
     const levels = question.levels;
-    if (!Array.isArray(levels) || levels.length < MIN_LEVELS || levels.length > MAX_LEVELS
+    if (!Array.isArray(levels) || levels.length < minLevels || levels.length > maxLevels
       || levels.some((level) => typeof level !== 'string' || level.trim() === '')) {
-      throw new ModelClientError('bad_request', `Question ${id} needs ${MIN_LEVELS}..${MAX_LEVELS} non-empty levels`);
+      const range = minLevels === maxLevels ? `exactly ${minLevels}` : `${minLevels}..${maxLevels}`;
+      throw new ModelClientError('bad_request', `Question ${id} needs ${range} non-empty levels`);
     }
   }
 }

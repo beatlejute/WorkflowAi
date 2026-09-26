@@ -68,3 +68,8 @@ cases:
     origin_chg: [convert-2026-09-23]
     tags: [rails, anatomy, regression-guard]
     severity: critical
+  - id: TC-DECOMPOSE-PLAN-012
+    file: cases/TC-DECOMPOSE-PLAN-012-check-record-transfer.yaml
+    origin_chg: [plan-002-2026-09-26]
+    tags: [dod-transfer, check-record, verbatim]
+    severity: high

@@ -170,8 +170,8 @@ export function appendReviewEntry(ticketPath, entry) {
   // возвращал WRITE_ERROR, строка ревью терялась. Цена: у check-relevance пропадала
   // отметка skipped (addSkippedReview бросает, main ловит и только пишет в лог, вердикт
   // уходит без отметки в тикете), у verify-artifacts — строка вердикта; а тикет без
-  // строки ревью getLastReviewStatus читает как «ревью не было», и move-to-review
-  // возвращает закрытый тикет из done/ в review/. У помощника лестница повторов и
+  // строки ревью getLastReviewStatus читает как «ревью не было», и авто-коррекция
+  // pick-next-task переносит закрытый тикет из done/ в backlog/ (правило done: null). У помощника лестница повторов и
   // слышимый запасной путь
   // (src/lib/utils.mjs, replaceFileAtomicSync), а имя временного файла укладывается в
   // лимит длины компонента пути — своя версия этого бюджета не держала.

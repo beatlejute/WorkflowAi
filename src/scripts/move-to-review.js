@@ -17,7 +17,6 @@ import path from "path";
 import { findProjectRoot } from "workflow-ai/lib/find-root.mjs";
 import {
   printResult,
-  getLastReviewStatus,
   replaceFileAtomicSync,
 } from "workflow-ai/lib/utils.mjs";
 
@@ -59,30 +58,23 @@ export function moveToReview(ticketId) {
     const donePath = path.join(TICKETS_DIR, "done", `${ticketId}.md`);
     const archivePath = path.join(ARCHIVE_DIR, `${ticketId}.md`);
     if (fs.existsSync(donePath)) {
-      // Проверяем, есть ли у тикета ревью — если нет, перемещаем в review/
-      const doneContent = fs.readFileSync(donePath, "utf8");
-      const reviewStatus = getLastReviewStatus(doneContent);
-      if (reviewStatus === null) {
-        // Тикет в done/ без ревью — агент переместил его самовольно, возвращаем в review/
-        if (!fs.existsSync(REVIEW_DIR)) {
-          fs.mkdirSync(REVIEW_DIR, { recursive: true });
-        }
-        const reviewTarget = path.join(REVIEW_DIR, `${ticketId}.md`);
-        fs.renameSync(donePath, reviewTarget);
-        console.log(
-          `[INFO] ${ticketId} was in done/ without review — moved to review/`,
-        );
-        return {
-          status: "moved",
-          ticket_id: ticketId,
-          from: "done",
-          to: "review",
-        };
+      // Тикет в done/ возвращается в review/ независимо от таблицы «## Ревью».
+      // Стадия идёт сразу после execute-task, ревью этой попытки ещё впереди
+      // (move-to-review → verify-artifacts → review-result), а строку passed в
+      // таблицу может дописать и сам исполнитель. Таблица — запись для человека,
+      // не основание оставить тикет в done/: прежний пропуск по любой строке
+      // уводил такой тикет по ветке skipped мимо проверки (PLAN-002).
+      if (!fs.existsSync(REVIEW_DIR)) {
+        fs.mkdirSync(REVIEW_DIR, { recursive: true });
       }
+      const reviewTarget = path.join(REVIEW_DIR, `${ticketId}.md`);
+      fs.renameSync(donePath, reviewTarget);
+      console.log(`[INFO] ${ticketId} was in done/ — moved to review/`);
       return {
-        status: "skipped",
+        status: "moved",
         ticket_id: ticketId,
-        reason: `${ticketId} already in done/ with review`,
+        from: "done",
+        to: "review",
       };
     }
     if (fs.existsSync(archivePath)) {

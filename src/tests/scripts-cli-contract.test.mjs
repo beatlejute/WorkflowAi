@@ -114,6 +114,27 @@ function cleanup(dir) {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+/**
+ * Кладёт в проект боевой конфиг правил авто-коррекции, а не выдуманный: проверяем
+ * ту же таблицу, которую workflow init кладёт в проект.
+ */
+function copyMovementRules(workflowDir) {
+  fs.mkdirSync(path.join(workflowDir, 'config'), { recursive: true });
+  fs.copyFileSync(
+    path.join(PROJECT_ROOT, 'configs', 'ticket-movement-rules.yaml'),
+    path.join(workflowDir, 'config', 'ticket-movement-rules.yaml')
+  );
+}
+
+/** Дописывает в тикет таблицу «## Ревью» с одной строкой вердикта. */
+function appendReview(file, verdict) {
+  fs.appendFileSync(
+    file,
+    `\n## Ревью\n\n| Дата | Статус | Самари | Агент |\n|------|--------|--------|-------|\n| 2026-04-02 10:00 | ${verdict} | ок | review-agent |\n`,
+    'utf8'
+  );
+}
+
 // ============================================================================
 // mark-blocked.js — разбор аргументов и коды выхода
 // ============================================================================
@@ -229,7 +250,7 @@ test('move-ticket: битый frontmatter — отказ, тикет остаё�
 });
 
 // ============================================================================
-// pick-next-task.js — фильтр по плану и закрытие плана
+// pick-next-task.js — фильтр по плану, закрытие плана и авто-коррекция
 // ============================================================================
 
 test('pick-next-task: в контексте есть plan_id — берётся тикет своего плана, чужой не трогается', () => {
@@ -271,22 +292,11 @@ test('pick-next-task: все тикеты плана в done — план зак
   cleanup(dir);
 });
 
-test('pick-next-task: авто-коррекция по конфигу — passed уезжает в done с отметкой времени, done без вердикта возвращается в backlog', () => {
+test('pick-next-task: авто-коррекция по конфигу — строка passed тикет из review/ не двигает, done без вердикта возвращается в backlog', () => {
   const { dir, workflowDir, ticketsDir } = makeProject();
-  // Берём боевой конфиг правил, а не выдумываем свой: проверяем ту же таблицу,
-  // которую workflow init кладёт в проект.
-  fs.mkdirSync(path.join(workflowDir, 'config'), { recursive: true });
-  fs.copyFileSync(
-    path.join(PROJECT_ROOT, 'configs', 'ticket-movement-rules.yaml'),
-    path.join(workflowDir, 'config', 'ticket-movement-rules.yaml')
-  );
+  copyMovementRules(workflowDir);
 
-  const reviewed = writeTicket(ticketsDir, 'review', 'IMPL-240');
-  fs.appendFileSync(
-    reviewed,
-    '\n## Ревью\n\n| Дата | Статус | Самари | Агент |\n|------|--------|--------|-------|\n| 2026-04-02 10:00 | ✅ passed | ок | review-agent |\n',
-    'utf8'
-  );
+  appendReview(writeTicket(ticketsDir, 'review', 'IMPL-240'), '✅ passed');
   writeTicket(ticketsDir, 'done', 'IMPL-241');
   writeTicket(ticketsDir, 'ready', 'IMPL-242');
 
@@ -295,19 +305,58 @@ test('pick-next-task: авто-коррекция по конфигу — passed
 
   assert.strictEqual(parsed.status, 'found');
   assert.strictEqual(parsed.ticket_id, 'IMPL-242');
-  assert.strictEqual(parsed.auto_corrected, '2', 'в RESULT должно быть число сдвинутых тикетов: по нему пайплайн отчитывается о коррекции');
-  assert.match(result.stdout, /\[AUTO-CORRECT\] IMPL-240/, 'сдвиг тикета обязан быть виден в логе — молча переложенный тикет не расследуешь');
+  assert.strictEqual(parsed.auto_corrected, '1', 'в RESULT должно быть число сдвинутых тикетов: по нему пайплайн отчитывается о коррекции');
+  assert.match(result.stdout, /\[AUTO-CORRECT\] IMPL-241/, 'сдвиг тикета обязан быть виден в логе — молча переложенный тикет не расследуешь');
 
-  const movedToDone = path.join(ticketsDir, 'done', 'IMPL-240.md');
-  assert.ok(fs.existsSync(movedToDone), 'тикет с пройденным ревью обязан уехать в done/');
-  assert.match(
-    readTicket(movedToDone),
-    /completed_at:/,
-    'без completed_at следующий проход отправит закрытый тикет на новый круг (HUMAN-4, HUMAN-5 2026-08-04)'
-  );
+  // Таблица «## Ревью» — запись для человека: строку passed в неё может дописать и
+  // сам исполнитель. В done/ тикет переносит стадия move-ticket по результату
+  // стадий пайплайна, а не авто-коррекция по тексту тикета (PLAN-002).
+  assert.ok(fs.existsSync(path.join(ticketsDir, 'review', 'IMPL-240.md')), 'тикет со строкой passed обязан остаться в review/');
+  assert.ok(!fs.existsSync(path.join(ticketsDir, 'done', 'IMPL-240.md')), 'по строке passed тикет не должен уезжать в done/ мимо ревью');
 
   assert.ok(fs.existsSync(path.join(ticketsDir, 'backlog', 'IMPL-241.md')), 'тикет в done/ без вердикта ревью обязан вернуться в backlog/');
   assert.ok(!fs.existsSync(path.join(ticketsDir, 'done', 'IMPL-241.md')), 'копии в done/ остаться не должно');
+
+  cleanup(dir);
+});
+
+test('pick-next-task: правило проекта «passed → done» по-прежнему исполняется и ставит completed_at', () => {
+  // Боевой конфиг правил в done/ больше не переносит (PLAN-002), но таблица правил —
+  // конфиг проекта, и перенос в done/ по своему правилу проект задать может. Тогда
+  // тикет получает completed_at, иначе следующий проход откатил бы его из done/.
+  const { dir, workflowDir, ticketsDir } = makeProject();
+  fs.mkdirSync(path.join(workflowDir, 'config'), { recursive: true });
+  fs.writeFileSync(path.join(workflowDir, 'config', 'ticket-movement-rules.yaml'),
+    'version: "1.0"\nrules:\n  review:\n    - condition: passed\n      to_dir: done\n      reason: "review passed"\n', 'utf8');
+  appendReview(writeTicket(ticketsDir, 'review', 'IMPL-260'), '✅ passed');
+  writeTicket(ticketsDir, 'ready', 'IMPL-261');
+
+  const result = run(PICK_NEXT_TASK, [], dir);
+  const parsed = parseResult(result.stdout);
+
+  assert.strictEqual(parsed.auto_corrected, '1');
+  assert.ok(!fs.existsSync(path.join(ticketsDir, 'review', 'IMPL-260.md')), 'по правилу проекта тикет уходит из review/');
+  assert.match(readTicket(path.join(ticketsDir, 'done', 'IMPL-260.md')), /completed_at:/, 'в done/ тикет приходит с completed_at');
+
+  cleanup(dir);
+});
+
+test('pick-next-task: строка passed в ready/ и blocked/ тикет не двигает — тикет из ready/ выбирается как обычный', () => {
+  const { dir, workflowDir, ticketsDir } = makeProject();
+  copyMovementRules(workflowDir);
+
+  appendReview(writeTicket(ticketsDir, 'ready', 'IMPL-250'), '✅ passed');
+  appendReview(writeTicket(ticketsDir, 'blocked', 'IMPL-251'), '✅ passed');
+
+  const result = run(PICK_NEXT_TASK, [], dir);
+  const parsed = parseResult(result.stdout);
+
+  assert.strictEqual(parsed.status, 'found');
+  assert.strictEqual(parsed.ticket_id, 'IMPL-250', 'тикет из ready/ со строкой passed обязан уйти в работу, а не в done/');
+  assert.strictEqual(parsed.auto_corrected, '0', 'по строке ревью в тексте тикета авто-коррекция ничего не двигает');
+  assert.ok(fs.existsSync(path.join(ticketsDir, 'ready', 'IMPL-250.md')), 'тикет обязан остаться в ready/');
+  assert.ok(fs.existsSync(path.join(ticketsDir, 'blocked', 'IMPL-251.md')), 'тикет обязан остаться в blocked/');
+  assert.deepStrictEqual(fs.readdirSync(path.join(ticketsDir, 'done')), [], 'в done/ по тексту тикета не попадает ничего');
 
   cleanup(dir);
 });

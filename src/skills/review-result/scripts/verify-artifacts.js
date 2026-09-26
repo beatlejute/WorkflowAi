@@ -8,6 +8,14 @@
  * - DoD completion %
  * - Заполненность секции Result (Summary)
  *
+ * Тикет с `dod_format: 2` (PLAN-002) дополнительно получает файл evidence
+ * `.workflow/state/evidence/<имя файла тикета>.json` (у стадии пайплайна имя
+ * файла — ticket_id из Context, см. resolveTicketPath), перезаписываемый
+ * каждой попыткой: проверки `check` пунктов DoD исполняются через
+ * check-runner, маски `visual` раскрываются в изображения, ссылки `file:line`
+ * из Result сверяются с исходником, дифф берётся по «Изменённым файлам».
+ * Тикет без поля проверяется как раньше, файла evidence у него нет.
+ *
  * Использование (как стейдж пайплайна):
  *   node verify-artifacts.js "<prompt>"
  *   Парсит ticket_id из Context-блока в промпте, резолвит в .workflow/tickets/review/{id}.md
@@ -18,23 +26,37 @@
  *
  * Вывод (для runner'а):
  *   ---RESULT---
- *   status: passed|failed
+ *   status: all_green|passed|legacy|failed
+ *     all_green — dod_format: 2, все пункты DoD — зелёные `check`, прежние гейты
+ *                 пройдены; в `## Ревью` дописана строка passed с путём evidence
+ *     passed    — dod_format: 2, проверки зелёные, есть пункты prose или visual
+ *                 для модели стадии ревью
+ *     legacy    — тикет без dod_format: 2, прежние гейты пройдены
+ *     failed    — провален прежний гейт или пункт DoD (проверка не прошла,
+ *                 у visual нет изображений, запись проверки не разобрана)
  *   dod_completion_pct: <int>
  *   result_filled: <bool>
  *   missing_files: <comma-separated list or empty>
+ *   Только у тикета dod_format: 2:
+ *   evidence_file: <путь файла evidence от корня проекта>
+ *   required_capabilities: <JSON-массив одной строкой>
+ *   dod_check_total, dod_check_failed, dod_prose_total, dod_visual_total: <int>
  *   warnings: <предупреждения через "; "; строка печатается только при наличии>
  *   ---RESULT---
  */
 
 import fs from 'fs';
 import path from 'path';
+import { spawnSync } from 'child_process';
 import { pathToFileURL } from 'url';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
-import { parseFrontmatter } from 'workflow-ai/lib/utils.mjs';
+import { parseFrontmatter, appendReviewEntry, replaceFileAtomicSync } from 'workflow-ai/lib/utils.mjs';
+import { runCheck, parseDodChecks, isDodFormat2 } from 'workflow-ai/lib/check-runner.mjs';
 
 const PROJECT_DIR = findProjectRoot();
 const TICKETS_DIR = path.join(PROJECT_DIR, '.workflow', 'tickets');
 const REVIEW_STATUSES = ['review', 'in-progress', 'done', 'ready', 'backlog'];
+const SCRIPT_AGENT_ID = 'script-verify-artifacts';
 
 function parseChangedFiles(body) {
   const files = [];
@@ -169,18 +191,22 @@ function parseDoDCompletion(body) {
   };
 }
 
-function checkResultSection(body) {
+/** Текст секции Result без заголовка; null — секции нет. */
+function resultSectionContent(body) {
   // Порядок альтернатив важен: «Результат выполнения» перед «Результат»,
   // чтобы более длинный вариант матчился первым.
   const resultSectionRegex = /^##\s*(Результат выполнения|Результат|Result)\s*$/m;
   const sectionMatch = resultSectionRegex.exec(body);
-
-  if (!sectionMatch) return { exists: false, summaryFilled: false };
+  if (!sectionMatch) return null;
 
   const startIdx = sectionMatch.index + sectionMatch[0].length;
   const nextH2 = body.indexOf('\n## ', startIdx);
-  const sectionEnd = nextH2 === -1 ? body.length : nextH2;
-  const sectionContent = body.substring(startIdx, sectionEnd);
+  return body.substring(startIdx, nextH2 === -1 ? body.length : nextH2);
+}
+
+function checkResultSection(body) {
+  const sectionContent = resultSectionContent(body);
+  if (sectionContent === null) return { exists: false, summaryFilled: false };
 
   // Сначала пытаемся найти явную подсекцию Summary
   const summaryRegex = /^###\s*(Summary|Что сделано)\s*$/m;
@@ -269,14 +295,8 @@ function checkSourceGrounding(body) {
   if (!hasSourceGroundingDod) return { required: false, satisfied: true };
 
   // Извлекаем Result секцию для проверки evidence
-  const resultSectionRegex = /^##\s*(Результат выполнения|Результат|Result)\s*$/m;
-  const resultMatch = resultSectionRegex.exec(body);
-  if (!resultMatch) return { required: true, satisfied: false };
-
-  const resultStart = resultMatch.index + resultMatch[0].length;
-  const resultNextH2 = body.indexOf('\n## ', resultStart);
-  const resultEnd = resultNextH2 === -1 ? body.length : resultNextH2;
-  const resultContent = body.substring(resultStart, resultEnd);
+  const resultContent = resultSectionContent(body);
+  if (resultContent === null) return { required: true, satisfied: false };
 
   const hasSourceRef =
     SOURCE_REF_FILE_LINE.test(resultContent) ||
@@ -378,6 +398,283 @@ async function runImplementationAssertions(assertions) {
   return results;
 }
 
+// ===========================================================================
+// Evidence тикета `dod_format: 2` (PLAN-002, «Файл evidence»).
+// Модель стадии ревью видит только собранное здесь, а не заявления исполнителя:
+// текст Result в evidence не попадает, ссылки из него — только проверенными
+// фрагментами исходника.
+// ===========================================================================
+
+const EVIDENCE_DIR = '.workflow/state/evidence';
+// Лимит диффа — предположение плана (половина контекста модели при 3–4 символах
+// на токен), не замер. Сверх лимита идёт начало диффа с пометкой усечения.
+const DIFF_LIMIT_CHARS = 60000;
+// Буфер вывода git: полный размер диффа нужен для пометки усечения.
+const GIT_BUFFER_BYTES = 64 * 1024 * 1024;
+const SOURCE_REF_CONTEXT_LINES = 5;
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+// Статусы пункта, которые валят тикет; passed бывает только у check,
+// pending — у prose и visual с изображениями.
+const DOD_FAILED_STATUSES = new Set(['failed', 'timeout', 'denied', 'image_missing']);
+
+// Ссылка `file:line` или `file:start-end` — SOURCE_REF_FILE_LINE с диапазоном,
+// все вхождения.
+const SOURCE_REFS_IN_TEXT = /[\w][\w/\\.-]+\.\w{1,10}:\d+(?:-\d+)?/g;
+
+function isInsideProject(fullPath) {
+  const rel = path.relative(PROJECT_DIR, fullPath);
+  return rel !== '' && !path.isAbsolute(rel) && rel.split(path.sep)[0] !== '..';
+}
+
+function toProjectPath(fullPath) {
+  return path.relative(PROJECT_DIR, fullPath).split(path.sep).join('/');
+}
+
+/**
+ * Ссылка из Result, сверенная с диском: найдена — строки исходника
+ * ±SOURCE_REF_CONTEXT_LINES с номерами; файла нет, он вне корня проекта или
+ * строки за концом файла — status: missing.
+ */
+function readSourceRef(ref) {
+  const [, file, startRaw, endRaw] = ref.match(/^(.*):(\d+)(?:-(\d+))?$/);
+  const start = Number(startRaw);
+  const end = endRaw === undefined ? start : Number(endRaw);
+  const missing = { ref, status: 'missing', excerpt: null };
+
+  const fullPath = path.resolve(PROJECT_DIR, file);
+  if (!isInsideProject(fullPath) || !fs.statSync(fullPath, { throwIfNoEntry: false })?.isFile()) return missing;
+
+  const lines = fs.readFileSync(fullPath, 'utf8').split(/\r?\n/);
+  if (lines[lines.length - 1] === '') lines.pop();
+  if (start < 1 || end < start || end > lines.length) return missing;
+
+  const from = Math.max(1, start - SOURCE_REF_CONTEXT_LINES);
+  const to = Math.min(lines.length, end + SOURCE_REF_CONTEXT_LINES);
+  const excerpt = lines.slice(from - 1, to).map((line, i) => `${from + i}: ${line}`).join('\n');
+  return { ref, status: 'found', excerpt };
+}
+
+function collectSourceRefs(body) {
+  const resultContent = resultSectionContent(body);
+  if (resultContent === null) return [];
+  return [...new Set(resultContent.match(SOURCE_REFS_IN_TEXT) || [])].map(readSourceRef);
+}
+
+function segmentRegex(segment) {
+  const source = segment
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.');
+  return new RegExp(`^${source}$`, process.platform === 'win32' ? 'i' : '');
+}
+
+function matchMask(dir, segments, found) {
+  if (segments.length === 0) {
+    if (fs.statSync(dir, { throwIfNoEntry: false })?.isFile()) found.add(dir);
+    return;
+  }
+  const [segment, ...rest] = segments;
+  if (!/[*?]/.test(segment)) {
+    matchMask(path.join(dir, segment), rest, found);
+    return;
+  }
+  let entries;
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  const regex = segmentRegex(segment);
+  for (const name of entries) {
+    if (regex.test(name)) matchMask(path.join(dir, name), rest, found);
+  }
+}
+
+/**
+ * Путь или маска `visual` от корня проекта → изображения (пути от корня через
+ * `/`, по алфавиту). `*` и `?` действуют внутри одного сегмента пути. Файлы вне
+ * корня проекта и не PNG, JPEG или WebP в список не входят.
+ */
+function expandImageMask(mask) {
+  const segments = mask.replace(/\\/g, '/').split('/').filter((s) => s !== '' && s !== '.');
+  const found = new Set();
+  matchMask(PROJECT_DIR, segments, found);
+  return [...found]
+    .filter((file) => isInsideProject(file) && IMAGE_EXTENSIONS.has(path.extname(file).toLowerCase()))
+    .map(toProjectPath)
+    .sort();
+}
+
+/**
+ * Пункты DoD для evidence. Проверки `check` исполняются по очереди через
+ * check-runner (ограничения исполнителя — там же). Пункт с неразобранной
+ * записью проверки — failed без запуска: закрыть его нечем.
+ */
+async function collectDodItems(dodItems) {
+  const items = [];
+  for (const item of dodItems) {
+    const base = { index: item.index, text: item.text, kind: item.kind };
+    if (item.error) {
+      items.push({ ...base, status: 'failed', reason: `dod_record_invalid: ${item.error}` });
+    } else if (item.kind === 'check') {
+      const run = await runCheck({ check: item.command, expect: item.expect, projectRoot: PROJECT_DIR });
+      items.push({
+        ...base,
+        command: item.command,
+        expect: item.expect,
+        regression: item.regression,
+        exit_code: run.exit_code,
+        stdout: run.stdout,
+        stderr: run.stderr,
+        duration_ms: run.duration_ms,
+        status: run.status,
+        reason: run.reason,
+      });
+    } else if (item.kind === 'prose') {
+      items.push({ ...base, reason: item.reason, status: 'pending' });
+    } else {
+      const images = expandImageMask(item.mask);
+      items.push({ ...base, mask: item.mask, images, status: images.length > 0 ? 'pending' : 'image_missing' });
+    }
+  }
+  return items;
+}
+
+function runGit(args, okStatuses = [0]) {
+  const run = spawnSync('git', args, {
+    cwd: PROJECT_DIR,
+    encoding: 'utf8',
+    maxBuffer: GIT_BUFFER_BYTES,
+    windowsHide: true,
+  });
+  const ok = !run.error && okStatuses.includes(run.status);
+  // Причина идёт в diff_error evidence и строку warnings RESULT-блока — одной строкой.
+  const error = (run.error ? run.error.message : run.stderr || `exit ${run.status}`).replace(/\s+/g, ' ').trim();
+  return { ok, stdout: run.stdout || '', error };
+}
+
+/**
+ * Изменения отслеживаемых файлов относительно HEAD и неотслеживаемые файлы
+ * целиком, как новые. Игнорируемые git файлы в дифф не попадают. Ошибка git
+ * идёт в problems; ошибка `git diff HEAD` (git нет, проект не в репозитории,
+ * у репозитория нет коммитов) — дифф не собран весь.
+ */
+function gitDiff(pathspecs, problems) {
+  // Вне репозитория `git diff HEAD -- <пути>` уходит в режим --no-index и вместо
+  // ошибки печатает справку по опциям (~4 тыс. символов) — она попадала в
+  // diff_error и в данные модели ревью (проба 2026-09-26). Проверка — до вызова.
+  const inside = runGit(['rev-parse', '--is-inside-work-tree']);
+  if (!inside.ok) {
+    problems.push(/not a git repository/i.test(inside.error) ? 'проект не в репозитории git' : inside.error);
+    return '';
+  }
+  const tracked = runGit(['diff', 'HEAD', '--no-color', '--', ...pathspecs]);
+  if (!tracked.ok) {
+    problems.push(tracked.error);
+    return '';
+  }
+  const untracked = runGit(['ls-files', '--others', '--exclude-standard', '-z', '--', ...pathspecs]);
+  if (!untracked.ok) {
+    problems.push(`новые файлы: ${untracked.error}`);
+    return tracked.stdout;
+  }
+
+  const parts = [tracked.stdout];
+  for (const file of untracked.stdout.split('\0').filter(Boolean)) {
+    // --no-index отвечает кодом 1, когда файлы различаются, — с /dev/null всегда.
+    const added = runGit(['diff', '--no-index', '--no-color', '--', '/dev/null', file], [0, 1]);
+    if (added.ok) parts.push(added.stdout);
+    else problems.push(`новый файл ${file}: ${added.error}`);
+  }
+  return parts.join('');
+}
+
+/**
+ * Дифф по «Изменённым файлам» с пометкой усечения. Путь не внутри корня
+ * проекта в дифф не идёт, как и ссылки `file:line` вне корня: путь вне
+ * репозитория git отверг бы вместе со всем вызовом. Каталог тикетов и файл
+ * тикета исключены: исполнитель может назвать тикет или каталог с ним среди
+ * изменённых, и в проекте, где тикеты хранятся в git, дифф принёс бы текст
+ * Result — нынешний и прежней попытки из копии тикета в HEAD под другим
+ * статусом. Что не собрано и почему — в diff_error (null — собрано всё) и в
+ * предупреждении: модель отличит «дифф не собран» от «изменений нет».
+ */
+function collectDiff(changedFiles, ticketPath, warnings) {
+  const problems = [];
+  const files = changedFiles.filter((file) => {
+    const inside = isInsideProject(path.resolve(PROJECT_DIR, file));
+    if (!inside) problems.push(`не внутри корня проекта: ${file}`);
+    return inside;
+  });
+  // Пути исключений — от корня проекта, он же cwd git.
+  const excludes = [TICKETS_DIR, ticketPath].filter(isInsideProject).map((p) => `:(exclude)${toProjectPath(p)}`);
+  // Одни исключения git понимает как «всё, кроме них» — без путей git не зовётся.
+  const diff = files.length > 0 ? gitDiff([...files, ...excludes], problems) : '';
+
+  const diffError = problems.length > 0 ? problems.join('; ') : null;
+  if (diffError) warnings.push(`дифф неполон: ${diffError}`);
+  if (diff.length <= DIFF_LIMIT_CHARS) return { diff, diff_truncated: null, diff_error: diffError };
+  return {
+    diff: diff.slice(0, DIFF_LIMIT_CHARS),
+    diff_truncated: { shown_chars: DIFF_LIMIT_CHARS, total_chars: diff.length },
+    diff_error: diffError,
+  };
+}
+
+// Номер попытки — из блока Context промпта стадии (`  attempt: N`), как его
+// передал раннер; при запуске с путём или id тикета — null.
+function parsePromptAttempt(arg) {
+  const match = arg.match(/^\s*attempt:\s*(\d+)\s*$/m);
+  return match ? Number(match[1]) : null;
+}
+
+async function collectEvidence(result, ticketPath, attempt) {
+  return {
+    ticket_id: result.ticket_id,
+    attempt,
+    collected_at: new Date().toISOString(),
+    items: await collectDodItems(result.dod_items),
+    source_refs: result.source_refs,
+    changed_files: result.changed_files,
+    ...collectDiff(result.changed_files, ticketPath, result.warnings),
+  };
+}
+
+function legacyGates(result, verdict, assertionsFailed) {
+  const grounding = result.source_grounding;
+  return {
+    missing_files: verdict.missingFiles,
+    unchanged_files: verdict.unchangedFiles,
+    dod_completion_pct: result.dod_completion_pct,
+    result_filled: result.result_filled,
+    source_grounding: !grounding.required ? 'not_required' : grounding.satisfied ? 'satisfied' : 'missing',
+    assertions_failed: assertionsFailed,
+  };
+}
+
+/** Файл evidence по имени файла тикета; возвращает путь от корня проекта. */
+function writeEvidence(ticketPath, evidence) {
+  const relPath = `${EVIDENCE_DIR}/${path.basename(ticketPath, '.md')}.json`;
+  const fullPath = path.join(PROJECT_DIR, relPath);
+  fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+  replaceFileAtomicSync(fullPath, `${JSON.stringify(evidence, null, 2)}\n`);
+  return relPath;
+}
+
+// Способности для выбора агента стадии ревью: способности тикета плюс
+// multimodal при пункте visual. JSON-массив одной строкой — так поле из
+// контекста разбирает resolveAgent раннера (JSON.parse).
+function reviewCapabilities(ticketCapabilities, items) {
+  const capabilities = new Set(ticketCapabilities);
+  if (items.some((item) => item.kind === 'visual')) capabilities.add('multimodal');
+  return JSON.stringify([...capabilities]);
+}
+
+function describeFailedItem(item) {
+  if (item.status === 'image_missing') return `пункт ${item.index} — нет изображений по маске ${item.mask}`;
+  return `пункт ${item.index} — ${item.status}: ${item.reason}`;
+}
+
 function verifyTicket(ticketPath) {
   if (!fs.existsSync(ticketPath)) {
     throw new Error(`Ticket file not found: ${ticketPath}`);
@@ -404,6 +701,9 @@ function verifyTicket(ticketPath) {
   const assertions = parseImplementationAssertions(body);
   const sourceGrounding = checkSourceGrounding(body);
 
+  // Проверки пунктов DoD и ссылки Result нужны только evidence тикета нового формата.
+  const dodFormat2 = isDodFormat2(frontmatter);
+
   return {
     ticket_id: frontmatter.id,
     created_at: frontmatter.created_at,
@@ -417,6 +717,11 @@ function verifyTicket(ticketPath) {
     source_grounding: sourceGrounding,
     work_start_source: workStart.source,
     warnings: workStart.warnings,
+    changed_files: filePaths,
+    required_capabilities: Array.isArray(frontmatter.required_capabilities) ? frontmatter.required_capabilities : [],
+    dod_format_2: dodFormat2,
+    dod_items: dodFormat2 ? parseDodChecks(body) : [],
+    source_refs: dodFormat2 ? collectSourceRefs(body) : [],
   };
 }
 
@@ -446,7 +751,11 @@ function resolveTicketPath(arg) {
   return null;
 }
 
-function formatVerdict(result) {
+/**
+ * @param {object} result - verifyTicket + assertionResults
+ * @param {object|null} evidence - evidence тикета dod_format: 2, иначе null
+ */
+function formatVerdict(result, evidence) {
   const missingFiles = result.files_exist
     .filter((f) => !f.exists)
     .map((f) => f.path);
@@ -460,6 +769,7 @@ function formatVerdict(result) {
   //   - dod_completion_pct == 0 (ни один пункт DoD не отмечен)
   //   - есть отсутствующие файлы из "Изменённые файлы"
   //   - есть неизменённые файлы (file_unchanged)
+  //   - у тикета dod_format: 2 провален пункт DoD (DOD_FAILED_STATUSES)
   const failReasons = [];
   const humanIssues = [];
   if (!result.result_filled) {
@@ -500,7 +810,30 @@ function formatVerdict(result) {
     humanIssues.push(`не прошли E2E-assertions (ghost execution): ${descriptions.join('; ')}`);
   }
 
-  const status = failReasons.length === 0 ? 'passed' : 'failed';
+  // Пункт DoD parseDodChecks — строка `- [ ]` без отступа, а процент DoD считает
+  // любые чекбоксы секции. Без пунктов закрывать тикету нечего — это провал, а
+  // не ревью без вопросов.
+  if (evidence && evidence.items.length === 0) {
+    failReasons.push('dod_items_missing');
+    humanIssues.push('у тикета dod_format: 2 нет пунктов DoD');
+  }
+  const failedItems = (evidence?.items || []).filter((item) => DOD_FAILED_STATUSES.has(item.status));
+  if (failedItems.length > 0) {
+    failReasons.push(`dod_items_failed=${failedItems.map((item) => item.index).join(',')}`);
+    humanIssues.push(`не пройдены пункты DoD: ${failedItems.map(describeFailedItem).join('; ')}`);
+  }
+
+  let status;
+  if (failReasons.length > 0) {
+    status = 'failed';
+  } else if (!evidence) {
+    // Тикет без dod_format: 2 — прежний маршрут, ревью агентом со скилом.
+    status = 'legacy';
+  } else if (evidence.items.every((item) => item.status === 'passed')) {
+    status = 'all_green';
+  } else {
+    status = 'passed';
+  }
 
   return { status, missingFiles, unchangedFiles, failReasons, humanIssues };
 }
@@ -582,8 +915,11 @@ function emitGhostMarker(ticketId, verdict, assertionsFailed) {
 
 // IMPL-87: Replace manual review-section write with appendReviewEntry from review-section.mjs.
 // Idempotency: skip if last summary already matches.
-async function appendReviewNote(ticketPath, humanIssues) {
-  const summary = `verify-artifacts: ${humanIssues.join('; ')}`;
+function appendReviewNote(ticketPath, status, text) {
+  // Самари — ячейка таблицы: перевод строки или `|` (причина проверки вида
+  // `stdout_no_match: /a|b/`) порвали бы строку. getLastReviewStatus делит
+  // ячейки по `|` без обратной косой перед ним.
+  const summary = text.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
   const date = new Date().toISOString().slice(0, 10);
 
   // Idempotency check
@@ -597,11 +933,10 @@ async function appendReviewNote(ticketPath, humanIssues) {
     }
   } catch {}
 
-  const { appendReviewEntry } = await import('../../../lib/review-section.mjs');
   const r = appendReviewEntry(ticketPath, {
     date,
-    agent: 'script-verify-artifacts',
-    status: 'failed',
+    agent: SCRIPT_AGENT_ID,
+    status,
     summary,
   });
   return r?.ok === true;
@@ -640,21 +975,40 @@ async function main() {
   try {
     const result = verifyTicket(ticketPath);
     result.assertionResults = await runImplementationAssertions(result.assertions || []);
+    const evidence = result.dod_format_2 ? await collectEvidence(result, ticketPath, parsePromptAttempt(arg)) : null;
 
     const warnings = result.warnings || [];
     for (const warning of warnings) {
       console.error(`Warning: ${warning}`);
     }
 
-    const verdict = formatVerdict(result);
-
-    let reviewNoteWritten = false;
-    if (verdict.status === 'failed' && verdict.humanIssues.length > 0) {
-      reviewNoteWritten = await appendReviewNote(ticketPath, verdict.humanIssues);
-    }
+    const verdict = formatVerdict(result, evidence);
 
     const assertionsTotal = result.assertionResults.length;
     const assertionsFailed = result.assertionResults.filter(r => !r.ok).length;
+
+    let evidenceFile = null;
+    if (evidence) {
+      evidence.legacy_gates = legacyGates(result, verdict, assertionsFailed);
+      // Раздел заполняет скрипт применения стадии ревью.
+      evidence.review = { agent: null, model: null, items: {} };
+      evidenceFile = writeEvidence(ticketPath, evidence);
+    }
+
+    let reviewNoteWritten = false;
+    if (verdict.status === 'failed' && verdict.humanIssues.length > 0) {
+      const issues = evidenceFile ? [...verdict.humanIssues, `evidence: ${evidenceFile}`] : verdict.humanIssues;
+      reviewNoteWritten = appendReviewNote(ticketPath, 'failed', `verify-artifacts: ${issues.join('; ')}`);
+    } else if (verdict.status === 'all_green') {
+      // Строка passed с путём evidence: без неё move-ticket при переходе
+      // review/ → done/ дописал бы свою fallback-строку без ссылки на evidence.
+      const green = evidence.items.length;
+      reviewNoteWritten = appendReviewNote(
+        ticketPath,
+        'passed',
+        `verify-artifacts: зелёных проверок DoD — ${green} из ${green}, evidence: ${evidenceFile}`
+      );
+    }
 
     emitGhostMarker(result.ticket_id, verdict, ghostAssertionCount(result.assertionResults));
 
@@ -669,6 +1023,16 @@ async function main() {
     console.log(`unchanged_files: ${verdict.unchangedFiles.join(',')}`);
     console.log(`assertions_total: ${assertionsTotal}`);
     console.log(`assertions_failed: ${assertionsFailed}`);
+    if (evidence) {
+      const ofKind = (kind) => evidence.items.filter((item) => item.kind === kind);
+      const checks = ofKind('check');
+      console.log(`evidence_file: ${evidenceFile}`);
+      console.log(`required_capabilities: ${reviewCapabilities(result.required_capabilities, evidence.items)}`);
+      console.log(`dod_check_total: ${checks.length}`);
+      console.log(`dod_check_failed: ${checks.filter((item) => item.status !== 'passed').length}`);
+      console.log(`dod_prose_total: ${ofKind('prose').length}`);
+      console.log(`dod_visual_total: ${ofKind('visual').length}`);
+    }
     // Дополнительная строка, а не замена существующих полей: runner парсит
     // RESULT-блок по ключам, лишний ключ формат не ломает.
     if (warnings.length > 0) {
@@ -677,6 +1041,8 @@ async function main() {
     if (verdict.failReasons.length > 0) {
       console.log(`fail_reasons: ${verdict.failReasons.join('; ')}`);
       console.log(`issues: ${verdict.humanIssues.join('; ')}`);
+    }
+    if (verdict.failReasons.length > 0 || verdict.status === 'all_green') {
       console.log(`review_note_written: ${reviewNoteWritten}`);
     }
     console.log('---RESULT---');

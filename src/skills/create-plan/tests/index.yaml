@@ -43,3 +43,8 @@ cases:
     origin_chg: [convert-2026-09-23]
     tags: [rails, anatomy, evidence, regression-guard]
     severity: critical
+  - id: TC-CREATE-PLAN-007
+    file: cases/TC-CREATE-PLAN-007-check-form-per-requirement.yaml
+    origin_chg: ["PLAN-002 задача 5 (2026-09-26)"]
+    tags: [verification-line, check-forms, plan-quality]
+    severity: high

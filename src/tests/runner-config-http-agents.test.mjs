@@ -40,7 +40,7 @@ const DECISIONS_AGENT = Object.freeze({
   kind: 'http',
   protocol: 'decisions',
   url: 'https://openrouter.ai/api/alpha/decisions',
-  model: 'typesafe/jev-1.13',
+  model: 'vendor/decisions-model',
   auth: { kilo_oauth: true },
   timeout_s: 60,
   capabilities: ['text'],
@@ -174,8 +174,8 @@ describe('validateConfig: запись агента kind: http', () => {
 
   for (const timeout of [0, -5, '120']) {
     it(`timeout_s = ${JSON.stringify(timeout)} — ошибка`, async () => {
-      const result = await runWithConfig(baseConfig({ jev: { ...DECISIONS_AGENT, timeout_s: timeout } }));
-      assertRejected(result, '"jev"', 'timeout_s');
+      const result = await runWithConfig(baseConfig({ 'decisions-http': { ...DECISIONS_AGENT, timeout_s: timeout } }));
+      assertRejected(result, '"decisions-http"', 'timeout_s');
     });
   }
 
@@ -184,7 +184,7 @@ describe('validateConfig: запись агента kind: http', () => {
   });
 
   it('валидная запись decisions проходит проверку', () => {
-    assert.deepEqual(validateConfig(baseConfig({ jev: { ...DECISIONS_AGENT } }), makeProject()), []);
+    assert.deepEqual(validateConfig(baseConfig({ 'decisions-http': { ...DECISIONS_AGENT } }), makeProject()), []);
   });
 
   it('rails_host вне kilo и claude — ошибка: опечатка молча выключила бы проверку ответа без инструментов', async () => {
@@ -263,6 +263,23 @@ describe('validateConfig: model_io стадии', () => {
     const root = makeProject({ scripts: [PREPARE, APPLY] });
     const config = modelIoConfig({ prepare: PREPARE, apply: APPLY, options: { images: true } });
     assert.deepEqual(validateConfig(config, root), []);
+  });
+
+  // Репозиторий канона: `.workflow/src/skills` — ссылка на установленную копию,
+  // в CI каталога `.workflow/` нет; скрипт скила лежит в `src/skills/…`.
+  const CANON_PREPARE = '.workflow/src/skills/x/scripts/p.js';
+  const CANON_APPLY = '.workflow/src/skills/x/scripts/a.js';
+
+  it('путь .workflow/src/… без файла, но с файлом в src/… от корня — проходит проверку', () => {
+    const root = makeProject({ scripts: ['src/skills/x/scripts/p.js', 'src/skills/x/scripts/a.js'] });
+    const config = modelIoConfig({ prepare: CANON_PREPARE, apply: CANON_APPLY });
+    assert.deepEqual(validateConfig(config, root), []);
+  });
+
+  it('путь .workflow/src/… без файла ни там, ни в src/… — ошибка script not found', async () => {
+    const result = await runWithConfig(modelIoConfig({ prepare: CANON_PREPARE, apply: CANON_APPLY }));
+    assertRejected(result, '"review"', 'model_io.prepare script not found', CANON_PREPARE);
+    assertRejected(result, '"review"', 'model_io.apply script not found', CANON_APPLY);
   });
 });
 

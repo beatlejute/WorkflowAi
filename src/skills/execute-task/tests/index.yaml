@@ -72,3 +72,8 @@ cases:
     origin_chg: ["convert-2026-09-23"]
     tags: [rails, anatomy, regression-guard]
     severity: critical
+  - id: TC-EXECUTE-TASK-013
+    file: cases/TC-EXECUTE-TASK-013-visual-no-snapshot.yaml
+    origin_chg: ["PLAN-002 задача 9 (2026-09-26)"]
+    tags: [visual-evidence, dod-fill, dod-format-2]
+    severity: high

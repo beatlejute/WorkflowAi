@@ -11,10 +11,19 @@ review-result/
 ├── workflows/
 │   └── review.md                     # Основной воркфлоу проверки результата
 ├── knowledge/
-│   └── dod-patterns.md               # Паттерны DoD по категориям задач
-└── algorithms/
-    └── verification.md               # Алгоритм верификации реальных изменений
+│   ├── dod-patterns.md               # Паттерны DoD по категориям задач
+│   └── dod-evidence-scale.md         # Шкала оценки пункта DoD по evidence (читает prepare-review.js)
+├── algorithms/
+│   └── verification.md               # Алгоритм верификации реальных изменений
+└── scripts/
+    ├── verify-artifacts.js           # Предпроверка: гейты тикета, исполнение проверок DoD, файл evidence
+    ├── prepare-review.js             # model_io: вопросы модели по пунктам prose и visual
+    └── apply-review.js               # model_io: вердикт по ответу модели и запись ревью
 ```
+
+## Ревью тикетов с `dod_format: 2`
+
+Тикет нового формата ревьюит не этот скил, а стадия с обменом `model_io`: `verify-artifacts.js` исполняет проверки `check` пунктов DoD и пишет файл evidence, `prepare-review.js` превращает пункты `prose` и `visual` в вопросы по шкале `knowledge/dod-evidence-scale.md`, модель стадии отвечает уровнем, `apply-review.js` выносит вердикт и пишет строку в «## Ревью». Тикет, у которого все пункты — зелёные проверки `check`, уходит в `done` без модели. Скил с этим графом ревьюит тикеты без `dod_format: 2`.
 
 ## Как это работает
 

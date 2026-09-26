@@ -29,6 +29,8 @@
     "./lib/utils.mjs": "./src/lib/utils.mjs",
     "./lib/logger.mjs": "./src/lib/logger.mjs",
     "./lib/js-yaml.mjs": "./src/lib/js-yaml.mjs",
+    "./lib/check-runner.mjs": "./src/lib/check-runner.mjs",
+    "./lib/rubric-levels.mjs": "./src/lib/rubric-levels.mjs",
     "./lib/operations/tickets.mjs": "./src/lib/operations/tickets.mjs",
     "./lib/operations/plans.mjs": "./src/lib/operations/plans.mjs",
     "./lib/operations/skills.mjs": "./src/lib/operations/skills.mjs"

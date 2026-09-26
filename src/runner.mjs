@@ -23,10 +23,13 @@ const KILO_MODELS_POLL_MS = 15000;
 import { incrementMetrics } from './lib/metrics-incremental.mjs';
 import { loadRailsConfig } from './rails/rails-config.mjs';
 import { check as checkRailsOutput } from './rails/output-check.mjs';
-import { evaluate as evaluateWithModel } from './lib/model-evaluate.mjs';
-import { ModelClientError, assertModelUrl } from './lib/model-client.mjs';
+import { evaluate as evaluateWithModel, validateInput } from './lib/model-evaluate.mjs';
+import { ModelClientError, assertModelUrl, redactNetworkDetail } from './lib/model-client.mjs';
+import { buildCliJudgePrompt, parseJudgeScore, parseJudgeExtras } from './lib/skill-judge.mjs';
+import { RUBRIC_LEVEL_COUNT } from './lib/rubric-levels.mjs';
 
-// Ошибка клиента безынструментного агента → запись health-реестра. Классы и TTL —
+// Ошибка клиента безынструментного агента или класс ошибки в ответе агента с
+// командой на шаге «модель» model_io → запись health-реестра. Классы и TTL —
 // как у правил, которые ловят те же сбои CLI-агентов (configs/agent-health-rules.yaml):
 // auth — http-auth, rate_limit — claude-rate-limit, server — http-5xx-transient,
 // timeout и network — net-econnreset. Прочие классы (no_key, bad_request,
@@ -38,6 +41,19 @@ const MODEL_ERROR_HEALTH = Object.freeze({
   timeout: { class: 'transient', ttl: '5m' },
   network: { class: 'transient', ttl: '5m' },
 });
+
+/**
+ * Вопросы входа слоя оценки для агента с командой (StageExecutor._askCommandAgent):
+ * непустые уникальные id, непустой текст и ровно пять уровней. Промпт и разбор
+ * судьи фиксированы на баллах 1..5 (skill-judge.mjs), обёртка decisions-judge.js
+ * разбирает ровно пять строк таблицы (rubric-levels.mjs), а слой оценки допускает
+ * 2..10 уровней: агент без обёртки на вопрос с тремя уровнями ответил бы
+ * `score: 5` — уровнем вне шкалы. Нарушение — bad_request до запуска агента.
+ */
+function commandAgentQuestions(input) {
+  validateInput(input, { minLevels: RUBRIC_LEVEL_COUNT, maxLevels: RUBRIC_LEVEL_COUNT });
+  return input.questions;
+}
 
 // ============================================================================
 // Audit-log helpers (used by executeWithFallback hook — IMPL-83)
@@ -1202,7 +1218,7 @@ class StageExecutor {
 
     const triedInThisAttempt = [];
     let lastErr = null;
-    // Результат последней ошибки безынструментного агента (callModelAgent): её не
+    // Результат последней ошибки шага «модель» обмена model_io (callModelAgent): её не
     // бросают, а возвращают стадии как status: error с error_class.
     let lastModelFailure = null;
 
@@ -1223,7 +1239,7 @@ class StageExecutor {
         if (resolved.blocked === 'all_unhealthy' && lastErr) {
           throw lastErr;
         }
-        // Безынструментный агент последним в списке: status: error с error_class.
+        // Ошибка модели у последнего агента списка: status: error с error_class.
         if (resolved.blocked === 'all_unhealthy' && lastModelFailure) {
           return lastModelFailure;
         }
@@ -1255,7 +1271,9 @@ class StageExecutor {
           this.logger.stageStart(stageId, agentId, effectiveStage.skill);
         }
 
-        const result = agent.kind === 'http'
+        // Стадия с model_io — обмен с моделью для любого агента списка; агент
+        // kind: http другого пути не имеет.
+        const result = agent.kind === 'http' || effectiveStage.model_io
           ? await this.callModelAgent(agent, prompt, stageId, effectiveStage, agentId)
           : await this.callAgent(agent, prompt, stageId, effectiveStage.skill, agentId);
         if (result.modelError?.fallback) {
@@ -1278,7 +1296,7 @@ class StageExecutor {
         // IMPL-83: audit-log hook (success path)
         await this._auditAgentRun(stageId, effectiveStage, agentId, {
           exitCode: result.exitCode ?? 0,
-          // Ошибка безынструментной модели без смены агента (no_key, bad_response, …):
+          // Ошибка модели обмена model_io без смены агента (no_key, bad_response, …):
           // текст ошибки — в stderr, иначе история тикета получила бы empty_response.
           stderr: result.modelError ? (result.result?.error || '') : '',
           stdout: result.output || '',
@@ -1286,8 +1304,12 @@ class StageExecutor {
           agentLabel: result.agentLabel || null,
         });
 
-        // IMPL-86: normalize agent_id in ## Ревью after review-result stage
-        if ((effectiveStage.skill === 'review-result' || stageId === 'review-result') && this.context?.ticket_id) {
+        // IMPL-86: normalize agent_id in ## Ревью after review-result stage.
+        // Стадия с model_io пропускается: строку ревью с id агента пишет её скрипт
+        // применения (WORKFLOW_MODEL_AGENT), а на выходах без строки (prepare закрыл
+        // стадию сам, ошибка обмена) нормализация переписала бы агента чужой, прежней строки.
+        if ((effectiveStage.skill === 'review-result' || stageId === 'review-result') && !effectiveStage.model_io
+          && this.context?.ticket_id) {
           try {
             const tp = findTicketPathForId(this.context.ticket_id, this.projectRoot);
             if (tp) {
@@ -1452,7 +1474,7 @@ class StageExecutor {
       const skipGuard = this.fileGuard && this.fileGuard.isTrusted(stage.agent, stageId);
       if (this.fileGuard && !skipGuard) this.fileGuard.takeSnapshot();
 
-      const result = agent.kind === 'http'
+      const result = agent.kind === 'http' || stage.model_io
         ? await this.callModelAgent(agent, prompt, stageId, stage, stage.agent)
         : await this.callAgent(agent, prompt, stageId, stage.skill, stage.agent);
 
@@ -1469,10 +1491,10 @@ class StageExecutor {
   }
 
   /**
-   * Исполняет стадию безынструментным агентом (`kind: http`) по обмену `model_io`
-   * (README, «Безынструментные агенты»): prepare → слой оценки → apply. Процесс
-   * `command` не запускается — модель не касается файлов: вход собирает prepare,
-   * статус и артефакты выдаёт apply, вызов модели делает раннер.
+   * Исполняет стадию по обмену `model_io` (README, «Безынструментные агенты»):
+   * prepare → модель → apply — для любого агента стадии с `model_io` и для агента
+   * `kind: http` (другого пути у него нет). Скил стадии агент не исполняет: вход
+   * собирает prepare, статус и артефакты выдаёт apply, вызов модели делает раннер.
    *
    * 1. prepare — `node <prepare> "<промпт>"`; `status: ready` + `request_file`
    *    ведут к шагу 2, любой другой результат — результат стадии.
@@ -1480,12 +1502,15 @@ class StageExecutor {
    *    по нему goto.error отличает ошибку скрипта от отказа модели.
    * 2. Модель — вход из request_file, ответ в
    *    `.workflow/state/model-io/<стадия>-<run_id пайплайна>-<id вызова>.json`.
-   *    Ошибка клиента или слоя — `status: error` с `error_class`, шаг 3 не выполняется.
+   *    Агент `kind: http` — слой оценки, все вопросы одним запросом; агент с
+   *    командой — промпт судьи тестов скилов на каждый вопрос (_askCommandAgent).
+   *    Ошибка модели — `status: error` с `error_class`, шаг 3 не выполняется.
    * 3. apply — `node <apply> "<промпт>"` + пути запроса и ответа; его RESULT — результат стадии.
    *
    * Остановка пайплайна (killCurrentChild) прерывает вызов модели и не даёт
    * запустить apply: результат — `status: error`, класс `aborted`.
-   * Сбой скрипта prepare или apply (выход ≠ 0 без RESULT) бросается, как у CLI-агента.
+   * Сбой скрипта prepare или apply и сбой процесса агента с командой (выход ≠ 0
+   * без RESULT, таймаут) бросаются, как у CLI-агента.
    */
   async callModelAgent(agent, prompt, stageId, stage, agentId) {
     const modelIo = stage.model_io;
@@ -1545,13 +1570,18 @@ class StageExecutor {
     }
     if (signal.aborted) return stopped('model call');
 
-    // Окружение модели — как у CLI-агентов: process.env + машинный agent.env
-    // (прокси и т.п., lib/agent-env.mjs).
-    const env = buildAgentEnv(process.env, {}, { logger: this.logger, stageId });
     started = Date.now();
     let evaluation;
     try {
-      evaluation = await evaluateWithModel({ ...agent, id: agentId }, input, { env, cwd: this.projectRoot, signal });
+      evaluation = agent.kind === 'http'
+        ? await evaluateWithModel({ ...agent, id: agentId }, input, {
+          // Окружение модели — как у CLI-агентов: process.env + машинный agent.env
+          // (прокси и т.п., lib/agent-env.mjs).
+          env: buildAgentEnv(process.env, {}, { logger: this.logger, stageId }),
+          cwd: this.projectRoot,
+          signal,
+        })
+        : await this._askCommandAgent(agent, agentId, input, stageId, stage.skill, signal);
     } catch (err) {
       if (!(err instanceof ModelClientError)) throw err;
       timing.model_ms = Date.now() - started;
@@ -1593,6 +1623,75 @@ class StageExecutor {
       ...timing,
     };
     return applied;
+  }
+
+  /**
+   * Шаг «модель» обмена model_io для агента с командой — по контракту судьи тестов
+   * скилов (src/lib/skill-judge.mjs, README «Судья тестов скилов»): каждый вопрос
+   * request_file — отдельный запуск агента тем же путём, что у агентов стадий
+   * (_callAgentOnce: таймаут стадии, prompt_stdin, остановка killCurrentChild).
+   * Промпт — buildCliJudgePrompt: таблица уровней вопроса, данные и пути изображений,
+   * текст вопроса; ответ — parseJudgeScore и parseJudgeExtras. Переоценки по
+   * escalate_to нет. Результат — той же формы, что у слоя оценки (model-evaluate.mjs):
+   * `raw` — ответы агента по вопросам, `usage: null`, `cost_usd` — сумма по вопросам
+   * или null, если хотя бы один ответ цены не назвал.
+   *
+   * До первого запуска — проверка входа (commandAgentQuestions): вопрос не с пятью
+   * уровнями — bad_request. Ответ без балла или с `error_class` — ModelClientError с
+   * классом из ответа (без него — unparsed). Остановка пайплайна — aborted. Сбой
+   * процесса агента бросается как есть.
+   */
+  async _askCommandAgent(agent, agentId, input, stageId, skillId, signal) {
+    const questions = commandAgentQuestions(input);
+    const data = typeof input.data === 'string' ? input.data : JSON.stringify(input.data ?? null, null, 2);
+    const images = Array.isArray(input.images) && input.images.length > 0
+      ? `\nИзображения:\n${input.images.join('\n')}`
+      : '';
+    const started = Date.now();
+    const answers = {};
+    const raw = {};
+    let model = null;
+    let cost = 0;
+    let costKnown = true;
+    for (const question of questions) {
+      if (signal.aborted) throw new ModelClientError('aborted', `stage stopped before question ${question.id}`);
+      const prompt = buildCliJudgePrompt({
+        // Перевод строки в тексте уровня разорвал бы строку таблицы.
+        rubric: question.levels.map((level, i) => `| ${i + 1} | ${level.trim().replace(/\s*[\r\n]+\s*/g, ' ')} |`).join('\n'),
+        agent_output: data + images,
+        criterion: question.text,
+      });
+      let result;
+      try {
+        // Роль executor — как у судьи тестов скилов (skill-judge.mjs): рельсы агента не ведут.
+        // В лог — id вопроса и длина промпта, данные вопроса не копируются.
+        result = await this._callAgentOnce(agent, prompt, stageId, skillId, agentId, { WORKFLOW_RAILS_ROLE: 'executor' },
+          { promptSummary: `question=${question.id} prompt_chars=${prompt.length}` });
+      } catch (err) {
+        if (signal.aborted) throw new ModelClientError('aborted', `stage stopped during question ${question.id}`);
+        throw err;
+      }
+      const output = result.output || '';
+      const score = parseJudgeScore(output);
+      const extras = parseJudgeExtras(output);
+      if (score === null || extras.error_class) {
+        const errorClass = extras.error_class || 'unparsed';
+        throw new ModelClientError(errorClass, extras.error_class
+          ? `question ${question.id}: ${errorClass}: ${redactNetworkDetail(extras.error || '')}`
+          : `question ${question.id}: agent output has no score 1..${RUBRIC_LEVEL_COUNT}`);
+      }
+      raw[question.id] = output;
+      answers[question.id] = {
+        level: score,
+        confidence: extras.confidence,
+        probabilities: extras.probabilities,
+        reason: typeof result.result?.reason === 'string' ? result.result.reason : null,
+      };
+      model = model ?? extras.model;
+      if (extras.cost_usd === null) costKnown = false;
+      else cost += extras.cost_usd;
+    }
+    return { answers, raw, model, usage: null, cost_usd: costKnown ? cost : null, duration_ms: Date.now() - started };
   }
 
   /**
@@ -1640,8 +1739,10 @@ class StageExecutor {
    * Вызывает CLI-агента через child_process ровно один раз (без rails-ретрая).
    * `railsEnv` — переменные окружения WORKFLOW_RAILS_* дочернего процесса
    * (src/rails/README.md §11); вызывающий код — `callAgent` ниже.
+   * `promptSummary` — строка в лог вместо построчного эха промпта: промпт судьи
+   * в _askCommandAgent несёт данные вопроса целиком (дифф, вывод проверок).
    */
-  _callAgentOnce(agent, prompt, stageId, skillId, agentId = null, railsEnv = {}) {
+  _callAgentOnce(agent, prompt, stageId, skillId, agentId = null, railsEnv = {}, { promptSummary = null } = {}) {
     return new Promise((resolve, reject) => {
       const timeout = this.pipeline.execution?.timeout_per_stage || 300;
       const healthRules = agentId ? this._getHealthRules() : null;
@@ -1672,11 +1773,15 @@ class StageExecutor {
       // Логгируем команду перед запуском (вместо промпта — имя skill)
       if (this.logger) {
         this.logger.info(`RUN ${agent.command} ${[...args.slice(0, -1), skillId].join(' ')}`, stageId);
-        // Логгируем входные параметры агента (context + counters)
-        const promptLines = prompt.split('\n').filter(l => l.trim());
-        if (promptLines.length > 1) {
-          for (const line of promptLines.slice(1)) {
-            this.logger.info(`  ${line}`, stageId);
+        if (promptSummary !== null) {
+          this.logger.info(`  ${promptSummary}`, stageId);
+        } else {
+          // Логгируем входные параметры агента (context + counters)
+          const promptLines = prompt.split('\n').filter(l => l.trim());
+          if (promptLines.length > 1) {
+            for (const line of promptLines.slice(1)) {
+              this.logger.info(`  ${line}`, stageId);
+            }
           }
         }
       }
@@ -3161,6 +3266,21 @@ function validateAgentEntry(agentId, agent, errors) {
   }
 }
 
+const CANONICAL_SCRIPT_PREFIX = '.workflow/src/';
+
+/**
+ * Скрипт model_io на диске. Путь `.workflow/src/…`, которого нет, ищется ещё и по
+ * `src/…` от корня: в репозитории канона `.workflow/src/skills/<скил>` — ссылка на
+ * установленную копию ~/.workflow/skills, где новых скриптов нет до релиза, а в CI
+ * каталога `.workflow/` нет совсем (.gitignore). Запуск это не меняет: callModelAgent
+ * берёт путь как записан.
+ */
+function modelIoScriptExists(projectRoot, script) {
+  if (fs.existsSync(path.resolve(projectRoot, script))) return true;
+  return script.startsWith(CANONICAL_SCRIPT_PREFIX)
+    && fs.existsSync(path.resolve(projectRoot, 'src', script.slice(CANONICAL_SCRIPT_PREFIX.length)));
+}
+
 /** Обмен стадии с моделью: `model_io: { prepare, apply, options? }`, пути от корня проекта. */
 function validateModelIo(stageId, modelIo, projectRoot, errors) {
   if (!isPlainObject(modelIo)) {
@@ -3171,7 +3291,7 @@ function validateModelIo(stageId, modelIo, projectRoot, errors) {
     const script = modelIo[step];
     if (typeof script !== 'string' || script.trim() === '') {
       errors.push(`Stage "${stageId}" model_io missing required field: ${step}`);
-    } else if (projectRoot && !fs.existsSync(path.resolve(projectRoot, script))) {
+    } else if (projectRoot && !modelIoScriptExists(projectRoot, script)) {
       errors.push(`Stage "${stageId}" model_io.${step} script not found: ${script}`);
     }
   }

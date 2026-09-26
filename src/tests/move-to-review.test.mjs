@@ -6,14 +6,19 @@
  * Проверяются все пять исходов, потому что каждый меняет состояние доски:
  *  - обычный переезд из in-progress/;
  *  - тикет уже в review/ — пропуск, а не ошибка (агент мог переместить его сам);
- *  - тикет в done/ без секции ревью — агент закрыл его самовольно, тикет возвращается
- *    в review/, иначе работа уходит в done, минуя проверку;
- *  - тикет в done/ с ревью — пропуск, ревью уже состоялось;
+ *  - тикет в done/ — агент закрыл его самовольно, тикет возвращается в review/
+ *    независимо от таблицы «## Ревью»: строку passed в неё может дописать и сам
+ *    исполнитель, а пропуск увёл бы работу в done, минуя проверку (PLAN-002);
+ *  - тикет в archive/ — пропуск с причиной;
  *  - тикета нет ни в одной колонке — ошибка, стадия обязана упасть, а не промолчать.
  *
  * Отдельно проверяется, что updated_at не меняется: verify-artifacts сравнивает mtime
  * файлов с updated_at, чтобы убедиться, что их правил агент. Обновление поля здесь
  * ложно отклонило бы все легитимные правки.
+ *
+ * И запуск скрипта так, как его зовёт пайплайн: исход уходит в блок ---RESULT---, по
+ * нему раннер выбирает переход стадии (configs/pipeline.yaml: skipped → pick-next-task,
+ * мимо проверки; иначе → verify-artifacts).
  *
  * Запуск: node --test --import ./src/tests/_rails-home.mjs src/tests/move-to-review.test.mjs
  */
@@ -23,6 +28,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 import { parseFrontmatter } from 'workflow-ai/lib/utils.mjs';
 
@@ -38,6 +45,7 @@ const cwdBefore = process.cwd();
 process.chdir(ROOT);
 const { moveToReview, parseTicketId } = await import('../scripts/move-to-review.js');
 process.chdir(cwdBefore);
+const SCRIPT = fileURLToPath(new URL('../scripts/move-to-review.js', import.meta.url));
 
 const UPDATED_AT = '2026-09-24T08:00:00.000Z';
 
@@ -111,15 +119,46 @@ test('тикет в done/ без ревью: возвращается в review/
   assert.equal(fs.existsSync(at('review', id)), true);
 });
 
-test('тикет в done/ с ревью: пропуск — проверка уже состоялась', () => {
+test('тикет в done/ со строкой ревью passed: тоже возвращается в review/ — таблица не основание оставить его в done', () => {
   const id = 'IMPL-004';
   put('done', id, { review: '✅ passed' });
 
   const result = moveToReview(id);
 
-  assert.equal(result.status, 'skipped');
-  assert.match(result.reason, /already in done\/ with review/);
-  assert.equal(fs.existsSync(at('done', id)), true, 'тикет остался в done');
+  assert.deepEqual(result, { status: 'moved', ticket_id: id, from: 'done', to: 'review' });
+  assert.equal(fs.existsSync(at('done', id)), false, 'в done тикет не остался');
+  assert.equal(fs.existsSync(at('review', id)), true);
+});
+
+test('тикет в done/ с дописанной исполнителем строкой passed после failed: возвращается в review/, таблица цела', () => {
+  const id = 'IMPL-007';
+  const text = `${ticketText(id, { review: '❌ failed' })}| 2026-09-25 | ✅ passed | сделано, проверено | executor |\n`;
+  fs.writeFileSync(at('done', id), text, 'utf8');
+
+  const result = moveToReview(id);
+
+  assert.deepEqual(result, { status: 'moved', ticket_id: id, from: 'done', to: 'review' });
+  assert.equal(fs.existsSync(at('done', id)), false);
+  assert.equal(fs.readFileSync(at('review', id), 'utf8'), text, 'таблица ревью — запись для человека, скрипт её не трогает');
+});
+
+test('запуск стадией: тикет в done/ со строкой passed — в RESULT status: moved, код 0', () => {
+  const id = 'IMPL-008';
+  put('done', id, { review: '✅ passed' });
+
+  const run = spawnSync(process.execPath, [SCRIPT, `move-to-review\n\nContext:\n  ticket_id: ${id}`], { cwd: ROOT, encoding: 'utf8' });
+
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /---RESULT---\nstatus: moved\n/, 'skipped увёл бы пайплайн на pick-next-task мимо verify-artifacts');
+  assert.equal(fs.existsSync(at('review', id)), true);
+});
+
+test('запуск стадией без ticket_id: код 1 и status: error — стадия падает, а не молчит', () => {
+  const run = spawnSync(process.execPath, [SCRIPT], { cwd: ROOT, encoding: 'utf8' });
+
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /No ticket_id/);
+  assert.match(run.stdout, /---RESULT---\nstatus: error\n/);
 });
 
 test('тикет в archive/: пропуск с причиной', () => {
