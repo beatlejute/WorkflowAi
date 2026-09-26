@@ -57,8 +57,30 @@ pipeline:
       command: "claude"
       args: ["--model", "claude-opus-5", "--permission-mode", "bypassPermissions", "-p"]
       workdir: "."
+      # Цена вызова судьи тестов скилов — для оценки перед прогоном: замер 2026-09-22,
+      # 207 вызовов claude-opus-4-7 ($0.222). Для claude-opus-5 цена не измерена.
+      cost_per_call: 0.222
       capabilities: [text, multimodal]
       description: "Claude Opus — мощная модель, поддержка изображений"
+
+    # Судья тестов скилов на модели решений Jev (README, «Судья тестов скилов»):
+    # безынструментный агент, исполнителем не назначается. Уверенность ниже
+    # escalate_below и любой отказ HTTP — оценку даёт escalate_to. Цена — среднее
+    # пилота 2026-09-24 ($0.000086 за вызов, 201 вызов). Таймаут вызова — таймаут
+    # судьи скила (execution.judge_timeout_s, по умолчанию 180 с). Ключ — только
+    # переменная окружения OPENROUTER_API_KEY. В judge_agent скилов не стоит: смена
+    # судьи по умолчанию — решение по перемеру согласия (src/scripts/compare-judges.js).
+    jev:
+      kind: http
+      protocol: decisions
+      url: "https://openrouter.ai/api/alpha/decisions"
+      model: "typesafe/jev-1.13"
+      auth: { env: OPENROUTER_API_KEY }
+      escalate_to: claude-opus
+      escalate_below: 0.8
+      cost_per_call: 0.0001
+      capabilities: [text]
+      description: "Jev (TypeSafe) через OpenRouter — судья тестов скилов; исполнителем не назначается"
 
     kilo-code:
       command: "kilo"

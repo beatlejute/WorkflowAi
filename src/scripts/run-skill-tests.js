@@ -21,6 +21,15 @@ import {
   railsNotEngagedVerdict,
   outputCheckVerdict
 } from '../lib/rails-run-state.mjs';
+import {
+  runJudge,
+  judgeAgentErrors,
+  judgeCallCost,
+  judgeClientEnv,
+  judgeKeyMissing,
+  createJudgeRunState,
+  DEFAULT_JUDGE_CALL_COST
+} from '../lib/skill-judge.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -84,6 +93,42 @@ function resolveAgentScriptArgs(agentConfig) {
 // Был жёстко 60 с — на длинных ответах коуча судья не успевал (TC-COACH-001/002, 2026-09-21/22),
 // trial оставался без оценки.
 let JUDGE_TIMEOUT_S = 180;
+
+// Состояние судей на весь прогон: судья kind: http без ключа предупреждает один
+// раз, дальше попытки сразу уходят к escalate_to (skill-judge.mjs).
+const judgeRunState = createJudgeRunState();
+
+// Ключи безынструментных агентов (`auth.env`) нужны только клиенту судьи.
+// Исполнители кейсов — в том числе бесплатные модели сторонних провайдеров —
+// наследуют окружение раннера целиком (agent-spawner → buildAgentEnv), поэтому
+// ключи снимаются с process.env до первого запуска исполнителя, а клиент судьи
+// получает снимок окружения, сделанный до этого, с машинным слоем agent.env.
+let judgeHttpEnv = null;
+
+function isolateModelKeys(pipelineConfig) {
+  if (judgeHttpEnv) return;
+  const snapshot = { ...process.env };
+  // На Windows имя переменной окружения не зависит от регистра (model-client, envValue).
+  const norm = (name) => (process.platform === 'win32' ? name.toUpperCase() : name);
+  const names = new Set(Object.values(pipelineConfig.agents || {})
+    .filter(agent => agent?.kind === 'http' && typeof agent.auth?.env === 'string')
+    .map(agent => norm(agent.auth.env)));
+  for (const key of Object.keys(process.env)) {
+    if (names.has(norm(key))) delete process.env[key];
+  }
+  judgeHttpEnv = judgeClientEnv(snapshot, { stageId: 'judge' });
+}
+
+function judgeContext(pipelineConfig, extra = {}) {
+  return {
+    agents: pipelineConfig.agents || {},
+    timeoutS: JUDGE_TIMEOUT_S,
+    state: judgeRunState,
+    ...(judgeHttpEnv ? { clientOptions: { env: judgeHttpEnv } } : {}),
+    log: (line) => console.log(line),
+    ...extra
+  };
+}
 
 function railsYamlExists(root, skill) {
   if (!skill) return false;
@@ -646,6 +691,11 @@ function validateAgents(agentIds, pipelineConfig, { role = 'target' } = {}) {
     }
   }
 
+  if (role === 'judge') {
+    const errors = agentIds.flatMap(id => judgeAgentErrors(id, agents));
+    if (errors.length > 0) throw new Error(errors.join('; '));
+  }
+
   return true;
 }
 
@@ -917,8 +967,7 @@ function extractPassThreshold(rubricContent) {
 }
 
 async function runCalibrationCheck(skillName, rubricName, calibrationFiles, pipelineConfig, judgeAgentId) {
-  const judgeAgentConfig = pipelineConfig.agents[judgeAgentId];
-  if (!judgeAgentConfig) {
+  if (!pipelineConfig.agents?.[judgeAgentId]) {
     throw new Error(`Judge agent not found: ${judgeAgentId}`);
   }
 
@@ -928,57 +977,46 @@ async function runCalibrationCheck(skillName, rubricName, calibrationFiles, pipe
   const goodContent = fs.readFileSync(calibrationFiles.good, 'utf8');
   const badContent = fs.readFileSync(calibrationFiles.bad, 'utf8');
 
-  const judgePrompt = (agentOutput, task) => `You are a judge evaluating the output of an AI agent.
-
-## Rubric
-${rubricContent}
-
-## Target Agent Output
-${agentOutput}
-
-## Task
-${task}
-
-Please evaluate the output according to the rubric and provide a score from 1 to 5.
-Output format:
----RESULT---
-score: <number 1-5>
-reason: <brief explanation>
----RESULT---`;
-
   const extractGoodResponse = (content) => {
     const match = content.match(/## Ответ агента[\s\S]*?^---$/m);
     return match ? match[0] : content;
   };
 
-  const goodOutput = extractGoodResponse(goodContent);
-  const badOutput = extractGoodResponse(badContent);
+  const judgeInput = (agentOutput, criterion) => ({
+    rubric_file: `${skillName}/tests/rubrics/${rubricName}.md`,
+    rubric: rubricContent,
+    criterion,
+    agent_output: agentOutput,
+    ticket_files: ''
+  });
 
   // Судьи калибровки идут в каталоге раннера, то есть в настоящем проекте. Писать им
   // незачем: граница записи — пустой временный каталог, снимается после вызова.
   const calibSandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-calib-'));
-  const calibOpts = { timeout: JUDGE_TIMEOUT_S, railsRole: 'executor', env: { WORKFLOW_SANDBOX_ROOT: calibSandbox } };
-  let goodResult;
-  let badResult;
+  const ctx = judgeContext(pipelineConfig, { env: { WORKFLOW_SANDBOX_ROOT: calibSandbox } });
+  let good;
+  let bad;
   try {
-    [goodResult, badResult] = await Promise.all([
-      spawnAgent(judgeAgentConfig, judgePrompt(goodOutput, 'Evaluate the good response'), calibOpts),
-      spawnAgent(judgeAgentConfig, judgePrompt(badOutput, 'Evaluate the bad response'), calibOpts)
+    [good, bad] = await Promise.all([
+      runJudge(judgeAgentId, judgeInput(extractGoodResponse(goodContent), 'Evaluate the good response'), ctx),
+      runJudge(judgeAgentId, judgeInput(extractGoodResponse(badContent), 'Evaluate the bad response'), ctx)
     ]);
   } finally {
     try { fs.rmSync(calibSandbox, { recursive: true, force: true }); } catch {}
   }
 
-  const goodScore = parseJudgeResult(goodResult.output)?.score || 3;
-  const badScore = parseJudgeResult(badResult.output)?.score || 3;
+  // Ответ без балла — ошибка калибровки, а не тройка: прежде сломанный судья
+  // проваливал калибровку как «miscalibrated».
+  const errors = [good.error && `good: ${good.error}`, bad.error && `bad: ${bad.error}`].filter(Boolean);
 
   return {
     rubricName,
     threshold,
-    goodScore,
-    badScore,
-    goodPassed: goodScore >= threshold,
-    badPassed: badScore < threshold
+    goodScore: good.score,
+    badScore: bad.score,
+    goodPassed: good.score !== null && good.score >= threshold,
+    badPassed: bad.score !== null && bad.score < threshold,
+    ...(errors.length > 0 ? { error: errors.join('; ') } : {})
   };
 }
 
@@ -1003,6 +1041,15 @@ async function runCalibrationGate(skillName, pipelineConfig) {
     console.log(`[Runner] Calibrating rubric: ${rubricName}`);
     const result = await runCalibrationCheck(skillName, rubricName, files, pipelineConfig, judgeAgent);
     results.push(result);
+
+    if (result.error) {
+      console.error(`[Runner] ABORT: judge failed on calibration — rubric '${rubricName}': ${result.error}`);
+      return {
+        passed: false,
+        calibrations: results,
+        error: `judge failed on calibration — rubric '${rubricName}': ${result.error}`
+      };
+    }
 
     if (!result.goodPassed) {
       console.error(`[Runner] ABORT: judge miscalibrated — rubric '${rubricName}' requires fix (good score=${result.goodScore}, expected ≥${result.threshold})`);
@@ -1039,6 +1086,42 @@ async function writeTrialOutput(skillName, caseId, agentId, trialNum, output) {
   
   fs.writeFileSync(trialFile, output, 'utf8');
   return trialFile;
+}
+
+function judgeRecordPath(skillName, caseId, agentId, trialNum) {
+  return path.join(findSkillsDir(), skillName, 'tests', 'cases', caseId, 'current', agentId, `trial-${trialNum}.judge.json`);
+}
+
+/**
+ * Запись вызова судьи рядом с `trial-<N>.md` (skill-judge.mjs): вход, промпт,
+ * сырой ответ, балл, уверенность, эскалация, цена. По ней compare-judges.js
+ * перемеряет согласие судей без повторного прогона исполнителей. Пишется и при
+ * ошибке судьи; от --skip-meta-write не зависит, как и сам `trial-<N>.md`.
+ */
+function writeJudgeRecord(skillName, caseId, agentId, trialNum, record) {
+  const file = judgeRecordPath(skillName, caseId, agentId, trialNum);
+  ensureDir(path.dirname(file));
+  fs.writeFileSync(file, JSON.stringify(record, null, 2), 'utf8');
+}
+
+function removeJudgeRecord(skillName, caseId, agentId, trialNum) {
+  try {
+    fs.rmSync(judgeRecordPath(skillName, caseId, agentId, trialNum), { force: true });
+  } catch {}
+}
+
+function removeStaleJudgeRecords(skillName, caseId, agentId, trials) {
+  const dir = path.dirname(judgeRecordPath(skillName, caseId, agentId, 1));
+  let names = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const match = name.match(/^trial-(\d+)\.judge\.json$/);
+    if (match && Number(match[1]) > trials) removeJudgeRecord(skillName, caseId, agentId, Number(match[1]));
+  }
 }
 
 /**
@@ -1118,14 +1201,19 @@ async function writeJudgeResults(skillName, caseId, results) {
   fs.writeFileSync(judgePath, JSON.stringify(judgeData, null, 2), 'utf8');
 }
 
-async function preFlightApproval(numCases, numModels, trials, judgeAgentCost = 0.02, targetAgentCost = 0.01) {
+// Цена вызова судьи — `cost_per_call` записи агента-судьи (skill-judge.mjs,
+// judgeCallCost); прежняя константа $0.02 была в 11 раз ниже замера claude-opus
+// ($0.222 за вызов, 207 вызовов 2026-09-22).
+async function preFlightApproval(numCases, numModels, trials, judgeAgentCost = DEFAULT_JUDGE_CALL_COST, targetAgentCost = 0.01) {
   const totalLlms = numCases * numModels * trials;
   const judgeCalls = numCases * numModels * trials;
   const targetCalls = numCases * numModels * trials;
-  const estimatedCost = (judgeCalls * judgeAgentCost) + (targetCalls * targetAgentCost);
-  
+  const judgeCost = judgeCalls * judgeAgentCost;
+  const targetCost = targetCalls * targetAgentCost;
+  const estimatedCost = judgeCost + targetCost;
+
   console.log(`[Runner] Estimated LLM calls: ${totalLlms} (target: ${targetCalls}, judge: ${judgeCalls})`);
-  console.log(`[Runner] Estimated cost: ~$${estimatedCost.toFixed(2)}`);
+  console.log(`[Runner] Estimated cost: ~$${estimatedCost.toFixed(2)} (judge ~$${judgeCost.toFixed(2)} at $${judgeAgentCost.toFixed(4)}/call, target ~$${targetCost.toFixed(2)})`);
   
   if (!process.argv.includes('--yes')) {
     const readline = await import('readline');
@@ -1150,8 +1238,7 @@ async function preFlightApproval(numCases, numModels, trials, judgeAgentCost = 0
 async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judgeAgentId, pipelineConfig, options = {}) {
   const { trials = 3, timeout = 300 } = options;
   
-  const judgeAgentConfig = pipelineConfig.agents[judgeAgentId];
-  if (!judgeAgentConfig) {
+  if (!pipelineConfig.agents?.[judgeAgentId]) {
     throw new Error(`Judge agent not found: ${judgeAgentId}`);
   }
 
@@ -1257,17 +1344,25 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
         agentId,
         trial,
         agentConfig: resolveAgentScriptArgs(agentConfig),
-        judgeAgentConfig,
         rubric,
         testCase
       });
     }
   }
 
+  // Записи судьи попыток, которых в этом прогоне нет (прошлый прогон с большим
+  // числом попыток), иначе читались бы compare-judges.js как текущие.
+  for (const agentId of targetAgents) {
+    removeStaleJudgeRecords(skillName, caseId, agentId, trials);
+  }
+
   const allResults = await Promise.all(
     allTasks.map(async (task) => {
       const taskSuffix = `${caseId}-${task.agentId}-t${task.trial}`;
       let taskWorkdir = null;
+      // Запись судьи прошлого прогона той же попытки читалась бы как текущая
+      // (compare-judges.js), если исполнитель упадёт раньше судьи.
+      removeJudgeRecord(skillName, caseId, task.agentId, task.trial);
       try {
         taskWorkdir = createTestWorkdir(skillName, taskSuffix);
         const targetPrompt = buildTargetPrompt(taskWorkdir);
@@ -1299,51 +1394,44 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
           }
         }
 
-        const judgePrompt = `You are a judge evaluating the output of an AI agent.
-
-## Rubric
-${rubric}
-
-## Target Agent Output
-${targetOutput.output || targetOutput.status || 'No output'}
-${ticketFilesSection}
-## Task
-${rubricCriterion || testCase.description || testCase.name || 'Evaluate the response'}
-
-Please evaluate the output according to the rubric and provide a score from 1 to 5.
-Output format:
----RESULT---
-score: <number 1-5>
-reason: <brief explanation>
----RESULT---`;
-
-        // Судья запускается в каталоге раннера, то есть в настоящем проекте, и пишет
-        // ему незачем: та же граница записи, что у исполнителя.
-        const judgeResult = await spawnAgent(task.judgeAgentConfig, judgePrompt, {
-          timeout: JUDGE_TIMEOUT_S,
+        // Судья CLI запускается в каталоге раннера, то есть в настоящем проекте, и
+        // пишет ему незачем: та же граница записи, что у исполнителя.
+        const judgeRecord = await runJudge(judgeAgentId, {
+          rubric_file: `${skillName}/tests/rubrics/${rubricName}.md`,
+          rubric,
+          criterion: rubricCriterion || testCase.description || testCase.name || 'Evaluate the response',
+          agent_output: targetOutput.output || targetOutput.status || 'No output',
+          ticket_files: ticketFilesSection
+        }, judgeContext(pipelineConfig, {
           stageId: `${caseId}-judge-${task.agentId}-trial-${task.trial}`,
-          railsRole: 'executor',
           env: { WORKFLOW_SANDBOX_ROOT: taskWorkdir }
-        });
-
-        let score = 3;
-        const parsed = parseJudgeResult(judgeResult.output);
-        if (parsed && parsed.score) {
-          score = parsed.score;
-        }
+        }));
 
         await writeTrialOutput(skillName, caseId, task.agentId, task.trial, targetOutput.output || '');
+        writeJudgeRecord(skillName, caseId, task.agentId, task.trial, judgeRecord);
 
-        return {
+        const trialBase = {
           trial: task.trial,
           agentId: task.agentId,
-          score,
           output: targetOutput.output || '',
-          judge_output: judgeResult.output || '',
-          // rails.failed — ответ без процедуры скила при хуках на месте: оценка судьи не спасает
-          passed: score >= 4 && !targetOutput.rails?.failed,
+          judge_output: judgeRecord.escalation?.raw_output ?? judgeRecord.raw_output ?? '',
           l1: evaluateTrialL1(targetOutput.output || '', task.testCase),
           ...(targetOutput.rails ? { rails: targetOutput.rails } : {}),
+          ...(judgeRecord.escalated ? { judge_escalated: true } : {}),
+          ...(judgeRecord.fallback ? { judge_fallback: judgeRecord.fallback } : {})
+        };
+
+        // Ответ судьи без балла — ошибка попытки, а не балл 3 (skill-judge.mjs).
+        if (judgeRecord.error) {
+          console.error(`[Runner] Judge errored: ${task.agentId} trial ${task.trial} — ${judgeRecord.error}`);
+          return { ...trialBase, score: null, error: `judge: ${judgeRecord.error}`, passed: false, errored: true };
+        }
+
+        return {
+          ...trialBase,
+          score: judgeRecord.score,
+          // rails.failed — ответ без процедуры скила при хуках на месте: оценка судьи не спасает
+          passed: judgeRecord.passed && !targetOutput.rails?.failed,
           errored: false
         };
       } catch (err) {
@@ -1476,22 +1564,6 @@ function describeL1Failures(l2Results) {
     }
   }
   return lines;
-}
-
-function parseJudgeResult(output) {
-  if (!output) return null;
-  
-  const scoreMatch = output.match(/score:\s*(\d+)/i);
-  const reasonMatch = output.match(/reason:\s*(.+)/i);
-  
-  if (scoreMatch) {
-    return {
-      score: parseInt(scoreMatch[1], 10),
-      reason: reasonMatch ? reasonMatch[1].trim() : ''
-    };
-  }
-  
-  return null;
 }
 
 function aggregateResults(results, testCase) {
@@ -1636,6 +1708,7 @@ async function runTestsForSkill(skillName, opts) {
   try {
     const index = loadIndexYaml(skillName);
     const pipelineConfig = loadPipelineConfig(opts.pipeline || null);
+    isolateModelKeys(pipelineConfig);
 
     const defaultTargetAgents = index.execution?.target_agents || [];
     const judgeAgent = index.execution?.judge_agent || null;
@@ -1735,7 +1808,16 @@ async function runTestsForSkill(skillName, opts) {
     if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent && anyHasRubric) {
       const trials = opts.fast ? 1 : 3;
       const totalModels = effectiveTargetAgents.length;
-      await preFlightApproval(casesWithRubric.length, totalModels, trials);
+      // HTTP-судья без ключа не ответит ни разу: каждую оценку даст escalate_to.
+      const noKey = judgeKeyMissing(judgeAgent, pipelineConfig.agents, judgeHttpEnv || process.env);
+      if (noKey) {
+        console.log(`[Runner] ⚠ judge ${judgeAgent}: ${noKey} — все оценки даст ${pipelineConfig.agents[judgeAgent].escalate_to}, оценка цены — по нему`);
+      }
+      const judgeCost = judgeCallCost(judgeAgent, pipelineConfig.agents, { allEscalate: Boolean(noKey) });
+      if (judgeCost.missing.length > 0) {
+        console.log(`[Runner] ⚠ цена судьи не задана (cost_per_call): ${judgeCost.missing.join(', ')} — в оценке $${DEFAULT_JUDGE_CALL_COST} за вызов`);
+      }
+      await preFlightApproval(casesWithRubric.length, totalModels, trials, judgeCost.cost);
     }
 
     let secretScanFailed = false;

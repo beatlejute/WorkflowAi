@@ -6,7 +6,10 @@
  *
  * Вход:  { data, images?, questions: [{ id, text, levels: [уровень 1, …, уровень n] }] }
  * Выход: { answers: { <id>: { level, confidence, probabilities, reason } },
- *          model, usage, cost_usd, duration_ms }
+ *          raw, model, usage, cost_usd, duration_ms }
+ *
+ * `raw` — ответ модели как есть: `answers` провайдера для decisions, текст для
+ * chat. Его сохраняет запись вызова судьи тестов скилов (skill-judge.mjs).
  *
  * `level` — номер уровня 1..n.
  *   - decisions: индекс наибольшей вероятности + 1, при равенстве — меньший (правило
@@ -232,6 +235,7 @@ export async function evaluate(agent, input, options = {}) {
   }
   return {
     answers: result.answers,
+    raw: agent.protocol === 'decisions' ? result.response.answers : result.response.text,
     model: result.response.model,
     usage: result.response.usage,
     cost_usd: result.response.cost_usd,

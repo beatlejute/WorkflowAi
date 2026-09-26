@@ -76,6 +76,10 @@ describe('model-evaluate: decisions', () => {
       assert.equal(result.model, 'typesafe/jev-1.13-20260917');
       assert.equal(result.cost_usd, 0.000126672);
       assert.equal(typeof result.duration_ms, 'number');
+      // raw — answers провайдера как есть, с его score и legend
+      assert.deepEqual(result.raw, {
+        q1: { type: 'score', score: 0, legend: {}, probabilities: { 3: 0.9, 4: 0.1 }, confidence: 0.9 },
+      });
     });
   });
 
@@ -135,6 +139,7 @@ describe('model-evaluate: chat', () => {
 
       assert.deepEqual(result.answers.q1, { level: 2, confidence: null, probabilities: null, reason: 'Нет тестов' });
       assert.equal(result.cost_usd, 0.002);
+      assert.equal(result.raw, reply, 'raw — текст ответа модели как есть');
 
       const { messages } = server.requests[0].json;
       assert.equal(messages[0].role, 'system');
