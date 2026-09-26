@@ -56,7 +56,7 @@ import fs from 'fs';
 import path from 'path';
 import http from 'http';
 import https from 'https';
-import { execSync } from 'child_process';
+import { exec } from 'child_process';
 
 const projectRoot = process.cwd();
 const mcpConfigPath = path.join(projectRoot, '.mcp.json');
@@ -143,15 +143,15 @@ function pingHttp(url, timeoutMs = 3000) {
   });
 }
 
+// Поиск асинхронный: пинги http-серверов идут параллельно, а их таймаут — таймер
+// этого же процесса. execSync останавливал цикл событий, пока отрабатывали cmd.exe и
+// where: соединение не шло, таймер тикал, и при поиске дольше 3 с живой сервер
+// получал «timeout 3000ms» (воспроизведено медленным PATH). Вероятная причина
+// падений check-mcp.test.mjs на windows-latest; полного лога CI нет.
 function commandExists(cmd) {
-  if (!cmd) return false;
+  if (!cmd) return Promise.resolve(false);
   const probe = process.platform === 'win32' ? `where ${cmd}` : `command -v ${cmd}`;
-  try {
-    execSync(probe, { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
+  return new Promise((resolve) => exec(probe, (err) => resolve(!err)));
 }
 
 function isEnabled(name, settings) {
@@ -179,11 +179,14 @@ async function checkServer(name, cfg, settings) {
   };
 
   if (httpUrl) {
+    // Пинг стартует следующим витком цикла, когда поиски stdio-команд уже запущены:
+    // сам запуск процесса синхронный, и его пауза иначе попала бы в таймаут пинга.
+    await new Promise((resolve) => setImmediate(resolve));
     const ping = await pingHttp(httpUrl);
     result.reachable = ping.ok;
     result.detail = ping.ok ? `HTTP ${ping.status}` : ping.reason;
   } else {
-    const ok = commandExists(cfg.command);
+    const ok = await commandExists(cfg.command);
     result.reachable = ok;
     result.detail = ok ? 'command found in PATH' : 'command not in PATH';
   }

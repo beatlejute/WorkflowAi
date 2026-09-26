@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import fs, { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename, resolve } from 'node:path';
 import { readMarker } from '../lib/marker.mjs';
 import { packageVersion } from '../lib/package-version.mjs';
-import { PipelineRunner } from '../runner.mjs';
+import { PipelineRunner, runPipeline } from '../runner.mjs';
 
 const BIN = resolve(process.cwd(), 'bin/workflow.mjs');
 
@@ -48,6 +48,21 @@ function wait(ms) {
 }
 
 /**
+ * Маркер виден с момента link, а свой временный файл writeMarker удаляет следующим
+ * вызовом. Раннер, убитый между ними, оставил бы временный файл рядом с маркером:
+ * на Windows kill завершает процесс без finally. Поэтому раннер убивается только
+ * после того, как временного файла не стало. Если он не исчез за срок, тест на
+ * остатки падает и показывает утечку.
+ */
+async function waitTempGone(root) {
+  const logsDir = join(root, '.workflow', 'logs');
+  for (let i = 0; i < 50; i++) {
+    if (!readdirSync(logsDir).some(n => n.includes('.tmp.'))) { return; }
+    await wait(100);
+  }
+}
+
+/**
  * Запускает раннер и возвращает маркер живого пайплайна.
  * Маркер должен быть полным с первой же записи — дозаписи больше нет.
  */
@@ -61,7 +76,10 @@ async function runAndReadMarker(root, env = {}) {
   try {
     for (let i = 0; i < 100; i++) {
       const marker = readMarker(root);
-      if (marker && marker.run_id) { return marker; }
+      if (marker && marker.run_id) {
+        await waitTempGone(root);
+        return marker;
+      }
       if (child.exitCode !== null) { break; }
       await wait(100);
     }
@@ -110,6 +128,33 @@ test('run_id matches the log file name', async () => {
     assert.ok(!marker.pipeline_log.includes('\u005c'), marker.pipeline_log);
     assert.ok(existsSync(join(root, marker.pipeline_log)), 'файл лога не найден по pipeline_log');
   } finally {
+    cleanup(root);
+  }
+});
+
+test('the log file exists by the time the marker appears', async () => {
+  const root = makeProject();
+  // Проверка в момент link, которым маркер появляется в каталоге. Опросом окно
+  // между маркером и логом ловится лишь изредка (тест выше упал так на CI
+  // Windows под c8 один раз), а здесь порядок проверяется на каждом прогоне.
+  const originalLink = fs.linkSync;
+  let logExisted = null;
+  fs.linkSync = (existingPath, newPath) => {
+    if (basename(String(newPath)) !== '.pipeline.lock') { return originalLink(existingPath, newPath); }
+    const payload = JSON.parse(readFileSync(existingPath, 'utf8'));
+    logExisted = existsSync(join(root, payload.pipeline_log));
+    // Маркер не публикуем: раннер получает отказ lock'а, пайплайн не стартует.
+    throw Object.assign(new Error('stop before the marker'), { code: 'EIO' });
+  };
+  try {
+    const result = await runPipeline([
+      '--project', root,
+      '--config', join(root, '.workflow', 'config', 'pipeline.yaml')
+    ]);
+    assert.equal(result.exitCode, 1);
+    assert.equal(logExisted, true, 'маркер появился раньше файла лога');
+  } finally {
+    fs.linkSync = originalLink;
     cleanup(root);
   }
 });

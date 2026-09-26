@@ -41,7 +41,7 @@ function runNodeTest(fixture, capMs, { budgetMs = SELF_EXIT_BUDGET_MS, tmp = nul
     // («run() is being called recursively»), поэтому убираем его.
     const env = { ...process.env, WORKFLOW_TEST_WORKER_CAP_MS: String(capMs) };
     delete env.NODE_TEST_CONTEXT;
-    // свой временный каталог дочернего прогона: его tmpdir() — только его
+    // Свой временный каталог дочернего прогона: его tmpdir() — только его
     if (tmp) Object.assign(env, { TMPDIR: tmp, TEMP: tmp, TMP: tmp });
     const child = spawn(
       process.execPath,
@@ -235,8 +235,9 @@ test('преднагрузка убирает свой каталог, даже 
   // навсегда. За один прогон набора так накапливалось 9 каталогов.
   //
   // Дочерний прогон получает собственный временный каталог. В общем %TEMP% в это
-  // же время заводят свои дома соседние файлы набора, и под `npm run coverage` на
-  // CI Windows 2026-09-25 чужой живой каталог засчитался утечкой.
+  // же время заводят свои дома соседние файлы набора, и прежняя проверка засчитывала
+  // чужой живой каталог утечкой — воспроизведено под нагрузкой. На CI Windows
+  // 2026-09-25 тест падал с таким сообщением под `npm test` и под `npm run coverage`.
   const tmp = mkdtempSync(path.join(tmpdir(), 'watchdog-tmp-'));
   try {
     const run = await runNodeTest('worker-overrides-home.mjs', 60_000, { tmp });

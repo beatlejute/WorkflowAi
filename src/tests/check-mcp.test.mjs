@@ -130,7 +130,10 @@ test('живой http-сервер и найденная stdio-команда �
       });
       writeSettings(root, { enableAllProjectMcpServers: true });
       const r = await run(root);
-      assert.equal(r.status, 'ok', r.out);
+      // Причины сбоя — первой строкой: аннотация CI показывает только её, а вывод
+      // скрипта начинается с заголовка, одинакового при любом сбое.
+      const problems = r.out.split(/\r?\n/).filter((line) => /^\s+- /.test(line)).map((line) => line.trim());
+      assert.equal(r.status, 'ok', `${problems.join('; ') || r.reason}\n${r.out}`);
       assert.match(r.reason, /2 servers reachable/);
     } finally {
       server.close();

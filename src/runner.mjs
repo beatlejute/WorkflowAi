@@ -3394,6 +3394,23 @@ async function runPipeline(argv = process.argv.slice(2)) {
   // окружения, и порядок полей в литерале не должен на это влиять.
   const startedByIdValue = startedById();
 
+  // Файл лога создаётся до lock'а: маркер виден наблюдателям с момента link, и
+  // pipeline_log в нём обязан вести к существующему файлу. Раньше файл создавал
+  // Logger уже после записи маркера — читатель, успевший между ними, лога не
+  // находил, а если раннер в это окно убивали, файл не появлялся вовсе (задержка
+  // после link воспроизводит падение теста «run_id matches the log file name» на
+  // CI Windows под c8 с тем же сообщением). Флаг 'a'
+  // не трогает уже существующий файл. Если lock не возьмётся, пустой файл
+  // остаётся: при совпавшем run_id (точность — секунда) это лог победившего
+  // запуска, и удалять его нельзя.
+  try {
+    fs.mkdirSync(path.dirname(logFilePath), { recursive: true });
+    fs.closeSync(fs.openSync(logFilePath, 'a'));
+  } catch (err) {
+    console.error(`[runner] failed to create log file: ${err.message}`);
+    return { exitCode: 1, error: 'Failed to create pipeline log', details: err.message };
+  }
+
   try {
     writeMarker(projectRoot, {
       pid: process.pid,
