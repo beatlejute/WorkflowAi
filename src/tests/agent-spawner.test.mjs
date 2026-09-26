@@ -57,6 +57,32 @@ describe('spawnAgent — Успешный spawn', () => {
 // ============================================================================
 // Test: Обработка ошибок (non-zero exit)
 // ============================================================================
+// prompt_stdin: промпт идёт через stdin, а не последним аргументом — аргумент
+// командной строки на Windows ограничен 32767 символами, а промпт судьи с выводом
+// исполнителя бывает длиннее.
+describe('spawnAgent — prompt_stdin', () => {
+  it('промпт длиннее 32767 символов доходит через stdin целиком, в аргументах его нет', async () => {
+    const prompt = `начало\n${'x'.repeat(40000)}\nконец`;
+    const result = await spawnAgent({
+      command: 'node',
+      args: ['-e', "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{console.log('len='+s.length+' args='+(process.argv.length-1))})"],
+      prompt_stdin: true
+    }, prompt, { timeout: 30 });
+
+    assert.match(result.output, new RegExp(`len=${prompt.length} args=0`));
+  });
+
+  // Агент вышел, не прочитав stdin: запись промпта от 64 КБ даёт EPIPE/EOF. Это
+  // отказ агента (NON_ZERO_EXIT), а не падение процесса-раннера.
+  it('агент вышел до чтения большого промпта — отказ с кодом выхода, процесс жив', async () => {
+    await assert.rejects(spawnAgent({
+      command: 'node',
+      args: ['-e', 'process.exit(1)'],
+      prompt_stdin: true
+    }, 'x'.repeat(200000), { timeout: 30 }), (err) => err.code === 'NON_ZERO_EXIT');
+  });
+});
+
 describe('spawnAgent — Обработка ошибок', () => {
   it('должен reject с ошибкой при non-zero exit code', async () => {
     const agentConfig = {

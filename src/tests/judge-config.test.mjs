@@ -1,11 +1,11 @@
 /**
- * Судья Jev в действующем configs/pipeline.yaml (PLAN-001, задача 19).
+ * Судьи тестов скилов в действующем configs/pipeline.yaml (PLAN-001).
  *
- * Запись `jev` — безынструментный судья тестов скилов: у неё есть CLI-агент для
- * эскалации, порог уверенности в 0..1, и она не стоит ни в одном месте, где
- * назначаются исполнители, и ни в одном `judge_agent` скилов — смена судьи по
- * умолчанию решается по перемеру согласия (compare-judges.js), а не правкой
- * конфига. Файл конфига тест только читает; копия для проверки отказа — во
+ * Судья — любой агент реестра, названный в `execution.judge_agent` скила; имени
+ * конкретного судьи тест не знает. Каждый такой агент и каждый агент с полями
+ * переоценки (`escalate_to` и соседние) проходит проверку записи судьи
+ * (skill-judge.mjs, judgeAgentErrors) — иначе прогон тестов скила упал бы до
+ * первого кейса. Файл конфига тест только читает; копия для проверки отказа — во
  * временном каталоге ОС, снимается в after().
  */
 
@@ -21,93 +21,69 @@ import { validateConfig } from '../runner.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CONFIG_PATH = join(REPO_ROOT, 'configs', 'pipeline.yaml');
-const JUDGE = 'jev';
+const SKILLS_DIR = join(REPO_ROOT, 'src', 'skills');
 
-function loadConfig(file) {
+function loadYaml(file) {
   return yaml.load(readFileSync(file, 'utf8'));
 }
 
-/** Места, где раннер назначает исполнителей стадий. */
-function executorPlaces(pipeline) {
-  const places = [];
-  if (pipeline.default_agent) places.push(['pipeline.default_agent', pipeline.default_agent]);
-  for (const id of pipeline.default_agents || []) places.push(['pipeline.default_agents', id]);
-  for (const [stageId, stage] of Object.entries(pipeline.stages || {})) {
-    if (!stage || typeof stage !== 'object') continue;
-    if (stage.agent) places.push([`${stageId}.agent`, stage.agent]);
-    for (const id of stage.agents || []) places.push([`${stageId}.agents`, id]);
-    for (const [type, byType] of Object.entries(stage.agents_by_type || {})) {
-      for (const id of byType?.agents || []) places.push([`${stageId}.agents_by_type.${type}`, id]);
-    }
+/** [skill, judge_agent] по всем скилам канона. */
+function skillJudges() {
+  const judges = [];
+  for (const skill of readdirSync(SKILLS_DIR)) {
+    const index = join(SKILLS_DIR, skill, 'tests', 'index.yaml');
+    if (!existsSync(index)) continue;
+    const judge = loadYaml(index)?.execution?.judge_agent;
+    if (judge) judges.push([skill, judge]);
   }
-  return places;
+  return judges;
 }
 
-/** Нарушения записи судьи в конфиге: проверка записи плюс места исполнителей. */
-function judgeConfigProblems(config) {
-  const pipeline = config.pipeline;
-  const agent = pipeline.agents[JUDGE];
-  if (!agent) return [`agent ${JUDGE} is missing`];
-  const problems = [...judgeAgentErrors(JUDGE, pipeline.agents)];
-  if (typeof agent.escalate_below !== 'number' || agent.escalate_below < 0 || agent.escalate_below > 1) {
-    problems.push(`escalate_below must be set in 0..1, got ${agent.escalate_below}`);
+/** Нарушения записей судей: судьи скилов и агенты с полями переоценки. */
+function judgeProblems(config) {
+  const agents = config.pipeline.agents;
+  const ids = new Set(skillJudges().map(([, judge]) => judge));
+  for (const [id, agent] of Object.entries(agents)) {
+    if (agent && (agent.escalate_to !== undefined || agent.escalate_below !== undefined || agent.escalation_share !== undefined)) ids.add(id);
   }
-  for (const [where, id] of executorPlaces(pipeline)) {
-    if (id === JUDGE) problems.push(`${JUDGE} is assigned as executor in ${where}`);
-  }
-  return problems;
+  return [...ids].flatMap((id) => judgeAgentErrors(id, agents));
 }
 
-describe('judge-config: судья jev в configs/pipeline.yaml', () => {
+describe('judge-config: судьи тестов скилов в configs/pipeline.yaml', () => {
   const tmpRoots = [];
   after(() => {
     for (const dir of tmpRoots) rmSync(dir, { recursive: true, force: true });
   });
 
-  it('jev — decisions, escalate_to на CLI-агента, порог в 0..1, не исполнитель', () => {
-    const config = loadConfig(CONFIG_PATH);
-    const agent = config.pipeline.agents[JUDGE];
-
-    assert.equal(agent.kind, 'http');
-    assert.equal(agent.protocol, 'decisions');
-    assert.deepEqual(agent.auth, { env: 'OPENROUTER_API_KEY' });
-    assert.deepEqual(judgeConfigProblems(config), []);
+  it('судья каждого скила и каждый агент с переоценкой проходят проверку записи судьи', () => {
+    assert.ok(skillJudges().length > 0, 'в каноне есть скилы с judge_agent');
+    assert.deepEqual(judgeProblems(loadYaml(CONFIG_PATH)), []);
   });
 
-  it('действующий конфиг с jev проходит проверку раннера при старте', () => {
-    const errors = validateConfig(loadConfig(CONFIG_PATH), REPO_ROOT);
-    assert.deepEqual(errors, []);
+  it('действующий конфиг проходит проверку раннера при старте', () => {
+    assert.deepEqual(validateConfig(loadYaml(CONFIG_PATH), REPO_ROOT), []);
   });
 
-  it('jev не стоит в judge_agent ни одного скила', () => {
-    const skillsDir = join(REPO_ROOT, 'src', 'skills');
-    const judges = [];
-    for (const skill of readdirSync(skillsDir)) {
-      const index = join(skillsDir, skill, 'tests', 'index.yaml');
-      if (!existsSync(index)) continue;
-      const judge = loadConfig(index)?.execution?.judge_agent;
-      if (judge) judges.push([skill, judge]);
-    }
-    assert.ok(judges.length > 0, 'в каноне есть скилы с judge_agent');
-    assert.deepEqual(judges.filter(([, judge]) => judge === JUDGE), []);
-  });
-
-  it('копия конфига с escalate_to: нет-такого — проверка находит нарушение', () => {
+  it('копия конфига, где судья скила переоценивается несуществующим агентом, — нарушение', () => {
     const dir = mkdtempSync(join(tmpdir(), 'wf-judge-config-'));
     tmpRoots.push(dir);
-    const config = loadConfig(CONFIG_PATH);
-    config.pipeline.agents[JUDGE].escalate_to = 'нет-такого';
+    const config = loadYaml(CONFIG_PATH);
+    const [, judge] = skillJudges()[0];
+    config.pipeline.agents[judge].escalate_to = 'нет-такого';
     const copy = join(dir, 'pipeline.yaml');
     writeFileSync(copy, yaml.dump(config));
 
-    const problems = judgeConfigProblems(loadConfig(copy));
+    const problems = judgeProblems(loadYaml(copy));
     assert.ok(problems.some((line) => line.includes("escalate_to 'нет-такого' not found")), problems.join('\n'));
   });
 
-  it('копия конфига с jev в default_agents — проверка находит нарушение', () => {
-    const config = loadConfig(CONFIG_PATH);
-    config.pipeline.default_agents = [...(config.pipeline.default_agents || []), JUDGE];
+  it('копия конфига, где судья скила — безынструментный агент, — нарушение', () => {
+    const config = loadYaml(CONFIG_PATH);
+    const [, judge] = skillJudges()[0];
+    config.pipeline.agents[judge] = {
+      kind: 'http', protocol: 'decisions', url: 'https://example.com/d', model: 'm', auth: { env: 'K' },
+    };
 
-    assert.ok(judgeConfigProblems(config).some((line) => line.includes('pipeline.default_agents')));
+    assert.ok(judgeProblems(config).some((line) => line.includes('must be an agent with a command')));
   });
 });

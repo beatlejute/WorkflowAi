@@ -8,7 +8,7 @@ execution:
     - gpt-luna
     - gemini-flash-lite
     - deepseek-flash
-  judge_agent: claude-opus
+  judge_agent: jev  # неуверенные оценки и отказы переоценивает escalate_to (claude-opus)
   default_timeout_s: 2400
   baseline_ref: origin/main
 

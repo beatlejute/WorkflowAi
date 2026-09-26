@@ -25,8 +25,6 @@ import {
   runJudge,
   judgeAgentErrors,
   judgeCallCost,
-  judgeClientEnv,
-  judgeKeyMissing,
   createJudgeRunState,
   DEFAULT_JUDGE_CALL_COST
 } from '../lib/skill-judge.mjs';
@@ -94,37 +92,15 @@ function resolveAgentScriptArgs(agentConfig) {
 // trial оставался без оценки.
 let JUDGE_TIMEOUT_S = 180;
 
-// Состояние судей на весь прогон: судья kind: http без ключа предупреждает один
-// раз, дальше попытки сразу уходят к escalate_to (skill-judge.mjs).
+// Состояние судей на весь прогон: предупреждение о судье без балла печатается
+// один раз на класс сбоя, дальше попытки молча уходят к escalate_to (skill-judge.mjs).
 const judgeRunState = createJudgeRunState();
-
-// Ключи безынструментных агентов (`auth.env`) нужны только клиенту судьи.
-// Исполнители кейсов — в том числе бесплатные модели сторонних провайдеров —
-// наследуют окружение раннера целиком (agent-spawner → buildAgentEnv), поэтому
-// ключи снимаются с process.env до первого запуска исполнителя, а клиент судьи
-// получает снимок окружения, сделанный до этого, с машинным слоем agent.env.
-let judgeHttpEnv = null;
-
-function isolateModelKeys(pipelineConfig) {
-  if (judgeHttpEnv) return;
-  const snapshot = { ...process.env };
-  // На Windows имя переменной окружения не зависит от регистра (model-client, envValue).
-  const norm = (name) => (process.platform === 'win32' ? name.toUpperCase() : name);
-  const names = new Set(Object.values(pipelineConfig.agents || {})
-    .filter(agent => agent?.kind === 'http' && typeof agent.auth?.env === 'string')
-    .map(agent => norm(agent.auth.env)));
-  for (const key of Object.keys(process.env)) {
-    if (names.has(norm(key))) delete process.env[key];
-  }
-  judgeHttpEnv = judgeClientEnv(snapshot, { stageId: 'judge' });
-}
 
 function judgeContext(pipelineConfig, extra = {}) {
   return {
     agents: pipelineConfig.agents || {},
     timeoutS: JUDGE_TIMEOUT_S,
     state: judgeRunState,
-    ...(judgeHttpEnv ? { clientOptions: { env: judgeHttpEnv } } : {}),
     log: (line) => console.log(line),
     ...extra
   };
@@ -668,7 +644,7 @@ function loadPipelineConfig(pipelinePath = null) {
 // role: 'target' — исполнитель кейса (target_agents скила или кейса, --agent);
 // 'judge' — судья. Безынструментный агент (`kind: http`) выполнить скил не может:
 // у него нет ни инструментов, ни файлов. Исполнителем он отклоняется до первого
-// вызова модели; судьёй допустим (PLAN-001).
+// вызова модели. Судья — только агент с командой (skill-judge.mjs, judgeAgentErrors).
 function validateAgents(agentIds, pipelineConfig, { role = 'target' } = {}) {
   const agents = pipelineConfig.agents || {};
   const availableAgents = Object.keys(agents);
@@ -1708,7 +1684,6 @@ async function runTestsForSkill(skillName, opts) {
   try {
     const index = loadIndexYaml(skillName);
     const pipelineConfig = loadPipelineConfig(opts.pipeline || null);
-    isolateModelKeys(pipelineConfig);
 
     const defaultTargetAgents = index.execution?.target_agents || [];
     const judgeAgent = index.execution?.judge_agent || null;
@@ -1808,14 +1783,15 @@ async function runTestsForSkill(skillName, opts) {
     if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent && anyHasRubric) {
       const trials = opts.fast ? 1 : 3;
       const totalModels = effectiveTargetAgents.length;
-      // HTTP-судья без ключа не ответит ни разу: каждую оценку даст escalate_to.
-      const noKey = judgeKeyMissing(judgeAgent, pipelineConfig.agents, judgeHttpEnv || process.env);
-      if (noKey) {
-        console.log(`[Runner] ⚠ judge ${judgeAgent}: ${noKey} — все оценки даст ${pipelineConfig.agents[judgeAgent].escalate_to}, оценка цены — по нему`);
-      }
-      const judgeCost = judgeCallCost(judgeAgent, pipelineConfig.agents, { allEscalate: Boolean(noKey) });
+      const judgeCost = judgeCallCost(judgeAgent, pipelineConfig.agents);
       if (judgeCost.missing.length > 0) {
-        console.log(`[Runner] ⚠ цена судьи не задана (cost_per_call): ${judgeCost.missing.join(', ')} — в оценке $${DEFAULT_JUDGE_CALL_COST} за вызов`);
+        console.log(`[Runner] ⚠ в записи судьи нет полей для оценки цены: ${judgeCost.missing.join(', ')} — вызов по $${DEFAULT_JUDGE_CALL_COST}, без доли переоценки — переоценка каждой оценки`);
+      }
+      // Судья, который не даст балла ни разу (нет ключа, сбой), отдаёт каждую
+      // оценку escalate_to — оценка по доле переоценки тогда занижена.
+      if (judgeCost.worst > judgeCost.cost) {
+        const calls = casesWithRubric.length * totalModels * trials;
+        console.log(`[Runner] Если судья ${judgeAgent} не даст балла ни разу, каждую оценку даст ${pipelineConfig.agents[judgeAgent].escalate_to}: судья до ~$${(calls * judgeCost.worst).toFixed(2)}`);
       }
       await preFlightApproval(casesWithRubric.length, totalModels, trials, judgeCost.cost);
     }

@@ -1717,8 +1717,11 @@ describe('Combined flags --all --severity', () => {
   it('--all --severity critical returns at least 3 tests (current state)', async () => {
     const metasBefore = snapshotRealSkillMetas();
 
+    // Реестр агентов — конфиг этого репозитория: `.workflow/config/` разработчика —
+    // копия установленной версии, и судьи скилов из канона могут там отличаться.
     const { stdout } = await runRunner(
-      ['--all', '--severity', 'critical', '--layer', 'static', '--skip-meta-write'],
+      ['--all', '--severity', 'critical', '--layer', 'static', '--skip-meta-write',
+        '--pipeline', join(PROJECT_ROOT, 'configs', 'pipeline.yaml')],
       { WORKFLOW_SKILLS_DIR: CANON_SKILLS_DIR }
     );
     const totalMatch = stdout.match(/total:\s*(\d+)/);
@@ -2253,7 +2256,7 @@ describe('WORKFLOW_SKILLS_DIR — каталог скилов раннера', (
 // ============================================================================
 // Безынструментный агент (kind: http) не исполняет кейсы. У него нет ни
 // инструментов, ни файлов — выполнить скил он не может. validateAgents
-// отклоняет его исполнителем до первого вызова модели; судьёй он допустим (PLAN-001).
+// отклоняет его исполнителем до первого вызова модели и судьёй тоже: судья — агент с командой.
 // ============================================================================
 
 describe('Безынструментный агент (kind: http) в тестах скилов', () => {
@@ -2262,8 +2265,6 @@ describe('Безынструментный агент (kind: http) в теста
   const TARGET_SKILL = `__test-http-target-${Date.now()}`;
   const JUDGE_SKILL = `__test-http-judge-${Date.now()}`;
   const PLAIN_SKILL = `__test-http-plain-${Date.now()}`;
-  const ALONE_JUDGE_SKILL = `__test-http-judge-alone-${Date.now()}`;
-  const CHAT_JUDGE_SKILL = `__test-http-judge-chat-${Date.now()}`;
   // Кейсы L2 с рубрикой: здесь раннер вызывает исполнителей. Агент-зонд пишет
   // файл-метку при вызове — по ней видно, запускался ли кто-то до отказа.
   const L2_CONTROL_SKILL = `__test-http-l2-control-${Date.now()}`;
@@ -2326,28 +2327,12 @@ describe('Безынструментный агент (kind: http) в теста
       '      command: "node"',
       '      args: ["src/tests/fixtures/mock-agent-pass.js"]',
       '      capabilities: [text]',
-      '    jev-judge:',
+      '    http-model:',
       '      kind: http',
       '      protocol: decisions',
       '      url: "http://127.0.0.1:9/api/alpha/decisions"',
-      '      model: "typesafe/jev-1.13"',
+      '      model: "vendor/model"',
       '      auth: { env: "TEST_MODEL_KEY" }',
-      '      escalate_to: mock-judge',
-      '      capabilities: [text]',
-      '    jev-alone:',
-      '      kind: http',
-      '      protocol: decisions',
-      '      url: "http://127.0.0.1:9/api/alpha/decisions"',
-      '      model: "typesafe/jev-1.13"',
-      '      auth: { env: "TEST_MODEL_KEY" }',
-      '      capabilities: [text]',
-      '    jev-chat:',
-      '      kind: http',
-      '      protocol: chat',
-      '      url: "http://127.0.0.1:9/v1/chat/completions"',
-      '      model: "vendor/chat"',
-      '      auth: { env: "TEST_MODEL_KEY" }',
-      '      escalate_to: mock-judge',
       '      capabilities: [text]',
       '    probe-control:',
       '      command: "node"',
@@ -2373,12 +2358,10 @@ describe('Безынструментный агент (kind: http) в теста
       ''
     ].join('\n'));
     writeL2Skill(L2_CONTROL_SKILL, ['probe-control']);
-    writeL2Skill(L2_TARGET_SKILL, ['probe-target', 'jev-judge']);
-    writeSkill(TARGET_SKILL, ['target_agents: [agent-pass, jev-judge]']);
-    writeSkill(JUDGE_SKILL, ['target_agents: [agent-pass]', 'judge_agent: jev-judge']);
+    writeL2Skill(L2_TARGET_SKILL, ['probe-target', 'http-model']);
+    writeSkill(TARGET_SKILL, ['target_agents: [agent-pass, http-model]']);
+    writeSkill(JUDGE_SKILL, ['target_agents: [agent-pass]', 'judge_agent: http-model']);
     writeSkill(PLAIN_SKILL, ['target_agents: [agent-pass]']);
-    writeSkill(ALONE_JUDGE_SKILL, ['target_agents: [agent-pass]', 'judge_agent: jev-alone']);
-    writeSkill(CHAT_JUDGE_SKILL, ['target_agents: [agent-pass]', 'judge_agent: jev-chat']);
   });
 
   after(() => {
@@ -2397,14 +2380,14 @@ describe('Безынструментный агент (kind: http) в теста
 
     assert.notStrictEqual(exitCode, 0, `прогон должен упасть: ${stdout}`);
     assert.match(stdout, /status: error/);
-    assert.match(stdout, /error: .*jev-judge.*tool-less \(kind: http\)/);
+    assert.match(stdout, /error: .*http-model.*tool-less \(kind: http\)/);
   });
 
   it('http-агент в --agent — ненулевой код, в выводе агент и причина', async () => {
-    const { stdout, exitCode } = await run(['--skill', PLAIN_SKILL, '--agent', 'jev-judge']);
+    const { stdout, exitCode } = await run(['--skill', PLAIN_SKILL, '--agent', 'http-model']);
 
     assert.notStrictEqual(exitCode, 0, `прогон должен упасть: ${stdout}`);
-    assert.match(stdout, /error: .*jev-judge.*tool-less \(kind: http\)/);
+    assert.match(stdout, /error: .*http-model.*tool-less \(kind: http\)/);
   });
 
   // Критерий задачи 7 — «до первого вызова модели». Слой static агентов не
@@ -2419,32 +2402,17 @@ describe('Безынструментный агент (kind: http) в теста
 
     const { stdout, exitCode } = await runRunner(l2Args(L2_TARGET_SKILL), { WORKFLOW_SKILLS_DIR: HTTP_SKILLS_DIR });
     assert.notStrictEqual(exitCode, 0, `прогон должен упасть: ${stdout}`);
-    assert.match(stdout, /error: .*jev-judge.*tool-less \(kind: http\)/);
+    assert.match(stdout, /error: .*http-model.*tool-less \(kind: http\)/);
     assert.ok(!existsSync(TARGET_MARK), 'ни один исполнитель не запускался до отказа');
   });
 
-  it('http-агент в judge_agent проходит проверку агентов', async () => {
+  // Судья — только агент с командой: модель с другим протоколом подключается
+  // CLI-обёрткой (src/scripts/decisions-judge.js), у системы нет для неё отдельной ветки.
+  it('http-агент в judge_agent — ненулевой код до прогона, в выводе агент и причина', async () => {
     const { stdout, exitCode } = await run(['--skill', JUDGE_SKILL]);
 
-    assert.strictEqual(exitCode, 0, `судья kind: http допустим: ${stdout}`);
-    assert.match(stdout, /status: passed/);
-    assert.doesNotMatch(stdout, /tool-less/);
-  });
-
-  // Неуверенную оценку и отказ HTTP некому переоценить — судья без escalate_to
-  // отклоняется до прогона (PLAN-001, задача 11).
-  it('http-судья без escalate_to — ненулевой код до прогона, в выводе агент и поле', async () => {
-    const { stdout, exitCode } = await run(['--skill', ALONE_JUDGE_SKILL]);
-
     assert.notStrictEqual(exitCode, 0, `прогон должен упасть: ${stdout}`);
-    assert.match(stdout, /error: .*jev-alone.*escalate_to/);
-  });
-
-  it('http-судья с protocol: chat — ненулевой код до прогона', async () => {
-    const { stdout, exitCode } = await run(['--skill', CHAT_JUDGE_SKILL]);
-
-    assert.notStrictEqual(exitCode, 0, `прогон должен упасть: ${stdout}`);
-    assert.match(stdout, /error: .*jev-chat.*protocol decisions/);
+    assert.match(stdout, /error: .*http-model.*must be an agent with a command/);
   });
 });
 
@@ -2573,13 +2541,14 @@ describe('Скил на рельсах: рельсы не зацепились �
 });
 
 // ============================================================================
-// Судья тестов скилов (PLAN-001): запись вызова судьи по каждой попытке, ответ
-// без балла — ошибка попытки, судья Jev (kind: http, decisions) на локальном
-// сервере, эскалация неуверенной оценки, фоллбек при отказе HTTP, цена судьи в
-// оценке перед прогоном. Сеть наружу не используется: Jev — сервер на 127.0.0.1.
+// Судья тестов скилов (PLAN-001): любой агент с командой. Запись вызова судьи по
+// каждой попытке, ответ без балла — ошибка попытки, судья на модели решений —
+// CLI-обёртка src/scripts/decisions-judge.js с моделью на локальном сервере и
+// ключом в файле, переоценка неуверенной оценки, фоллбек при ответе без балла,
+// цена судьи в оценке перед прогоном. Сеть наружу не используется.
 // ============================================================================
 
-describe('Судья: запись вызова, Jev, эскалация, фоллбек, цена', () => {
+describe('Судья: запись вызова, модель решений, переоценка, фоллбек, цена', () => {
   const JUDGE_SKILLS_DIR = makeSkillsDir('wf-skills-judge-');
   const PIPELINE_PATH = join(JUDGE_SKILLS_DIR, 'pipeline.yaml');
   const CASE_ID = 'TC-JUDGE-001';
@@ -2602,7 +2571,8 @@ describe('Судья: запись вызова, Jev, эскалация, фол
   const yamlPath = (p) => p.replace(/\\/g, '/');
   const MOCK_RAW = yamlPath(join(PROJECT_ROOT, 'src', 'tests', 'fixtures', 'mock-judge-raw.js'));
   const MOCK_JUDGE = yamlPath(join(PROJECT_ROOT, 'src', 'tests', 'fixtures', 'mock-judge.js'));
-  const KEY_PROBE = yamlPath(join(JUDGE_SKILLS_DIR, 'key-probe.mjs'));
+  const DECISIONS_SCRIPT = yamlPath(join(PROJECT_ROOT, 'src', 'scripts', 'decisions-judge.js'));
+  const KEY_FILE = yamlPath(join(JUDGE_SKILLS_DIR, 'model.key'));
 
   let server;
   // Ответ сервера для следующего прогона: (request, res) => void.
@@ -2624,17 +2594,10 @@ describe('Судья: запись вызова, Jev, эскалация, фол
     ];
   }
 
-  function httpAgent(id, extra = []) {
-    return [
-      `    ${id}:`,
-      '      kind: http',
-      '      protocol: decisions',
-      `      url: "${server.url('/api/alpha/decisions')}"`,
-      '      model: "typesafe/jev-1.13"',
-      '      auth: { env: "TEST_MODEL_KEY" }',
-      ...extra.map(line => `      ${line}`),
-      '      capabilities: [text]'
-    ];
+  /** Судья на модели решений — обычный агент с командой: скрипт-обёртка, модель и ключ — в аргументах. */
+  function deciderAgent(id, extra = [], { keyFile = KEY_FILE, scriptArgs = [] } = {}) {
+    return cliAgent(id, [DECISIONS_SCRIPT, '--model', 'vendor/decider', '--url', server.url('/api/alpha/decisions'),
+      '--key-file', keyFile, ...scriptArgs], ['prompt_stdin: true', ...extra]);
   }
 
   function writeSkill(name, judge, rubric = TABLE_RUBRIC, { target = 'agent-pass', execution = [] } = {}) {
@@ -2667,12 +2630,12 @@ describe('Судья: запись вызова, Jev, эскалация, фол
   }
 
   let skillSeq = 0;
-  async function runWithJudge(judge, { rubric, fast = true, env = { TEST_MODEL_KEY: TEST_KEY }, target = 'agent-pass', execution = [] } = {}) {
-    const skill = `__test-judge-${Date.now()}-${++skillSeq}`;
+  async function runWithJudge(judge, { rubric, fast = true, target = 'agent-pass', execution = [], skill: reuse = null } = {}) {
+    const skill = reuse || `__test-judge-${Date.now()}-${++skillSeq}`;
     writeSkill(skill, judge, rubric, { target, execution });
     const args = ['--skill', skill, '--layer', 'l2', '--skip-secret-scan', '--yes', '--skip-meta-write',
       '--pipeline', PIPELINE_PATH, ...(fast ? ['--fast'] : [])];
-    const result = await runRunner(args, { WORKFLOW_SKILLS_DIR: JUDGE_SKILLS_DIR, ...env });
+    const result = await runRunner(args, { WORKFLOW_SKILLS_DIR: JUDGE_SKILLS_DIR });
     const current = join(JUDGE_SKILLS_DIR, skill, 'tests', 'cases', CASE_ID, 'current');
     const recordOf = (trial = 1) => {
       const file = join(current, target, `trial-${trial}.judge.json`);
@@ -2680,36 +2643,31 @@ describe('Судья: запись вызова, Jev, эскалация, фол
       return JSON.parse(readFileSync(file, 'utf8'));
     };
     const judgeJson = () => JSON.parse(readFileSync(join(current, 'judge.json'), 'utf8'));
-    return { ...result, recordOf, judgeJson };
+    return { ...result, skill, current, recordOf, judgeJson };
   }
 
   before(async () => {
     server = await startModelServer((req, res) => respond(req, res));
-    // Исполнитель-зонд: печатает, видит ли он ключ судьи в своём окружении.
-    writeFileSync(KEY_PROBE, [
-      "const seen = Object.keys(process.env).some(k => k.toUpperCase() === 'TEST_MODEL_KEY');",
-      "console.log('---RESULT---');",
-      "console.log('status: passed');",
-      "console.log(seen ? 'output: KEY_SEEN' : 'output: KEY_ABSENT');",
-      "console.log('---RESULT---');",
-      ''
-    ].join('\n'));
+    writeFileSync(KEY_FILE, `${TEST_KEY}\n`);
     writeFileSync(PIPELINE_PATH, [
       'pipeline:',
       '  name: "judge-tests"',
       '  version: "1.0"',
       '  agents:',
       ...cliAgent('agent-pass', ['src/tests/fixtures/mock-agent-pass.js']),
-      ...cliAgent('agent-key-probe', [KEY_PROBE]),
       ...cliAgent('mock-judge', [MOCK_JUDGE]),
       ...cliAgent('judge-priced', [MOCK_JUDGE], ['cost_per_call: 0.222']),
       ...cliAgent('judge-two', [MOCK_RAW, 'score: 2'], ['cost_per_call: 0.222']),
       ...cliAgent('judge-unparsed', [MOCK_RAW, 'оценки не будет']),
       ...cliAgent('judge-seven', [MOCK_RAW, 'score: 7']),
       ...cliAgent('judge-crash', ['-e', 'process.exit(3)']),
-      ...httpAgent('jev', ['escalate_to: judge-two', 'cost_per_call: 0.0001']),
-      ...httpAgent('jev-strict', ['escalate_to: judge-two', 'escalate_below: 0.95']),
-      ...httpAgent('jev-crash-escalation', ['escalate_to: judge-crash']),
+      ...cliAgent('target-crash', ['-e', 'process.exit(3)']),
+      ...cliAgent('judge-slow', ['-e', 'setTimeout(() => {}, 20000)'], ['escalate_to: judge-two']),
+      ...deciderAgent('decider', ['escalate_to: judge-two', 'escalate_below: 0.8', 'escalation_share: 0.3', 'cost_per_call: 0.0001']),
+      ...deciderAgent('decider-strict', ['escalate_to: judge-two', 'escalate_below: 0.95']),
+      ...deciderAgent('decider-crash-escalation', ['escalate_to: judge-crash', 'escalate_below: 0.8']),
+      ...deciderAgent('decider-nokey', ['escalate_to: judge-two'], { keyFile: yamlPath(join(JUDGE_SKILLS_DIR, 'none.key')) }),
+      ...deciderAgent('decider-timeout', ['escalate_to: judge-two'], { scriptArgs: ['--timeout', '1'] }),
       ''
     ].join('\n'));
   });
@@ -2721,12 +2679,11 @@ describe('Судья: запись вызова, Jev, эскалация, фол
 
   // --- запись вызова судьи (задачи 3–4) ---------------------------------------
 
-  it('CLI-судья: trial-1.judge.json с входом, промптом, сырым ответом и баллом', async () => {
+  it('судья: trial-1.judge.json с входом, промптом, сырым ответом и баллом', async () => {
     const run = await runWithJudge('mock-judge');
     const record = run.recordOf();
 
     assert.strictEqual(record.judge_agent, 'mock-judge');
-    assert.strictEqual(record.judge_kind, 'cli');
     assert.strictEqual(record.input.criterion, CRITERION);
     assert.match(record.input.agent_output, /MOCK_HIGH_SCORE/);
     assert.match(record.prompt, /^You are a judge evaluating the output of an AI agent\./);
@@ -2769,33 +2726,30 @@ describe('Судья: запись вызова, Jev, эскалация, фол
     assert.strictEqual(run.judgeJson().per_model['agent-pass'].trials[0].score, null);
   });
 
-  // --- судья Jev (задачи 11–12) ------------------------------------------------
+  // --- судья на модели решений (задачи 11–12) ----------------------------------
 
-  it('Jev: argmax вероятностей + 1, уверенность и цена в записи; тело — score и пять criteria', async () => {
+  it('модель решений: балл — самый вероятный уровень, уверенность и цена в записи; тело — score и пять criteria', async () => {
     respond = decisions({ 3: 0.9, 4: 0.1 }, 0.93);
     const seen = server.requests.length;
-    const run = await runWithJudge('jev');
+    const run = await runWithJudge('decider');
     const record = run.recordOf();
 
-    assert.strictEqual(record.judge_kind, 'http');
     assert.strictEqual(record.score, 4);
     assert.strictEqual(record.own_score, 4);
     assert.strictEqual(record.passed, true);
     assert.strictEqual(record.confidence, 0.93);
     assert.deepStrictEqual(record.probabilities, { 3: 0.9, 4: 0.1 });
     assert.strictEqual(record.cost_usd, 0.000126672);
+    assert.strictEqual(record.model, 'typesafe/jev-1.13-20260917');
     assert.strictEqual(record.escalated, false);
     assert.strictEqual(record.escalation, null);
-    // raw_output — ответ провайдера как есть: answers с его type, score, legend
-    const raw = JSON.parse(record.raw_output);
-    assert.strictEqual(raw.model, 'typesafe/jev-1.13-20260917');
-    assert.deepStrictEqual(raw.answers.verdict, { type: 'score', score: 0, legend: {}, probabilities: { 3: 0.9, 4: 0.1 }, confidence: 0.93 });
+    assert.match(record.raw_output, /^raw: \{"verdict":\{"type":"score"/m, 'ответ провайдера как есть — в выводе судьи');
 
     const requests = server.requests.slice(seen);
     assert.strictEqual(requests.length, 1);
     const body = requests[0].json;
     assert.strictEqual(requests[0].headers.authorization, `Bearer ${TEST_KEY}`);
-    assert.strictEqual(body.model, 'typesafe/jev-1.13');
+    assert.strictEqual(body.model, 'vendor/decider');
     assert.strictEqual(body.questions.verdict.type, 'score');
     assert.strictEqual(body.questions.verdict.instructions, CRITERION);
     assert.deepStrictEqual(body.questions.verdict.criteria,
@@ -2803,17 +2757,17 @@ describe('Судья: запись вызова, Jev, эскалация, фол
     assert.match(body.state.agent_output, /MOCK_HIGH_SCORE/);
   });
 
-  it('Jev: равные вероятности уровней 3 и 4 — меньший уровень', async () => {
+  it('модель решений: равные вероятности уровней 3 и 4 — меньший уровень', async () => {
     respond = decisions({ 2: 0.5, 3: 0.5 }, 0.9);
-    const record = (await runWithJudge('jev')).recordOf();
+    const record = (await runWithJudge('decider')).recordOf();
 
     assert.strictEqual(record.score, 3);
     assert.strictEqual(record.passed, false);
   });
 
-  it('Jev: рубрика без таблицы уровней — оценку даёт escalate_to, fallback rubric_unparsed', async () => {
+  it('рубрика без таблицы уровней — оценку даёт escalate_to, fallback rubric_unparsed', async () => {
     const seen = server.requests.length;
-    const record = (await runWithJudge('jev', { rubric: LIST_RUBRIC })).recordOf();
+    const record = (await runWithJudge('decider', { rubric: LIST_RUBRIC })).recordOf();
 
     assert.strictEqual(record.fallback, 'rubric_unparsed');
     assert.strictEqual(record.escalation.judge_agent, 'judge-two');
@@ -2821,50 +2775,50 @@ describe('Судья: запись вызова, Jev, эскалация, фол
     assert.strictEqual(server.requests.length, seen, 'к модели не обращались');
   });
 
-  // --- эскалация (задачи 13–14) ---------------------------------------------------
+  // --- переоценка (задачи 13–14) --------------------------------------------------
 
-  it('уверенность 0.5 и уровень 5 — итог от CLI-судьи (score 2), escalated: true', async () => {
+  it('уверенность 0.5 и уровень 5 — итог от escalate_to (score 2), escalated: true', async () => {
     respond = decisions({ 4: 1 }, 0.5);
-    const record = (await runWithJudge('jev')).recordOf();
+    const record = (await runWithJudge('decider')).recordOf();
 
     assert.strictEqual(record.own_score, 5);
     assert.strictEqual(record.confidence, 0.5);
     assert.strictEqual(record.escalated, true);
-    assert.strictEqual(record.escalation.judge_kind, 'cli');
+    assert.strictEqual(record.escalation.judge_agent, 'judge-two');
     assert.strictEqual(record.escalation.score, 2);
     assert.strictEqual(record.score, 2);
     assert.strictEqual(record.passed, false);
   });
 
-  it('уверенность ровно на пороге 0.8 — эскалации нет', async () => {
+  it('уверенность ровно на пороге 0.8 — переоценки нет', async () => {
     respond = decisions({ 4: 1 }, 0.8);
-    const record = (await runWithJudge('jev')).recordOf();
+    const record = (await runWithJudge('decider')).recordOf();
 
     assert.strictEqual(record.escalated, false);
     assert.strictEqual(record.escalation, null);
     assert.strictEqual(record.score, 5);
   });
 
-  it('уверенность 0.9 — CLI-судья не вызывается', async () => {
+  it('уверенность 0.9 — escalate_to не вызывается', async () => {
     respond = decisions({ 4: 1 }, 0.9);
-    const record = (await runWithJudge('jev')).recordOf();
+    const record = (await runWithJudge('decider')).recordOf();
 
     assert.strictEqual(record.escalated, false);
     assert.strictEqual(record.escalation, null);
     assert.strictEqual(record.score, 5);
   });
 
-  it('свой escalate_below 0.95 в записи агента — 0.9 уходит на эскалацию', async () => {
+  it('свой escalate_below 0.95 в записи агента — 0.9 уходит на переоценку', async () => {
     respond = decisions({ 4: 1 }, 0.9);
-    const record = (await runWithJudge('jev-strict')).recordOf();
+    const record = (await runWithJudge('decider-strict')).recordOf();
 
     assert.strictEqual(record.escalated, true);
     assert.strictEqual(record.score, 2);
   });
 
-  it('CLI-судья упал при эскалации — попытка errored, в записи оба ответа', async () => {
+  it('escalate_to упал при переоценке — попытка errored, в записи оба ответа', async () => {
     respond = decisions({ 4: 1 }, 0.5);
-    const run = await runWithJudge('jev-crash-escalation');
+    const run = await runWithJudge('decider-crash-escalation');
     const record = run.recordOf();
 
     assert.strictEqual(record.own_score, 5);
@@ -2874,51 +2828,49 @@ describe('Судья: запись вызова, Jev, эскалация, фол
     assert.strictEqual(run.judgeJson().per_model['agent-pass'].trials[0].score, null);
   });
 
-  // --- фоллбек при отказе HTTP (задачи 15–16) --------------------------------------
+  // --- фоллбек: судья ответил без балла (задачи 15–16) -----------------------------
 
-  it('HTTP 401 — fallback auth, оценка от CLI-судьи', async () => {
+  it('HTTP 401 у модели — fallback auth, оценка от escalate_to; ключа в выводе нет', async () => {
     respond = (req, res) => sendJson(res, 401, { error: 'bad key' });
-    const run = await runWithJudge('jev');
+    const run = await runWithJudge('decider');
     const record = run.recordOf();
 
     assert.strictEqual(record.fallback, 'auth');
     assert.strictEqual(record.score, 2);
-    assert.match(run.stdout, /HTTP-судья не ответил \(auth\)/);
+    assert.match(run.stdout, /judge decider: нет балла \(auth\)/);
     assert.ok(!run.stdout.includes(TEST_KEY), 'ключ не печатается');
+    assert.ok(!JSON.stringify(record).includes(TEST_KEY), 'ключа нет в записи');
   });
 
   it('HTTP 500 после повторов — fallback server', async () => {
     respond = (req, res) => sendJson(res, 500, { error: 'down' });
-    const record = (await runWithJudge('jev')).recordOf();
+    const record = (await runWithJudge('decider')).recordOf();
 
     assert.strictEqual(record.fallback, 'server');
     assert.strictEqual(record.score, 2);
   });
 
-  it('сервер молчит дольше judge_timeout_s скила — fallback timeout', async () => {
+  it('модель молчит дольше --timeout скрипта — fallback timeout', async () => {
     respond = () => {};
-    const started = Date.now();
-    const record = (await runWithJudge('jev', { execution: ['judge_timeout_s: 3'] })).recordOf();
+    const record = (await runWithJudge('decider-timeout')).recordOf();
 
     assert.strictEqual(record.fallback, 'timeout');
-    assert.match(record.fallback_detail, /timed out after 3s/, 'таймаут HTTP-судьи — judge_timeout_s скила');
     assert.strictEqual(record.score, 2);
-    assert.ok(Date.now() - started < 60000);
   });
 
-  it('ключ судьи не попадает в окружение исполнителя', async () => {
-    respond = decisions({ 4: 1 }, 0.9);
-    const seen = server.requests.length;
-    const record = (await runWithJudge('jev', { target: 'agent-key-probe' })).recordOf();
+  it('судья молчит дольше judge_timeout_s скила — снят по таймауту, fallback judge_error', async () => {
+    const started = Date.now();
+    const record = (await runWithJudge('judge-slow', { execution: ['judge_timeout_s: 2'] })).recordOf();
 
-    assert.strictEqual(record.score, 5, 'судья ключ получил и ответил');
-    assert.match(record.input.agent_output, /KEY_ABSENT/);
-    assert.match(server.requests[seen].json.state.agent_output, /KEY_ABSENT/);
+    assert.strictEqual(record.fallback, 'judge_error');
+    assert.match(record.fallback_detail, /timed out after 2s/);
+    assert.strictEqual(record.score, 2);
+    assert.ok(Date.now() - started < 15000, 'судья снят по judge_timeout_s, а не по своему сну');
   });
 
-  it('пустой ключ — код 0, fallback no_key у каждой попытки, предупреждение одно', async () => {
+  it('нет файла ключа — код 0, fallback no_key у каждой попытки, предупреждение одно, к модели не обращались', async () => {
     const seen = server.requests.length;
-    const run = await runWithJudge('jev', { fast: false, env: { TEST_MODEL_KEY: '' } });
+    const run = await runWithJudge('decider-nokey', { fast: false });
 
     assert.strictEqual(run.exitCode, 0, run.stdout);
     for (const trial of [1, 2, 3]) {
@@ -2926,11 +2878,31 @@ describe('Судья: запись вызова, Jev, эскалация, фол
       assert.strictEqual(record.fallback, 'no_key', `trial ${trial}`);
       assert.strictEqual(record.score, 2);
     }
-    assert.strictEqual(run.stdout.match(/нет ключа \(no_key\)/g)?.length, 1, run.stdout);
-    assert.strictEqual(server.requests.length, seen, 'без ключа к модели не обращались');
-    // оценка перед прогоном — по полной цене escalate_to: 3 × 0.222
-    assert.match(run.stdout, /все оценки даст judge-two/);
-    assert.match(run.stdout, /judge ~\$0\.67 at \$0\.2220\/call/);
+    assert.strictEqual(run.stdout.match(/нет балла \(no_key\)/g)?.length, 1, run.stdout);
+    assert.strictEqual(server.requests.length, seen);
+  });
+
+  it('повтор с меньшим числом попыток снимает записи судьи лишних попыток', async () => {
+    respond = decisions({ 4: 1 }, 0.9);
+    const first = await runWithJudge('decider', { fast: false });
+    assert.ok(existsSync(join(first.current, 'agent-pass', 'trial-3.judge.json')));
+
+    const second = await runWithJudge('decider', { fast: true, skill: first.skill });
+    assert.ok(existsSync(join(second.current, 'agent-pass', 'trial-1.judge.json')));
+    assert.ok(!existsSync(join(second.current, 'agent-pass', 'trial-2.judge.json')), 'trial-2 от прошлого прогона снят');
+    assert.ok(!existsSync(join(second.current, 'agent-pass', 'trial-3.judge.json')), 'trial-3 от прошлого прогона снят');
+  });
+
+  it('исполнитель упал до судьи — запись судьи прошлого прогона этой попытки снята', async () => {
+    const skill = `__test-judge-${Date.now()}-${++skillSeq}`;
+    const agentDir = join(JUDGE_SKILLS_DIR, skill, 'tests', 'cases', CASE_ID, 'current', 'target-crash');
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(agentDir, 'trial-1.judge.json'), '{"judge_agent":"old","score":5}');
+
+    await runWithJudge('mock-judge', { target: 'target-crash', skill });
+
+    assert.ok(!existsSync(join(agentDir, 'trial-1.judge.json')), 'старая запись судьи не должна пережить прогон');
+    assert.match(readFileSync(join(agentDir, 'trial-1.md'), 'utf8'), /TRIAL ERRORED/);
   });
 
   // --- калибровка идёт через тот же адаптер (задачи 7–8) --------------------------
@@ -2943,7 +2915,7 @@ describe('Судья: запись вызова, Jev, эскалация, фол
     writeFileSync(join(calDir, 'r-good.md'), '# Good\n\n## Ответ агента\n\nхороший ответ\n\n---\n');
     writeFileSync(join(calDir, 'r-bad.md'), '# Bad\n\n## Ответ агента\n\nMOCK_LOW_SCORE плохой ответ\n\n---\n');
     return runRunner(['--skill', skill, '--calibrate', '--yes', '--pipeline', PIPELINE_PATH],
-      { WORKFLOW_SKILLS_DIR: JUDGE_SKILLS_DIR, TEST_MODEL_KEY: TEST_KEY });
+      { WORKFLOW_SKILLS_DIR: JUDGE_SKILLS_DIR });
   }
 
   it('калибровка: ответ судьи без балла — отказ с причиной, а не «miscalibrated» по тройке', async () => {
@@ -2953,10 +2925,10 @@ describe('Судья: запись вызова, Jev, эскалация, фол
     assert.match(stdout + stderr, /judge failed on calibration — rubric 'r': good: judge output unparsed; bad: judge output unparsed/);
   });
 
-  it('калибровка судьёй Jev — оба вызова идут к модели через адаптер', async () => {
+  it('калибровка судьёй на модели решений — оба вызова идут к модели через адаптер', async () => {
     respond = decisions({ 4: 1 }, 0.99);
     const seen = server.requests.length;
-    const { stdout } = await calibrateWith('jev');
+    const { stdout } = await calibrateWith('decider');
 
     const tasks = server.requests.slice(seen).map(r => r.json.questions.verdict.instructions).sort();
     assert.deepStrictEqual(tasks, ['Evaluate the bad response', 'Evaluate the good response']);
@@ -2966,26 +2938,28 @@ describe('Судья: запись вызова, Jev, эскалация, фол
 
   // --- цена судьи в оценке перед прогоном (задачи 17–18) ---------------------------
 
-  it('CLI-судья с cost_per_call 0.222: 3 вызова — судья ~$0.67', async () => {
+  it('судья с cost_per_call 0.222: 3 вызова — судья ~$0.67', async () => {
     const run = await runWithJudge('judge-priced', { fast: false });
 
     assert.match(run.stdout, /judge ~\$0\.67 at \$0\.2220\/call/);
-    assert.doesNotMatch(run.stdout, /цена судьи не задана/);
+    assert.doesNotMatch(run.stdout, /нет полей для оценки цены/);
   });
 
-  it('судья без цены — прежние $0.02 и предупреждение', async () => {
+  it('судья без цены — прежние $0.02 и предупреждение с именем поля', async () => {
     const run = await runWithJudge('mock-judge', { fast: false });
 
-    assert.match(run.stdout, /цена судьи не задана \(cost_per_call\): mock-judge/);
+    assert.match(run.stdout, /нет полей для оценки цены: mock-judge\.cost_per_call/);
     assert.match(run.stdout, /judge ~\$0\.06 at \$0\.0200\/call/);
   });
 
-  it('Jev с эскалацией: 0.0001 + 0.284 × 0.222 за вызов', async () => {
+  it('судья с переоценкой: cost_per_call + escalation_share × цена escalate_to', async () => {
     respond = decisions({ 4: 1 }, 0.9);
-    const run = await runWithJudge('jev', { fast: false });
+    const run = await runWithJudge('decider', { fast: false });
 
-    // 3 × (0.0001 + 0.284 × 0.222) = 0.189444
-    assert.match(run.stdout, /judge ~\$0\.19 at \$0\.0631\/call/);
+    // 3 × (0.0001 + 0.3 × 0.222) = 0.2001
+    assert.match(run.stdout, /judge ~\$0\.20 at \$0\.0667\/call/);
+    // худший случай — судья не ответил ни разу: 3 × (0.0001 + 0.222) = 0.6663
+    assert.match(run.stdout, /Если судья decider не даст балла ни разу, каждую оценку даст judge-two: судья до ~\$0\.67/);
   });
 });
 

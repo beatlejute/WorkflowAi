@@ -8,18 +8,18 @@
  * (src/lib/skill-judge.mjs). Скрипт переоценивает каждую запись судьёй `--judge`
  * с тем же входом, без запуска исполнителей, и сравнивает с баллом записи.
  * Так согласие судей перемеряется на промптах текущего прогона, а не разбором
- * транскриптов, как в пилоте Jev 2026-09-24.
+ * транскриптов, как в пилоте 2026-09-24.
  *
  * Судья `--judge` оценивает сам: без эскалации и без фоллбека (skill-judge.mjs,
  * noEscalation) — иначе сравнивался бы не он. Отказ судьи — строка «переоценка
  * не удалась». Записи с ошибкой судьи пропускаются и считаются отдельно.
  *
- * Выводы исполнителей уходят судье `--judge`; для `kind: http` — во внешний
- * сервис. Перед вызовами — оценка числа и цены вызовов и вопрос; `--yes` его
- * пропускает.
+ * Выводы исполнителей уходят судье `--judge` — для судьи на внешней модели во
+ * внешний сервис. Перед вызовами — оценка числа и цены вызовов и вопрос; `--yes`
+ * его пропускает.
  *
  * Использование:
- *   node src/scripts/compare-judges.js --judge jev [--skill <name>] [--out <file.md>]
+ *   node src/scripts/compare-judges.js --judge <агент> [--skill <name>] [--out <file.md>]
  *     [--disagreements <dir>] [--pipeline <pipeline.yaml>] [--concurrency 8] [--yes]
  *
  * Окружение: WORKFLOW_SKILLS_DIR — каталог скилов (по умолчанию <корень>/src/skills).
@@ -175,13 +175,13 @@ function summarize(rows) {
   };
 }
 
-function formatReport({ judge, found, skippedRecords, failed, summary, baselineJudges, skill }) {
+function formatReport({ judge, found, skippedRecords, selfScored, failed, summary, baselineJudges, skill }) {
   const s = summary;
   const lines = [
     `# Согласие судей: ${judge} против записанных оценок`,
     '',
     `Записей судьи найдено: ${found}${skill ? ` (скил ${skill})` : ''}. Судьи записей: ${baselineJudges.join(', ') || '—'}.`,
-    `Пропущено записей с ошибкой судьи: ${skippedRecords}. Переоценка не удалась: ${failed}. Сравнено: ${s.compared}.`,
+    `Пропущено записей с ошибкой судьи: ${skippedRecords}. Пропущено записей, балл которых дал сам ${judge}: ${selfScored}. Переоценка не удалась: ${failed}. Сравнено: ${s.compared}.`,
     '',
     '## Совпадение',
     '',
@@ -209,7 +209,7 @@ function formatReport({ judge, found, skippedRecords, failed, summary, baselineJ
     '',
   ];
   if (s.thresholds.length === 0) {
-    lines.push(`У судьи ${judge} нет уверенности (CLI-судья) — таблица порогов не строится.`);
+    lines.push(`Судья ${judge} не сообщает уверенность — таблица порогов не строится.`);
   } else {
     lines.push(
       '| Порог | Уходит на эскалацию | Совпадение pass/fail на оставшихся | Расхождений мимо порога |',
@@ -227,7 +227,13 @@ function formatReport({ judge, found, skippedRecords, failed, summary, baselineJ
   return lines.join('\n');
 }
 
-/** Кто дал балл записи: при эскалации и фоллбеке — `escalate_to`, а не сам судья записи. */
+/** Агент, чей балл стоит в записи: при эскалации и фоллбеке — `escalate_to`. */
+function scorerOf(record) {
+  if ((record.escalated || record.fallback) && record.escalation?.judge_agent) return record.escalation.judge_agent;
+  return record.judge_agent;
+}
+
+/** Кто дал балл записи, для отчёта: при эскалации и фоллбеке — с пометкой, от кого перешла оценка. */
 function scoredBy(record) {
   if ((record.escalated || record.fallback) && record.escalation?.judge_agent) {
     const why = record.fallback ? `фоллбек ${record.fallback}` : 'эскалация';
@@ -308,17 +314,22 @@ async function main(argv = process.argv.slice(2)) {
   const { file: pipelineFile, agents } = loadAgents(opts.pipeline, root);
   const agent = agents[opts.judge];
   if (!agent) throw new Error(`Judge agent '${opts.judge}' not found in ${pipelineFile}`);
-  if (agent.kind === 'http' && agent.protocol !== 'decisions') {
-    throw new Error(`Judge agent '${opts.judge}' (kind: http) must use protocol decisions, got: ${agent.protocol}`);
+  if ((agent.kind ?? 'cli') !== 'cli') {
+    throw new Error(`Judge agent '${opts.judge}' must be an agent with a command (kind: cli), got kind: ${agent.kind}`);
   }
 
   const found = collectRecords(skillsDir, opts.skill);
-  const usable = found.filter((r) => r.record && !r.record.error && Number.isInteger(r.record.score) && r.record.input);
-  const skippedRecords = found.length - usable.length;
-  console.log(`[compare-judges] ${pipelineFile}; записей судьи: ${found.length}, к переоценке: ${usable.length}, с ошибкой: ${skippedRecords}`);
+  const valid = found.filter((r) => r.record && !r.record.error && Number.isInteger(r.record.score) && r.record.input);
+  const skippedRecords = found.length - valid.length;
+  // Балл записи, который дал сам --judge, сравнивать не с чем: судья совпал бы
+  // сам с собой. Когда записи сделаны судьёй с переоценкой, перемер делает его
+  // `escalate_to`: сравниваются оценки судьи, не ушедшие на переоценку.
+  const usable = valid.filter((r) => scorerOf(r.record) !== opts.judge);
+  const selfScored = valid.length - usable.length;
+  console.log(`[compare-judges] ${pipelineFile}; записей судьи: ${found.length}, к переоценке: ${usable.length}, с ошибкой: ${skippedRecords}, балл дал сам ${opts.judge}: ${selfScored}`);
 
   const price = typeof agent.cost_per_call === 'number' ? agent.cost_per_call : DEFAULT_JUDGE_CALL_COST;
-  console.log(`[compare-judges] Estimated judge calls: ${usable.length} × $${price.toFixed(4)} = ~$${(usable.length * price).toFixed(2)}${agent.kind === 'http' ? ` — выводы исполнителей уходят в ${agent.url}` : ''}`);
+  console.log(`[compare-judges] Estimated judge calls: ${usable.length} × $${price.toFixed(4)} = ~$${(usable.length * price).toFixed(2)}`);
   if (usable.length > 0 && !opts.yes && !(await confirm('Continue? [y/N] '))) {
     console.log('[compare-judges] Aborted by user');
     return 0;
@@ -354,6 +365,7 @@ async function main(argv = process.argv.slice(2)) {
     judge: opts.judge,
     found: found.length,
     skippedRecords,
+    selfScored,
     failed: failedRows.length,
     summary,
     baselineJudges: [...new Set(usable.map((r) => scoredBy(r.record)))].sort(),
@@ -374,9 +386,10 @@ async function main(argv = process.argv.slice(2)) {
     }
     console.log(`[compare-judges] расхождений: ${summary.disagreements.length} → ${opts.disagreements}`);
   }
-  // Записи были, а сравнить не удалось ни одну — это не замер (например, нет ключа).
-  if (usable.length > 0 && compared.length === 0) {
-    console.error(`[compare-judges] ни одна из ${usable.length} записей не переоценена судьёй ${opts.judge}`);
+  // Записи были, а сравнить не удалось ни одну — это не замер (нет ключа, все
+  // записи с ошибкой судьи или с баллом самого --judge).
+  if (found.length > 0 && compared.length === 0) {
+    console.error(`[compare-judges] ни одна из ${found.length} записей не сравнена с судьёй ${opts.judge}`);
     return 1;
   }
   return 0;

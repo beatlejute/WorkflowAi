@@ -1658,8 +1658,10 @@ class StageExecutor {
 
       // На Windows shell: true обрезает многострочные аргументы на \n (cmd.exe).
       // Поэтому передаём промпт через stdin, а -p (если есть) оставляем как флаг print mode.
+      // prompt_stdin: true в записи агента — промпт всегда через stdin (аргумент
+      // командной строки на Windows ограничен 32767 символами), как в agent-spawner.
       const useShell = process.platform === 'win32' && agent.command !== 'node';
-      const useStdin = useShell && finalPrompt.includes('\n');
+      const useStdin = agent.prompt_stdin === true || (useShell && finalPrompt.includes('\n'));
 
       if (!useStdin) {
         // Однострочный промпт или не Windows — передаём через аргумент
@@ -1693,7 +1695,10 @@ class StageExecutor {
       });
       this.currentChild = child;
 
-      // Передаём промпт через stdin или закрываем если не нужно
+      // Передаём промпт через stdin или закрываем если не нужно. Агент, вышедший
+      // до чтения stdin, даёт EPIPE/EOF на записи — без обработчика это падение
+      // всего раннера; код выхода агента и так приходит в 'close'.
+      child.stdin.on('error', () => {});
       if (useStdin) {
         child.stdin.write(finalPrompt);
         child.stdin.end();
@@ -3087,12 +3092,13 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** `{ env: <ИМЯ> }` или `{ kilo_oauth: true }` — ровно одна форма. */
+/** `{ env: <ИМЯ> }`, `{ file: <путь> }` или `{ kilo_oauth: true }` — ровно одна форма. */
 function isValidHttpAuth(auth) {
   if (!isPlainObject(auth)) return false;
   const keys = Object.keys(auth);
   if (keys.length !== 1) return false;
   if (keys[0] === 'env') return typeof auth.env === 'string' && ENV_NAME_RE.test(auth.env);
+  if (keys[0] === 'file') return typeof auth.file === 'string' && auth.file.trim() !== '';
   if (keys[0] === 'kilo_oauth') return auth.kilo_oauth === true;
   return false;
 }
@@ -3114,6 +3120,9 @@ function validateAgentEntry(agentId, agent, errors) {
     // Опечатка молча выключила бы проверку «ответ без единого вызова инструмента» (railsHost).
     if (agent.rails_host !== undefined && !['kilo', 'claude'].includes(agent.rails_host)) {
       errors.push(`Agent "${agentId}" has invalid rails_host: ${agent.rails_host} (expected: kilo, claude)`);
+    }
+    if (agent.prompt_stdin !== undefined && typeof agent.prompt_stdin !== 'boolean') {
+      errors.push(`Agent "${agentId}" has invalid prompt_stdin: must be true or false`);
     }
     return;
   }
@@ -3144,7 +3153,7 @@ function validateAgentEntry(agentId, agent, errors) {
     errors.push(`Agent "${agentId}" (kind: http) has invalid model: expected string`);
   }
   if (agent.auth != null && agent.auth !== '' && !isValidHttpAuth(agent.auth)) {
-    errors.push(`Agent "${agentId}" (kind: http) has invalid auth: expected { env: <NAME> } or { kilo_oauth: true }`);
+    errors.push(`Agent "${agentId}" (kind: http) has invalid auth: expected { env: <NAME> }, { file: <path> } or { kilo_oauth: true }`);
   }
   if (agent.timeout_s !== undefined
     && !(typeof agent.timeout_s === 'number' && Number.isFinite(agent.timeout_s) && agent.timeout_s > 0)) {

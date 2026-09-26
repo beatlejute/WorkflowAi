@@ -63,24 +63,24 @@ pipeline:
       capabilities: [text, multimodal]
       description: "Claude Opus — мощная модель, поддержка изображений"
 
-    # Судья тестов скилов на модели решений Jev (README, «Судья тестов скилов»):
-    # безынструментный агент, исполнителем не назначается. Уверенность ниже
-    # escalate_below и любой отказ HTTP — оценку даёт escalate_to. Цена — среднее
-    # пилота 2026-09-24 ($0.000086 за вызов, 201 вызов). Таймаут вызова — таймаут
-    # судьи скила (execution.judge_timeout_s, по умолчанию 180 с). Ключ — только
-    # переменная окружения OPENROUTER_API_KEY. В judge_agent скилов не стоит: смена
-    # судьи по умолчанию — решение по перемеру согласия (src/scripts/compare-judges.js).
+    # Судья тестов скилов на модели решений Jev (TypeSafe через OpenRouter) — агент с
+    # командой, как остальные (README, «Судья тестов скилов»). Скрипт получает промпт
+    # судьи через stdin и отвечает баллом и уверенностью; ключ читает сам из файла
+    # --key-file, в переменных окружения его нет. Уверенность ниже escalate_below и
+    # ответ без балла — оценку даёт escalate_to. Цена — среднее пилота 2026-09-24
+    # ($0.000086 за вызов); escalation_share — доля переоценки при 0.8 в перемере
+    # 2026-09-26 (83 из 284; pass/fail 94.7%, на оставшихся 100%).
     jev:
-      kind: http
-      protocol: decisions
-      url: "https://openrouter.ai/api/alpha/decisions"
-      model: "typesafe/jev-1.13"
-      auth: { env: OPENROUTER_API_KEY }
+      command: "node"
+      args: [".workflow/src/scripts/decisions-judge.js", "--model", "typesafe/jev-1.13", "--url", "https://openrouter.ai/api/alpha/decisions", "--key-file", "~/.workflow/secrets/openrouter.key"]
+      workdir: "."
+      prompt_stdin: true
       escalate_to: claude-opus
       escalate_below: 0.8
+      escalation_share: 0.292
       cost_per_call: 0.0001
       capabilities: [text]
-      description: "Jev (TypeSafe) через OpenRouter — судья тестов скилов; исполнителем не назначается"
+      description: "Jev (TypeSafe) через OpenRouter — судья тестов скилов"
 
     kilo-code:
       command: "kilo"

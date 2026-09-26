@@ -12,7 +12,7 @@ execution:
     - deepseek-flash      # дополнительная модель для сравнения
     - gemini-flash-lite   # дополнительная модель для сравнения
     - gpt-luna            # дополнительная модель для сравнения
-  judge_agent: claude-opus  # другая модель, чтобы исключить self-enhancement bias
+  judge_agent: jev  # другая модель, чтобы исключить self-enhancement bias; неуверенные оценки и отказы переоценивает escalate_to (claude-opus)
   default_timeout_s: 2400
   baseline_ref: origin/main  # git ref для сравнения previously_green/red
 

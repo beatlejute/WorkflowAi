@@ -10,9 +10,11 @@
  *     пилота судьи Jev 2026-09-24 (201 вызов). Изображений протокол не принимает.
  *
  * Общее у протоколов: ключ, прокси, повторы и классы ошибок.
- *   - Ключ — `auth: { env: <ИМЯ> }` (только переменная окружения, файл `.env` не
- *     читается) или `auth: { kilo_oauth: true }` (`~/.local/share/kilo/auth.json`,
- *     поле `kilo.access`). В вывод и в сообщения ошибок ключ не попадает.
+ *   - Ключ — `auth: { env: <ИМЯ> }` (переменная окружения, файл `.env` не
+ *     читается), `auth: { file: <путь> }` (файл с одним ключом, `~` — домашний
+ *     каталог: ключ не лежит в окружении, которое наследуют все процессы) или
+ *     `auth: { kilo_oauth: true }` (`~/.local/share/kilo/auth.json`, поле
+ *     `kilo.access`). В вывод и в сообщения ошибок ключ не попадает.
  *   - Прокси — первая заданная из HTTPS_PROXY, https_proxy, HTTP_PROXY, http_proxy,
  *     ALL_PROXY, all_proxy; только для `https:`-адресов, туннелем CONNECT.
  *   - `http:` — только для адреса своей машины (localhost, 127.0.0.1, ::1): ключ
@@ -104,6 +106,19 @@ export function resolveModelKey(agent, env = process.env, now = Date.now(), plat
     }
     return key;
   }
+  if (typeof auth.file === 'string') {
+    const file = expandHome(auth.file, env, platform);
+    let key = '';
+    try {
+      key = fs.readFileSync(file, 'utf-8').trim();
+    } catch (err) {
+      throw new ModelClientError('no_key', `Agent "${agent.id || agent.model}": key file is missing or unreadable: ${file} (${err.code || err.message})`);
+    }
+    if (!key) {
+      throw new ModelClientError('no_key', `Agent "${agent.id || agent.model}": key file is empty: ${file}`);
+    }
+    return key;
+  }
   if (auth.kilo_oauth === true) {
     const file = kiloAuthPath(env, platform);
     let parsed;
@@ -121,7 +136,14 @@ export function resolveModelKey(agent, env = process.env, now = Date.now(), plat
     }
     return kilo.access;
   }
-  throw new ModelClientError('no_key', `Agent "${agent.id || agent.model}": auth must be { env: <NAME> } or { kilo_oauth: true }`);
+  throw new ModelClientError('no_key', `Agent "${agent.id || agent.model}": auth must be { env: <NAME> }, { file: <path> } or { kilo_oauth: true }`);
+}
+
+/** `~/…` — от домашнего каталога (HOME, на Windows USERPROFILE); иначе путь как есть. */
+export function expandHome(file, env = process.env, platform = process.platform) {
+  if (file !== '~' && !/^~[\\/]/.test(file)) return file;
+  const home = envValue(env, 'HOME', platform) || envValue(env, 'USERPROFILE', platform) || '';
+  return path.join(home, file.slice(1));
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +206,22 @@ export function assertModelUrl(url) {
   if (target.protocol === 'http:' && LOOPBACK_HOSTS.has(target.hostname)) return target;
   throw new ModelClientError('bad_request',
     `Model url must be https:// (http:// only for localhost, 127.0.0.1, ::1): ${target.protocol}//${target.host}`);
+}
+
+// Текст ошибки клиента попадает в записи, которые лежат в git (запись вызова судьи
+// тестов скилов): адрес прокси или сервера там не нужен. Сетевая ошибка Node
+// называет адрес после системного вызова и кода (`connect ECONNREFUSED
+// 127.0.0.1:3128`, `connect EADDRNOTAVAIL ff02::1:443`, `getaddrinfo ENOTFOUND
+// proxy.corp.local`) — адрес после кода заменяется при любом коде; TLS-отказ по
+// имени перечисляет имена и адреса сертификата после `altnames:` — они тоже;
+// прочие `хост:порт` в тексте — по форме. Ключ вырезает scrub.
+const NET_ERRNO_ADDRESS = /\b(connect|getaddrinfo|lookup|bind|read|write)\s+(E[A-Z0-9_]+)\s+\S+/g;
+const CERT_ALTNAMES = /(altnames:)[^\n]*/g;
+export function redactNetworkDetail(text) {
+  return String(text ?? '')
+    .replace(NET_ERRNO_ADDRESS, '$1 $2 [address]')
+    .replace(CERT_ALTNAMES, '$1 [redacted]')
+    .replace(/\b[\w.-]+:\d{2,5}\b/g, '[host:port]');
 }
 
 function scrub(text, secret) {

@@ -199,6 +199,39 @@ describe('model-client: ключ', () => {
     await rejectsWithClass(chat(chatAgent('http://127.0.0.1:9/chat', { auth: { kilo_oauth: true } }),
       { message: 'm' }, { env: { HOME: home, USERPROFILE: home } }), 'no_key');
   });
+
+  // Ключ в файле, как у claude и kilo: в окружении, которое наследуют все
+  // процессы, его нет. `~` — домашний каталог; пробелы и перевод строки снимаются.
+  it('auth.file с ~ — Bearer из файла, окружение не нужно', async () => {
+    const home = mkdtempSync(join(root, 'home-'));
+    mkdirSync(join(home, 'secrets'));
+    writeFileSync(join(home, 'secrets', 'model.key'), `  ${TEST_KEY}\r\n`);
+    const server = await startModelServer((req, res) => sendJson(res, 200, chatResponse('ok')));
+    try {
+      await chat(chatAgent(server.url('/chat'), { auth: { file: '~/secrets/model.key' } }), { message: 'm' },
+        { retryDelaysMs: [1, 1], env: { HOME: home, USERPROFILE: home } });
+      assert.equal(server.requests[0].headers.authorization, `Bearer ${TEST_KEY}`);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('auth.file: нет файла или файл пуст — no_key без запроса, путь в сообщении', async () => {
+    const home = mkdtempSync(join(root, 'home-'));
+    writeFileSync(join(home, 'empty.key'), '\n');
+    const server = await startModelServer((req, res) => sendJson(res, 200, chatResponse('ok')));
+    try {
+      const missing = await rejectsWithClass(chat(chatAgent(server.url('/chat'), { auth: { file: join(home, 'none.key') } }),
+        { message: 'm' }, FAST), 'no_key');
+      assert.match(missing.message, /none\.key/);
+      const empty = await rejectsWithClass(chat(chatAgent(server.url('/chat'), { auth: { file: join(home, 'empty.key') } }),
+        { message: 'm' }, FAST), 'no_key');
+      assert.match(empty.message, /empty/);
+      assert.equal(server.requests.length, 0);
+    } finally {
+      await server.close();
+    }
+  });
 });
 
 describe('model-client: повторы и классы ошибок', () => {

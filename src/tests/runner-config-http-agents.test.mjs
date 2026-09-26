@@ -125,9 +125,19 @@ describe('validateConfig: запись агента kind: http', () => {
     ['kilo_oauth: false', { kilo_oauth: false }],
     ['обе формы сразу', { env: 'TEST_MODEL_KEY', kilo_oauth: true }],
     ['ключ прямо в конфиге', { key: 'sk-test' }],
+    ['пустой путь файла', { file: '  ' }],
   ];
+  it('auth: { file: <путь> } проходит проверку', () => {
+    assert.deepEqual(validateConfig(baseConfig({ 'vision-chat': { ...CHAT_AGENT, auth: { file: '~/.workflow/secrets/model.key' } } }), makeProject()), []);
+  });
+
+  it('prompt_stdin не true/false у агента с командой — ошибка', async () => {
+    const result = await runWithConfig(baseConfig({ judge: { command: 'node', args: ['x.js'], prompt_stdin: 'yes' } }));
+    assertRejected(result, '"judge"', 'prompt_stdin');
+  });
+
   for (const [label, auth] of badAuths) {
-    it(`auth не в одной из двух форм (${label}) — ошибка`, async () => {
+    it(`auth не в одной из форм (${label}) — ошибка`, async () => {
       const result = await runWithConfig(baseConfig({ 'vision-chat': { ...CHAT_AGENT, auth } }));
       assertRejected(result, '"vision-chat"', 'auth');
     });

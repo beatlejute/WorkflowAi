@@ -182,7 +182,10 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
     const hasAgentRules = Boolean(rules && agentId && rules.agents.get(agentId)?.length);
 
     const useShell = process.platform === 'win32' && agentConfig.command !== 'node';
-    const useStdin = useShell && finalPrompt.includes('\n');
+    // prompt_stdin — промпт через stdin и без shell: аргумент командной строки на
+    // Windows ограничен 32767 символами, а промпт судьи с выводом исполнителя и
+    // файлами тикета бывает длиннее.
+    const useStdin = agentConfig.prompt_stdin === true || (useShell && finalPrompt.includes('\n'));
 
     if (!useStdin) {
       args.push(finalPrompt);
@@ -228,6 +231,10 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
       currentChildRef.current = child;
     }
 
+    // Агент, вышедший до чтения stdin, даёт EPIPE/EOF на записи промпта (от 64 КБ):
+    // без обработчика это необработанная ошибка и падение всего раннера вместо
+    // отказа одного агента. Код выхода агента и так приходит в 'close'.
+    child.stdin.on('error', () => {});
     if (useStdin) {
       child.stdin.write(finalPrompt);
       child.stdin.end();

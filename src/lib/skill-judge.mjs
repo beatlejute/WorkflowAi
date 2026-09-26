@@ -1,41 +1,35 @@
 /**
- * Судья тестов скилов: один контракт для двух видов судьи (PLAN-001).
+ * Судья тестов скилов (PLAN-001): любой агент с командой из pipeline.yaml.
  *
- *   - CLI-агент (`claude-opus` и т. п.) — текстовый промпт, балл из строки
- *     `score: <1-5>` ответа. Промпт — байт в байт прежний (buildCliJudgePrompt).
- *   - Безынструментный агент `kind: http`, `protocol: decisions` (Jev) — один
- *     вопрос `verdict` через слой оценки (model-evaluate.mjs); уровни — из
- *     таблицы рубрики (rubric-levels.mjs). Состав входа — как в пилоте Jev
- *     2026-09-24: `state.agent_output` = вывод исполнителя с секциями файлов
- *     тикета, `instructions` = критерий кейса, `criteria` = пять уровней. Цифры
- *     согласия этапа 0 относятся к этому составу: меняешь его — перемеряешь
- *     (src/scripts/compare-judges.js).
+ * Судья получает текстовый промпт (buildCliJudgePrompt — рубрика, вывод
+ * исполнителя с файлами тикета, критерий кейса) и отвечает блоком `---RESULT---`
+ * со строкой `score: <1-5>`. Кроме балла судья может сообщить уверенность
+ * (`confidence: <0..1>`) и цену ответа (`cost_usd:`). Модель, которой нужен
+ * другой протокол (модель решений по HTTP), подключается скриптом-обёрткой с тем
+ * же входом и выходом (src/scripts/decisions-judge.js) — у системы нет отдельной
+ * ветки ни для протокола, ни для конкретной модели, ни для её ключа.
  *
- * Уверенность Jev ниже `escalate_below` (по умолчанию 0.8) — попытку переоценивает
- * `escalate_to` (CLI-агент): на пилоте при 0.8 мимо эскалации прошли 2 расхождения
- * с Opus из 18. Любая ошибка клиента (нет ключа, сеть, 5xx, чужой ответ) и
- * нечитаемая рубрика — тоже `escalate_to`, с пометкой `fallback: <класс>`:
- * сетевой сбой не обнуляет прогон, который идёт десятки минут.
+ * Переоценка — полями записи агента-судьи в pipeline.yaml:
+ *   - `escalate_to` — судья, который переоценивает; без него переоценки нет;
+ *   - `escalate_below` — уверенность ниже порога (или её отсутствие в ответе) —
+ *     попытку переоценивает `escalate_to`, итог — его балл;
+ *   - ответ без балла (ошибка судьи, `status: error` с `error_class`) — тоже
+ *     `escalate_to`, с пометкой `fallback: <класс>`: сбой одного судьи не обнуляет
+ *     прогон, который идёт десятки минут.
  *
  * Результат — запись вызова судьи (README, «Судья тестов скилов»): её пишет раннер
- * в `current/<agent>/trial-<N>.judge.json`, по ней перемеряется согласие судей.
- * Неразобранный ответ и балл вне 1..5 — ошибка (`error`), а не балл 3: прежде
- * сломанный ответ судьи был неотличим от честной тройки.
+ * в `current/<agent>/trial-<N>.judge.json`, по ней перемеряется согласие судей
+ * (src/scripts/compare-judges.js). Неразобранный ответ и балл вне 1..5 — ошибка
+ * (`error`), а не балл 3: прежде сломанный ответ судьи был неотличим от честной
+ * тройки.
  */
 
 import { spawnAgent } from './agent-spawner.mjs';
-import { evaluate } from './model-evaluate.mjs';
-import { ModelClientError, assertModelUrl, resolveModelKey } from './model-client.mjs';
-import { buildAgentEnv } from './agent-env.mjs';
-import { rubricLevels } from './rubric-levels.mjs';
+import { redactNetworkDetail } from './model-client.mjs';
 
 export const JUDGE_PASS_SCORE = 4;
-export const DEFAULT_ESCALATE_BELOW = 0.8;
 // Цена вызова судьи без `cost_per_call` в записи агента — прежняя константа оценки.
 export const DEFAULT_JUDGE_CALL_COST = 0.02;
-// Доля оценок Jev, ушедших на эскалацию при пороге 0.8: пилот 2026-09-24, 57 из 201.
-export const ESCALATION_SHARE = 0.284;
-export const VERDICT_QUESTION_ID = 'verdict';
 
 /** Промпт CLI-судьи. `ticket_files` пуст — строка та же, что у калибровки. */
 export function buildCliJudgePrompt({ rubric, agent_output, ticket_files = '', criterion }) {
@@ -58,7 +52,7 @@ reason: <brief explanation>
 ---RESULT---`;
 }
 
-/** Балл из ответа CLI-судьи: первое `score: <число>`; null — нет строки или балл вне 1..5. */
+/** Балл из ответа судьи: первое `score: <число>`; null — нет строки или балл вне 1..5. */
 export function parseJudgeScore(output) {
   const match = String(output ?? '').match(/score:\s*(\d+)/i);
   if (!match) return null;
@@ -66,112 +60,114 @@ export function parseJudgeScore(output) {
   return score >= 1 && score <= 5 ? score : null;
 }
 
-/** Данные для Jev — текст между `## Target Agent Output` и `## Task` промпта CLI-судьи. */
-export function jevAgentOutput({ agent_output, ticket_files = '' }) {
-  return `${agent_output}\n${ticket_files}`.trim();
+function field(output, name) {
+  const match = String(output ?? '').match(new RegExp(`^${name}:\\s*(.+?)\\s*$`, 'mi'));
+  return match ? match[1] : null;
 }
 
 /**
- * Проверка записи судьи до прогона. CLI-агент — без условий. `kind: http` —
- * только `protocol: decisions` и `escalate_to` на CLI-агента из реестра: без
- * него неуверенную оценку и отказ HTTP некому переоценить.
+ * Необязательные поля ответа судьи сверх балла. Нет поля или значение не того
+ * вида — null: судья, который уверенности не сообщает, не ломает разбор.
+ */
+export function parseJudgeExtras(output) {
+  const confidenceText = field(output, 'confidence');
+  const confidence = confidenceText !== null && /^(0(\.\d+)?|1(\.0+)?)$/.test(confidenceText)
+    ? Number(confidenceText) : null;
+  const costText = field(output, 'cost_usd');
+  const cost = costText !== null && /^\d+(\.\d+)?(e-?\d+)?$/i.test(costText) ? Number(costText) : null;
+  let probabilities = null;
+  const probabilitiesText = field(output, 'probabilities');
+  if (probabilitiesText) {
+    try {
+      const parsed = JSON.parse(probabilitiesText);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) probabilities = parsed;
+    } catch { /* не JSON — нет поля */ }
+  }
+  return {
+    confidence,
+    probabilities,
+    cost_usd: cost,
+    model: field(output, 'model'),
+    error_class: field(output, 'error_class'),
+    error: field(output, 'error'),
+  };
+}
+
+/**
+ * Проверка записи судьи до прогона.
  * @returns {string[]} ошибки
  */
 export function judgeAgentErrors(judgeId, agents) {
   const agent = agents?.[judgeId];
   if (!agent) return [`Judge agent '${judgeId}' not found in pipeline.yaml → agents[]`];
   const errors = [];
-  const costOk = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
-  if (agent.cost_per_call !== undefined && !costOk(agent.cost_per_call)) {
+  const isCli = (a) => (a.kind ?? 'cli') === 'cli';
+  const inUnit = (value) => typeof value === 'number' && value >= 0 && value <= 1;
+  if (!isCli(agent)) {
+    errors.push(`Judge agent '${judgeId}' must be an agent with a command (kind: cli), got kind: ${agent.kind}; a model with another protocol joins as a CLI wrapper (src/scripts/decisions-judge.js)`);
+  }
+  if (agent.cost_per_call !== undefined && !(typeof agent.cost_per_call === 'number' && Number.isFinite(agent.cost_per_call) && agent.cost_per_call >= 0)) {
     errors.push(`Judge agent '${judgeId}': cost_per_call must be a number >= 0`);
   }
-  if (agent.kind !== 'http') return errors;
-
-  try {
-    assertModelUrl(agent.url);
-  } catch (err) {
-    errors.push(`Judge agent '${judgeId}' (kind: http): ${err.message}`);
+  if (agent.escalate_below !== undefined && !inUnit(agent.escalate_below)) {
+    errors.push(`Judge agent '${judgeId}': escalate_below must be a number in 0..1`);
   }
-  if (agent.protocol !== 'decisions') {
-    errors.push(`Judge agent '${judgeId}' (kind: http) must use protocol decisions, got: ${agent.protocol}`);
+  if (agent.escalation_share !== undefined && !inUnit(agent.escalation_share)) {
+    errors.push(`Judge agent '${judgeId}': escalation_share must be a number in 0..1`);
   }
   const target = agent.escalate_to;
-  if (typeof target !== 'string' || target === '') {
-    errors.push(`Judge agent '${judgeId}' (kind: http) needs escalate_to — a CLI agent for low-confidence scores and HTTP failures`);
-  } else if (!agents[target]) {
-    errors.push(`Judge agent '${judgeId}': escalate_to '${target}' not found in pipeline.yaml → agents[]`);
-  } else if ((agents[target].kind ?? 'cli') !== 'cli') {
-    errors.push(`Judge agent '${judgeId}': escalate_to '${target}' must be a CLI agent (kind: cli), got kind: ${agents[target].kind}`);
-  }
-  const below = agent.escalate_below;
-  if (below !== undefined && !(typeof below === 'number' && below >= 0 && below <= 1)) {
-    errors.push(`Judge agent '${judgeId}': escalate_below must be a number in 0..1`);
+  if (target !== undefined) {
+    if (typeof target !== 'string' || target === '') {
+      errors.push(`Judge agent '${judgeId}': escalate_to must be an agent id`);
+    } else if (target === judgeId) {
+      errors.push(`Judge agent '${judgeId}': escalate_to must be another agent`);
+    } else if (!agents[target]) {
+      errors.push(`Judge agent '${judgeId}': escalate_to '${target}' not found in pipeline.yaml → agents[]`);
+    } else if (!isCli(agents[target])) {
+      errors.push(`Judge agent '${judgeId}': escalate_to '${target}' must be an agent with a command (kind: cli), got kind: ${agents[target].kind}`);
+    }
+  } else if (agent.escalate_below !== undefined || agent.escalation_share !== undefined) {
+    errors.push(`Judge agent '${judgeId}': escalate_below and escalation_share need escalate_to`);
   }
   return errors;
 }
 
 /**
- * Ожидаемая цена одной оценки: `cost_per_call` судьи; для `kind: http` с
- * эскалацией — плюс доля эскалации пилота × `cost_per_call` агента `escalate_to`.
- * `allEscalate` — HTTP-судья не ответит ни разу (нет ключа): каждую оценку даёт
- * `escalate_to` по полной цене.
- * @returns {{ cost: number, missing: string[] }} missing — агенты без цены
+ * Ожидаемая цена одной оценки: `cost_per_call` судьи плюс, если задан
+ * `escalate_to`, `escalation_share` × `cost_per_call` судьи эскалации (доля
+ * переоценённых оценок — замер, а не константа кода).
+ * `worst` — цена, если судья не даст балла ни разу (нет ключа, сбой, всегда
+ * неуверен): каждую оценку тогда даёт ещё и `escalate_to`.
+ * @returns {{ cost: number, worst: number, missing: string[] }} missing — чего нет в записях
  */
-export function judgeCallCost(judgeId, agents, { allEscalate = false } = {}) {
+export function judgeCallCost(judgeId, agents) {
   const missing = [];
   const priceOf = (id) => {
     const value = agents?.[id]?.cost_per_call;
     if (typeof value === 'number' && Number.isFinite(value)) return value;
-    missing.push(id);
+    missing.push(`${id}.cost_per_call`);
     return DEFAULT_JUDGE_CALL_COST;
   };
   const agent = agents?.[judgeId] || {};
-  if (agent.kind === 'http' && agent.escalate_to && allEscalate) {
-    return { cost: priceOf(agent.escalate_to), missing };
+  const own = priceOf(judgeId);
+  if (!agent.escalate_to) return { cost: own, worst: own, missing };
+  const target = priceOf(agent.escalate_to);
+  let share = agent.escalation_share;
+  if (typeof share !== 'number') {
+    missing.push(`${judgeId}.escalation_share`);
+    share = 1; // без замера — худший случай: переоценивается каждая оценка
   }
-  let cost = priceOf(judgeId);
-  if (agent.kind === 'http' && agent.escalate_to) {
-    cost += ESCALATION_SHARE * priceOf(agent.escalate_to);
-  }
-  return { cost, missing };
+  return { cost: own + share * target, worst: own + target, missing };
 }
 
-/**
- * Окружение клиента HTTP-судьи: переданное или окружение процесса с машинным
- * слоем `~/.workflow/agent.env` (ключ, прокси) — как у стадий `model_io` раннера.
- */
-export function judgeClientEnv(baseEnv = process.env, { stageId = 'judge', logger = null } = {}) {
-  return buildAgentEnv(baseEnv, null, { stageId, ...(logger ? { logger } : {}) });
-}
-
-/** Ключ HTTP-судьи есть в окружении клиента? Ошибка — класс `no_key` клиента. */
-export function judgeKeyMissing(judgeId, agents, env) {
-  const agent = agents?.[judgeId];
-  if (agent?.kind !== 'http') return null;
-  try {
-    resolveModelKey({ ...agent, id: judgeId }, env);
-    return null;
-  } catch (err) {
-    return err.message;
-  }
-}
-
-// Текст ошибки клиента пишется в запись судьи, а записи лежат в git вместе с
-// выводами прогона: адрес прокси или сервера (`connect ECONNREFUSED host:port`) там
-// не нужен. Ключ клиент вырезает сам (model-client.mjs, scrub).
-function redactDetail(text) {
-  return String(text ?? '').replace(/\b[\w.-]+:\d{2,5}\b/g, '[host:port]');
-}
-
-/** Состояние одного прогона: судьи без ключа — предупреждение печатается один раз. */
+/** Состояние одного прогона: предупреждение о сбое судьи печатается один раз на класс. */
 export function createJudgeRunState() {
-  return { noKey: new Map() };
+  return { warned: new Set() };
 }
 
-function newRecord(judgeId, kind, input) {
+function newRecord(judgeId, input) {
   return {
     judge_agent: judgeId,
-    judge_kind: kind,
     input: {
       rubric_file: input.rubric_file ?? null,
       rubric: input.rubric,
@@ -182,7 +178,7 @@ function newRecord(judgeId, kind, input) {
     prompt: null,
     raw_output: null,
     model: null,
-    // own_score — балл этого судьи; score и passed — итог попытки (после эскалации).
+    // own_score — балл этого судьи; score и passed — итог попытки (после переоценки).
     own_score: null,
     score: null,
     passed: false,
@@ -195,11 +191,12 @@ function newRecord(judgeId, kind, input) {
     duration_ms: null,
     cost_usd: null,
     error: null,
+    error_class: null,
   };
 }
 
-async function runCliJudge(judgeId, agent, input, ctx) {
-  const record = newRecord(judgeId, 'cli', input);
+async function askJudge(judgeId, agent, input, ctx) {
+  const record = newRecord(judgeId, input);
   record.prompt = buildCliJudgePrompt(input);
   const started = Date.now();
   try {
@@ -210,132 +207,80 @@ async function runCliJudge(judgeId, agent, input, ctx) {
       ...(ctx.env ? { env: ctx.env } : {}),
     });
     record.raw_output = result.output || '';
+    const extras = parseJudgeExtras(record.raw_output);
+    Object.assign(record, {
+      model: extras.model,
+      confidence: extras.confidence,
+      probabilities: extras.probabilities,
+      cost_usd: extras.cost_usd,
+    });
     const score = parseJudgeScore(record.raw_output);
     if (score === null) {
-      record.error = 'judge output unparsed';
+      record.error_class = extras.error_class || 'unparsed';
+      record.error = extras.error_class
+        ? `${extras.error_class}: ${redactNetworkDetail(extras.error || '')}`
+        : 'judge output unparsed';
     } else {
       record.own_score = score;
       record.score = score;
       record.passed = score >= JUDGE_PASS_SCORE;
     }
   } catch (err) {
-    record.error = err.message;
+    record.error_class = 'judge_error';
+    record.error = redactNetworkDetail(err.message);
   }
   record.duration_ms = Date.now() - started;
   return record;
 }
 
-/** Итог попытки берётся у `escalate_to`; ответ Jev остаётся в записи. */
-async function handOver(record, agent, input, ctx) {
-  const targetId = agent.escalate_to;
-  const cli = await runCliJudge(targetId, ctx.agents[targetId], input, ctx);
-  record.escalation = cli;
-  record.score = cli.score;
-  record.passed = cli.passed;
-  if (cli.error) record.error = `${targetId}: ${cli.error}`;
-  return record;
-}
-
-async function runHttpJudge(judgeId, agent, input, ctx) {
-  const record = newRecord(judgeId, 'http', input);
-  const started = Date.now();
-  const log = ctx.log || (() => {});
-  const done = () => {
-    record.duration_ms = Date.now() - started;
-    return record;
-  };
-  // Без эскалации (сравнение судей) отказ — ошибка записи; иначе оценку даёт escalate_to.
-  const fallback = async (errorClass, rawDetail) => {
-    const detail = redactDetail(rawDetail);
-    if (ctx.noEscalation) {
-      record.error = `${errorClass}: ${detail}`;
-      return done();
-    }
-    record.fallback = errorClass;
-    record.fallback_detail = detail;
-    await handOver(record, agent, input, ctx);
-    return done();
-  };
-
-  let levels;
-  try {
-    levels = rubricLevels(input.rubric, input.rubric_file || 'rubric');
-  } catch (err) {
-    if (!ctx.noEscalation) log(`[Runner] judge ${judgeId}: ${err.message} — оценку даёт ${agent.escalate_to}`);
-    return fallback('rubric_unparsed', err.message);
-  }
-
-  const noKey = ctx.state?.noKey;
-  if (noKey?.has(judgeId)) return fallback('no_key', noKey.get(judgeId));
-
-  // Таймаут судьи — `execution.judge_timeout_s` скила (ctx.timeoutS), как у CLI-судьи.
-  const httpAgent = { ...agent, id: judgeId, ...(ctx.timeoutS ? { timeout_s: ctx.timeoutS } : {}) };
-  const clientOptions = { ...(ctx.clientOptions || {}) };
-  if (!clientOptions.env) clientOptions.env = judgeClientEnv(process.env, { stageId: ctx.stageId });
-
-  let evaluation;
-  try {
-    evaluation = await evaluate(httpAgent, {
-      data: { agent_output: jevAgentOutput(input) },
-      questions: [{ id: VERDICT_QUESTION_ID, text: String(input.criterion).trim(), levels }],
-    }, clientOptions);
-  } catch (err) {
-    if (!(err instanceof ModelClientError)) throw err;
-    const handler = ctx.noEscalation ? 'оценки нет' : `оценку даёт ${agent.escalate_to}`;
-    if (err.class === 'no_key' && noKey) {
-      if (!noKey.has(judgeId)) {
-        noKey.set(judgeId, err.message);
-        log(`[Runner] ⚠ judge ${judgeId}: нет ключа (no_key) — ${err.message}. До конца прогона ${handler}`);
-      }
-    } else {
-      log(`[Runner] judge ${judgeId}: HTTP-судья не ответил (${err.class}) — ${handler}`);
-    }
-    return fallback(err.class, err.message);
-  }
-
-  const answer = evaluation.answers[VERDICT_QUESTION_ID];
-  Object.assign(record, {
-    // Ответ модели как есть — форма тела decisions: model, answers провайдера, usage.
-    raw_output: JSON.stringify({ model: evaluation.model, answers: evaluation.raw, usage: evaluation.usage }),
-    model: evaluation.model ?? null,
-    cost_usd: evaluation.cost_usd ?? null,
-    own_score: answer.level,
-    score: answer.level,
-    passed: answer.level >= JUDGE_PASS_SCORE,
-    confidence: answer.confidence,
-    probabilities: answer.probabilities,
-  });
-
-  const below = typeof agent.escalate_below === 'number' ? agent.escalate_below : DEFAULT_ESCALATE_BELOW;
-  if (!ctx.noEscalation && (answer.confidence === null || answer.confidence < below)) {
-    record.escalated = true;
-    await handOver(record, agent, input, ctx);
-  }
-  return done();
-}
-
 /**
- * Одна оценка судьёй `judgeId`.
+ * Одна оценка судьёй `judgeId` с переоценкой по полям его записи.
  *
  * @param {string} judgeId
  * @param {object} input - { rubric_file, rubric, criterion, agent_output, ticket_files }
  * @param {object} ctx
  * @param {object} ctx.agents - реестр агентов pipeline.yaml
- * @param {number} ctx.timeoutS - таймаут судьи на один вызов, с (CLI и HTTP)
+ * @param {number} ctx.timeoutS - таймаут судьи на один вызов, с
  * @param {string} [ctx.stageId]
- * @param {object} [ctx.env] - доплата к окружению CLI-судьи
- * @param {object} [ctx.clientOptions] - параметры клиента HTTP (env, retryDelaysMs);
- *   без env — окружение процесса с ~/.workflow/agent.env (judgeClientEnv)
+ * @param {object} [ctx.env] - доплата к окружению судьи
  * @param {object} [ctx.state] - createJudgeRunState() прогона
- * @param {boolean} [ctx.noEscalation] - только оценка самого судьи: без эскалации
- *   и без фоллбека (ошибка клиента — `error`). Для сравнения судей.
+ * @param {boolean} [ctx.noEscalation] - только оценка самого судьи, без переоценки
+ *   и без фоллбека (для сравнения судей)
  * @param {Function} [ctx.log]
  * @returns {Promise<object>} запись вызова судьи
  */
 export async function runJudge(judgeId, input, ctx) {
   const agent = ctx.agents?.[judgeId];
   if (!agent) throw new Error(`Judge agent not found: ${judgeId}`);
-  return agent.kind === 'http'
-    ? runHttpJudge(judgeId, agent, input, ctx)
-    : runCliJudge(judgeId, agent, input, ctx);
+  const started = Date.now();
+  const record = await askJudge(judgeId, agent, input, ctx);
+  const targetId = agent.escalate_to;
+  if (ctx.noEscalation || !targetId) return record;
+
+  const log = ctx.log || (() => {});
+  if (record.error) {
+    record.fallback = record.error_class;
+    record.fallback_detail = record.error;
+    const key = `${judgeId}:${record.error_class}`;
+    if (!ctx.state?.warned?.has(key)) {
+      ctx.state?.warned?.add(key);
+      log(`[Runner] ⚠ judge ${judgeId}: нет балла (${record.error_class}) — оценку даёт ${targetId}; ${record.error}`);
+    }
+  } else if (typeof agent.escalate_below === 'number'
+    && (record.confidence === null || record.confidence < agent.escalate_below)) {
+    record.escalated = true;
+  } else {
+    return record;
+  }
+
+  // Итог попытки берётся у escalate_to; ответ судьи остаётся в записи.
+  const target = await askJudge(targetId, ctx.agents[targetId], input, ctx);
+  record.escalation = target;
+  record.score = target.score;
+  record.passed = target.passed;
+  // error и error_class — итог попытки: сбой судьи, давший фоллбек, — в `fallback`.
+  record.error = target.error ? `${targetId}: ${target.error}` : null;
+  record.error_class = target.error ? target.error_class : null;
+  record.duration_ms = Date.now() - started;
+  return record;
 }

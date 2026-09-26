@@ -2,20 +2,22 @@
  * Сравнение судей по записям попыток (src/scripts/compare-judges.js, PLAN-001).
  *
  * Записи судьи — фикстуры во временном каталоге скилов (WORKFLOW_SKILLS_DIR) с
- * известными баллами. Судья-кандидат — Jev на локальном сервере (_model-server.mjs):
- * уровень и уверенность он берёт из маркера `WANT:<уровень>:<уверенность>` в выводе
- * исполнителя. Числа отчёта сверяются с посчитанными вручную (таблица ниже). Сеть
- * наружу не используется; каталог снимается в after().
+ * известными баллами. Судья сравнения — агент с командой: CLI-обёртка модели
+ * решений (src/scripts/decisions-judge.js) с моделью на локальном сервере
+ * (_model-server.mjs) и ключом в файле. Уровень и уверенность сервер берёт из
+ * маркера `WANT:<уровень>:<уверенность>` в выводе исполнителя. Числа отчёта
+ * сверяются с посчитанными вручную (таблица ниже). Сеть наружу не используется;
+ * каталог снимается в after().
  *
- * | запись | скил | балл записи | Jev: уровень, уверенность | pass/fail |
- * |--------|------|-------------|---------------------------|-----------|
- * | r1     | A    | 5           | 5, 0.95                   | совпал    |
- * | r2     | A    | 4           | 5, 0.9                    | совпал    |
- * | r3     | A    | 2           | 5, 0.6                    | расхождение |
- * | r4     | A    | 5           | 1, 0.85                   | расхождение |
- * | r5     | A    | 3           | 3, 0.75                   | совпал    |
- * | r6     | A    | ошибка судьи| —                         | пропуск   |
- * | r7     | B    | 1           | 2, 0.99                   | совпал    |
+ * | запись | скил | балл записи | судья: уровень, уверенность | pass/fail |
+ * |--------|------|-------------|-----------------------------|-----------|
+ * | r1     | A    | 5           | 5, 0.95                     | совпал    |
+ * | r2     | A    | 4           | 5, 0.9                      | совпал    |
+ * | r3     | A    | 2           | 5, 0.6                      | расхождение |
+ * | r4     | A    | 5           | 1, 0.85                     | расхождение |
+ * | r5     | A    | 3           | 3, 0.75                     | совпал    |
+ * | r6     | A    | ошибка судьи| —                           | пропуск   |
+ * | r7     | B    | 1           | 2, 0.99                     | совпал    |
  *
  * Точно 2/6, ±1 4/6, pass/fail 4/6. Пороги: 0.7 — уходит 1 (r3), на оставшихся
  * 4 из 5, мимо порога 1 (r4); 0.8 — уходит 2 (r3, r5), 3 из 4, мимо 1; 0.95 —
@@ -33,6 +35,9 @@ import { TEST_KEY, startModelServer, sendJson, decisionsResponse } from './_mode
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SCRIPT = join(PROJECT_ROOT, 'src', 'scripts', 'compare-judges.js');
+const DECISIONS_SCRIPT = join(PROJECT_ROOT, 'src', 'scripts', 'decisions-judge.js');
+const MOCK_RAW = join(PROJECT_ROOT, 'src', 'tests', 'fixtures', 'mock-judge-raw.js');
+const yamlPath = (p) => p.replace(/\\/g, '/');
 
 const RUBRIC = [
   '| Балл | Описание |', '|---|---|',
@@ -52,7 +57,6 @@ const FIXTURES = [
 function record(f) {
   return {
     judge_agent: 'mock-opus',
-    judge_kind: 'cli',
     input: {
       rubric_file: `${f.skill}/tests/rubrics/r.md`,
       rubric: RUBRIC,
@@ -91,7 +95,7 @@ function runScript(args, env) {
   });
 }
 
-describe('compare-judges: переоценка записей судьёй Jev', () => {
+describe('compare-judges: переоценка записей судьёй на модели решений', () => {
   let root;
   let skillsDir;
   let pipeline;
@@ -112,17 +116,24 @@ describe('compare-judges: переоценка записей судьёй Jev',
         verdict: { type: 'score', score: 0, legend: {}, probabilities: { [Number(level) - 1]: 1 }, confidence: Number(confidence) },
       }));
     });
+    const keyFile = join(root, 'model.key');
+    writeFileSync(keyFile, `${TEST_KEY}\n`);
+    // Судья на модели решений — обычный агент с командой: скрипт-обёртка,
+    // модель и файл ключа — в аргументах.
+    const decider = (id, key) => [
+      `    ${id}:`,
+      '      command: "node"',
+      `      args: [${[DECISIONS_SCRIPT, '--model', 'vendor/decider', '--url', server.url('/api/alpha/decisions'), '--key-file', key]
+        .map((a) => JSON.stringify(yamlPath(a))).join(', ')}]`,
+      '      prompt_stdin: true',
+      '      cost_per_call: 0.0001',
+    ];
     pipeline = join(root, 'pipeline.yaml');
     writeFileSync(pipeline, [
       'pipeline:',
       '  agents:',
-      '    jev:',
-      '      kind: http',
-      '      protocol: decisions',
-      `      url: "${server.url('/api/alpha/decisions')}"`,
-      '      model: "typesafe/jev-1.13"',
-      '      auth: { env: "TEST_MODEL_KEY" }',
-      '      cost_per_call: 0.0001',
+      ...decider('decider', keyFile),
+      ...decider('decider-nokey', join(root, 'none.key')),
       '',
     ].join('\n'));
   });
@@ -132,13 +143,13 @@ describe('compare-judges: переоценка записей судьёй Jev',
     rmSync(root, { recursive: true, force: true });
   });
 
-  const env = () => ({ WORKFLOW_SKILLS_DIR: skillsDir, TEST_MODEL_KEY: TEST_KEY });
+  const env = () => ({ WORKFLOW_SKILLS_DIR: skillsDir });
 
   it('отчёт: совпадения, матрица, пороги, скилы, цена — как посчитано вручную', async () => {
     const out = join(root, 'report.md');
     const disagreements = join(root, 'disagreements');
     const seen = server.requests.length;
-    const run = await runScript(['--judge', 'jev', '--pipeline', pipeline, '--yes',
+    const run = await runScript(['--judge', 'decider', '--pipeline', pipeline, '--yes',
       '--out', out, '--disagreements', disagreements], env());
 
     assert.equal(run.exitCode, 0, run.stdout + run.stderr);
@@ -146,13 +157,13 @@ describe('compare-judges: переоценка записей судьёй Jev',
     const report = readFileSync(out, 'utf8');
 
     assert.match(report, /Записей судьи найдено: 7\. Судьи записей: mock-opus\./);
-    assert.match(report, /Пропущено записей с ошибкой судьи: 1\. Переоценка не удалась: 0\. Сравнено: 6\./);
+    assert.match(report, /Пропущено записей с ошибкой судьи: 1\. Пропущено записей, балл которых дал сам decider: 0\. Переоценка не удалась: 0\. Сравнено: 6\./);
     assert.match(report, /\| Точное совпадение балла \| 2 из 6 \(33\.3%\) \|/);
     assert.match(report, /\| В пределах ±1 \| 4 из 6 \(66\.7%\) \|/);
     assert.match(report, /\| Совпадение pass\/fail \(порог 4\) \| 4 из 6 \(66\.7%\) \|/);
     assert.match(report, /\| Расхождений pass\/fail \| 2 \|/);
 
-    // строки — балл записи, столбцы — Jev
+    // строки — балл записи, столбцы — судья сравнения
     assert.match(report, /\| 1 \| 0 \| 1 \| 0 \| 0 \| 0 \|/);
     assert.match(report, /\| 2 \| 0 \| 0 \| 0 \| 0 \| 1 \|/);
     assert.match(report, /\| 3 \| 0 \| 0 \| 1 \| 0 \| 0 \|/);
@@ -167,7 +178,7 @@ describe('compare-judges: переоценка записей судьёй Jev',
     assert.match(report, /\| 0\.95 \| 4 \(66\.7%\) \| 2 из 2 \(100\.0%\) \| 0 из 2 \|/);
 
     // 6 × 0.000126672 (цена ответа _model-server) = 0.000760032
-    assert.match(report, /Судья jev: \$0\.0008 за 6 вызовов с ценой; без цены в ответе: 0\./);
+    assert.match(report, /Судья decider: \$0\.0008 за 6 вызовов с ценой; без цены в ответе: 0\./);
 
     const files = readdirSync(disagreements).sort();
     assert.deepEqual(files, [
@@ -176,13 +187,13 @@ describe('compare-judges: переоценка записей судьёй Jev',
     ]);
     const r3 = readFileSync(join(disagreements, files[0]), 'utf8');
     assert.match(r3, /Запись: mock-opus — балл 2/);
-    assert.match(r3, /jev: балл 5, уверенность 0\.6/);
+    assert.match(r3, /decider: балл 5, уверенность 0\.6/);
     assert.match(r3, /вывод r3 WANT:5:0\.6/);
   });
 
   it('--skill — только записи этого скила', async () => {
     const out = join(root, 'report-b.md');
-    const run = await runScript(['--judge', 'jev', '--pipeline', pipeline, '--yes', '--skill', 'skill-b', '--out', out], env());
+    const run = await runScript(['--judge', 'decider', '--pipeline', pipeline, '--yes', '--skill', 'skill-b', '--out', out], env());
 
     assert.equal(run.exitCode, 0, run.stdout + run.stderr);
     const report = readFileSync(out, 'utf8');
@@ -190,15 +201,14 @@ describe('compare-judges: переоценка записей судьёй Jev',
     assert.match(report, /Сравнено: 1\./);
   });
 
-  it('судья без ключа — переоценка не удалась у каждой записи: отчёт есть, код 1', async () => {
+  it('у судьи нет файла ключа — переоценка не удалась у каждой записи: отчёт есть, код 1', async () => {
     const out = join(root, 'report-nokey.md');
-    const run = await runScript(['--judge', 'jev', '--pipeline', pipeline, '--yes', '--out', out],
-      { WORKFLOW_SKILLS_DIR: skillsDir, TEST_MODEL_KEY: '' });
+    const run = await runScript(['--judge', 'decider-nokey', '--pipeline', pipeline, '--yes', '--out', out], env());
 
     assert.equal(run.exitCode, 1, run.stdout + run.stderr);
-    assert.match(run.stderr, /ни одна из 6 записей не переоценена судьёй jev/);
+    assert.match(run.stderr, /ни одна из 7 записей не сравнена с судьёй decider-nokey/);
     assert.match(readFileSync(out, 'utf8'), /Переоценка не удалась: 6\. Сравнено: 0\./);
-    assert.equal(run.stdout.match(/нет ключа \(no_key\)/g)?.length, 1, 'предупреждение о ключе — одно');
+    assert.match(run.stdout, /переоценка не удалась: .* — no_key: /);
   });
 
   it('без --judge — код 1 и подсказка', async () => {
@@ -210,8 +220,8 @@ describe('compare-judges: переоценка записей судьёй Jev',
 
   it('ошибки аргументов и судьи — код 1 с причиной', async () => {
     const cases = [
-      [['--judge', 'jev', '--bogus'], /Unknown argument: --bogus/],
-      [['--judge', 'jev', '--concurrency', '0'], /--concurrency must be an integer >= 1/],
+      [['--judge', 'decider', '--bogus'], /Unknown argument: --bogus/],
+      [['--judge', 'decider', '--concurrency', '0'], /--concurrency must be an integer >= 1/],
       [['--judge'], /--judge needs a value/],
       [['--judge', 'нет-такого', '--pipeline', pipeline], /Judge agent 'нет-такого' not found/],
     ];
@@ -230,7 +240,7 @@ describe('compare-judges: переоценка записей судьёй Jev',
   });
 });
 
-describe('compare-judges: CLI-судья, испорченная запись, судья chat', () => {
+describe('compare-judges: судья без уверенности, испорченная запись, судья kind: http', () => {
   let root;
   before(() => {
     root = mkdtempSync(join(tmpdir(), 'wf-compare-judges-cli-'));
@@ -238,24 +248,35 @@ describe('compare-judges: CLI-судья, испорченная запись, �
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'trial-1.judge.json'), JSON.stringify(record({ id: 'c1', skill: 'skill-c', score: 5, want: '5:1' })));
     writeFileSync(join(dir, 'trial-2.judge.json'), '{ испорчено');
-    // Балл записи дал escalate_to: HTTP-судья записи не ответил (фоллбек).
+    // Балл записи дал escalate_to: судья записи ответил без балла (фоллбек).
     writeFileSync(join(dir, 'trial-3.judge.json'), JSON.stringify({
       ...record({ id: 'c3', skill: 'skill-c', score: 2, want: '2:1' }),
-      judge_agent: 'jev', judge_kind: 'http', own_score: null, fallback: 'no_key',
+      judge_agent: 'decider', own_score: null, fallback: 'no_key',
       escalation: { judge_agent: 'claude-opus', raw_output: 'score: 2', score: 2 },
     }));
+    // Балл записи дал сам судья сравнения: сравнивать не с чем.
+    writeFileSync(join(dir, 'trial-4.judge.json'), JSON.stringify({
+      ...record({ id: 'c4', skill: 'skill-c', score: 4, want: '4:1' }),
+      judge_agent: 'cli-four',
+    }));
     writeFileSync(join(dir, 'notes.txt'), 'не запись судьи');
+    // Скил, где все записи — с ошибкой судьи: сравнить нечего.
+    const errDir = join(root, 'skills', 'skill-d', 'tests', 'cases', 'TC-D-1', 'current', 'agent-x');
+    mkdirSync(errDir, { recursive: true });
+    writeFileSync(join(errDir, 'trial-1.judge.json'), JSON.stringify(record({
+      id: 'd1', skill: 'skill-d', score: null, want: '5:1', error: 'judge output unparsed',
+    })));
     writeFileSync(join(root, 'pipeline.yaml'), [
       'pipeline:',
       '  agents:',
       '    cli-four:',
       '      command: "node"',
-      `      args: ["${join(PROJECT_ROOT, 'src', 'tests', 'fixtures', 'mock-judge-raw.js').replace(/\\/g, '/')}", "score: 4"]`,
-      '    jev-chat:',
+      `      args: ["${yamlPath(MOCK_RAW)}", "score: 4"]`,
+      '    tool-less:',
       '      kind: http',
-      '      protocol: chat',
-      '      url: "http://127.0.0.1:9/v1/chat/completions"',
-      '      model: "vendor/chat"',
+      '      protocol: decisions',
+      '      url: "http://127.0.0.1:9/d"',
+      '      model: "vendor/model"',
       '      auth: { env: "TEST_MODEL_KEY" }',
       '',
     ].join('\n'));
@@ -264,26 +285,35 @@ describe('compare-judges: CLI-судья, испорченная запись, �
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('CLI-судья: без уверенности таблица порогов не строится; испорченная запись — пропуск', async () => {
+  it('все записи скила с ошибкой судьи — «Сравнено: 0» и код 1', async () => {
+    const run = await runScript(['--judge', 'cli-four', '--pipeline', join(root, 'pipeline.yaml'), '--yes', '--skill', 'skill-d'],
+      { WORKFLOW_SKILLS_DIR: join(root, 'skills') });
+
+    assert.equal(run.exitCode, 1, run.stdout + run.stderr);
+    assert.match(run.stdout, /Сравнено: 0\./);
+    assert.match(run.stderr, /ни одна из 1 записей не сравнена с судьёй cli-four/);
+  });
+
+  it('судья без уверенности: таблица порогов не строится; испорченная запись — пропуск; балл самого судьи — пропуск', async () => {
     const out = join(root, 'report.md');
-    const run = await runScript(['--judge', 'cli-four', '--pipeline', join(root, 'pipeline.yaml'), '--yes', '--out', out],
+    const run = await runScript(['--judge', 'cli-four', '--pipeline', join(root, 'pipeline.yaml'), '--yes', '--out', out, '--skill', 'skill-c'],
       { WORKFLOW_SKILLS_DIR: join(root, 'skills') });
 
     assert.equal(run.exitCode, 0, run.stdout + run.stderr);
     const report = readFileSync(out, 'utf8');
-    assert.match(report, /Записей судьи найдено: 3\. Судьи записей: claude-opus \(фоллбек no_key с jev\), mock-opus\./);
-    assert.match(report, /Пропущено записей с ошибкой судьи: 1\. Переоценка не удалась: 0\. Сравнено: 2\./);
+    assert.match(report, /Записей судьи найдено: 4 \(скил skill-c\)\. Судьи записей: claude-opus \(фоллбек no_key с decider\), mock-opus\./);
+    assert.match(report, /Пропущено записей с ошибкой судьи: 1\. Пропущено записей, балл которых дал сам cli-four: 1\. Переоценка не удалась: 0\. Сравнено: 2\./);
     assert.match(report, /\| 2 \| 0 \| 0 \| 0 \| 1 \| 0 \|/);
     assert.match(report, /\| 5 \| 0 \| 0 \| 0 \| 1 \| 0 \|/);
-    assert.match(report, /нет уверенности \(CLI-судья\) — таблица порогов не строится/);
+    assert.match(report, /Судья cli-four не сообщает уверенность — таблица порогов не строится/);
     assert.match(report, /без цены в ответе: 2\./);
   });
 
-  it('судья kind: http с protocol: chat — код 1', async () => {
-    const run = await runScript(['--judge', 'jev-chat', '--pipeline', join(root, 'pipeline.yaml'), '--yes'],
+  it('судья kind: http — код 1: судья — только агент с командой', async () => {
+    const run = await runScript(['--judge', 'tool-less', '--pipeline', join(root, 'pipeline.yaml'), '--yes'],
       { WORKFLOW_SKILLS_DIR: join(root, 'skills') });
 
     assert.equal(run.exitCode, 1);
-    assert.match(run.stderr, /must use protocol decisions, got: chat/);
+    assert.match(run.stderr, /must be an agent with a command \(kind: cli\), got kind: http/);
   });
 });
