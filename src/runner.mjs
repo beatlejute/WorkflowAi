@@ -6,7 +6,7 @@ import { spawn, execSync } from 'child_process';
 import crypto from 'crypto';
 import yaml from './lib/js-yaml.mjs';
 import { findProjectRoot } from './lib/find-root.mjs';
-import { loadRules, scanStderrForFatalRule, classify } from './lib/error-classifier.mjs';
+import { loadRules, scanStderrForFatalRule, classify, parseTtl } from './lib/error-classifier.mjs';
 import { snapshot, diff, isEmpty } from './lib/artifact-snapshot.mjs';
 import { markUnhealthy, isHealthy } from './lib/agent-health-registry.mjs';
 import { writeMarker, readMarker, removeMarker } from './lib/marker.mjs';
@@ -16,11 +16,19 @@ import { packageVersion as pipelineVersion } from './lib/package-version.mjs';
 import { appendAgentRun, classifyAgentResult } from './lib/agent-history.mjs';
 import { buildAgentEnv } from './lib/agent-env.mjs';
 import { findRailsStateByRun, railsHost, railsHooksPresent, railsNotEngagedVerdict, outputCheckVerdict } from './lib/rails-run-state.mjs';
-import { isKiloRun, kiloRunTitle, withKiloTitle, requestedKiloModel, kiloDbPath, readKiloModels, formatKiloModels, kiloAgentLabel } from './lib/kilo-models.mjs';
+import { isKiloRun, kiloRunTitle, withKiloTitle, requestedKiloModel, kiloDbPath, readKiloRun, formatKiloModels, kiloAgentLabel } from './lib/kilo-models.mjs';
+import {
+  EXECUTOR_SKILL, ROUTER_RESTARTS, CRASH_TTL_DEFAULT_MS,
+  appendRunEvent, readRunEvents, activeBans, findBan, describeBan, configuredModelKey, runModelKey,
+  requestedModel, ticketTypeOf, isCrashStatus, newRunKey, writeOpenRun, clearOpenRun, closeInterruptedRun,
+} from './lib/agent-runs.mjs';
+import { captureRunChanges, countRunChanges } from './lib/agent-run-changes.mjs';
 
 // Как часто, пока kilo-агент работает, смотреть в базу kilo, какие модели ответили.
 const KILO_MODELS_POLL_MS = 15000;
-import { incrementMetrics } from './lib/metrics-incremental.mjs';
+// Повторы финального чтения базы kilo после выхода агента (_trackKiloModels).
+const KILO_FINAL_READ_RETRIES = 3;
+const KILO_FINAL_READ_DELAY_MS = 300;
 import { loadRailsConfig } from './rails/rails-config.mjs';
 import { check as checkRailsOutput } from './rails/output-check.mjs';
 import { evaluate as evaluateWithModel, validateInput } from './lib/model-evaluate.mjs';
@@ -41,6 +49,59 @@ const MODEL_ERROR_HEALTH = Object.freeze({
   timeout: { class: 'transient', ttl: '5m' },
   network: { class: 'transient', ttl: '5m' },
 });
+
+/**
+ * TTL правила health (`5m`, `1h`, `until_utc_midnight`, …) в миллисекундах от текущего
+ * момента — для `crash_ttl_ms` события run. Нет TTL или он не разбирается — null.
+ */
+function ttlToMs(ttl, now = Date.now()) {
+  if (typeof ttl !== 'string' || !ttl) return null;
+  try {
+    // `infinite` — Number.MAX_SAFE_INTEGER: конец запрета держится в пределах Date.
+    return Math.max(0, Math.min(parseTtl(ttl, now), MAX_DATE_MS) - now);
+  } catch {
+    return null;
+  }
+}
+
+// Наибольшее время, которое представимо в Date (ECMAScript: ±8.64e15 мс).
+const MAX_DATE_MS = 8.64e15;
+
+/**
+ * Какое событие журнала запусков пишет стадия по своему результату: `verify` —
+ * стадия контроля артефактов (агент — скрипт verify-artifacts.js), `review` — стадия
+ * ревью (со скилом review-result или с обменом model_io, чей apply — apply-review.js);
+ * иначе null. Стадия опознаётся по скрипту и скилу, а не по id: переименование
+ * стадии в конфиге запись не отключает.
+ */
+function stageEventKind(pipeline, stage) {
+  if (!stage) return null;
+  const script = stage.agent && !stage.agents ? pipeline.agents?.[stage.agent] : null;
+  if (script && Array.isArray(script.args) && script.args.some((a) => path.basename(String(a)) === 'verify-artifacts.js')) {
+    return 'verify';
+  }
+  if (stage.skill === 'review-result') return 'review';
+  if (stage.model_io?.apply && path.basename(String(stage.model_io.apply)) === 'apply-review.js') return 'review';
+  return null;
+}
+
+/** Значения RESULT (строки) → поля событий журнала. */
+function resultNumber(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function resultBoolean(value) {
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+  return null;
+}
+
+function resultList(value, separator) {
+  if (typeof value !== 'string') return [];
+  return value.split(separator).map((s) => s.trim()).filter(Boolean);
+}
 
 /**
  * Вопросы входа слоя оценки для агента с командой (StageExecutor._askCommandAgent):
@@ -1102,6 +1163,38 @@ class StageExecutor {
   }
 
   /**
+   * Жёсткое снятие текущего агента — повторный сигнал во время мягкой остановки
+   * (runPipeline): на POSIX агент мог не выйти по `SIGTERM` из killCurrentChild, и
+   * без `SIGKILL` он пережил бы выход раннера. `SIGKILL` снимает только сам процесс
+   * агента, не его потомков. На Windows дерево агента снимает уже killCurrentChild
+   * (`taskkill /T /F`); повтор — на случай, если дерево ещё живо.
+   */
+  forceKillCurrentChild() {
+    this.stopRequested = true;
+    this.currentModelAbort?.abort();
+    const child = this.currentChild;
+    if (!child || !child.pid) return;
+    if (process.platform === 'win32') {
+      try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe', windowsHide: true }); } catch {}
+    } else {
+      try { child.kill('SIGKILL'); } catch {}
+    }
+  }
+
+  /**
+   * Действующие запреты моделей по журналу запусков. Журнал не читается — null:
+   * агенты тогда не фильтруются, в лог — WARN.
+   */
+  _loadBans(stageId) {
+    try {
+      return activeBans(readRunEvents(this.projectRoot), Date.now());
+    } catch (err) {
+      if (this.logger) this.logger.warn(`agent-runs: journal not readable, model bans not applied: ${err.message}`, stageId);
+      return null;
+    }
+  }
+
+  /**
    * Строит список кандидатов-агентов для стейджа с учётом типа задачи,
    * required_capabilities и номера попытки. Возвращает:
    *   { agentId, effectiveStage } — если кандидат найден,
@@ -1172,12 +1265,40 @@ class StageExecutor {
     // Реестр персистентный между attempt'ами (план rev.3, решение 6.5).
     const afterHealth = afterCapabilities.filter(id => isHealthy(this.projectRoot, id));
 
+    // Фильтр по запретам моделей из журнала запусков (PLAN-003) — только на стадии
+    // исполнителя: одна модель стоит и у исполнителя, и у судьи ревью, и запрет за
+    // провалы исполнителя не должен снимать судью (решение 2026-09-26, «Только
+    // исполнитель»). Ключ модели — тот же, что у события run (configuredModelKey):
+    // роутер kilo по ключу роутера не отсеивается, его модели отсеивает остановка
+    // в опросе базы kilo (_trackKiloModels).
+    const banned = new Map();
+    if (stage.skill === EXECUTOR_SKILL && afterHealth.length > 0) {
+      const bans = this._loadBans(stageId);
+      for (const id of afterHealth) {
+        const model = configuredModelKey(this.pipeline.agents[id], id);
+        const ban = findBan(bans, model, taskType);
+        if (!ban) continue;
+        banned.set(id, ban);
+        if (this.logger) this.logger.info(`agent ${id} skipped: model "${model}" — ${describeBan(ban)}`, stageId);
+      }
+    }
+    const afterBans = banned.size > 0 ? afterHealth.filter(id => !banned.has(id)) : afterHealth;
+
     // Фильтр по excludeAgents (для in-stage fallback в рамках одной attempt)
     const afterExclude = excludeAgents.length > 0
-      ? afterHealth.filter(id => !excludeAgents.includes(id))
-      : afterHealth;
+      ? afterBans.filter(id => !excludeAgents.includes(id))
+      : afterBans;
 
     if (afterExclude.length === 0) {
+      // Все агенты — под запретом модели: тикет уходит по goto.blocked, причина
+      // называет запрет, а не нездоровье агентов.
+      if (afterHealth.length > 0 && afterBans.length === 0) {
+        return {
+          blocked: 'all_banned',
+          reason: `All capable agents have banned models: ${[...banned].map(([id, ban]) => `${id} (${ban.model}: ${describeBan(ban)})`).join('; ')}`,
+          attempt
+        };
+      }
       // Все capability-совместимые агенты либо unhealthy в реестре, либо уже пробованы в этой attempt.
       if (afterCapabilities.length > 0) {
         return {
@@ -1206,6 +1327,21 @@ class StageExecutor {
 
   /**
    * Выполняет stage с fallback-логикой: при пустом artifact diff делает retry с другим агентом.
+   *
+   * Каждый запуск агента пишется в журнал запусков (src/lib/agent-runs.mjs, PLAN-003):
+   * до старта — запись открытого запуска `.workflow/state/agent-run-open.json`, после
+   * вызова в любой ветке — событие `run` с тем же `run_key`, затем запись удаляется.
+   * Статус запуска определяется один раз и идёт и в событие, и в строку истории
+   * работы тикета: остановка пайплайна (`stopRequested`) — `aborted` с
+   * `stop_requested: true`, остановка за запрещённую модель — `model_banned`, иначе —
+   * класс classifyAgentResult.
+   *
+   * После MODEL_BANNED тот же агент заходит снова — новая сессия kilo, новый
+   * `run_key` — не больше ROUTER_RESTARTS раз, затем стадия берёт следующего агента,
+   * даже при изменённых артефактах: сделанное записано в тикет по правилу скила
+   * исполнителя «Инкрементальная запись обязательна», следующий запуск продолжает с
+   * записанного. Агент при этом не помечается нездоровым.
+   *
    * @param {string} stageId - ID stage из конфигурации
    * @param {object} [stageOverride] - явный stage (для тестов и промежуточных вызовов); по умолчанию берётся из pipeline.stages
    * @returns {Promise<{status: string, output: string, result?: object}>}
@@ -1221,6 +1357,9 @@ class StageExecutor {
     // Результат последней ошибки шага «модель» обмена model_io (callModelAgent): её не
     // бросают, а возвращают стадии как status: error с error_class.
     let lastModelFailure = null;
+    // Перезапуски агентов после MODEL_BANNED и выбор, с которым агент заходит снова.
+    const bannedRestarts = new Map();
+    let restart = null;
 
     const snapshotEnabled = this.pipeline.execution?.artifact_snapshot_enabled !== false;
     const snapshotOpts = {
@@ -1229,20 +1368,23 @@ class StageExecutor {
     };
 
     while (true) {
-      const resolved = this.resolveAgent(stage, stageId, { excludeAgents: triedInThisAttempt });
+      const resolved = restart ?? this.resolveAgent(stage, stageId, { excludeAgents: triedInThisAttempt });
+      restart = null;
 
       if (resolved.blocked) {
+        const exhausted = resolved.blocked === 'all_unhealthy' || resolved.blocked === 'all_banned';
         // all_unhealthy после исчерпания списка в текущей attempt (lastErr есть) —
         // re-throw, чтобы стадия ушла в goto.error и inc-counter. Без lastErr —
         // первая итерация while, агентов сразу нет (persistence из прошлой attempt)
         // → возвращаем blocked, чтобы конфиг мог развести goto.blocked vs goto.error.
-        if (resolved.blocked === 'all_unhealthy' && lastErr) {
+        if (exhausted && lastErr) {
           throw lastErr;
         }
         // Ошибка модели у последнего агента списка: status: error с error_class.
-        if (resolved.blocked === 'all_unhealthy' && lastModelFailure) {
+        if (exhausted && lastModelFailure) {
           return lastModelFailure;
         }
+        if (resolved.blocked === 'all_banned' && this.logger) this.logger.warn(resolved.reason, stageId);
         return { status: 'blocked', blocked_reason: resolved.blocked, reason: resolved.reason };
       }
 
@@ -1262,6 +1404,8 @@ class StageExecutor {
         throw Object.assign(new Error(`Stage "${stageId}" stopped before agent ${agentId}`), { code: 'STOPPED' });
       }
 
+      const run = this._openAgentRun(stageId, effectiveStage, agentId, agent, resolved.attempt);
+
       try {
         if (this.logger) {
           this.logger.info(
@@ -1273,16 +1417,29 @@ class StageExecutor {
 
         // Стадия с model_io — обмен с моделью для любого агента списка; агент
         // kind: http другого пути не имеет.
-        const result = agent.kind === 'http' || effectiveStage.model_io
+        const result = run.modelIo
           ? await this.callModelAgent(agent, prompt, stageId, effectiveStage, agentId)
-          : await this.callAgent(agent, prompt, stageId, effectiveStage.skill, agentId);
+          : await this.callAgent(agent, prompt, stageId, effectiveStage.skill, agentId, { bannedCheck: run.bannedCheck });
+        // Снимок «после» — до записей раннера в тикет и в .workflow/metrics/: строка
+        // истории работы попала бы в подсчёт, и «пусто» не срабатывало бы никогда.
+        const changedFiles = this._runChangedFiles(run);
+        const stopRequested = this.stopRequested;
+
         if (result.modelError?.fallback) {
-          await this._auditAgentRun(stageId, effectiveStage, agentId, {
+          const callResult = {
             exitCode: -1,
             stderr: result.result?.error || '',
             stdout: '',
             parsedResult: result.result,
+          };
+          const status = stopRequested ? 'aborted' : this._classifyRun(agentId, callResult);
+          this._closeAgentRun(run, {
+            status, exitCode: -1, changedFiles, stopRequested,
+            crashTtlMs: ttlToMs(MODEL_ERROR_HEALTH[result.modelError.class]?.ttl),
           });
+          // Агент — для события ревью, если эта ошибка станет результатом стадии.
+          result.agentId = agentId;
+          await this._auditAgentRun(stageId, effectiveStage, agentId, { ...callResult, status });
           if (this.stopRequested) return result;
           if (this.logger) {
             this.logger.info(`agent ${agentId} model error ${result.modelError.class} — falling back in-stage`, stageId);
@@ -1293,8 +1450,7 @@ class StageExecutor {
           continue;
         }
 
-        // IMPL-83: audit-log hook (success path)
-        await this._auditAgentRun(stageId, effectiveStage, agentId, {
+        const callResult = {
           exitCode: result.exitCode ?? 0,
           // Ошибка модели обмена model_io без смены агента (no_key, bad_response, …):
           // текст ошибки — в stderr, иначе история тикета получила бы empty_response.
@@ -1302,7 +1458,19 @@ class StageExecutor {
           stdout: result.output || '',
           parsedResult: result.result || null,
           agentLabel: result.agentLabel || null,
+        };
+        const status = stopRequested ? 'aborted' : this._classifyRun(agentId, callResult);
+        const event = this._closeAgentRun(run, {
+          status, exitCode: callResult.exitCode, changedFiles, stopRequested,
+          kiloModels: result.kiloModels, modelIoModel: result.modelIo?.model,
+          crashTtlMs: result.modelError ? ttlToMs(MODEL_ERROR_HEALTH[result.modelError.class]?.ttl) : null,
         });
+        // Агент и модель запуска — для события ревью стадии (PipelineRunner.recordStageEvent).
+        result.agentId = agentId;
+        result.runModel = event.model;
+
+        // IMPL-83: audit-log hook (success path)
+        await this._auditAgentRun(stageId, effectiveStage, agentId, { ...callResult, status });
 
         // IMPL-86: normalize agent_id in ## Ревью after review-result stage.
         // Стадия с model_io пропускается: строку ревью с id агента пишет её скрипт
@@ -1326,13 +1494,17 @@ class StageExecutor {
         if (this.logger) this.logger.stageComplete(stageId, result.status, result.exitCode);
         return result;
       } catch (err) {
-        if (!err.exitCode && !err.code) throw err;
+        if (!err.exitCode && !err.code) {
+          // Исключение без кода выхода — события нет, запись открытого запуска снимается.
+          this._dropOpenRun(run, stageId);
+          throw err;
+        }
 
+        const changedFiles = this._runChangedFiles(run);
+        const stopRequested = this.stopRequested;
         const exitCode = err.exitCode ?? err.code;
         const stderr = err.stderr || '';
-
-        // IMPL-83: audit-log hook (failure path)
-        await this._auditAgentRun(stageId, effectiveStage, agentId, {
+        const callResult = {
           exitCode,
           stderr,
           stdout: err.stdout || '',
@@ -1340,7 +1512,27 @@ class StageExecutor {
           timedOut: err.timedOut === true,
           signal: err.signal,
           agentLabel: err.agentLabel || null,
+        };
+        const banned = !stopRequested && err.code === 'MODEL_BANNED';
+
+        // classify — до события: TTL сработавшего правила health идёт в crash_ttl_ms.
+        let status;
+        let classification = null;
+        if (stopRequested) {
+          status = 'aborted';
+        } else if (banned) {
+          status = 'model_banned';
+        } else {
+          status = this._classifyRun(agentId, callResult);
+          classification = await classify(this.rules, agentId, { exitCode, stderr });
+        }
+        this._closeAgentRun(run, {
+          status, exitCode, changedFiles, stopRequested,
+          kiloModels: err.kiloModels, crashTtlMs: ttlToMs(classification?.ttl),
         });
+
+        // IMPL-83: audit-log hook (failure path)
+        await this._auditAgentRun(stageId, effectiveStage, agentId, { ...callResult, status });
 
         // Агента убила остановка пайплайна: это не его сбой — без пометки в
         // health-реестре и без перехода к следующему агенту.
@@ -1349,11 +1541,29 @@ class StageExecutor {
           throw err;
         }
 
+        if (banned) {
+          const used = bannedRestarts.get(agentId) ?? 0;
+          lastErr = err;
+          lastModelFailure = null;
+          if (used < ROUTER_RESTARTS) {
+            bannedRestarts.set(agentId, used + 1);
+            if (this.logger) {
+              this.logger.warn(`agent ${agentId} stopped: model "${err.bannedModel}" banned — restart ${used + 1}/${ROUTER_RESTARTS}`, stageId);
+            }
+            restart = resolved;
+            continue;
+          }
+          if (this.logger) {
+            this.logger.warn(`agent ${agentId} stopped: model "${err.bannedModel}" banned — restarts exhausted, falling back in-stage`, stageId);
+          }
+          triedInThisAttempt.push(agentId);
+          continue;
+        }
+
         const after = snapshotEnabled ? await snapshot(this.projectRoot, snapshotOpts) : null;
         const diffResult = snapshotEnabled ? diff(before, after) : null;
         const diffEmpty = snapshotEnabled && isEmpty(diffResult);
 
-        const classification = await classify(this.rules, agentId, { exitCode, stderr });
         if (classification) {
           markUnhealthy(this.projectRoot, agentId, classification);
           if (this.logger) {
@@ -1390,7 +1600,116 @@ class StageExecutor {
   }
 
   /**
-   * IMPL-83: Audit-log hook — write entry to ticket history + bump metrics.
+   * Начало запуска агента: запись открытого запуска (до старта агента, когда
+   * ответившей модели ещё нет — ключ модели без данных запуска, у kilo-агента null),
+   * снимок для подсчёта изменённых файлов и проверка ответивших моделей kilo-агента
+   * на стадии исполнителя. Ошибка записи не меняет ход стадии: WARN, агент запускается.
+   */
+  _openAgentRun(stageId, effectiveStage, agentId, agent, attempt) {
+    const context = this.context || {};
+    const ticket = context.ticket_id || null;
+    const modelIo = agent.kind === 'http' || Boolean(effectiveStage.model_io);
+    const record = {
+      run_key: newRunKey(),
+      ts: new Date().toISOString(),
+      pipeline_run: this.pipelineRunId,
+      stage: stageId,
+      skill: effectiveStage.skill || null,
+      ticket,
+      ticket_type: ticketTypeOf(context),
+      attempt: attempt ?? null,
+      agent: agentId,
+      requested: requestedModel(agent),
+      model: runModelKey(agent, agentId),
+    };
+    // Стадия с model_io файлов не касается: вход собирает prepare, записи делает apply.
+    const changes = modelIo ? null : captureRunChanges(this.projectRoot, findTicketPathForId(ticket, this.projectRoot));
+
+    // Запреты перечитываются, когда в сессии появляется новая модель: запрет или его
+    // снятие во время запуска учитываются, а временный запрет, истёкший за время
+    // работы агента, агента не останавливает.
+    let bannedCheck = null;
+    if (!modelIo && effectiveStage.skill === EXECUTOR_SKILL && isKiloRun(agent)) {
+      let bans = null;
+      let bansFor = null;
+      bannedCheck = (models) => {
+        const names = models.map((m) => m.model).join('\n');
+        if (names !== bansFor) {
+          bans = this._loadBans(stageId);
+          bansFor = names;
+        }
+        const now = Date.now();
+        for (const { model } of models) {
+          const ban = findBan(bans, model, record.ticket_type);
+          if (ban && !(ban.kind === 'crash' && Date.parse(ban.until) <= now)) return { model, reason: describeBan(ban) };
+        }
+        return null;
+      };
+    }
+
+    const written = writeOpenRun(this.projectRoot, record);
+    if (!written.ok && this.logger) this.logger.warn(`agent-runs: open run record not written: ${written.error}`, stageId);
+    return { record, agent, agentId, modelIo, changes, bannedCheck, startedAt: Date.now() };
+  }
+
+  /** Изменённые файлы проекта за запуск; у стадии с model_io и при сбое подсчёта — null. */
+  _runChangedFiles(run) {
+    if (run.modelIo) return null;
+    return countRunChanges(this.projectRoot, run.changes, findTicketPathForId(run.record.ticket, this.projectRoot));
+  }
+
+  /**
+   * Событие `run` запуска и снятие записи открытого запуска — в этом порядке: раннер,
+   * снятый между ними, оставит файл при записанном событии, и следующий старт второго
+   * события не допишет (closeInterruptedRun сверяет run_key). Сбой записи — WARN,
+   * ход стадии не меняется.
+   * @returns {object} событие (поле `model` — ключ модели запуска)
+   */
+  _closeAgentRun(run, { status, exitCode, changedFiles, stopRequested, kiloModels = null, modelIoModel = null, crashTtlMs = null }) {
+    const { ts, ...record } = run.record;
+    const event = { type: 'run', ...record, status };
+    try {
+      Object.assign(event, {
+        models: isKiloRun(run.agent) ? (kiloModels?.models ?? null) : null,
+        model: runModelKey(run.agent, run.agentId, { kiloLast: kiloModels?.last ?? null, modelIoModel }),
+        status,
+        exit_code: typeof exitCode === 'number' ? exitCode : null,
+        changed_files: typeof changedFiles === 'number' ? changedFiles : null,
+        duration_ms: Date.now() - run.startedAt,
+      });
+      if (stopRequested) event.stop_requested = true;
+      else if (isCrashStatus(event)) event.crash_ttl_ms = crashTtlMs ?? CRASH_TTL_DEFAULT_MS;
+      const written = appendRunEvent(this.projectRoot, event);
+      if (!written.ok && this.logger) this.logger.warn(`agent-runs: run event not written: ${written.error}`, run.record.stage);
+    } catch (err) {
+      if (this.logger) this.logger.warn(`agent-runs: run event failed: ${err.message}`, run.record.stage);
+    }
+    this._dropOpenRun(run, run.record.stage);
+    return event;
+  }
+
+  _dropOpenRun(run, stageId) {
+    const cleared = clearOpenRun(this.projectRoot);
+    if (!cleared.ok && this.logger) this.logger.warn(`agent-runs: open run record not removed: ${cleared.error}`, stageId);
+  }
+
+  /** Класс запуска для истории работы тикета и журнала (classifyAgentResult). */
+  _classifyRun(agentId, callResult) {
+    return classifyAgentResult({
+      exitCode: callResult.exitCode ?? 0,
+      stderr: callResult.stderr || '',
+      stdout: callResult.stdout || '',
+      timedOut: callResult.timedOut === true,
+      signal: callResult.signal,
+      parsedResult: callResult.parsedResult || null,
+      agentType: (agentId || '').startsWith('script-') ? 'script' : 'ai',
+    });
+  }
+
+  /**
+   * IMPL-83: Audit-log hook — строка истории работы тикета. Статус — `callResult.status`
+   * (его определяет executeWithFallback один раз для истории и журнала), без него —
+   * класс classifyAgentResult.
    * Non-blocking: errors are logged via logger.warn, never thrown.
    */
   async _auditAgentRun(stageId, effectiveStage, agentId, callResult) {
@@ -1398,16 +1717,7 @@ class StageExecutor {
       const ticketId = this.context?.ticket_id;
       if (!ticketId) return;
 
-      const agentType = (agentId || '').startsWith('script-') ? 'script' : 'ai';
-      const status = classifyAgentResult({
-        exitCode: callResult.exitCode ?? 0,
-        stderr: callResult.stderr || '',
-        stdout: callResult.stdout || '',
-        timedOut: callResult.timedOut === true,
-        signal: callResult.signal,
-        parsedResult: callResult.parsedResult || null,
-        agentType,
-      });
+      const status = callResult.status ?? this._classifyRun(agentId, callResult);
 
       // For move-* stages prefer destination from parsedResult.to
       let ticketPath = null;
@@ -1424,28 +1734,18 @@ class StageExecutor {
       const entry = {
         timestamp: formatLocalDateTime(new Date()),
         skill: skillName,
-        agent: agentId || 'unknown',
+        // В истории — подпись с фактической моделью kilo (`kilo-free(dots-3-note-preview)`).
+        agent: callResult.agentLabel || agentId || 'unknown',
         status,
       };
 
       try {
-        // В истории — подпись с фактической моделью kilo (`kilo-free(dots-3-note-preview)`),
-        // в метриках — id агента из конфига: по нему они группируются.
-        const r = appendAgentRun(ticketPath, { ...entry, agent: callResult.agentLabel || entry.agent });
+        const r = appendAgentRun(ticketPath, entry);
         if (!r?.ok && this.logger) {
           this.logger.warn(`audit-log appendAgentRun failed: ${r?.code || 'unknown'} ${r?.error || ''}`, stageId);
         }
       } catch (err) {
         if (this.logger) this.logger.warn(`audit-log appendAgentRun threw: ${err.message}`, stageId);
-      }
-
-      try {
-        const r = incrementMetrics(this.projectRoot, entry, ticketId);
-        if (!r?.ok && this.logger) {
-          this.logger.warn(`metrics update failed: ${r?.code || 'unknown'} ${r?.error || ''}`, stageId);
-        }
-      } catch (err) {
-        if (this.logger) this.logger.warn(`metrics update threw: ${err.message}`, stageId);
       }
     } catch (outer) {
       // Final safety net — never let audit-log break the pipeline
@@ -1912,7 +2212,10 @@ class StageExecutor {
       });
 
       child.on('close', (code, signal) => {
-        this.currentChild = null;
+        // Только свой процесс: после таймаута или EARLY_KILL вызов уже отклонён, и
+        // стадия могла запустить следующего агента раньше, чем этот процесс закрылся —
+        // поздний close стёр бы ссылку на живого агента, и остановка его бы не сняла.
+        if (this.currentChild === child) this.currentChild = null;
         clearTimeout(timeoutId);
         // Обрабатываем остаток буфера стриминга
         if (stdoutBuffer.trim()) {
@@ -2070,14 +2373,17 @@ class StageExecutor {
    * единого вызова инструмента). Хуков нет или хост не claude/kilo — повтором
    * не обосновать: предупреждение в лог, ответ как есть.
    *
+   * `bannedCheck` — проверка ответивших моделей kilo-агента по запретам журнала
+   * запусков (_callAgentTracked): и у первого вызова, и у повтора рельс.
+   *
    * @returns {Promise<{status: string, output: string, stderr: string, result: object, exitCode: number, parsed: boolean}>}
    */
-  async callAgent(agent, prompt, stageId, skillId, agentId = null) {
+  async callAgent(agent, prompt, stageId, skillId, agentId = null, { bannedCheck = null } = {}) {
     const runId = crypto.randomUUID();
     const railsEnv = { WORKFLOW_RAILS_ROLE: 'coordinator', WORKFLOW_RAILS_RUN: runId };
     if (skillId) railsEnv.WORKFLOW_RAILS_SKILL = skillId;
 
-    const result = await this._callAgentTracked(agent, prompt, stageId, skillId, agentId, railsEnv);
+    const result = await this._callAgentTracked(agent, prompt, stageId, skillId, agentId, railsEnv, { bannedCheck });
 
     if (!railsYamlExists(this.projectRoot, skillId)) return result;
 
@@ -2120,7 +2426,7 @@ class StageExecutor {
       WORKFLOW_RAILS_RUN: crypto.randomUUID(),
       WORKFLOW_RAILS_SKILL: skillId
     };
-    const retryResult = await this._callAgentTracked(agent, verdictText + prompt, stageId, skillId, agentId, retryEnv);
+    const retryResult = await this._callAgentTracked(agent, verdictText + prompt, stageId, skillId, agentId, retryEnv, { bannedCheck });
     retryResult.railsRetried = true;
     retryResult.railsVerdict = verdict;
     if (!state && !findRailsStateByRun(this.projectRoot, retryEnv.WORKFLOW_RAILS_RUN) && this.logger) {
@@ -2132,12 +2438,21 @@ class StageExecutor {
   /**
    * `_callAgentOnce` + фактическая модель kilo-агента (lib/kilo-models.mjs). Пока агент
    * работает — опрос базы kilo и строка `AGENT_MODELS`, когда подпись агента меняется
-   * (по ней панель pipeline в расширении показывает `openrouter-free(nemotron, ling)`);
+   * (по ней панель pipeline в расширении показывает подпись с моделями роутера);
    * после выхода — финальная строка с числом шагов. Результат (или ошибка) получает
-   * `agentLabel` — для столбца «Агент» истории работы тикета.
+   * `agentLabel` — для столбца «Агент» истории работы тикета — и `kiloModels`
+   * (`{models, last}`: ответившие модели и модель последнего шага корневой сессии) —
+   * для события run журнала запусков.
+   *
+   * `bannedCheck(models)` — проверка ответивших моделей по запретам журнала (задаёт
+   * executeWithFallback на стадии исполнителя): ответила запрещённая модель — опрос
+   * снимает процесс агента, и вызов отклоняется ошибкой с кодом MODEL_BANNED и именем
+   * модели. killCurrentChild для этого не годится: он ставит stopRequested, и стадия
+   * больше не брала бы агентов. Убитый процесс на Windows выходит с кодом 1 без сигнала —
+   * без пометки MODEL_BANNED запуск стал бы NON_ZERO_EXIT и классом error.
    */
-  async _callAgentTracked(agent, prompt, stageId, skillId, agentId, railsEnv) {
-    const tracker = this._trackKiloModels(agent, agentId, railsEnv.WORKFLOW_RAILS_RUN, stageId);
+  async _callAgentTracked(agent, prompt, stageId, skillId, agentId, railsEnv, { bannedCheck = null } = {}) {
+    const tracker = this._trackKiloModels(agent, agentId, railsEnv.WORKFLOW_RAILS_RUN, stageId, { bannedCheck });
     let result;
     let error = null;
     try {
@@ -2145,27 +2460,49 @@ class StageExecutor {
     } catch (err) {
       error = err;
     }
-    const agentLabel = tracker ? await tracker.finish() : null;
+    const kilo = tracker ? await tracker.finish() : null;
+    const agentLabel = kilo?.label ?? null;
+    const kiloModels = kilo ? { models: kilo.models, last: kilo.last } : null;
+    const banned = tracker?.banned() ?? null;
+    if (banned) {
+      error = Object.assign(new Error(`Agent "${agentId}" stopped: model "${banned.model}" is banned (${banned.reason})`), {
+        code: 'MODEL_BANNED',
+        exitCode: -1,
+        stderr: (error?.stderr ?? result?.stderr) || '',
+        bannedModel: banned.model,
+        banReason: banned.reason,
+      });
+    }
     if (error) {
-      if (agentLabel && typeof error === 'object') error.agentLabel = agentLabel;
+      if (typeof error === 'object') {
+        if (agentLabel) error.agentLabel = agentLabel;
+        if (kiloModels) error.kiloModels = kiloModels;
+      }
       throw error;
     }
     if (agentLabel) result.agentLabel = agentLabel;
+    if (kiloModels) result.kiloModels = kiloModels;
     return result;
   }
 
   /**
    * Опрос базы kilo на время запуска агента. null — агент не kilo (или нет run id).
-   * `finish()` останавливает опрос, пишет финальную строку и отдаёт подпись агента
-   * (null — модели не определены). Сбой чтения базы на агента не влияет.
+   * `finish()` останавливает опрос, пишет финальную строку и отдаёт
+   * `{label, models, last}` (label null — модели не определены; models и last —
+   * по базе kilo, null — база не прочитана). `banned()` — модель, за которую опрос
+   * снял агента, или null. Сбой чтения базы на агента не влияет.
    */
-  _trackKiloModels(agent, agentId, runId, stageId) {
+  _trackKiloModels(agent, agentId, runId, stageId, { bannedCheck = null } = {}) {
     if (!runId || !isKiloRun(agent)) return null;
     const title = kiloRunTitle(runId);
     const requested = requestedKiloModel(agent.args) || '?';
     const dbPathReady = kiloDbPath(agent.command);
     let lastLabel = null;
     let stopped = false;
+    let banned = null;
+    // Последнее, что опрос прочитал из базы: запасной ответ finish(), если финальное
+    // чтение не удалось.
+    let polled = null;
 
     const report = (models) => {
       lastLabel = kiloAgentLabel(agentId, requested, models);
@@ -2177,14 +2514,32 @@ class StageExecutor {
     const poll = async () => {
       const dbPath = await dbPathReady;
       if (!dbPath || stopped) return;
-      const models = await readKiloModels(dbPath, title);
+      const run = await readKiloRun(dbPath, title);
+      const models = run?.models;
       if (stopped || !models?.length) return;
+      polled = run;
       if (kiloAgentLabel(agentId, requested, models) !== lastLabel) report(models);
+      if (!bannedCheck || banned) return;
+      const hit = bannedCheck(models);
+      if (!hit) return;
+      banned = hit;
+      if (this.logger) {
+        this.logger.warn(`MODEL_BANNED agent="${agentId}" model="${hit.model}" — ${hit.reason}; stopping agent`, stageId);
+      }
+      const child = this.currentChild;
+      if (child?.pid) {
+        if (process.platform === 'win32') {
+          try { execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'pipe', windowsHide: true }); } catch {}
+        } else {
+          try { child.kill('SIGTERM'); } catch {}
+        }
+      }
     };
     const timer = setInterval(() => { poll().catch(() => {}); }, this.kiloModelsPollMs || KILO_MODELS_POLL_MS);
     timer.unref?.();
 
     return {
+      banned: () => banned,
       finish: async () => {
         stopped = true;
         clearInterval(timer);
@@ -2195,18 +2550,42 @@ class StageExecutor {
               this._kiloDbPathWarned = true;
               this.logger.warn('kilo: `kilo db path` не дал путь базы — фактическая модель kilo-агентов не определяется', stageId);
             }
-            return null;
+            return { label: null, models: null, last: null };
           }
-          const models = await readKiloModels(dbPath, title);
-          if (!models?.length) {
+          // Сразу после снятия процесса база kilo может не отдать шаги: живой прогон
+          // 2026-09-27 — опрос видел модель, а чтение через 200 мс после taskkill дало
+          // «модели нет», хотя шаг в базе есть (прочитан позже). Пока чтение не удалось
+          // (null: база не читается или сессии нет) или не дало того, что уже видел
+          // опрос, — несколько повторов, затем прочитанное опросом. Цена — до 0,9 с на
+          // запуске kilo, упавшем до создания сессии.
+          const behindPoll = (r) => r === null || (!r.models.length && Boolean(polled?.models?.length));
+          let run = await readKiloRun(dbPath, title);
+          for (let i = 0; behindPoll(run) && i < KILO_FINAL_READ_RETRIES; i++) {
+            await new Promise((resolve) => setTimeout(resolve, KILO_FINAL_READ_DELAY_MS));
+            run = await readKiloRun(dbPath, title);
+          }
+          if (behindPoll(run) && polled) run = polled;
+          if (!run?.models?.length) {
             if (this.logger) this.logger.info('kilo: шагов с моделью в базе kilo нет — фактическая модель неизвестна', stageId);
-            return null;
+            return { label: null, models: run?.models ?? null, last: null };
           }
-          report(models);
-          return lastLabel;
+          report(run.models);
+          // Запрещённая модель ответила после последнего опроса — агент уже вышел,
+          // снимать нечего, но результат не засчитывается как обычный запуск: вызов
+          // отклоняется с MODEL_BANNED, и стадия запускает агента заново.
+          if (bannedCheck && !banned) {
+            const hit = bannedCheck(run.models);
+            if (hit) {
+              banned = hit;
+              if (this.logger) {
+                this.logger.warn(`MODEL_BANNED agent="${agentId}" model="${hit.model}" — ${hit.reason}; agent already exited`, stageId);
+              }
+            }
+          }
+          return { label: lastLabel, models: run.models, last: run.last };
         } catch (err) {
           if (this.logger) this.logger.warn(`kilo: фактическая модель не прочитана: ${err.message}`, stageId);
-          return null;
+          return { label: null, models: null, last: null };
         }
       },
     };
@@ -2338,6 +2717,12 @@ class PipelineRunner {
     this.fileGuard = new FileGuard(protectedPatterns, projectRoot, trustedAgents, trustedStages);
     this.projectRoot = projectRoot;
     this.currentExecutor = null;
+
+    // Закрыть запись открытого запуска, оставленную прерванным раннером
+    // (src/lib/agent-runs.mjs, closeInterruptedRun). Флаг ставит только runPipeline:
+    // закрывать можно только под .pipeline.lock, а прямое создание раннера (тесты,
+    // встраивание) lock не берёт — файл может принадлежать живому раннеру.
+    this.closeOpenRunOnStart = overrides.closeOpenRunOnStart === true;
 
     // Настройка graceful shutdown
     this.setupGracefulShutdown();
@@ -2802,6 +3187,8 @@ class PipelineRunner {
     this.logger.info(`Max steps: ${maxSteps}`, 'PipelineRunner');
     this.logger.info(`Context: ${JSON.stringify(this.context)}`, 'PipelineRunner');
 
+    if (this.closeOpenRunOnStart) this.closeInterruptedAgentRun();
+
     while (this.running && this.stepCount < maxSteps) {
       if (this.currentStage !== 'end') {
         await this.waitWhilePauseRequested();
@@ -2836,6 +3223,7 @@ class PipelineRunner {
            this.currentExecutor = new StageExecutor(this.config, this.context, this.counters, {}, this.fileGuard, this.logger, this.projectRoot, { runId: this.runId });
            result = await this.currentExecutor.execute(this.currentStage);
            this.currentExecutor = null;
+           this.recordStageEvent(this.currentStage, stage, result);
          }
 
         this.logger.info(`Stage ${this.currentStage} completed with status: ${result.status}`, 'PipelineRunner');
@@ -3052,8 +3440,109 @@ class PipelineRunner {
       }
     };
 
-    process.on('SIGINT', () => shutdown('SIGINT'));
-    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    this.signalHandlers = {
+      SIGINT: () => shutdown('SIGINT'),
+      SIGTERM: () => shutdown('SIGTERM'),
+    };
+    process.on('SIGINT', this.signalHandlers.SIGINT);
+    process.on('SIGTERM', this.signalHandlers.SIGTERM);
+  }
+
+  /** Снимает обработчики сигнала раннера — после завершения runPipeline. */
+  disposeSignalHandlers() {
+    if (!this.signalHandlers) return;
+    process.off('SIGINT', this.signalHandlers.SIGINT);
+    process.off('SIGTERM', this.signalHandlers.SIGTERM);
+    this.signalHandlers = null;
+  }
+
+  /**
+   * Жёсткая остановка — повторный сигнал во время мягкой (runPipeline): цикл не
+   * продолжается, текущий агент снимается без ожидания (forceKillCurrentChild).
+   */
+  forceStop() {
+    this.running = false;
+    this.currentExecutor?.forceKillCurrentChild();
+  }
+
+  /**
+   * Событие `verify` или `review` журнала запусков по результату стадии
+   * (src/lib/agent-runs.mjs, PLAN-003). Контроль артефактов — поля его блока RESULT;
+   * стадия, упавшая без RESULT, события не пишет. Ревью — статус, как вернула стадия,
+   * агент и модель: у обмена model_io — из ответа модели, у стадии со скилом — агент и
+   * ключ модели запуска. Сбой записи — WARN, ход пайплайна не меняется.
+   */
+  recordStageEvent(stageId, stage, result) {
+    try {
+      const kind = stageEventKind(this.pipeline, stage);
+      if (!kind || !result) return;
+      const data = result.result || {};
+      const ticket = data.ticket_id || this.context.ticket_id || null;
+      const base = {
+        pipeline_run: this.runId,
+        ticket,
+        ticket_type: ticketTypeOf({ ...this.context, ticket_id: ticket }),
+      };
+      let event;
+      if (kind === 'verify') {
+        if (!result.parsed) return;
+        event = {
+          type: 'verify',
+          ...base,
+          status: result.status,
+          reason: data.reason || null,
+          dod_completion_pct: resultNumber(data.dod_completion_pct),
+          result_filled: resultBoolean(data.result_filled),
+          missing_files: resultList(data.missing_files, ','),
+          unchanged_files: resultList(data.unchanged_files, ','),
+          evidence_file: data.evidence_file || null,
+          dod_check_total: resultNumber(data.dod_check_total),
+          dod_check_failed: resultNumber(data.dod_check_failed),
+          fail_reasons: resultList(data.fail_reasons, ';'),
+        };
+      } else {
+        const modelIo = result.modelIo || null;
+        event = {
+          type: 'review',
+          ...base,
+          stage: stageId,
+          status: result.status,
+          agent: modelIo?.agent ?? result.agentId ?? null,
+          model: modelIo ? (modelIo.model ?? null) : (stage.model_io ? null : (result.runModel ?? null)),
+        };
+      }
+      const written = appendRunEvent(this.projectRoot, event);
+      if (!written.ok) this.logger.warn(`agent-runs: ${kind} event not written: ${written.error}`, stageId);
+    } catch (err) {
+      this.logger.warn(`agent-runs: stage event failed: ${err.message}`, stageId);
+    }
+  }
+
+  /**
+   * Запись открытого запуска, оставленная прерванным раннером (`taskkill /F`,
+   * `SIGKILL`, падение раннера или машины), — событием `run` со статусом `aborted` и
+   * `interrupted: true` (closeInterruptedRun). Вызывается до первой стадии, только
+   * когда раннер запущен runPipeline и держит .pipeline.lock.
+   */
+  closeInterruptedAgentRun() {
+    try {
+      const closed = closeInterruptedRun(this.projectRoot);
+      if (closed.action === 'closed') {
+        const e = closed.event;
+        this.logger.warn(
+          `agent run interrupted: agent=${e.agent} ticket=${e.ticket ?? '-'} stage=${e.stage} run_key=${e.run_key} — recorded as aborted (interrupted)`,
+          'PipelineRunner'
+        );
+      } else if (closed.action === 'already_logged') {
+        this.logger.info(`open agent run record ${closed.run_key} already in journal — removed`, 'PipelineRunner');
+      } else if (closed.action === 'unreadable') {
+        this.logger.warn(`open agent run record unreadable — removed without event: ${closed.error}`, 'PipelineRunner');
+      } else if (closed.action === 'failed') {
+        this.logger.warn(`open agent run record not closed: ${closed.error}`, 'PipelineRunner');
+      }
+    } catch (err) {
+      this.logger.warn(`open agent run record not closed: ${err.message}`, 'PipelineRunner');
+    }
   }
 }
 
@@ -3555,18 +4044,40 @@ async function runPipeline(argv = process.argv.slice(2)) {
     return { exitCode: 1, error: 'Failed to acquire pipeline lock', details: err.message };
   }
 
-  // Register signal handlers for cleanup
-  const cleanup = () => {
-    removeMarker(projectRoot);
+  // Сигналы остановки. Первый SIGINT / SIGTERM при работающем раннере из процесса
+  // не выходит: его отрабатывает обработчик раннера (setupGracefulShutdown) —
+  // running = false и killCurrentChild, стадия проходит ветку остановки (событие run
+  // со статусом aborted, снятие записи открытого запуска), цикл выходит, finally
+  // снимает маркер, процесс выходит с кодом 130. Прежде этот обработчик выходил
+  // process.exit(130) сразу: он зарегистрирован раньше обработчика раннера, и ветки
+  // остановки не исполнялись, а агент оставался работать без раннера (запуски
+  // 2026-09-27, PLAN-003). Одной перестановки мало: слушатель с process.exit на том же
+  // сигнале вывел бы процесс в том же emit, до закрытия агента.
+  // Повторный сигнал во время мягкой остановки (эскалация MCP abort_pipeline, второй
+  // Ctrl+C) — жёсткое снятие агента и выход 130 без ожидания.
+  // Имя сигнала задаётся здесь, а не берётся из аргумента слушателя: `process.emit`
+  // вызывает слушателей без аргумента.
+  let runner = null;
+  let stopSignal = null;
+  const onSignal = (signal) => {
+    if (runner && !stopSignal) {
+      stopSignal = signal;
+      return;
+    }
+    runner?.forceStop();
+    try { removeMarker(projectRoot); } catch {}
     process.exit(130); // 128 + SIGINT(2) — standard exit code for signal-terminated
   };
-  process.once('SIGINT', cleanup);
-  process.once('SIGTERM', cleanup);
+  const onSigint = () => onSignal('SIGINT');
+  const onSigterm = () => onSignal('SIGTERM');
+  process.on('SIGINT', onSigint);
+  process.on('SIGTERM', onSigterm);
 
   try {
     // Запускаем пайплайн. run_id и путь к логу уже записаны в маркер — раннер
-    // получает ровно их, чтобы имя файла и lock не разъехались.
-    const runner = new PipelineRunner(config, args, { runId, logFilePath, startedAt });
+    // получает ровно их, чтобы имя файла и lock не разъехались. Раннер держит lock
+    // и закрывает запись открытого запуска, оставленную прерванным раннером.
+    runner = new PipelineRunner(config, args, { runId, logFilePath, startedAt, closeOpenRunOnStart: true });
     const result = await runner.run();
 
     console.log('\n=== Summary ===');
@@ -3584,6 +4095,9 @@ async function runPipeline(argv = process.argv.slice(2)) {
 
     return { exitCode: 1, error: err.message, stack: err.stack };
   } finally {
+    process.off('SIGINT', onSigint);
+    process.off('SIGTERM', onSigterm);
+    runner?.disposeSignalHandlers();
     // Ensure marker is cleaned up on normal exit
     try {
       removeMarker(projectRoot);
@@ -3593,6 +4107,9 @@ async function runPipeline(argv = process.argv.slice(2)) {
         console.warn(`[runner] cleanup warning: ${err.message}`);
       }
     }
+    // Остановлен сигналом: код 130 задаётся явно — код возврата runPipeline в код
+    // процесса не передаётся (bin/workflow.mjs).
+    if (stopSignal) process.exit(130);
   }
 }
 

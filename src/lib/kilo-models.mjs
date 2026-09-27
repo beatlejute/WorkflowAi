@@ -7,10 +7,12 @@
  * в одной сессии отвечали 11 разных моделей, через kilo-auto/free — одна
  * (dots-3-note-preview). В логе раннера до этого был виден только роутер.
  *
- * kilo 7.7.9 записывает ответившую модель в каждую часть `step-finish` своей базы
- * SQLite (`part.data.model.modelID`; запрошенная — в `session.model`). Чтобы найти
- * сессию запуска, раннер передаёт `kilo run --title <метка>`; сессии субагентов
- * (`session.parent_id`) считаются вместе с корневой.
+ * kilo 7.7.9 записывает ответившую модель роутера в каждую часть `step-finish` своей
+ * базы SQLite (`part.data.model.modelID`); у сессии с фиксированной моделью шаги без
+ * модели, и модель шага — модель сессии (`session.model.id`). Чтобы найти сессию
+ * запуска, раннер передаёт `kilo run --title <метка>`; сессии субагентов
+ * (`session.parent_id`) считаются вместе с корневой. За запуск отвечает модель
+ * последнего шага корневой сессии (readKiloRun, поле `last`).
  *
  * Пока агент работает, раннер опрашивает базу и пишет строку `AGENT_MODELS`, когда
  * набор моделей меняется, и финальную — после выхода. По ней панель pipeline в
@@ -58,6 +60,16 @@ export function requestedKiloModel(args) {
     if (args[i] === '-m' || args[i] === '--model') return args[i + 1];
   }
   return null;
+}
+
+/**
+ * Ключ модели, как её хранит kilo: `session.model.id` — без провайдера из `-m`
+ * (`openai/<модель>` → `<модель>`, `kilo/<роутер>/free` → `<роутер>/free`).
+ */
+export function kiloModelKey(requested) {
+  if (typeof requested !== 'string' || !requested) return null;
+  const slash = requested.indexOf('/');
+  return slash === -1 ? requested : requested.slice(slash + 1);
 }
 
 let dbPathPromise = null;
@@ -117,23 +129,46 @@ function loadSqlite() {
   return sqlitePromise;
 }
 
+// Модель сессии — `session.model.id` (JSON `{"id", "providerID", …}`, как хранит kilo:
+// без провайдера из `-m`). Шаг `step-finish` без `model.modelID` отвечает моделью своей
+// сессии: у сессии с фиксированной моделью kilo 7.7.9 модель в шаг не пишет (запрос к
+// базе PulseProxy 2026-09-26: gpt-5.6-luna — 976 шагов, ни одного с моделью), у
+// роутерной — пишет в каждый шаг. Субагент без своей модели (`session.model` = null)
+// получает модель корневой сессии.
+const SESSION_MODEL = "CASE WHEN json_valid(%s) THEN json_extract(%s, '$.id') END";
+const sessionModel = (column) => SESSION_MODEL.replaceAll('%s', column);
+
 const MODELS_SQL = `
-WITH RECURSIVE tree(id) AS (
-  SELECT id FROM session WHERE title = ?
-  UNION SELECT s.id FROM session s JOIN tree t ON s.parent_id = t.id
+WITH RECURSIVE tree(id, model) AS (
+  SELECT id, ${sessionModel('model')} FROM session WHERE title = ?
+  UNION SELECT s.id, COALESCE(${sessionModel('s.model')}, t.model) FROM session s JOIN tree t ON s.parent_id = t.id
 )
-SELECT json_extract(p.data, '$.model.modelID') AS model, count(*) AS steps
+SELECT COALESCE(json_extract(p.data, '$.model.modelID'), t.model) AS model, count(*) AS steps
 FROM part p JOIN tree t ON p.session_id = t.id
 WHERE json_valid(p.data) AND json_extract(p.data, '$.type') = 'step-finish'
-GROUP BY model
+GROUP BY 1
 ORDER BY steps DESC, model`;
 
+// Последний шаг корневой сессии: наибольший `part.time_created`, при равенстве —
+// наибольший `part.id`. Шаги субагентов не учитываются: за запуск отвечает модель,
+// на которой закончила корневая сессия (решение стейкхолдера 2026-09-25,
+// PLAN-003: «openrouter/free последняя — ответственна за все предыдущие»).
+const LAST_MODEL_SQL = `
+SELECT COALESCE(json_extract(p.data, '$.model.modelID'), ${sessionModel('s.model')}) AS model
+FROM session s JOIN part p ON p.session_id = s.id
+WHERE s.title = ? AND s.parent_id IS NULL
+  AND json_valid(p.data) AND json_extract(p.data, '$.type') = 'step-finish'
+ORDER BY p.time_created DESC, p.id DESC
+LIMIT 1`;
+
 /**
- * Модели, ответившие в сессии с меткой `title` и её субагентах.
- * @returns {Promise<Array<{model: string, steps: number}>|null>} null — сессии нет
- *   или база не читается; [] — сессия есть, шагов с моделью нет.
+ * Модели запуска kilo с меткой `title`: ответившие в корневой сессии и её субагентах
+ * и модель последнего шага корневой сессии.
+ * @returns {Promise<{models: Array<{model: string, steps: number}>, last: string|null}|null>}
+ *   null — сессии нет или база не читается; `models: []`, `last: null` — сессия есть,
+ *   шагов с моделью нет.
  */
-export async function readKiloModels(dbPath, title) {
+export async function readKiloRun(dbPath, title) {
   if (!dbPath || !title) return null;
   const sqlite = await loadSqlite();
   if (!sqlite?.DatabaseSync) return null;
@@ -142,14 +177,25 @@ export async function readKiloModels(dbPath, title) {
     db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
     const found = db.prepare('SELECT 1 FROM session WHERE title = ? LIMIT 1').get(title);
     if (!found) return null;
-    return db.prepare(MODELS_SQL).all(title)
+    const models = db.prepare(MODELS_SQL).all(title)
       .filter((r) => r.model)
       .map((r) => ({ model: String(r.model), steps: Number(r.steps) }));
+    const last = db.prepare(LAST_MODEL_SQL).get(title)?.model;
+    return { models, last: last ? String(last) : null };
   } catch {
     return null;
   } finally {
     try { db?.close(); } catch {}
   }
+}
+
+/**
+ * Модели, ответившие в сессии с меткой `title` и её субагентах.
+ * @returns {Promise<Array<{model: string, steps: number}>|null>} null — сессии нет
+ *   или база не читается; [] — сессия есть, шагов с моделью нет.
+ */
+export async function readKiloModels(dbPath, title) {
+  return (await readKiloRun(dbPath, title))?.models ?? null;
 }
 
 /** «модель ×шаги» через запятую — полный вид для лога. */

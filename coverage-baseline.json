@@ -85,12 +85,6 @@
       "functions": 95,
       "branches": 70
     },
-    "src/lib/metrics-incremental.mjs": {
-      "lines": 84.61,
-      "statements": 84.61,
-      "functions": 100,
-      "branches": 41.66
-    },
     "src/lib/operations/plans.mjs": {
       "lines": 100,
       "statements": 100,
