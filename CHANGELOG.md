@@ -1,3 +1,11 @@
+## [1.14.2] — 2026-09-27
+
+### Fixed
+- **Тикет с `required_capabilities: [mcp]` блокировался навсегда.** Способности `mcp` не было ни у одного агента `configs/pipeline.yaml`, и `resolveAgent` отправлял такой тикет в `blocked/` с `no_capable_agent` (16 QA-тикетов PulseProxy, 2026-09-25). Теперь `mcp` есть у `claude-haiku`, `claude-sonnet` и `claude-opus`: claude подключает серверы из `.mcp.json` проекта, разрешённые в `.claude/settings.local.json` (проверено 2026-09-27: `claude -p` в PulseProxy находит `mcp__playwright__*`). У kilo-агентов `mcp` нет — kilo `.mcp.json` не читает. README — раздел «MCP-серверы у агентов».
+
+### Tests
+- `pipeline-mcp-capability.test.mjs`: у каждого типа из `context.mcp_require_for` среди исполнителей `execute-task` есть агент с `mcp`; агент без инструментов `mcp` не заявляет.
+
 ## [1.14.1] — 2026-09-27
 
 ### Fixed
