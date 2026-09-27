@@ -5,6 +5,7 @@ origin:
   incidents:
     - "Аудит consistency 2026-09-21: SKILL.md/execute.md предписывали брать тикет из мёртвой ветки review/ (execute-task никогда туда не пишет — pipeline.yaml: execute-task всегда move-to-review; retry идёт review→ready→in-progress); SKILL.md секция «Формат вывода» противоречила строгому формату stdout шага 8; GATE-1 требовал ровно 2 вызова Edit (невыполнимо при continuation, где чекбоксы уже все [x]); execute.md GATE-2 допускал `[ ]` с пометкой при одновременном запрете `[ ]`; Result-секция называлась то `## Result`, то `## Результат выполнения`, DoD — то `## Definition of Done`, то `## Критерии готовности`, при каноне `templates/ticket-template.md`/`tickets.mjs`/`verify-artifacts.js` = `## Результат выполнения` + `## Критерии готовности (Definition of Done)`; правило «Соразмерность проверки критерию» дублировалось тремя разными формулировками в SKILL.md/execute.md/algorithms/execution-strategy.md; algorithms/execution-strategy.md ссылался на несуществующий «шаг 5»."
     - "Инцидент 2026-09-27 (тикеты тестирования, claude-haiku): algorithms/execution-strategy.md, загружаемый на этапе 0, предписывал «Сразу выполнять: Read → Edit → Verify», а rails.yaml разрешает запись результата только на этапах 3 и 5 — агент писал и прогонял тесты на этапе 0, запись Result отклонялась уже после работы, попытка тикета пропадала."
+    - "Инцидент 2026-09-27, повторный заход QA-146 (claude-haiku): тикет с готовыми тестами лежал в in-progress/, агент ответил «нет» на выборе «тикет найден?», ушёл к выводу и выдал status blocked «Result пуст» по правилу P7S2 — тикет снова в blocked/."
   principle: "Consistency (coach/SKILL.md, принцип 12): одна версия правила/термина, обновить все места."
   backlog_sources: []
 tags: [consistency, regression-guard]
@@ -136,5 +137,23 @@ assertions:
       reason: "Алгоритм прямо говорит, что правка файлов по выбранному подходу начинается на этапе 3 графа."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "P0E1\\[\"[^\"]*правка любых файлов открывается на этапе 3"
+      pattern: "P0E1\\[\"[^\"]*[Пп]равка любых файлов открывается на этапе 3"
       reason: "Вход графа задаёт порядок до первого действия: этапы 0–2 — чтение и план, правка файлов — с этапа 3 (согласовано с гардом edit_project в rails.yaml)."
+
+    # Инцидент 2026-09-27 (второй): ветка «тикет не найден» как короткий путь к выводу
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0Q1\\{\"[^\"]*«нет» — только если файла тикета с ticket_id из Context в in-progress/ нет"
+      reason: "Выбор на входе: «нет» — только при отсутствии файла тикета запуска; пустой Result и работа прошлой попытки — «да» (согласовано со стражем ребра P0Q1 → P7E1 в rails.yaml, маска {ticket})."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P2G1\\{\"[^\"]*«нет» — только при permission denied"
+      reason: "Второй самообъявленный выход к выводу до выполнения: «нет» на P2G1 — только при permission denied на обязательном файле контекста, не при пустом Result или отказе рельс."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P7S2\\[\"[^\"]*[Пп]устой Result на входе в тикет — не причина блокировки"
+      reason: "Правило блокировки при пустом Result относится к результату после выполнения; на входе пустой Result — работа этапов 3 и 5, а не повод для status blocked."
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: "после этапов выполнения секция Result[\\s\\S]{0,300}[Пп]устой Result на входе в тикет — не причина блокировки"
+      reason: "Памятка грузится на этапе 0, до выбора P0Q1: её правило блокировки при пустом Result совпадает с узлом P7S2, а не остаётся безусловным."
