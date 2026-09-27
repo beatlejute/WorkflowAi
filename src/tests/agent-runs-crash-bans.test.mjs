@@ -23,7 +23,9 @@
  *    только постоянный запрет пары и этого запрета не трогает;
  *  - crashed_after_work (changed_files: null, без вердикта) уходит во
  *    временный запрет так же, как обычный crashed;
- *  - запуск с model: null во временный запрет не идёт.
+ *  - запуск с model: null во временный запрет не идёт;
+ *  - ограничение провайдера (rate_limit, градация throttled) запрета не даёт — даже со
+ *    старым crash_ttl_ms в событии — и прежний запрет за сбой не снимает.
  *
  * Запуск: node --import ./src/tests/_rails-home.mjs --test src/tests/agent-runs-crash-bans.test.mjs
  */
@@ -201,6 +203,30 @@ test('crashed_after_work (changed_files: null, без вердикта) — то
 test('запуск с model: null во временный запрет не идёт', () => {
   const events = [runEvent({ ticket: 'IMPL-1', status: 'error', changed_files: 0, model: null, ts: minutesAgo(10) })];
   assert.deepEqual(crashBans(events, NOW), []);
+});
+
+test('ограничение провайдера (rate_limit) — запрета нет, в том числе с изменениями и crash_ttl_ms старого журнала', () => {
+  // Событие как в журнале PulseProxy 2026-09-27: роутер отработал 15 минут на модели,
+  // провайдер ответил «Rate limit exceeded», раннер записал crash_ttl_ms 1 час.
+  const cases = [
+    { changed_files: 0 },
+    { changed_files: 1, crash_ttl_ms: HOUR },
+  ];
+  for (const overrides of cases) {
+    const events = [runEvent({ ticket: 'IMPL-1', status: 'rate_limit', exit_code: 1, ts: minutesAgo(10), ...overrides })];
+    assert.deepEqual(crashBans(events, NOW), [], JSON.stringify(overrides));
+  }
+});
+
+test('сбой, за которым ограничение провайдера той же модели — запрет за сбой остаётся', () => {
+  const events = [
+    runEvent({ ticket: 'IMPL-1', status: 'error', changed_files: 0, ts: minutesAgo(10) }),
+    runEvent({ ticket: 'IMPL-2', status: 'rate_limit', exit_code: 1, changed_files: 0, ts: minutesAgo(5) }),
+  ];
+  const bans = crashBans(events, NOW);
+  assert.equal(bans.length, 1);
+  assert.equal(bans[0].evidence[0].ticket, 'IMPL-1');
+  assert.equal(bans[0].evidence[0].grade, 'crashed');
 });
 
 test('TTL за пределами Date (правило health с ttl: infinite) — запрет без исключения, конец — наибольшая дата', () => {

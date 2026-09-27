@@ -117,6 +117,24 @@ export function parseAgentHistory(content) {
   return result;
 }
 
+/**
+ * Ограничение провайдера, на котором закончился запуск: текст лимита (rate limit,
+ * quota exceeded, too many requests — в обычных записях регистра) или код 429 после
+ * `status`, `code`, `error`, `HTTP` — в одной из трёх последних строк stderr (пустые
+ * строки в конце не считаются). Середина stderr не смотрится: kilo пишет туда вывод
+ * инструментов (дифф тикета со строкой истории `rate_limit`, `ls`, стек `file:429:17`)
+ * и каждый 429, после которого сам повторил запрос и продолжил работу. Три строки —
+ * итог kilo: «stream error», «message=process» и «Error: …» последней попытки;
+ * многострочный текст квоты Gemini (с «Please retry in …» в конце) в них умещается.
+ *
+ * Выражение — без флагов и без встроенных модификаторов: тот же текст стоит в
+ * `pattern` общего правила health `provider-rate-limit` (configs/agent-health-rules.yaml,
+ * совпадение проверяет agent-health-rules-config.test.mjs), а этот файл читают и
+ * раннеры прежних версий из общей папки конфигов — запись вне синтаксиса JS Node 18
+ * (например `(?i)`) их конструктор StageExecutor обрывал бы на каждой стадии.
+ */
+export const PROVIDER_RATE_LIMIT_PATTERN = /(?:[Rr]ate.?[Ll]imit|RATE.?LIMIT|[Qq]uota.?[Ee]xceeded|QUOTA.?EXCEEDED|[Tt]oo [Mm]any [Rr]equests|TOO MANY REQUESTS|(?:[Ss]tatus|[Cc]ode|[Ee]rror|HTTP(?:\/[\d.]+)?)["']?[ :=]*429\b(?!:\d))[^\n]*(?:\n[^\n]*){0,2}\s*$/;
+
 export function classifyAgentResult({ exitCode, stderr, stdout, timedOut, signal, parsedResult, agentType }) {
   if (timedOut === true) {
     return 'timeout';
@@ -130,7 +148,9 @@ export function classifyAgentResult({ exitCode, stderr, stdout, timedOut, signal
   if (parsedResult?.status === 'irrelevant') {
     return 'skipped_relevance';
   }
-  if (/\b429\b|rate.?limit|quota.?exceeded|too many requests/i.test(stderr)) {
+  // Запуск закончился на ограничении провайдера (PROVIDER_RATE_LIMIT_PATTERN): журнал
+  // запусков даёт статусу `rate_limit` градацию `throttled` без запрета модели.
+  if (PROVIDER_RATE_LIMIT_PATTERN.test(stderr)) {
     return 'rate_limit';
   }
   if (/ECONNREFUSED|ENETUNREACH|ETIMEDOUT|EHOSTUNREACH|getaddrinfo|network/i.test(stderr)) {

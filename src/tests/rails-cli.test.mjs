@@ -7,6 +7,8 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 import { run } from '../rails/cli.mjs';
+import { startState, loadState } from '../rails/state.mjs';
+import { readJournal } from '../rails/journal.mjs';
 import { createJunction } from '../junction-manager.mjs';
 
 // `start --session` пишет память «сессия → корень» в <WORKFLOW_HOME>/state —
@@ -126,6 +128,118 @@ test('run start: сессия занята другим скилом без --fo
 
     const r3 = run(['start', 'othertest', '--session', sessionId, '--force'], { cwd: root, env: {} });
     assert.equal(r3.code, 0);
+  });
+});
+
+// --- start при заданном скиле запуска (WORKFLOW_RAILS_SKILL) ---------------------------
+//
+// Прогон PulseProxy 2026-09-27: на стадии execute-task claude-haiku принял «Твоя роль:
+// manual-testing» за скил, получил «используй --force», стартовал manual-testing с --force,
+// и раннер отклонил ответ — узел не терминал скила стадии.
+
+function addOtherSkill(root) {
+  const dir = join(root, '.workflow', 'src', 'skills', 'othertest');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'SKILL.md'), SKILL_MD.replace(/clitest/g, 'othertest'), 'utf8');
+  writeFileSync(join(dir, 'rails.yaml'), RAILS_YAML.replace('skill: clitest', 'skill: othertest'), 'utf8');
+}
+
+const RUN_ENV = { WORKFLOW_RAILS_SKILL: 'clitest', WORKFLOW_RAILS_ROLE: 'coordinator', WORKFLOW_RAILS_RUN: 'run-1' };
+
+test('run start: задан WORKFLOW_RAILS_SKILL, сессия уже идёт по нему -> старт другого скила отклонён и с --force; узел и переходы в отказе, состояние не тронуто, отказ в журнале', () => {
+  withProject(({ root }) => {
+    addOtherSkill(root);
+    const sessionId = randomUUID();
+    // Так состояние создаёт хук при первом действии стадии.
+    startState({ root, sessionId, skill: 'clitest', entry: 'P4E1', run: 'run-1' });
+
+    for (const force of [[], ['--force']]) {
+      const r = run(['start', 'othertest', '--session', sessionId, ...force], { cwd: root, env: RUN_ENV });
+      assert.equal(r.code, 2);
+      assert.match(r.stdout, /скил этого запуска — "clitest"/);
+      assert.match(r.stdout, /Скил "othertest" в этом запуске не стартует, --force этого не меняет/);
+      assert.match(r.stdout, /Роль и тип задачи в промпте описывают содержание работы/);
+      assert.match(r.stdout, /числится P4E1 «П4 ВХОД/);
+      assert.match(r.stdout, /cli\.mjs goto P4S1 --quote/);
+      assert.doesNotMatch(r.stdout, /Используй --force/);
+      // Имя переменной окружения агенту не называется: незачем знать, что подменять в команде.
+      assert.doesNotMatch(r.stdout, /WORKFLOW_RAILS/);
+    }
+
+    const state = loadState(root, sessionId);
+    assert.equal(state.skill, 'clitest');
+    assert.equal(state.node, 'P4E1');
+
+    const denials = readJournal(root, {}).filter((e) => e.type === 'denial' && e.session === sessionId);
+    assert.equal(denials.length, 2);
+    assert.equal(denials[0].skill, 'clitest');
+    assert.equal(denials[0].node, 'P4E1');
+    assert.equal(denials[0].run, 'run-1');
+    assert.equal(denials[0].command, 'start othertest');
+  });
+});
+
+test('run start: задан WORKFLOW_RAILS_SKILL, состояния нет или оно чужое -> отказ даёт команду старта скила запуска', () => {
+  withProject(({ root }) => {
+    addOtherSkill(root);
+    const sessionId = randomUUID();
+    const r1 = run(['start', 'othertest', '--session', sessionId], { cwd: root, env: RUN_ENV });
+    assert.equal(r1.code, 2);
+    assert.match(r1.stdout, new RegExp(`Старт скила запуска: node \\.workflow/src/rails/cli\\.mjs start clitest --session ${sessionId}\\n`));
+    assert.equal(loadState(root, sessionId), null);
+
+    // Сессия уже привязана к третьему скилу (например, с --force до этой проверки).
+    startState({ root, sessionId, skill: 'othertest', entry: 'P4E1' });
+    const r2 = run(['start', 'othertest', '--session', sessionId, '--force'], { cwd: root, env: RUN_ENV });
+    assert.equal(r2.code, 2);
+    assert.match(r2.stdout, /start clitest --session \S+ --force\n/);
+    assert.equal(loadState(root, sessionId).skill, 'othertest');
+  });
+});
+
+// Префикс `WORKFLOW_RAILS_SKILL=othertest node …cli.mjs start othertest` (POSIX, хук пропускает
+// его как cli-вызов и вставляет --session своей сессии) подменяет переменную в окружении CLI.
+// Состояние той сессии хук уже создал при первом действии — с `run` запуска и скилом запуска;
+// отказ сверяется с ним, а не только с переменной.
+test('run start: состояние сессии привязано к запуску (run), переменная скила подменена или снята -> другой скил отклонён и с --force', () => {
+  withProject(({ root }) => {
+    addOtherSkill(root);
+    const sessionId = randomUUID();
+    startState({ root, sessionId, skill: 'clitest', entry: 'P4E1', run: 'run-1' });
+
+    for (const env of [{ ...RUN_ENV, WORKFLOW_RAILS_SKILL: 'othertest' }, { WORKFLOW_RAILS_RUN: 'run-1' }, {}]) {
+      for (const force of [[], ['--force']]) {
+        const r = run(['start', 'othertest', '--session', sessionId, ...force], { cwd: root, env });
+        assert.equal(r.code, 2, JSON.stringify({ env, force }));
+        assert.match(r.stdout, /скил этого запуска — "clitest"/);
+        assert.match(r.stdout, /числится P4E1 «П4 ВХОД/);
+        assert.match(r.stdout, /cli\.mjs goto P4S1 --quote/);
+        assert.doesNotMatch(r.stdout, /Используй --force/);
+      }
+    }
+    const state = loadState(root, sessionId);
+    assert.equal(state.skill, 'clitest');
+    assert.equal(state.run, 'run-1');
+  });
+});
+
+test('run start: задан WORKFLOW_RAILS_SKILL -> сам скил запуска стартует как раньше', () => {
+  withProject(({ root }) => {
+    const sessionId = randomUUID();
+    const r = run(['start', 'clitest', '--session', sessionId], { cwd: root, env: RUN_ENV });
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /Старт: скил "clitest"/);
+    assert.equal(loadState(root, sessionId).run, 'run-1');
+  });
+});
+
+test('run start: WORKFLOW_RAILS_SKILL без rails.yaml -> отказа нет, другой скил стартует как раньше', () => {
+  withProject(({ root }) => {
+    mkdirSync(join(root, '.workflow', 'src', 'skills', 'norails'), { recursive: true });
+    const sessionId = randomUUID();
+    const r = run(['start', 'clitest', '--session', sessionId], { cwd: root, env: { WORKFLOW_RAILS_SKILL: 'norails' } });
+    assert.equal(r.code, 0);
+    assert.equal(loadState(root, sessionId).skill, 'clitest');
   });
 });
 
@@ -404,14 +518,45 @@ test('run selfcheck: полностью зарегистрированный п�
 
 // --- через child_process: проверка настоящего процесса cli.mjs -----------------------
 
-function runCliProcess(args, cwd, binPath = CLI_PATH) {
+// Окружение дочернего cli.mjs — без WORKFLOW_RAILS_* прогона, внутри которого идут тесты
+// (их запускает и агент стадии пайплайна): его SESSION и RUN ушли бы в start/goto временного
+// проекта, а SKILL дал бы отказ `start`, только если в фикстуре есть скил с тем же именем.
+// `extraEnv` задаёт переменные явно.
+function runCliProcess(args, cwd, binPath = CLI_PATH, extraEnv = {}) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^WORKFLOW_RAILS_/i.test(k)));
   try {
-    const stdout = execFileSync('node', [binPath, ...args], { cwd, encoding: 'utf8' });
+    const stdout = execFileSync('node', [binPath, ...args], { cwd, encoding: 'utf8', env: { ...env, ...extraEnv } });
     return { code: 0, stdout };
   } catch (err) {
     return { code: err.status ?? 1, stdout: (err.stdout || '') + (err.stderr || '') };
   }
 }
+
+test('child_process: WORKFLOW_RAILS_SKILL в окружении процесса -> start другого скила — код выхода 2 и команда старта скила запуска', () => {
+  withProject(({ root }) => {
+    addOtherSkill(root);
+    const sessionId = randomUUID();
+    const r = runCliProcess(['start', 'othertest', '--session', sessionId, '--force'], root, CLI_PATH, { WORKFLOW_RAILS_SKILL: 'clitest' });
+    assert.equal(r.code, 2);
+    assert.match(r.stdout, /скил этого запуска — "clitest"/);
+    assert.match(r.stdout, /start clitest --session/);
+  });
+});
+
+test('child_process: префикс подменил WORKFLOW_RAILS_SKILL на запрошенный скил, состояние сессии привязано к запуску -> код выхода 2', () => {
+  withProject(({ root }) => {
+    addOtherSkill(root);
+    const sessionId = randomUUID();
+    startState({ root, sessionId, skill: 'clitest', entry: 'P4E1', run: 'run-1' });
+    const r = runCliProcess(['start', 'othertest', '--session', sessionId, '--force'], root, CLI_PATH, {
+      WORKFLOW_RAILS_SKILL: 'othertest',
+      WORKFLOW_RAILS_RUN: 'run-1',
+    });
+    assert.equal(r.code, 2);
+    assert.match(r.stdout, /скил этого запуска — "clitest"/);
+    assert.equal(loadState(root, sessionId).skill, 'clitest');
+  });
+});
 
 test('child_process: cli.mjs start + status через настоящий node-процесс', () => {
   withProject(({ root }) => {

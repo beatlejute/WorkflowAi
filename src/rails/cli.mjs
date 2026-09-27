@@ -28,6 +28,7 @@ import {
   currentNodeInfo,
   newestSessionId,
   listSessionIds,
+  RAILS_CLI,
 } from './state.mjs';
 import { appendDenial, appendEvent, readJournal, readJournalFile, summarize } from './journal.mjs';
 import { checkCoverage } from './coverage.mjs';
@@ -103,17 +104,82 @@ function ambiguousSessionError(sessions) {
 
 // --- start -----------------------------------------------------------------------------
 
+// Скил запуска — WORKFLOW_RAILS_SKILL (ставят раннер стадии и раннер тестов скилов): по нему
+// хук создаёт состояние сессии при первом действии, по нему раннер после выхода агента
+// проверяет финальный ответ (output-check, терминал этого скила). Прогон PulseProxy
+// 2026-09-27: claude-haiku на QA-тикете стадии execute-task принял подсказку «Твоя роль:
+// manual-testing» за скил, `start manual-testing` получил «сессия уже привязана к
+// execute-task, используй --force», повторил с --force и прошёл граф manual-testing — раннер
+// отклонил ответ: узел P9S2 не терминал execute-task. Поэтому при заданном скиле запуска
+// (с rails.yaml) другой скил не стартует и с --force; отказ называет скил запуска и как
+// продолжить. Скил запуска без rails.yaml раннер не проверяет — там отказа нет.
+//
+// Признаков скила запуска два, отказ — по любому: переменная окружения процесса CLI и
+// состояние сессии, привязанное к запуску раннера (`run`). Его хук создаёт при первом
+// действии агента — раньше, чем выполнится сама команда start, — по окружению процесса
+// хоста, которое команда агента не меняет. Окружение CLI меняет: `VAR=… node cli.mjs` под
+// POSIX, `env`/`export` там, где shell-команду пропускают общие правила. Имя переменной
+// агенту не называется — ни здесь, ни в подсказке SessionStart.
+function foreignRunSkill(root, env, existing, skill) {
+  const envSkill = env && typeof env.WORKFLOW_RAILS_SKILL === 'string' ? env.WORKFLOW_RAILS_SKILL : '';
+  if (envSkill && envSkill !== skill && hasRailsYaml(root, envSkill)) return envSkill;
+  if (existing && existing.run && existing.skill && existing.skill !== skill) return existing.skill;
+  return null;
+}
+
+function foreignSkillRefusal({ root, skill, runSkill, sessionId, explicitSession, existing, env }) {
+  const lines = [
+    `Ошибка: скил этого запуска — "${runSkill}" (его задал раннер): по нему ведётся состояние сессии и проверяется финальный ответ. Скил "${skill}" в этом запуске не стартует, --force этого не меняет.`,
+    'Роль и тип задачи в промпте описывают содержание работы, а не скил процедуры.',
+  ];
+  let node = null;
+  if (existing && existing.skill === runSkill) {
+    node = existing.node;
+    let graph = null;
+    let config = null;
+    try {
+      ({ config, graph } = loadSkillRuntime(root, runSkill));
+    } catch {
+      // граф может быть битым — отказ всё равно называет узел
+    }
+    const label = graph ? graph.node(existing.node)?.label ?? '' : '';
+    lines.push(`Сессия ${sessionId} уже идёт по "${runSkill}": числится ${existing.node} «${label}» — продолжай оттуда.`);
+    if (graph) lines.push(formatTransitions(existing, graph, config));
+  } else {
+    const session = explicitSession ? ` --session ${sessionId}` : '';
+    lines.push(`Старт скила запуска: node ${RAILS_CLI} start ${runSkill}${session}${existing ? ' --force' : ''}`);
+  }
+  try {
+    appendDenial(root, {
+      session: sessionId,
+      skill: runSkill,
+      node,
+      run: (env && env.WORKFLOW_RAILS_RUN) || null,
+      reason: `start ${skill}: скил этого запуска — ${runSkill}`,
+      command: `start ${skill}`,
+    });
+  } catch {
+    // журнал не должен ронять CLI
+  }
+  return { code: 2, stdout: `${lines.join('\n')}\n` };
+}
+
 function cmdStart(root, positional, flags, env) {
   const skill = positional[0];
   if (!skill) {
     return { code: 1, stdout: 'Ошибка: не указан скил. Использование: start <skill> [--session S] [--force]\n' };
   }
 
+  const explicitSession = Boolean(flags.session || (env && env.WORKFLOW_RAILS_SESSION));
   const sessionId = flags.session ? String(flags.session) : (env && env.WORKFLOW_RAILS_SESSION) || randomUUID();
   // Явный идентификатор сессии (хук или человек) — запомнить «сессия → корень», чтобы
   // хук сессии из каталога-зонтика находил корень для shell-команд (session-memo.mjs).
-  if (flags.session || (env && env.WORKFLOW_RAILS_SESSION)) rememberSessionRoot(sessionId, root);
+  if (explicitSession) rememberSessionRoot(sessionId, root);
   const existing = loadState(root, sessionId);
+  const runSkill = foreignRunSkill(root, env, existing, skill);
+  if (runSkill) {
+    return foreignSkillRefusal({ root, skill, runSkill, sessionId, explicitSession, existing, env });
+  }
   // §5: «уже есть состояние для другого скила → отказ, если не --force».
   if (existing && existing.skill !== skill && !flags.force) {
     return {

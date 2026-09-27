@@ -5,8 +5,9 @@
  * `model: null`.
  *
  * Что охраняется:
- *  - число запусков по каждой градации, включая `stopped` и `pending`, совпадает с
- *    ручным подсчётом по фикстуре;
+ *  - число запусков по каждой градации, включая `stopped`, `throttled` и `pending`,
+ *    совпадает с ручным подсчётом по фикстуре; проваленный контроль после запуска
+ *    `throttled` в долю пройденного контроля не входит;
  *  - `artifacts_success_rate` — доля `artifacts_passed: true` среди запусков, где
  *    контроль вынес вердикт (`artifacts_passed` не null), а не среди всех запусков
  *    строки;
@@ -107,6 +108,14 @@ function artifactsFailed(model, ticketType) {
 function stoppedRun(model, ticketType) {
   return [runEvent(model, ticketType, { status: 'model_banned', changed_files: 0 })];
 }
+// Ограничение провайдера после части работы; проваленный следом контроль модели не засчитывается.
+function throttledRun(model, ticketType) {
+  const ticket = nextTicket();
+  return [
+    runEvent(model, ticketType, { ticket, status: 'rate_limit', exit_code: 1, changed_files: 2 }),
+    verifyEvent(ticket, ticketType, { status: 'failed', fail_reasons: ['missing_files'] }),
+  ];
+}
 function refusedRun(model, ticketType) {
   return [runEvent(model, ticketType, { status: 'blocked', changed_files: 0 })];
 }
@@ -137,6 +146,7 @@ describe('statsTable: числа по градациям и доли на model-
     emptyRun('model-a', 'code'),
     artifactsFailed('model-a', 'code'),
     stoppedRun('model-a', 'code'),
+    throttledRun('model-a', 'code'),
     refusedRun('model-a', 'code'),
     // model-a / text — три неудачи подряд без успеха — постоянный запрет по правилу 1.
     emptyRun('model-a', 'text'),
@@ -157,12 +167,12 @@ describe('statsTable: числа по градациям и доли на model-
     assert.equal(rows.length, 5);
   });
 
-  test('model-a / code: числа по градациям (включая stopped и pending) и доли, без запрета', () => {
+  test('model-a / code: числа по градациям (включая stopped, throttled и pending) и доли, без запрета', () => {
     const row = findRow(rows, 'model-a', 'code');
     assert.ok(row, 'строка найдена');
-    assert.equal(row.runs, 9);
+    assert.equal(row.runs, 10);
     assert.deepEqual(row.grades, {
-      crashed: 0, refused: 1, stopped: 1, empty: 1, artifacts_failed: 1, review_failed: 1, accepted: 2, pending: 2,
+      crashed: 0, refused: 1, stopped: 1, throttled: 1, empty: 1, artifacts_failed: 1, review_failed: 1, accepted: 2, pending: 2,
     });
     assert.equal(row.artifacts_success_rate, 4 / 5);
     // Ревью с вердиктом — у двух запусков (passed и failed); all_green в долю не входит.

@@ -15,6 +15,9 @@
  *    (ревью не прошло);
  *  - запуски с `model: null` и градацией `stopped` (`model_banned`, `aborted` с
  *    `interrupted: true`) не входят ни в неудачи, ни в успехи, ни в счёт окна;
+ *  - запуск, упавший на ограничении провайдера (`rate_limit`, градация `throttled`),
+ *    тоже не входит никуда: проваленный после него контроль — не неудача, пройденный —
+ *    не успех;
  *  - счёт ведётся по паре «модель + тип тикета» отдельно — неудачи одного типа не
  *    запрещают другой;
  *  - `unban` пары обнуляет счёт: правило 2 после снятия ждёт новых 10 запусков «с
@@ -115,6 +118,15 @@ function stoppedBanned(model, ticketType) {
 // Остановка пайплайна, дозаписанная следующим стартом (задача 34).
 function stoppedInterrupted(model, ticketType) {
   return [runEvent(model, ticketType, { status: 'aborted', interrupted: true, changed_files: null })];
+}
+
+// Ограничение провайдера (HTTP 429) после части работы; контроль после него — любой.
+function throttled(model, ticketType, verifyOverrides = { status: 'failed', fail_reasons: ['missing_files'] }) {
+  const ticket = nextTicket();
+  return [
+    runEvent(model, ticketType, { ticket, status: 'rate_limit', exit_code: 1, changed_files: 2 }),
+    verifyEvent(ticket, ticketType, verifyOverrides),
+  ];
 }
 
 // Модель kilo не прочитана — не входит ни в одно правило.
@@ -305,6 +317,38 @@ describe('permanentBans: model: null и stopped вне правил', () => {
     const events = flat(
       repeat(RULE1_MIN_FAILURES, () => stoppedBanned('model-a', 'code')),
       repeat(RULE1_MIN_FAILURES, () => stoppedInterrupted('model-a', 'code')),
+    );
+    assert.deepEqual(permanentBans(events), []);
+  });
+});
+
+describe('permanentBans: ограничение провайдера (throttled) вне правил', () => {
+  test('проваленный контроль после ограничения провайдера — не неудача: правило 1 не срабатывает', () => {
+    const events = flat(
+      repeat(RULE1_MIN_FAILURES, () => throttled('model-a', 'code')),
+      repeat(RULE1_MIN_FAILURES - 1, () => failureEmpty('model-a', 'code')),
+    );
+    assert.deepEqual(permanentBans(events), []);
+  });
+
+  test('пройденный контроль после ограничения провайдера — не успех: правило 1 срабатывает', () => {
+    const events = flat(
+      throttled('model-a', 'code', { status: 'all_green' }),
+      repeat(RULE1_MIN_FAILURES, () => failureEmpty('model-a', 'code')),
+    );
+    const bans = permanentBans(events);
+    assert.equal(bans.length, 1);
+    assert.equal(bans[0].rule, 1);
+    assert.equal(bans[0].failures, RULE1_MIN_FAILURES);
+    assert.equal(bans[0].evidence.every((e) => e.grade === 'empty'), true);
+  });
+
+  test('ограничения провайдера не занимают места в окне правила 2', () => {
+    // 9 оценённых (1 успех, 8 неудач) и 5 запусков throttled: окна из 10 нет — без запрета.
+    const events = flat(
+      successAccepted('model-a', 'code'),
+      repeat(RULE2_WINDOW - 2, () => failureArtifacts('model-a', 'code')),
+      repeat(5, () => throttled('model-a', 'code')),
     );
     assert.deepEqual(permanentBans(events), []);
   });

@@ -36,7 +36,9 @@ pipeline:
   #                                 рельсами не отклоняется (src/rails/README.md §11).
   #
   # Runner добавляет промпт последним аргументом автоматически.
-  # Роль (skill) передаётся через stage.instructions, а не через args.
+  # Скил агенту задаёт stage.skill: первая строка промпта и WORKFLOW_RAILS_SKILL (рельсы).
+  # stage.instructions и agents_by_type.<type>.instructions — только содержание работы
+  # (блок «Instructions:» промпта), скил они не меняют. В args агента скил не пишется.
   # Скрипт-агенты (script-*) — детерминированы, capabilities к ним не применяются.
   # ===========================================================================
   agents:
@@ -670,13 +672,19 @@ pipeline:
       skill: execute-task
       counter: task_attempts
       agents: [kilo-free, openrouter-free, gpt-luna, gemini-flash-lite, claude-haiku, claude-sonnet, claude-opus, deepseek-flash]
+      # instructions типа — содержание работы, а не скил. Скил стадии раннер передаёт агенту в
+      # WORKFLOW_RAILS_SKILL: по нему хук ведёт состояние рельс, по его терминалу раннер
+      # проверяет финальный ответ, `start` другого скила рельсы отклоняют (src/rails/README.md §5).
+      # Прежние «Твоя роль: coach» / «Твоя роль: manual-testing» (b86303d, 2026-04-15, замена
+      # агентов claude-coach / claude-qa с именем скила в аргументах) агенты принимали за скил:
+      # прогон PulseProxy 2026-09-27, QA-тикеты — старт manual-testing вместо execute-task.
       agents_by_type:
         coach:
           agents: [claude-opus, gpt-sun, gemini-flash, deepseek-pro]
-          instructions: "Твоя роль: coach"
+          instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: правка скилов по описанию и DoD тикета."
         qa:
           agents: [claude-haiku, gpt-luna, gemini-flash-lite, claude-sonnet, claude-opus]
-          instructions: "Твоя роль: manual-testing"
+          instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: по описанию и DoD тикета напиши и реально запусти тесты и проверки, результаты и дефекты запиши в тикет."
         arch:
           agents: [claude-opus, gpt-sun]
       goto:

@@ -1,29 +1,30 @@
 /**
- * Остановка kilo-агента при ответе запрещённой модели и перезапуск после неё
- * (PLAN-003, задачи 21–22; автотест задачи 23).
+ * Остановка kilo-агента при ответе запрещённой модели и переход к следующему агенту
+ * стадии (PLAN-003, задачи 21–22; автотест задачи 23).
  *
  * Роутер kilo выбирает модель сам, и по ключу роутера агент при выборе не отсеять:
  * ответившая модель становится известна только из базы kilo, пока агент работает.
  * Поэтому на стадии исполнителя (скил `execute-task`) опрос базы снимает агента, как
  * только в его сессии ответила модель под запретом журнала `.workflow/metrics/agent-runs.jsonl`,
- * вызов отклоняется с `MODEL_BANNED`, и тот же агент заходит снова — новая сессия kilo,
- * роутер может выбрать другую модель. Не больше двух перезапусков, затем следующий
- * агент стадии.
+ * вызов отклоняется с `MODEL_BANNED`, и стадия сразу берёт следующего агента. Тот же
+ * агент заново не запускается: модель выбирает его роутер, и перезапуск запрещённую
+ * модель не обходит (прогон PulseProxy 2026-09-27: три остановки подряд за одну и ту же
+ * модель, 11,5 минуты впустую).
  *
  * Что охраняется:
- *  - роутер всегда отвечает запрещённой моделью — три остановки (запуск и два
- *    перезапуска), каждая до конца работы фейкового kilo, затем выбран следующий агент
- *    стадии; так и при постоянном запрете пары «модель + тип тикета», и при временном
- *    запрете модели за сбой (он действует на модель целиком, при любом типе тикета);
- *  - роутер со второго запуска отвечает разрешённой моделью — стадию завершает этот же
- *    агент, следующий не вызывается;
+ *  - после остановки за запрещённую модель — ровно один запуск агента роутера, снятый
+ *    до конца работы фейкового kilo, затем выбран следующий агент стадии; так и при
+ *    постоянном запрете пары «модель + тип тикета», и при временном запрете модели за
+ *    сбой (он действует на модель целиком, при любом типе тикета);
+ *  - агент роутера не запускается снова, даже если следующим запуском роутер ответил бы
+ *    разрешённой моделью;
  *  - переход к следующему агенту не блокируется изменёнными артефактами (`src/`): после
  *    остановки за модель прежний запрет fallback при непустом diff не действует;
  *  - агент не помечается нездоровым в `.workflow/state/agent-health.json`;
- *  - у каждого запуска после `MODEL_BANNED` своё событие `run` со статусом
- *    `model_banned` и свой `run_key`, равный `run_key` записи открытого запуска
- *    `.workflow/state/agent-run-open.json` на время этого запуска (фейковый kilo
- *    копирует запись в свой выходной файл);
+ *  - у снятого запуска событие `run` со статусом `model_banned` и `run_key`, равным
+ *    `run_key` записи открытого запуска `.workflow/state/agent-run-open.json` на время
+ *    этого запуска (фейковый kilo копирует запись в свой выходной файл), у следующего
+ *    агента — своё событие и свой `run_key`;
  *  - на стадии не исполнителя тот же фейковый kilo с той же запрещённой моделью
  *    доходит до конца (решение 2026-09-26, вопрос 3: «Только исполнитель»).
  *
@@ -46,7 +47,7 @@ import path from 'node:path';
 
 import { setKiloDbPathCache } from '../lib/kilo-models.mjs';
 import {
-  appendRunEvent, readRunEvents, permanentBans, crashBans, OPEN_RUN_FILE, ROUTER_RESTARTS,
+  appendRunEvent, readRunEvents, permanentBans, crashBans, OPEN_RUN_FILE,
 } from '../lib/agent-runs.mjs';
 import { isHealthy } from '../lib/agent-health-registry.mjs';
 import { StageExecutor } from '../runner.mjs';
@@ -305,60 +306,50 @@ function assertNoHealthMark(project, logger) {
 }
 
 /**
- * Три остановки (запуск и ROUTER_RESTARTS перезапусков), затем следующий агент:
- * общие проверки для постоянного и временного запрета.
+ * Одна остановка агента роутера, затем сразу следующий агент — без перезапуска роутера.
+ * `killed` — снят ли запуск роутера до своего завершения (false — запрещённую модель
+ * увидело только финальное чтение базы, агент уже вышел сам).
  */
-function assertThreeStopsThenNext(project, { result, logger }) {
-  const stops = ROUTER_RESTARTS + 1;
+function assertOneStopThenNext(project, { result, logger }, { killed = true } = {}) {
   assert.equal(result.status, 'passed', logText(logger));
   assert.equal(result.agentId, NEXT, 'стадию завершил следующий агент');
   assert.ok(nextCalled(project), 'следующий агент стадии вызван');
 
-  assert.equal(launches(project), stops, 'фейковый kilo запущен ровно три раза');
-  for (let n = 1; n <= stops; n++) {
-    assert.equal(done(project, n), false, `запуск ${n} снят до своего завершения`);
-  }
+  assert.equal(launches(project), 1, 'фейковый kilo запущен ровно один раз — без перезапуска');
+  assert.equal(done(project, 1), !killed, killed ? 'запуск снят до своего завершения' : 'запуск завершился сам');
 
   const banned = bannedLines(logger);
-  assert.equal(banned.length, stops, `в логе три остановки:\n${logText(logger)}`);
-  for (const line of banned) {
-    assert.match(line, new RegExp(`agent="${ROUTER}" model="${BAD}"`));
-  }
+  assert.equal(banned.length, 1, `в логе одна остановка:\n${logText(logger)}`);
+  assert.match(banned[0], new RegExp(`agent="${ROUTER}" model="${BAD}"`));
   const text = logText(logger);
-  assert.match(text, /restart 1\/2/);
-  assert.match(text, /restart 2\/2/);
-  assert.match(text, /restarts exhausted, falling back in-stage/);
+  assert.match(text, new RegExp(`agent ${ROUTER} stopped: model "${BAD}" banned — falling back in-stage`));
+  assert.doesNotMatch(text, /restart/);
 
   const selected = selectedLines(logger);
   assert.deepEqual(
     selected.map((l) => l.match(/^INFO Agent selected: (\S+)/)[1]),
-    [ROUTER, ROUTER, ROUTER, NEXT],
-    'три захода агента роутера, затем следующий агент',
+    [ROUTER, NEXT],
+    'один заход агента роутера, затем следующий агент',
   );
-  const lastBanned = logger.lines.lastIndexOf(banned.at(-1));
+  const bannedAt = logger.lines.indexOf(banned[0]);
   const nextSelected = logger.lines.indexOf(selected.at(-1));
-  assert.ok(nextSelected > lastBanned, 'следующий агент выбран после третьей остановки');
+  assert.ok(nextSelected > bannedAt, 'следующий агент выбран после остановки');
 
   const runs = stageRuns(project);
-  assert.equal(runs.length, stops + 1, JSON.stringify(runs, null, 2));
-  const bannedRuns = runs.slice(0, stops);
-  for (const [i, event] of bannedRuns.entries()) {
-    const n = i + 1;
-    assert.equal(event.status, 'model_banned', `запуск ${n}: статус`);
-    assert.equal(event.agent, ROUTER, `запуск ${n}: агент`);
-    assert.equal(event.model, BAD, `запуск ${n}: модель — ответившая модель роутера`);
-    assert.equal(event.stop_requested, undefined, `запуск ${n}: не остановка пайплайна`);
-    assert.equal(event.crash_ttl_ms, undefined, `запуск ${n}: не сбой`);
-    assert.equal(event.run_key, openRunCopy(project, `open-run-${n}.json`).run_key,
-      `запуск ${n}: run_key события — run_key записи открытого запуска на время запуска`);
-  }
-  assert.equal(new Set(bannedRuns.map((e) => e.run_key)).size, stops, 'у каждого перезапуска свой run_key');
+  assert.equal(runs.length, 2, JSON.stringify(runs, null, 2));
+  const [stopped, last] = runs;
+  assert.equal(stopped.status, 'model_banned', 'статус снятого запуска');
+  assert.equal(stopped.agent, ROUTER);
+  assert.equal(stopped.model, BAD, 'модель — ответившая модель роутера');
+  assert.equal(stopped.stop_requested, undefined, 'не остановка пайплайна');
+  assert.equal(stopped.crash_ttl_ms, undefined, 'не сбой');
+  assert.equal(stopped.run_key, openRunCopy(project, 'open-run-1.json').run_key,
+    'run_key события — run_key записи открытого запуска на время запуска');
 
-  const last = runs.at(-1);
   assert.equal(last.agent, NEXT);
   assert.equal(last.status, 'ok');
   assert.equal(last.run_key, openRunCopy(project, 'next-open-run.json').run_key);
-  assert.ok(!bannedRuns.some((e) => e.run_key === last.run_key));
+  assert.notEqual(last.run_key, stopped.run_key, 'у следующего агента свой run_key');
 
   assert.equal(fs.existsSync(path.join(project.root, OPEN_RUN_FILE)), false, 'запись открытого запуска снята');
   assertNoHealthMark(project, logger);
@@ -378,40 +369,36 @@ describe('остановка kilo-агента за запрещённую мо�
     const crash = crashBans(crashBanJournal(BAD));
     assert.equal(crash.length, 1);
     assert.equal(crash[0].model, BAD);
-    assert.equal(ROUTER_RESTARTS, 2, 'число перезапусков из решения стейкхолдера');
   });
 
-  test('роутер всегда отвечает запрещённой моделью (постоянный запрет): три остановки, затем следующий агент; правка src/ fallback не блокирует', async () => {
+  test('роутер ответил запрещённой моделью (постоянный запрет): одна остановка, затем следующий агент; правка src/ fallback не блокирует', async () => {
     const project = makeProject({
       ticketId: 'IMPL-1',
       journal: permanentBanJournal(BAD, 'impl'),
       launches: [{ model: BAD, holdMs: HOLD_UNTIL_KILLED_MS, writeSrc: true }],
     });
     const run = await runStage(project, EXECUTOR_STAGE);
-    assertThreeStopsThenNext(project, run);
+    assertOneStopThenNext(project, run);
 
-    // Артефакты изменены каждым снятым запуском, и переход всё равно состоялся.
-    for (let n = 1; n <= 3; n++) {
-      assert.ok(fs.existsSync(path.join(project.root, 'src', `work-${n}.txt`)), `запуск ${n} изменил src/`);
-    }
-    for (const event of stageRuns(project).slice(0, 3)) {
-      assert.ok(event.changed_files >= 1, `изменения снятого запуска посчитаны: ${JSON.stringify(event)}`);
-    }
+    // Артефакты изменены снятым запуском, и переход всё равно состоялся.
+    assert.ok(fs.existsSync(path.join(project.root, 'src', 'work-1.txt')), 'снятый запуск изменил src/');
+    const [stopped] = stageRuns(project);
+    assert.ok(stopped.changed_files >= 1, `изменения снятого запуска посчитаны: ${JSON.stringify(stopped)}`);
     assert.ok(!run.logger.lines.some((l) => l.includes('fallback blocked')), logText(run.logger));
   });
 
-  test('временный запрет модели за сбой действует при любом типе тикета: три остановки, затем следующий агент', async () => {
+  test('временный запрет модели за сбой действует при любом типе тикета: одна остановка, затем следующий агент', async () => {
     const project = makeProject({
       ticketId: 'DOCS-1',
       journal: crashBanJournal(BAD),
       launches: [{ model: BAD, holdMs: HOLD_UNTIL_KILLED_MS, writeSrc: false }],
     });
     const run = await runStage(project, EXECUTOR_STAGE);
-    assertThreeStopsThenNext(project, run);
-    for (const event of stageRuns(project).slice(0, 3)) assert.equal(event.ticket_type, 'docs');
+    assertOneStopThenNext(project, run);
+    for (const event of stageRuns(project)) assert.equal(event.ticket_type, 'docs');
   });
 
-  test('роутер со второго запуска отвечает разрешённой моделью: стадию завершает тот же агент', async () => {
+  test('агент роутера не запускается снова, даже если следующим запуском роутер ответил бы разрешённой моделью', async () => {
     const project = makeProject({
       ticketId: 'IMPL-1',
       journal: permanentBanJournal(BAD, 'impl'),
@@ -420,34 +407,12 @@ describe('остановка kilo-агента за запрещённую мо�
         { model: GOOD, holdMs: 300, writeSrc: false },
       ],
     });
-    const { result, logger } = await runStage(project, EXECUTOR_STAGE);
-    assert.equal(result.status, 'passed', logText(logger));
-    assert.equal(result.agentId, ROUTER, 'стадию завершил агент роутера');
-    assert.equal(nextCalled(project), false, 'следующий агент не вызывался');
-    assert.equal(launches(project), 2);
-    assert.equal(done(project, 1), false, 'первый запуск снят до завершения');
-    assert.equal(done(project, 2), true, 'второй запуск дошёл до конца');
-
-    assert.equal(bannedLines(logger).length, 1, logText(logger));
-    assert.match(logText(logger), /restart 1\/2/);
-    assert.doesNotMatch(logText(logger), /restarts exhausted/);
-    assert.doesNotMatch(logText(logger), /fallback blocked/);
-
-    const runs = stageRuns(project);
-    assert.equal(runs.length, 2, JSON.stringify(runs, null, 2));
-    assert.equal(runs[0].status, 'model_banned');
-    assert.equal(runs[0].model, BAD);
-    assert.equal(runs[0].run_key, openRunCopy(project, 'open-run-1.json').run_key);
-    assert.equal(runs[1].status, 'ok');
-    assert.equal(runs[1].agent, ROUTER);
-    assert.equal(runs[1].model, GOOD);
-    assert.equal(runs[1].run_key, openRunCopy(project, 'open-run-2.json').run_key);
-    assert.notEqual(runs[0].run_key, runs[1].run_key, 'перезапуск получил новый run_key');
-    assert.equal(fs.existsSync(path.join(project.root, OPEN_RUN_FILE)), false, 'запись открытого запуска снята');
-    assertNoHealthMark(project, logger);
+    const run = await runStage(project, EXECUTOR_STAGE);
+    assertOneStopThenNext(project, run);
+    assert.equal(done(project, 2), false, 'вторая строка плана фейкового kilo не использована');
   });
 
-  test('запрещённая модель ответила после последнего опроса: агент уже вышел, запуск — model_banned и перезапуск', async () => {
+  test('запрещённая модель ответила после последнего опроса: агент уже вышел, запуск — model_banned, затем следующий агент', async () => {
     const project = makeProject({
       ticketId: 'IMPL-1',
       journal: permanentBanJournal(BAD, 'impl'),
@@ -457,24 +422,29 @@ describe('остановка kilo-агента за запрещённую мо�
       ],
     });
     // Опрос реже, чем живёт запуск: запрещённую модель видит только финальное чтение.
-    const { result, logger } = await runStage(project, EXECUTOR_STAGE, { pollMs: 60000 });
-    assert.equal(result.status, 'passed', logText(logger));
-    assert.equal(result.agentId, ROUTER);
-    assert.equal(launches(project), 2);
-    assert.equal(done(project, 1), true, 'первый запуск завершился сам — снимать было нечего');
-    assert.equal(nextCalled(project), false);
-    const banned = bannedLines(logger);
-    assert.equal(banned.length, 1, logText(logger));
-    assert.match(banned[0], /agent already exited/);
-    assert.match(logText(logger), /restart 1\/2/);
+    const run = await runStage(project, EXECUTOR_STAGE, { pollMs: 60000 });
+    assertOneStopThenNext(project, run, { killed: false });
+    assert.match(bannedLines(run.logger)[0], /agent already exited/);
+  });
 
+  test('агент роутера — последний в списке стадии: одна остановка, стадия отклоняется с MODEL_BANNED', async () => {
+    const project = makeProject({
+      ticketId: 'IMPL-1',
+      journal: permanentBanJournal(BAD, 'impl'),
+      launches: [
+        { model: BAD, holdMs: HOLD_UNTIL_KILLED_MS, writeSrc: false },
+        { model: GOOD, holdMs: 300, writeSrc: false },
+      ],
+    });
+    const stage = { id: 'execute-task', def: { agents: [ROUTER], instructions: 'Выполни тикет', skill: 'execute-task' } };
+    await assert.rejects(runStage(project, stage), (err) => err.code === 'MODEL_BANNED' && err.bannedModel === BAD);
+    assert.equal(launches(project), 1, 'агент роутера не перезапускался');
+    assert.equal(nextCalled(project), false);
     const runs = stageRuns(project);
-    assert.equal(runs.length, 2, JSON.stringify(runs, null, 2));
+    assert.equal(runs.length, 1, JSON.stringify(runs, null, 2));
     assert.equal(runs[0].status, 'model_banned');
-    assert.equal(runs[0].model, BAD);
-    assert.equal(runs[1].status, 'ok');
-    assert.equal(runs[1].model, GOOD);
-    assertNoHealthMark(project, logger);
+    assert.equal(fs.existsSync(path.join(project.root, OPEN_RUN_FILE)), false, 'запись открытого запуска снята');
+    assert.equal(isHealthy(project.root, ROUTER), true, 'агент роутера не помечен нездоровым');
   });
 
   test('на стадии не исполнителя тот же фейковый kilo с запрещённой моделью доходит до конца', async () => {

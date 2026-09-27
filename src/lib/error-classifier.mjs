@@ -92,6 +92,16 @@ function buildRules(rulesData, compiledRules = []) {
   return compiledRules;
 }
 
+/**
+ * Правила health-классификатора из `.workflow/config/agent-health-rules.yaml` (или
+ * `configPath`). `pattern` правила — регулярное выражение JS без флагов (`new RegExp`),
+ * с учётом регистра. Префикс `(?i)` JS не знает — InvalidRulesConfigError, а
+ * `(?i:…)` понимает только Node 23+, тогда как `engines` — Node 18, и поставляемый
+ * файл через общую папку конфигов читают раннеры прежних версий: регистр — классами
+ * вида `[Rr]`. Порядок проверки в classify: правила агента (свои, затем
+ * унаследованные по `extends`), потом общие (`common`) в порядке файла.
+ * @returns {{common: Array, agents: Map<string, Array>}}
+ */
 export function loadRules(projectRoot, configPath) {
   const defaultPath = join(projectRoot, '.workflow/config/agent-health-rules.yaml');
   const fullPath = configPath || defaultPath;

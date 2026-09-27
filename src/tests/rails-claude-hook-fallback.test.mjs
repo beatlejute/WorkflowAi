@@ -335,25 +335,66 @@ test('Stop: журнал недоступен -> блок финального �
   });
 });
 
-test('Stop: состояние не записывается -> блок доходит до агента, счётчик на диске не растёт', () => {
+// Счётчик stop_blocks — единственное, что кончает блоки Stop (stop_hook_active блок не снимает).
+// Не лёг он на диск — потолок узла не наступит никогда: блок только на первой остановке,
+// остановка сразу после блока (stop_hook_active) проходит, иначе цикл без конца.
+function stopUntilPass(root, base, sessionId) {
+  const stop = (extra) => callHook({
+    hook_event_name: 'Stop',
+    session_id: sessionId,
+    cwd: root,
+    transcript_path: join(base, 'нет-такого.jsonl'),
+    ...extra,
+  });
+  const first = stop({});
+  const next = [1, 2, 3].map(() => stop({ stop_hook_active: true }));
+  return { first, next };
+}
+
+test('Stop: состояние не записывается -> один блок, остановки сразу после него проходят, в журнале unsaved', () => {
   withProject({}, ({ root, base }) => {
     const sessionId = writeUnsaveableState(root, 'P4S1');
 
-    const { result, stderr } = callHook({
-      hook_event_name: 'Stop',
-      session_id: sessionId,
-      cwd: root,
-      transcript_path: join(base, 'нет-такого.jsonl'),
-    });
+    const { first, next } = stopUntilPass(root, base, sessionId);
 
-    assert.equal(result.decision, 'block', 'битый файл состояния не должен ронять завершение сессии');
-    assert.equal(stderr, '');
-    // Запись в журнал идёт до сохранения состояния — она обязана остаться.
-    const stopBlocks = readJournal(root, {}).filter((e) => e.type === 'stop_block');
-    assert.equal(stopBlocks.length, 1);
-    assert.equal(stopBlocks[0].node, 'P4S1');
-    // Цена: счётчик не сохранился, значит блок повторится — но инструмент жив.
+    assert.equal(first.result.decision, 'block', 'битый файл состояния не должен ронять завершение сессии');
+    assert.equal(first.stderr, '');
+    for (const [i, r] of next.entries()) {
+      assert.equal(r.result, null, `остановка ${i + 2} сразу после блока: без сохранённого счётчика блок повторялся бы вечно`);
+      assert.equal(r.stderr, '');
+    }
+    // Счётчик не сохранился — на диске его нет.
     assert.equal(loadState(root, sessionId).counters['stop_blocks:P4S1'], undefined);
+    // Каждая остановка с нарушением — запись в журнал; пропущенные — exhausted.
+    const stopBlocks = readJournal(root, {}).filter((e) => e.type === 'stop_block');
+    assert.deepEqual(stopBlocks.map((e) => [e.node, e.exhausted, e.unsaved]), [
+      ['P4S1', false, true],
+      ['P4S1', true, true],
+      ['P4S1', true, true],
+      ['P4S1', true, true],
+    ]);
+  });
+});
+
+test('Stop: поле session в файле состояния чужое -> запись уходит в другой файл, счётчик сессии не растёт, цикла нет', () => {
+  withProject({}, ({ root, base }) => {
+    const sessionId = uuid();
+    const other = uuid();
+    const dir = join(root, '.workflow', 'state', 'rails');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `${sessionId}.json`),
+      JSON.stringify({ session: other, skill: 'hookfall', node: 'P4S1', counters: {}, history: [] }),
+      'utf8'
+    );
+
+    const { first, next } = stopUntilPass(root, base, sessionId);
+
+    assert.equal(first.result.decision, 'block');
+    assert.deepEqual(next.map((r) => r.result), [null, null, null]);
+    assert.equal(loadState(root, sessionId).counters['stop_blocks:P4S1'], undefined);
+    const stopBlocks = readJournal(root, {}).filter((e) => e.type === 'stop_block');
+    assert.ok(stopBlocks.every((e) => e.unsaved === true), 'счётчик в чужом файле не сохранён для этой сессии');
   });
 });
 

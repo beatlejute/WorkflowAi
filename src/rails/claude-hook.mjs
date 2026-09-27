@@ -141,10 +141,23 @@ function handlePostToolUse(input, env) {
 }
 
 // --- Stop (§8: выходной слой для Claude) -------------------------------------------
+//
+// `stop_hook_active` во входе (Claude Code ставит его на остановке, следующей за блоком
+// Stop-хука) блок не снимает, пока счётчик сохраняется. Прежде хук при нём сразу пропускал
+// ответ, и после одного блока следующая остановка проходила всегда: `max_stop_blocks: 2` был 1
+// (прогон PulseProxy 2026-09-27: четыре сессии claude-haiku получили ровно по одному блоку,
+// журнал — по одной записи stop_block, и закончили вне терминального узла).
+//
+// От бесконечного цикла защищает счётчик `stop_blocks:<узел>`: на одном узле — не больше
+// `max_stop_blocks` блоков, дальше allow с записью в журнал. Новый блок возможен только
+// после перехода goto в узел, где счётчик не исчерпан; повторный заход в узел счётчик не
+// обнуляет, поэтому за жизнь состояния блоков не больше max_stop_blocks × число узлов графа.
+// Граница держится, только если счётчик сохранён в файл состояния сессии: запись упала или
+// ушла в другой файл — остановка сразу после блока (`stop_hook_active`) проходит, в журнале
+// `unsaved: true`. Отдельного потолка на сессию нет: он обрывал бы агента, который после
+// каждого блока продвигается к терминалу, а задать его нечем — другого ключа в rails.yaml нет.
 
 function handleStop(input, env) {
-  if (input && input.stop_hook_active) return null;
-
   const cwd = (input && input.cwd) || process.cwd();
   const sessionId = input && input.session_id;
   if (!sessionId) return null;
@@ -174,8 +187,28 @@ function handleStop(input, env) {
   const key = `stop_blocks:${node}`;
   const maxStopBlocks = Number.isFinite(config?.output?.max_stop_blocks) ? config.output.max_stop_blocks : 2;
   const count = (state.counters && state.counters[key]) || 0;
-  const exhausted = count >= maxStopBlocks;
   const run = (env && env.WORKFLOW_RAILS_RUN) || null;
+
+  let exhausted = count >= maxStopBlocks;
+  let unsaved = false;
+  if (!exhausted) {
+    state.counters ??= {};
+    state.counters[key] = count + 1;
+    state.updated = new Date().toISOString();
+    try {
+      saveState(root, state);
+      // Сверка с файлом, из которого состояние прочитано: saveState строит путь по полю
+      // `session` — без него бросает, при расхождении с именем файла пишет в чужой файл.
+      unsaved = loadState(root, sessionId)?.counters?.[key] !== count + 1;
+    } catch {
+      // сохранение состояния не должно ронять хук
+      unsaved = true;
+    }
+    // Счётчик не лёг на диск — потолок узла не наступит никогда, и блок повторялся бы на
+    // каждой остановке. Тогда потолок — один блок подряд: остановка сразу после блока
+    // (`stop_hook_active`) проходит.
+    if (unsaved && input && input.stop_hook_active) exhausted = true;
+  }
 
   try {
     appendEvent(root, {
@@ -186,23 +219,15 @@ function handleStop(input, env) {
       run,
       missing: result.missing,
       exhausted,
+      ...(unsaved ? { unsaved: true } : {}),
     });
   } catch {
     // журнал не должен ронять хук
   }
 
   if (exhausted) {
-    // §8: счётчик ≤ max_stop_blocks, дальше — allow с записью в журнал (уже сделана выше).
+    // §8: потолок исчерпан — allow с записью в журнал (уже сделана выше).
     return null;
-  }
-
-  state.counters ??= {};
-  state.counters[key] = count + 1;
-  state.updated = new Date().toISOString();
-  try {
-    saveState(root, state);
-  } catch {
-    // сохранение состояния не должно ронять хук
   }
 
   return {
@@ -276,12 +301,47 @@ function handleUserPromptSubmit(input, env) {
 
 // --- SessionStart ---------------------------------------------------------------------
 
-function handleSessionStart(input) {
+// Скил запуска — WORKFLOW_RAILS_SKILL (ставят раннер стадии и раннер тестов скилов) у
+// ведущего агента. Исполнителя (судья, субагент) рельсы не ведут: ему скил запуска не
+// называется, даже если переменная досталась по наследству.
+function runSkillOf(input, env) {
+  const skill = env && typeof env.WORKFLOW_RAILS_SKILL === 'string' ? env.WORKFLOW_RAILS_SKILL : '';
+  if (!skill || resolveRole(input, env) === 'executor') return null;
+  return skill;
+}
+
+// Подсказка сессии без состояния при заданном скиле запуска. Прогон PulseProxy 2026-09-27:
+// сессии claude-haiku, стартовавшие manual-testing на стадии execute-task, получили подсказку
+// «скил не запущен — start <skill>», а в промпте — «Твоя роль: manual-testing». Скил запуска
+// называется прямо, имя переменной окружения — нет: агенту незачем знать, что подменять в
+// команде (отказ `start` в cli.mjs). Состояние заранее не создаётся: раннер по его наличию
+// отличает агента, который не вызвал ни одного инструмента под рельсами (rails-run-state.mjs,
+// README §11).
+function runSkillHint(root, runSkill, sessionId) {
+  let entry;
+  let label = '';
+  try {
+    const { config, graph } = loadSkillRuntime(root, runSkill);
+    entry = config.entry;
+    label = graph.node(entry)?.label ?? '';
+  } catch {
+    return null; // скил запуска без рельс или битый — общая подсказка
+  }
+  if (typeof entry !== 'string' || !entry) return null;
+  return (
+    `RAILS: сессия ${sessionId}, проект ${root}; скил этого запуска — ${runSkill} (его задал раннер): ` +
+    `состояние создастся само при первом действии во входе ${entry} «${truncate(label, 80)}». ` +
+    'Другой скил в этом запуске не стартует: роль и тип задачи в промпте описывают содержание работы, а не скил.'
+  );
+}
+
+function handleSessionStart(input, env) {
   const cwd = (input && input.cwd) || process.cwd();
   const sessionId = input && input.session_id;
   if (!sessionId) return null;
 
   const reply = (text) => ({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text } });
+  const runSkill = runSkillOf(input, env);
 
   let root;
   try {
@@ -291,13 +351,14 @@ function handleSessionStart(input) {
     // чтобы стартовать скил из каталога проекта явно (session-memo.mjs подхватит корень).
     return reply(
       `RAILS: сессия ${sessionId}; корень проекта по cwd (${cwd}) не найден. Работа по скилу — из каталога проекта: ` +
-      `node .workflow/src/rails/cli.mjs start <skill> --session ${sessionId}`
+      `node .workflow/src/rails/cli.mjs start ${runSkill || '<skill>'} --session ${sessionId}`
     );
   }
 
   const state = loadState(root, sessionId);
   if (!state || !state.skill) {
-    return reply(`RAILS: сессия ${sessionId}, проект ${root}; скил не запущен — node .workflow/src/rails/cli.mjs start <skill> --session ${sessionId}`);
+    const hint = runSkill ? runSkillHint(root, runSkill, sessionId) : null;
+    return reply(hint || `RAILS: сессия ${sessionId}, проект ${root}; скил не запущен — node .workflow/src/rails/cli.mjs start <skill> --session ${sessionId}`);
   }
 
   let label = '';

@@ -16,6 +16,11 @@
  *    id агента;
  *  - ошибка процесса: класс classifyAgentResult, код выхода, crash_ttl_ms — TTL
  *    сработавшего правила health, без правила — 1 час;
+ *  - ограничение провайдера по поставляемому configs/agent-health-rules.yaml: статус
+ *    rate_limit без crash_ttl_ms, градация throttled, временного запрета модели нет,
+ *    агент выведен из выбора общим правилом provider-rate-limit на 15 минут; 429 в
+ *    середине stderr запуска, упавшего на другой ошибке, — сбой (error, crash_ttl_ms,
+ *    временный запрет модели) без этого правила;
  *  - fallback A (упал) → B (успех): две строки `run` с разными run_key;
  *  - kilo-агент: модель — модель последнего шага корневой сессии, models — все
  *    ответившие; сессия без шагов — model: null;
@@ -45,7 +50,8 @@ import { fileURLToPath } from 'node:url';
 import { StageExecutor } from '../runner.mjs';
 import { parseAgentHistory } from '../lib/agent-history.mjs';
 import { setKiloDbPathCache } from '../lib/kilo-models.mjs';
-import { CRASH_TTL_DEFAULT_MS } from '../lib/agent-runs.mjs';
+import { CRASH_TTL_DEFAULT_MS, readRunEvents, gradeRuns, crashBans } from '../lib/agent-runs.mjs';
+import { unhealthy } from '../lib/agent-health-registry.mjs';
 
 const MOCK_JUDGE = fileURLToPath(new URL('./fixtures/mock-judge-raw.js', import.meta.url));
 const RUN_ID = 'pipeline-run-test-1';
@@ -287,6 +293,79 @@ describe('событие run: успех, ошибка, fallback', () => {
     const history = parseAgentHistory(fs.readFileSync(ticketPath, 'utf8'));
     assert.deepEqual(history.map((h) => [h.agent, h.status]), [['agent-a', 'error'], ['agent-b', 'ok']]);
     assert.equal(openRunExists(root), false);
+  });
+
+  test('ограничение провайдера (поставляемые правила health): rate_limit без crash_ttl_ms, запрета модели нет, агент выведен на 15 минут', async () => {
+    const { root, outside } = makeProject();
+    // Правила — поставляемые, как у проекта после init/update.
+    fs.copyFileSync(
+      fileURLToPath(new URL('../../configs/agent-health-rules.yaml', import.meta.url)),
+      path.join(root, '.workflow', 'config', 'agent-health-rules.yaml'),
+    );
+    // Итог запуска kilo из лога PulseProxy 2026-09-27.
+    const failing = writeStub(outside, 'agent-a', { stderr: 'Error: [Poolside] Rate limit exceeded\n', exit: 1 });
+    const ok = writeStub(outside, 'agent-b');
+    const { executor, logger } = makeExecutor(root, {
+      'agent-a': { command: 'node', args: [failing, '--model', 'prov/model-a'], capabilities: ['text'] },
+      'agent-b': { command: 'node', args: [ok], capabilities: ['text'] },
+    });
+
+    const started = Date.now();
+    const result = await executor.executeWithFallback('execute-task', EXECUTOR_STAGE(['agent-a', 'agent-b']));
+    assert.equal(result.status, 'passed', logger.lines.join('\n'));
+
+    const [a] = runEvents(root);
+    assert.equal(a.agent, 'agent-a');
+    assert.equal(a.status, 'rate_limit');
+    assert.ok(!('crash_ttl_ms' in a), 'ограничение провайдера — не сбой, TTL запрета не пишется');
+
+    const events = readRunEvents(root);
+    assert.equal(gradeRuns(events)[0].grade, 'throttled');
+    assert.deepEqual(crashBans(events), [], 'временного запрета модели нет');
+
+    const marks = unhealthy(root);
+    assert.equal(marks.length, 1, JSON.stringify(marks));
+    assert.equal(marks[0].agentId, 'agent-a');
+    assert.equal(marks[0].rule_id, 'provider-rate-limit');
+    assert.equal(marks[0].class, 'unavailable');
+    const until = Date.parse(marks[0].until);
+    assert.ok(until >= started + 15 * 60 * 1000 && until <= Date.now() + 15 * 60 * 1000, `until: ${marks[0].until}`);
+  });
+
+  test('429 в середине stderr, запуск упал на другом (поставляемые правила health): сбой с временным запретом, без provider-rate-limit', async () => {
+    const { root, outside } = makeProject();
+    fs.copyFileSync(
+      fileURLToPath(new URL('../../configs/agent-health-rules.yaml', import.meta.url)),
+      path.join(root, '.workflow', 'config', 'agent-health-rules.yaml'),
+    );
+    // Агент повторил запрос после 429, поработал и упал на ошибке сервера.
+    const stderr = [
+      'level=ERROR message="stream error" error.error="AI_APICallError: [Provider] Rate limit exceeded"',
+      '→ Read src/a.ts',
+      '$ npm test',
+      '33/33 tests pass',
+      'level=ERROR message="stream error" error.error="AI_APICallError: Internal Server Error"',
+      'level=ERROR message=process error="Internal Server Error"',
+      'Error: Internal Server Error',
+    ].join('\n') + '\n';
+    const failing = writeStub(outside, 'agent-a', { stderr, exit: 1 });
+    const ok = writeStub(outside, 'agent-b');
+    const { executor, logger } = makeExecutor(root, {
+      'agent-a': { command: 'node', args: [failing, '--model', 'prov/model-a'], capabilities: ['text'] },
+      'agent-b': { command: 'node', args: [ok], capabilities: ['text'] },
+    });
+
+    const result = await executor.executeWithFallback('execute-task', EXECUTOR_STAGE(['agent-a', 'agent-b']));
+    assert.equal(result.status, 'passed', logger.lines.join('\n'));
+
+    const [a] = runEvents(root);
+    assert.equal(a.status, 'error');
+    assert.equal(a.crash_ttl_ms, CRASH_TTL_DEFAULT_MS, 'правило health не сработало — 1 час');
+
+    const events = readRunEvents(root);
+    assert.equal(gradeRuns(events)[0].grade, 'crashed');
+    assert.deepEqual(crashBans(events).map((b) => b.model), ['prov/model-a'], 'временный запрет модели');
+    assert.deepEqual(unhealthy(root).filter((m) => m.rule_id === 'provider-rate-limit'), []);
   });
 });
 

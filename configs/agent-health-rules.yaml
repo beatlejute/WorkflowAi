@@ -1,6 +1,22 @@
 version: "1.0"
 
 common:
+  # Ограничение провайдера (HTTP 429, rate limit, quota exceeded) — не дефект модели:
+  # агент недоступен 15 минут, запрета модели нет (src/lib/agent-runs.mjs, градация
+  # `throttled`). Шаблон — дословно PROVIDER_RATE_LIMIT_PATTERN, класс `rate_limit`
+  # classifyAgentResult (src/lib/agent-history.mjs): ограничение в трёх последних
+  # строках stderr, то есть запуск на нём закончился; 429 из середины, после которых
+  # агент продолжил работу, не в счёт. Правило стоит первым, как проверка там: при
+  # ограничении в конце и сетевой ошибке раньше побеждает ограничение. Общее правило
+  # в онлайн-скане stderr не участвует: агент, который сам повторяет запросы после
+  # 429, не снимается. Шаблон — без флагов и модификаторов вида `(?i)`: файл читают и
+  # раннеры прежних версий (обычный `new RegExp` Node 18), регистр — классами `[Rr]`.
+  # В одинарных кавычках YAML обратная косая черта — как есть, `''` — кавычка.
+  - id: "provider-rate-limit"
+    class: "unavailable"
+    ttl: "15m"
+    pattern: '(?:[Rr]ate.?[Ll]imit|RATE.?LIMIT|[Qq]uota.?[Ee]xceeded|QUOTA.?EXCEEDED|[Tt]oo [Mm]any [Rr]equests|TOO MANY REQUESTS|(?:[Ss]tatus|[Cc]ode|[Ee]rror|HTTP(?:/[\d.]+)?)["'']?[ :=]*429\b(?!:\d))[^\n]*(?:\n[^\n]*){0,2}\s*$'
+    exit_codes: "any"
   - id: "net-econnreset"
     class: "transient"
     ttl: "5m"
@@ -39,7 +55,7 @@ agents:
       - id: "kilo-free-tier-exhausted"
         class: "unavailable"
         ttl: "until_utc_midnight"
-        pattern: "free tier.*exhaust|daily limit|too many requests"
+        pattern: "free tier.*exhaust|daily limit"
         exit_codes: "any"
 
   deepseek-flash:

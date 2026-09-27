@@ -10,6 +10,9 @@
  * унаследованного PWD и писал состояние рельс в настоящий проект (см.
  * lib/agent-env.mjs). Раньше любой такой случай молча отключал output-check;
  * теперь раннер сообщает о нём, а побег в настоящий проект различает отдельно.
+ *
+ * Здесь же — повтор по вердикту рельс: продолжение сессии хоста агента
+ * (resumeSessionArgs) и тексты вердикта для той же и для новой сессии.
  */
 
 import fs from 'node:fs';
@@ -19,27 +22,37 @@ import { isKiloRun } from './kilo-models.mjs';
 import { RAILS_CLI, describeTransitions } from '../rails/state.mjs';
 import { loadSkillGraph } from '../rails/graph.mjs';
 
-/** Файл состояния сессии rails с данным `run` в корне `root`, или null. */
-export function findRailsStateByRun(root, run) {
-  if (!root || !run) return null;
+/**
+ * Все состояния сессий rails с данным `run` в корне `root` (порядок каталога). Сессий у
+ * одного запуска бывает больше одной: в журнале PulseProxy 2026-09-27 у двух запусков kilo —
+ * по две сессии `ses_…` с общим `run` (переменные окружения процесса видят и субагенты).
+ */
+export function railsStatesByRun(root, run) {
+  if (!root || !run) return [];
   const dir = path.join(root, '.workflow', 'state', 'rails');
   let entries;
   try {
     entries = fs.readdirSync(dir);
   } catch {
-    return null;
+    return [];
   }
+  const found = [];
   for (const name of entries) {
     if (!name.endsWith('.json') || name.startsWith('.')) continue;
     try {
       const state = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
-      if (state && state.run === run) return state;
+      if (state && state.run === run) found.push(state);
     } catch {
       // повреждённый/недописанный файл состояния — пропускаем, как и
       // остальные читатели rails (journal.mjs, state.mjs).
     }
   }
-  return null;
+  return found;
+}
+
+/** Файл состояния сессии rails с данным `run` в корне `root` (первый по порядку каталога), или null. */
+export function findRailsStateByRun(root, run) {
+  return railsStatesByRun(root, run)[0] ?? null;
 }
 
 /**
@@ -84,9 +97,61 @@ export function railsNotEngagedMessage({ who, escaped, projectRoot }) {
 export function railsHost(agent) {
   const explicit = agent?.rails_host;
   if (explicit === 'kilo' || explicit === 'claude') return explicit;
+  return commandHost(agent);
+}
+
+/** Хост по самой команде агента (`kilo … run`, `claude`), без явного `rails_host`. */
+function commandHost(agent) {
   if (isKiloRun(agent)) return 'kilo';
   const base = path.win32.basename(String(agent?.command ?? ''));
   return /^claude(?:\.cmd|\.exe|\.ps1)?$/i.test(base) ? 'claude' : null;
+}
+
+// Флаги сессии в записи агента: с любым из них раннер своё продолжение не добавляет —
+// сочетание с `--resume` / `--session` не проверено. Списки — `claude --help` 2.1.278 и
+// `kilo run --help` 7.7.9.
+const CLAUDE_SESSION_FLAGS = new Set([
+  '--resume', '-r', '--continue', '-c', '--session-id', '--fork-session', '--no-session-persistence', '--from-pr',
+]);
+const KILO_SESSION_FLAGS = new Set(['--continue', '-c', '--session', '-s', '--fork', '--cloud-fork']);
+// id сессии уходит в командную строку, на Windows — через cmd.exe без кавычек (shell: true):
+// только буквы, цифры, `_` и `-` (uuid Claude, `ses_…` kilo).
+const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+/**
+ * Аргументы агента, продолжающие сессию хоста `sessionId` (id сессии из состояния рельс,
+ * поле `session`: его пишет хук хоста), или null — продолжить нельзя.
+ *
+ * Хост — по команде агента, как в railsHost, но без явного `rails_host`: у обёртки с другим
+ * именем команды флаги продолжения неизвестны. Проверено запуском 2026-09-27:
+ *  - claude 2.1.278: `claude --resume <id> … -p` с промптом через stdin продолжает ту же
+ *    сессию — ответ помнит прежний разговор, `session_id` в ответе и во входе хуков
+ *    (`SessionStart` с `source: "resume"`, `PreToolUse`) прежний, значит и состояние рельс
+ *    (файл `<session>.json`) то же;
+ *  - kilo 7.7.9: `kilo … run --session <id> --title <та же метка>` с промптом через stdin
+ *    дописывает ту же сессию (в базе kilo та же строка `session`, сообщений стало больше,
+ *    метка прежняя), ответ помнит прежний разговор.
+ * Флаги сессии уже в записи агента — null (CLAUDE_SESSION_FLAGS, KILO_SESSION_FLAGS).
+ *
+ * @param {{command?: string, args?: string[]}} agent
+ * @param {string} sessionId
+ * @returns {string[]|null}
+ */
+export function resumeSessionArgs(agent, sessionId) {
+  if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) return null;
+  const args = Array.isArray(agent?.args) ? agent.args.map(String) : [];
+  const flag = (a) => a.split('=')[0];
+  const host = commandHost(agent);
+  if (host === 'claude') {
+    if (args.some((a) => CLAUDE_SESSION_FLAGS.has(flag(a)))) return null;
+    return ['--resume', sessionId, ...args];
+  }
+  if (host === 'kilo') {
+    if (args.some((a) => KILO_SESSION_FLAGS.has(flag(a)))) return null;
+    const i = args.indexOf('run');
+    return [...args.slice(0, i + 1), '--session', sessionId, ...args.slice(i + 1)];
+  }
+  return null;
 }
 
 /**
@@ -143,34 +208,63 @@ function terminalText(config) {
   return terminal.length > 0 ? `Финальный ответ — только в ${terminal.join(', ')}.` : 'Финальный ответ — только в терминальном узле графа.';
 }
 
+// Прогон PulseProxy 2026-09-27: повторы claude-haiku в новой сессии дважды ответили за два
+// хода без единого вызова инструмента — напечатали команду goto текстом ответа.
+const RUN_COMMANDS_TEXT = 'Команды рельс выполняй инструментом shell: команда, напечатанная в ответе, перехода не делает.';
+
 /**
  * Вердикт повтора, когда хуки рельс на месте, а состояния сессии нет: за весь запуск агент
  * не вызвал ни одного инструмента под рельсами — финальный ответ дан без процедуры скила.
  * Прогон deep-research 2026-09-25: gpt-luna во всех трёх попытках ответила отчётом без
- * единого вызова инструмента, output-check не запускался, одна попытка прошла.
+ * единого вызова инструмента, output-check не запускался, одна попытка прошла. Повтор —
+ * новая сессия (продолжать нечего: id сессии хоста знает только состояние рельс), граф — с
+ * первого узла.
  */
 export function railsNotEngagedVerdict({ skill, config }) {
   return `RAILS: предыдущий ответ отклонён — скил «${skill}» идёт по рельсам, а за весь запуск не было `
     + 'ни одного вызова инструмента под рельсами: процедура скила не пройдена. '
     + `Пройди граф от первого узла: начни командой \`node ${RAILS_CLI} start ${skill}\` и переходи `
-    + `командами goto, которые она печатает. ${terminalText(config)}\n\n`;
+    + `командами goto, которые она печатает. ${RUN_COMMANDS_TEXT} ${terminalText(config)}\n\n`;
 }
 
 /**
- * Вердикт повтора по output-check: что отсутствует, где агент числится и готовые команды
- * переходов оттуда (state.describeTransitions). Граф не читается — без переходов.
+ * Вердикт повтора по output-check.
+ *
+ * `sameSession: true` — повтор продолжает ту же сессию хоста (resumeSessionArgs): рельсы
+ * помнят узел, и вердикт называет, где агент числится, и готовые команды переходов оттуда
+ * (state.describeTransitions; граф не читается — без переходов).
+ *
+ * По умолчанию повтор — новая сессия: её рельсы начинаются с `entry`, а прежний узел —
+ * узел другой сессии. Прогон PulseProxy 2026-09-27: новой сессии сказали «Числишься в
+ * P7S1», её `goto P7S2` рельсы отклонили («нет ребра из P0E1 в P7S2»), два других повтора
+ * напечатали команду текстом и ответили без процедуры скила. Поэтому для новой сессии
+ * вердикт говорит правду: где остановилась прошлая сессия, что граф — заново командой
+ * `start`, и что сделанное осталось только в файлах.
+ *
+ * @param {{verdict: {missing: string[]}, state: object, config: object, skillDir: string,
+ *   skill?: string, sameSession?: boolean}} args
+ *   skill — имя скила для команды `start` (иначе `config.skill`, затем `state.skill`)
  */
-export function outputCheckVerdict({ verdict, state, config, skillDir }) {
+export function outputCheckVerdict({ verdict, state, config, skillDir, skill, sameSession = false }) {
+  const head = `RAILS: предыдущий ответ отклонён output-check — отсутствует: ${verdict.missing.join('; ')}.`;
+  const tail = `${RUN_COMMANDS_TEXT} ${terminalText(config)} Исправь и ответь заново.\n\n`;
+  if (!sameSession) {
+    const name = skill || config?.skill || state?.skill || '<скил>';
+    const stoppedAt = state?.node ? ` Прошлая сессия остановилась в ${state.node}, но это новая сессия:` : ' Это новая сессия:';
+    return `${head}${stoppedAt} её рельсы начинаются с первого узла графа — начни командой `
+      + `\`node ${RAILS_CLI} start ${name}\` и переходи командами goto, которые она печатает. `
+      + 'Сделанное прошлой сессией осталось только в файлах проекта (в том числе в тикете, если он есть): '
+      + `сверься с ними и не переделывай готовое. ${tail}`;
+  }
   let where = '';
   try {
     const graph = loadSkillGraph(skillDir, config);
     const lines = describeTransitions(state, graph, config);
-    where = ` Числишься в ${state.node}.${lines.length > 0 ? ` Переходы оттуда:\n${lines.map((l) => `  ${l}`).join('\n')}\n` : ''}`;
+    where = ` Сессия та же. Числишься в ${state.node}.${lines.length > 0 ? ` Переходы оттуда:\n${lines.map((l) => `  ${l}`).join('\n')}\n` : ''}`;
   } catch {
-    where = state?.node ? ` Числишься в ${state.node}.` : '';
+    where = state?.node ? ` Сессия та же. Числишься в ${state.node}.` : '';
   }
-  return `RAILS: предыдущий ответ отклонён output-check — отсутствует: ${verdict.missing.join('; ')}.${where} `
-    + `${terminalText(config)} Исправь и ответь заново.\n\n`;
+  return `${head}${where} ${tail}`;
 }
 
 /**

@@ -366,23 +366,88 @@ test('handleHookInput: необработанное исключение вне 
 
 // --- Stop ------------------------------------------------------------------------------
 
-test('Stop: stop_hook_active=true -> null, не блокирует', () => {
+// Прогон PulseProxy 2026-09-27: хук пропускал любую остановку со stop_hook_active=true —
+// Claude Code ставит его на остановке сразу после блока, и max_stop_blocks: 2 работал как 1.
+test('Stop: stop_hook_active=true не снимает блок — max_stop_blocks: 2 даёт два блока подряд, третья остановка проходит', () => {
+  withProject(({ root, base }) => {
+    const sessionId = makeState(root, 'P4S1'); // не terminal
+    const transcriptPath = writeTranscript(base, [
+      { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'ничего не подготовлено' }] } },
+    ]);
+    const input = { hook_event_name: 'Stop', session_id: sessionId, cwd: root, transcript_path: transcriptPath };
+
+    assert.equal(handleHookInput(input, {}).decision, 'block');
+    // Остановка сразу после блока — как её присылает Claude Code.
+    assert.equal(handleHookInput({ ...input, stop_hook_active: true }, {}).decision, 'block');
+    assert.equal(handleHookInput({ ...input, stop_hook_active: true }, {}), null);
+
+    assert.equal(loadState(root, sessionId).counters['stop_blocks:P4S1'], 2);
+    const stopBlocks = readJournal(root, {}).filter((e) => e.type === 'stop_block' && e.session === sessionId);
+    assert.deepEqual(stopBlocks.map((e) => e.exhausted), [false, false, true]);
+  });
+});
+
+test('Stop: stop_hook_active=true и ответ по rails.yaml в terminal -> null', () => {
   withProject(({ root, base }) => {
     const sessionId = makeState(root, 'P5S1');
     const transcriptPath = writeTranscript(base, [
-      { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'что угодно' }] } },
+      { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'Готово. RAILS: P5S1 завершено.' }] } },
     ]);
     const r = handleHookInput(
-      {
-        hook_event_name: 'Stop',
-        session_id: sessionId,
-        cwd: root,
-        transcript_path: transcriptPath,
-        stop_hook_active: true,
-      },
+      { hook_event_name: 'Stop', session_id: sessionId, cwd: root, transcript_path: transcriptPath, stop_hook_active: true },
       {}
     );
     assert.equal(r, null);
+    assert.equal(readJournal(root, {}).filter((e) => e.type === 'stop_block').length, 0);
+  });
+});
+
+// Потолок — на узел: после перехода в другой нетерминальный узел агента снова возвращают,
+// а исчерпанный узел при повторном заходе не блокирует (счётчик не обнуляется), поэтому
+// блоков за жизнь состояния не больше max_stop_blocks × число узлов.
+test('Stop: счётчик блоков по узлу — новый узел даёт новые блоки, исчерпанный узел при возврате пропускает', () => {
+  withProject(({ root, base }) => {
+    const sessionId = makeState(root, 'P4S1');
+    const transcriptPath = writeTranscript(base, [
+      { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'ничего не подготовлено' }] } },
+    ]);
+    const input = { hook_event_name: 'Stop', session_id: sessionId, cwd: root, transcript_path: transcriptPath, stop_hook_active: true };
+    const moveTo = (node) => {
+      const s = loadState(root, sessionId);
+      s.node = node;
+      saveState(root, s);
+    };
+
+    assert.equal(handleHookInput(input, {}).decision, 'block');
+    assert.equal(handleHookInput(input, {}).decision, 'block');
+    assert.equal(handleHookInput(input, {}), null);
+
+    moveTo('P5E1');
+    assert.equal(handleHookInput(input, {}).decision, 'block');
+
+    moveTo('P4S1');
+    assert.equal(handleHookInput(input, {}), null);
+
+    const counters = loadState(root, sessionId).counters;
+    assert.equal(counters['stop_blocks:P4S1'], 2);
+    assert.equal(counters['stop_blocks:P5E1'], 1);
+  });
+});
+
+test('Stop: max_stop_blocks: 0 -> нарушение не блокирует ни разу, но пишется в журнал', () => {
+  withProject(({ root, base, skillDir }) => {
+    writeFileSync(join(skillDir, 'rails.yaml'), RAILS_YAML.replace('max_stop_blocks: 2', 'max_stop_blocks: 0'), 'utf8');
+    const sessionId = makeState(root, 'P4S1');
+    const transcriptPath = writeTranscript(base, [
+      { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'ничего не подготовлено' }] } },
+    ]);
+    const r = handleHookInput(
+      { hook_event_name: 'Stop', session_id: sessionId, cwd: root, transcript_path: transcriptPath },
+      {}
+    );
+    assert.equal(r, null);
+    const stopBlocks = readJournal(root, {}).filter((e) => e.type === 'stop_block' && e.session === sessionId);
+    assert.deepEqual(stopBlocks.map((e) => e.exhausted), [true]);
   });
 });
 
@@ -501,6 +566,61 @@ test('SessionStart: без состояния -> подсказка с session_i
     assert.match(ctx, new RegExp(sessionId));
     assert.match(ctx, /cli\.mjs start <skill> --session/);
   });
+});
+
+// Прогон PulseProxy 2026-09-27: подсказка «start <skill>» в стадии execute-task, и агент
+// стартовал скил из подсказки роли. При заданном скиле запуска подсказка называет его.
+test('SessionStart: без состояния, задан WORKFLOW_RAILS_SKILL -> подсказка называет скил запуска и его вход, состояние не создаётся', () => {
+  withProject(({ root }) => {
+    const sessionId = uuid();
+    const r = handleHookInput(
+      { hook_event_name: 'SessionStart', session_id: sessionId, cwd: root },
+      { WORKFLOW_RAILS_SKILL: 'hooktest', WORKFLOW_RAILS_ROLE: 'coordinator' }
+    );
+    const ctx = r.hookSpecificOutput.additionalContext;
+    assert.match(ctx, new RegExp(sessionId));
+    assert.match(ctx, /скил этого запуска — hooktest/);
+    assert.match(ctx, /P4E1 «П4 ВХОД/);
+    assert.match(ctx, /Другой скил в этом запуске не стартует/);
+    assert.doesNotMatch(ctx, /<skill>/);
+    // Имя переменной окружения агенту не называется: незачем знать, что подменять в команде.
+    assert.doesNotMatch(ctx, /WORKFLOW_RAILS/);
+    // Состояние по-прежнему создаёт первое действие: по его наличию раннер отличает
+    // агента, не вызвавшего ни одного инструмента под рельсами.
+    assert.equal(loadState(root, sessionId), null);
+  });
+});
+
+test('SessionStart: WORKFLOW_RAILS_SKILL у исполнителя или у скила без rails.yaml -> общая подсказка «start <skill>»', () => {
+  withProject(({ root }) => {
+    const sessionId = uuid();
+    const executor = handleHookInput(
+      { hook_event_name: 'SessionStart', session_id: sessionId, cwd: root },
+      { WORKFLOW_RAILS_SKILL: 'hooktest', WORKFLOW_RAILS_ROLE: 'executor' }
+    );
+    assert.match(executor.hookSpecificOutput.additionalContext, /cli\.mjs start <skill> --session/);
+
+    mkdirSync(join(root, '.workflow', 'src', 'skills', 'norails'), { recursive: true });
+    const noRails = handleHookInput(
+      { hook_event_name: 'SessionStart', session_id: sessionId, cwd: root },
+      { WORKFLOW_RAILS_SKILL: 'norails' }
+    );
+    assert.match(noRails.hookSpecificOutput.additionalContext, /cli\.mjs start <skill> --session/);
+  });
+});
+
+test('SessionStart: зонтик и задан WORKFLOW_RAILS_SKILL -> команда старта скила запуска', () => {
+  const base = mkdtempSync(join(tmpdir(), 'rails-hook-umbrella-'));
+  try {
+    const sessionId = uuid();
+    const r = handleHookInput(
+      { hook_event_name: 'SessionStart', session_id: sessionId, cwd: base },
+      { WORKFLOW_RAILS_SKILL: 'hooktest' }
+    );
+    assert.match(r.hookSpecificOutput.additionalContext, new RegExp(`cli\\.mjs start hooktest --session ${sessionId}`));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test('SessionStart: cwd вне проекта (зонтик) -> подсказка с session_id, не null', () => {

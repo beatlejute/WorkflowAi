@@ -15,10 +15,13 @@ import { readPauseRequest, RUNNER_CAPABILITIES } from './lib/pause-request.mjs';
 import { packageVersion as pipelineVersion } from './lib/package-version.mjs';
 import { appendAgentRun, classifyAgentResult } from './lib/agent-history.mjs';
 import { buildAgentEnv } from './lib/agent-env.mjs';
-import { findRailsStateByRun, railsHost, railsHooksPresent, railsNotEngagedVerdict, outputCheckVerdict } from './lib/rails-run-state.mjs';
+import {
+  findRailsStateByRun, railsStatesByRun, railsHost, railsHooksPresent, resumeSessionArgs,
+  railsNotEngagedVerdict, outputCheckVerdict,
+} from './lib/rails-run-state.mjs';
 import { isKiloRun, kiloRunTitle, withKiloTitle, requestedKiloModel, kiloDbPath, readKiloRun, formatKiloModels, kiloAgentLabel } from './lib/kilo-models.mjs';
 import {
-  EXECUTOR_SKILL, ROUTER_RESTARTS, CRASH_TTL_DEFAULT_MS,
+  EXECUTOR_SKILL, CRASH_TTL_DEFAULT_MS,
   appendRunEvent, readRunEvents, activeBans, findBan, describeBan, configuredModelKey, runModelKey,
   requestedModel, ticketTypeOf, isCrashStatus, newRunKey, writeOpenRun, clearOpenRun, closeInterruptedRun,
 } from './lib/agent-runs.mjs';
@@ -1336,11 +1339,13 @@ class StageExecutor {
    * `stop_requested: true`, остановка за запрещённую модель — `model_banned`, иначе —
    * класс classifyAgentResult.
    *
-   * После MODEL_BANNED тот же агент заходит снова — новая сессия kilo, новый
-   * `run_key` — не больше ROUTER_RESTARTS раз, затем стадия берёт следующего агента,
-   * даже при изменённых артефактах: сделанное записано в тикет по правилу скила
-   * исполнителя «Инкрементальная запись обязательна», следующий запуск продолжает с
-   * записанного. Агент при этом не помечается нездоровым.
+   * После MODEL_BANNED стадия сразу берёт следующего агента, даже при изменённых
+   * артефактах: сделанное записано в тикет по правилу скила исполнителя
+   * «Инкрементальная запись обязательна», следующий запуск продолжает с записанного.
+   * Тот же агент заново не запускается: модель выбирает его роутер, и перезапуск
+   * запрещённую модель не обходит — прогон PulseProxy 2026-09-27: роутер трижды
+   * подряд выбрал ту же запрещённую модель, 11,5 минуты впустую. Агент при этом не
+   * помечается нездоровым: в следующей попытке тикета он снова в списке.
    *
    * @param {string} stageId - ID stage из конфигурации
    * @param {object} [stageOverride] - явный stage (для тестов и промежуточных вызовов); по умолчанию берётся из pipeline.stages
@@ -1357,9 +1362,6 @@ class StageExecutor {
     // Результат последней ошибки шага «модель» обмена model_io (callModelAgent): её не
     // бросают, а возвращают стадии как status: error с error_class.
     let lastModelFailure = null;
-    // Перезапуски агентов после MODEL_BANNED и выбор, с которым агент заходит снова.
-    const bannedRestarts = new Map();
-    let restart = null;
 
     const snapshotEnabled = this.pipeline.execution?.artifact_snapshot_enabled !== false;
     const snapshotOpts = {
@@ -1368,8 +1370,7 @@ class StageExecutor {
     };
 
     while (true) {
-      const resolved = restart ?? this.resolveAgent(stage, stageId, { excludeAgents: triedInThisAttempt });
-      restart = null;
+      const resolved = this.resolveAgent(stage, stageId, { excludeAgents: triedInThisAttempt });
 
       if (resolved.blocked) {
         const exhausted = resolved.blocked === 'all_unhealthy' || resolved.blocked === 'all_banned';
@@ -1541,20 +1542,13 @@ class StageExecutor {
           throw err;
         }
 
+        // Остановка за запрещённую модель: сразу следующий агент стадии, без пометки
+        // в health-реестре и без запрета fallback при изменённых артефактах.
         if (banned) {
-          const used = bannedRestarts.get(agentId) ?? 0;
           lastErr = err;
           lastModelFailure = null;
-          if (used < ROUTER_RESTARTS) {
-            bannedRestarts.set(agentId, used + 1);
-            if (this.logger) {
-              this.logger.warn(`agent ${agentId} stopped: model "${err.bannedModel}" banned — restart ${used + 1}/${ROUTER_RESTARTS}`, stageId);
-            }
-            restart = resolved;
-            continue;
-          }
           if (this.logger) {
-            this.logger.warn(`agent ${agentId} stopped: model "${err.bannedModel}" banned — restarts exhausted, falling back in-stage`, stageId);
+            this.logger.warn(`agent ${agentId} stopped: model "${err.bannedModel}" banned — falling back in-stage`, stageId);
           }
           triedInThisAttempt.push(agentId);
           continue;
@@ -2362,16 +2356,35 @@ class StageExecutor {
    * не различает судью и целевого агента внутри обычного pipeline — судья
    * есть только в run-skill-tests.js). После успешного завершения, если у
    * скила стадии есть `rails.yaml`, ищем состояние сессии по `run` и гоним
-   * его через `output-check`; при нарушении — один повтор с вердиктом в
-   * начале промпта (§8). Ошибка/таймаут агента rails не касаются — пробрасываются
-   * как есть, ретрая на них нет.
+   * его через `output-check`; при нарушении — один повтор с вердиктом (§8).
+   * Ошибка/таймаут агента rails не касаются — пробрасываются как есть, ретрая на
+   * них нет.
+   *
+   * Повтор по output-check продолжает ту же сессию хоста, если её можно продолжить:
+   * у запуска ровно одно состояние рельс, и хост по команде агента умеет продолжение
+   * (resumeSessionArgs: `claude --resume <id>`, `kilo run --session <id>`). Тогда
+   * `WORKFLOW_RAILS_RUN` прежний — состояние той же сессии хранит `run` первого
+   * запуска, — а промпт — только вердикт «числишься в <узел>, переходы оттуда», всегда через
+   * stdin: исходный промпт и сделанное агент помнит. Иначе повтор — новая сессия с новым
+   * `run`, и вердикт говорит правду: рельсы новой сессии — с `start`, сделанное — в
+   * файлах; исходный промпт идёт после вердикта. Прогон PulseProxy 2026-09-27: новой
+   * сессии говорили «Числишься в <узел прошлой сессии>», и повторы claude-haiku либо
+   * проходили граф и работу заново, либо печатали команду goto текстом без единого
+   * вызова инструмента.
    *
    * Состояния с этим `run` нет, а хуки рельс для хоста агента на месте
    * (railsHost/railsHooksPresent) — агент не вызвал ни одного инструмента под
-   * рельсами: это нарушение, повтор с вердиктом «пройди граф от start». Прежде
-   * такой ответ проходил молча (прогон deep-research 2026-09-25: gpt-luna без
-   * единого вызова инструмента). Хуков нет или хост не claude/kilo — повтором
-   * не обосновать: предупреждение в лог, ответ как есть.
+   * рельсами: это нарушение, повтор в новой сессии с вердиктом «пройди граф от
+   * start». Прежде такой ответ проходил молча (прогон deep-research 2026-09-25:
+   * gpt-luna без единого вызова инструмента). Хуков нет или хост не claude/kilo —
+   * повтором не обосновать: предупреждение в лог, ответ как есть.
+   *
+   * Ответ повтора тоже проходит output-check (`railsRetryVerdict` результата). Нарушение
+   * и повтор без состояния — предупреждение в лог, а ответ всё равно отдаётся стадии:
+   * третьего запуска нет, маршрут — по статусу ответа. У исполнителя и `default`, и
+   * `error` ведут в move-to-review → verify-artifacts (configs/pipeline.yaml), и контроль
+   * артефактов судит сделанное по тикету: работа, записанная до сбоя рельс, проходит, а
+   * пустой результат — неудача с событием `verify` для правил отсева моделей.
    *
    * `bannedCheck` — проверка ответивших моделей kilo-агента по запретам журнала
    * запусков (_callAgentTracked): и у первого вызова, и у повтора рельс.
@@ -2398,7 +2411,6 @@ class StageExecutor {
     const skillDir = path.join(this.projectRoot, '.workflow', 'src', 'skills', skillId);
     const state = findRailsStateByRun(this.projectRoot, runId);
     let verdict;
-    let verdictText;
     if (!state) {
       const host = railsHost(agent);
       const agentCwd = path.resolve(this.projectRoot, agent.workdir || '.');
@@ -2410,27 +2422,68 @@ class StageExecutor {
         return result;
       }
       verdict = { ok: false, missing: ['ни одного вызова инструмента под рельсами'] };
-      verdictText = railsNotEngagedVerdict({ skill: skillId, config });
     } else {
       verdict = checkRailsOutput(result.output || '', config, state);
       if (verdict.ok) return result;
-      verdictText = outputCheckVerdict({ verdict, state, config, skillDir });
+    }
+
+    // Та же сессия — если её id однозначен (одно состояние у запуска) и хост умеет её продолжить.
+    const states = state ? railsStatesByRun(this.projectRoot, runId) : [];
+    const resumeArgs = states.length === 1 ? resumeSessionArgs(agent, state.session) : null;
+    let retryAgent = agent;
+    let retryPrompt;
+    let retryRun;
+    let sessionNote;
+    if (resumeArgs) {
+      // Промпт — всегда через stdin (prompt_stdin): из терминального узла переходов нет, вердикт —
+      // одна строка, а однострочный промпт _callAgentOnce кладёт в командную строку, на Windows —
+      // через cmd.exe без кавычек, и шаблоны rails.yaml из вердикта (`|`, `>`, `^`) cmd.exe
+      // исполнял как свой синтаксис: повтор падал, не запустив хост (ревью 2026-09-27).
+      // Продолжение с промптом через stdin проверено запуском (resumeSessionArgs).
+      retryAgent = { ...agent, args: resumeArgs, prompt_stdin: true };
+      retryRun = runId;
+      retryPrompt = outputCheckVerdict({ verdict, state, config, skillDir, skill: skillId, sameSession: true }).trimEnd();
+      sessionNote = `та же (${state.session})`;
+    } else {
+      retryRun = crypto.randomUUID();
+      retryPrompt = (state
+        ? outputCheckVerdict({ verdict, state, config, skillDir, skill: skillId })
+        : railsNotEngagedVerdict({ skill: skillId, config })) + prompt;
+      const why = !state ? 'состояния сессии нет'
+        : states.length > 1 ? `сессий рельс у запуска: ${states.length}`
+          : 'хост агента сессию не продолжает';
+      sessionNote = `новая — ${why}`;
     }
 
     if (this.logger) {
-      this.logger.warn(`rails: output-check нарушен, повтор с вердиктом — отсутствует: ${verdict.missing.join('; ')}`, stageId);
+      this.logger.warn(`rails: output-check нарушен, повтор с вердиктом — отсутствует: ${verdict.missing.join('; ')}; сессия ${sessionNote}`, stageId);
     }
 
     const retryEnv = {
       WORKFLOW_RAILS_ROLE: 'coordinator',
-      WORKFLOW_RAILS_RUN: crypto.randomUUID(),
+      WORKFLOW_RAILS_RUN: retryRun,
       WORKFLOW_RAILS_SKILL: skillId
     };
-    const retryResult = await this._callAgentTracked(agent, verdictText + prompt, stageId, skillId, agentId, retryEnv, { bannedCheck });
+    const retryResult = await this._callAgentTracked(retryAgent, retryPrompt, stageId, skillId, agentId, retryEnv, { bannedCheck });
     retryResult.railsRetried = true;
     retryResult.railsVerdict = verdict;
-    if (!state && !findRailsStateByRun(this.projectRoot, retryEnv.WORKFLOW_RAILS_RUN) && this.logger) {
-      this.logger.warn('rails: повтор тоже без единого вызова инструмента под рельсами — ответ принят без процедуры скила', stageId);
+    retryResult.railsRetrySession = resumeArgs ? 'same' : 'new';
+
+    // Ответ повтора — через тот же output-check. Третьего запуска нет: нарушение — в лог,
+    // ответ — стадии (почему так — в JSDoc выше).
+    // Та же сессия — её собственное состояние: за повтор у запуска могла появиться сессия субагента.
+    const retryState = resumeArgs
+      ? railsStatesByRun(this.projectRoot, retryRun).find((s) => s.session === state.session) ?? null
+      : findRailsStateByRun(this.projectRoot, retryRun);
+    const retryVerdict = retryState
+      ? checkRailsOutput(retryResult.output || '', config, retryState)
+      : { ok: false, missing: ['ни одного вызова инструмента под рельсами'] };
+    retryResult.railsRetryVerdict = retryVerdict;
+    if (!retryVerdict.ok && this.logger) {
+      const what = retryState
+        ? `повтор тоже нарушил output-check — отсутствует: ${retryVerdict.missing.join('; ')}`
+        : 'повтор без единого вызова инструмента под рельсами';
+      this.logger.warn(`rails: ${what} — ответ принят без процедуры скила, дальше — по переходам стадии`, stageId);
     }
     return retryResult;
   }
@@ -2572,7 +2625,7 @@ class StageExecutor {
           report(run.models);
           // Запрещённая модель ответила после последнего опроса — агент уже вышел,
           // снимать нечего, но результат не засчитывается как обычный запуск: вызов
-          // отклоняется с MODEL_BANNED, и стадия запускает агента заново.
+          // отклоняется с MODEL_BANNED, и стадия берёт следующего агента.
           if (bannedCheck && !banned) {
             const hit = bannedCheck(run.models);
             if (hit) {

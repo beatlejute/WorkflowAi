@@ -15,12 +15,14 @@ import path from 'node:path';
 
 import {
   findRailsStateByRun,
+  railsStatesByRun,
   railsEngagement,
   railsNotEngagedMessage,
   railsCounters,
   describeRailsEngagement,
   railsHost,
   railsHooksPresent,
+  resumeSessionArgs,
   railsNotEngagedVerdict,
   outputCheckVerdict
 } from '../lib/rails-run-state.mjs';
@@ -61,6 +63,63 @@ describe('findRailsStateByRun', () => {
     assert.equal(findRailsStateByRun(sandbox, null), null);
     assert.equal(findRailsStateByRun(path.join(sandbox, 'nope'), 'r1'), null);
   }));
+});
+
+describe('railsStatesByRun', () => {
+  test('все сессии запуска — у kilo их бывает две с общим run; чужие, скрытые и битые файлы пропущены', withRoots(({ sandbox }) => {
+    writeState(sandbox, 'ses_a.json', { session: 'ses_a', run: 'r1', node: 'P3S1' });
+    writeState(sandbox, 'ses_b.json', { session: 'ses_b', run: 'r1', node: 'P0E1' });
+    writeState(sandbox, 'ses_c.json', { session: 'ses_c', run: 'r2', node: 'P0E1' });
+    writeState(sandbox, '.hidden.json', { run: 'r1', node: 'X' });
+    fs.writeFileSync(path.join(sandbox, '.workflow', 'state', 'rails', 'broken.json'), '{', 'utf8');
+    assert.deepEqual(railsStatesByRun(sandbox, 'r1').map((s) => s.session).sort(), ['ses_a', 'ses_b']);
+    assert.equal(railsStatesByRun(sandbox, 'r2').length, 1);
+    assert.equal(findRailsStateByRun(sandbox, 'r1').session, railsStatesByRun(sandbox, 'r1')[0].session,
+      'findRailsStateByRun — первое из railsStatesByRun');
+  }));
+
+  test('нет run, нет каталога состояния — пусто', withRoots(({ sandbox }) => {
+    assert.deepEqual(railsStatesByRun(sandbox, null), []);
+    assert.deepEqual(railsStatesByRun(path.join(sandbox, 'nope'), 'r1'), []);
+  }));
+});
+
+describe('resumeSessionArgs', () => {
+  const claudeArgs = ['--model', 'model-a', '--permission-mode', 'bypassPermissions', '-p'];
+  const kiloArgs = ['-m', 'prov/model-a', '--agent', 'code', 'run', '--auto'];
+  const sid = '76604780-c933-4a87-bc17-4a0d15e761d0';
+
+  test('claude по имени команды — --resume <id> перед аргументами записи', () => {
+    for (const command of ['claude', 'C:\\nvm4w\\nodejs\\claude.cmd', '/usr/local/bin/claude']) {
+      assert.deepEqual(resumeSessionArgs({ command, args: claudeArgs }, sid), ['--resume', sid, ...claudeArgs], command);
+    }
+  });
+
+  test('kilo run — --session <id> сразу после run', () => {
+    assert.deepEqual(resumeSessionArgs({ command: 'kilo', args: kiloArgs }, 'ses_f1cf8694affewRMWhGo3lVD1U0'),
+      ['-m', 'prov/model-a', '--agent', 'code', 'run', '--session', 'ses_f1cf8694affewRMWhGo3lVD1U0', '--auto']);
+  });
+
+  test('флаги сессии уже в записи агента — null', () => {
+    for (const flag of ['--resume', '-r', '--continue', '-c', '--session-id', '--fork-session', '--no-session-persistence', '--resume=x']) {
+      assert.equal(resumeSessionArgs({ command: 'claude', args: [flag, ...claudeArgs] }, sid), null, flag);
+    }
+    for (const flag of ['--continue', '-c', '--session', '-s', '--fork']) {
+      assert.equal(resumeSessionArgs({ command: 'kilo', args: [...kiloArgs, flag] }, 'ses_1'), null, flag);
+    }
+  });
+
+  test('хост не по команде (обёртка с rails_host, прочие команды, kilo без run) — null', () => {
+    assert.equal(resumeSessionArgs({ command: 'node', args: ['wrapper.mjs'], rails_host: 'claude' }, sid), null);
+    assert.equal(resumeSessionArgs({ command: 'node', args: ['stub.mjs'] }, sid), null);
+    assert.equal(resumeSessionArgs({ command: 'kilo', args: ['db', 'path'] }, 'ses_1'), null);
+  });
+
+  test('id сессии не годится для командной строки — null', () => {
+    for (const bad of [null, undefined, '', 'a b', 'x&calc', '../x', 'a"b', '-flag', 'a'.repeat(129)]) {
+      assert.equal(resumeSessionArgs({ command: 'claude', args: claudeArgs }, bad), null, String(bad));
+    }
+  });
 });
 
 describe('railsEngagement', () => {
@@ -172,10 +231,11 @@ describe('вердикты повтора', () => {
     assert.ok(v.startsWith('RAILS: предыдущий ответ отклонён — скил «deep-research» идёт по рельсам'), v);
     assert.match(v, /`node \.workflow\/src\/rails\/cli\.mjs start deep-research`/);
     assert.match(v, /Финальный ответ — только в P9S1\.\n\n$/);
+    assert.match(v, /Команды рельс выполняй инструментом shell/, 'команда текстом ответа перехода не делает');
     assert.match(railsNotEngagedVerdict({ skill: 'x', config: {} }), /только в терминальном узле графа/);
   });
 
-  test('output-check — что отсутствует, где числится и команды переходов оттуда', withRoots(({ sandbox }) => {
+  function writeGraph(sandbox) {
     const skillDir = path.join(sandbox, 'skill');
     fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(path.join(skillDir, 'SKILL.md'), [
@@ -187,14 +247,39 @@ describe('вердикты повтора', () => {
       '```',
       ''
     ].join('\n'), 'utf8');
-    const config = { skill: 'skill', entry: 'P1E1', terminal: ['P1S1'], quote_min: 25 };
-    const v = outputCheckVerdict({ verdict: { ok: false, missing: ['position:P1E1 не входит в terminal/pause_nodes'] }, state: { node: 'P1E1' }, config, skillDir });
+    return skillDir;
+  }
+  const config = { skill: 'skill', entry: 'P1E1', terminal: ['P1S1'], quote_min: 25 };
+  const missing = { ok: false, missing: ['position:P1E1 не входит в terminal/pause_nodes'] };
+
+  test('output-check, та же сессия — что отсутствует, где числится и команды переходов оттуда', withRoots(({ sandbox }) => {
+    const skillDir = writeGraph(sandbox);
+    const v = outputCheckVerdict({ verdict: missing, state: { node: 'P1E1' }, config, skillDir, sameSession: true });
     assert.match(v, /^RAILS: предыдущий ответ отклонён output-check — отсутствует: position:P1E1/);
-    assert.match(v, /Числишься в P1E1\. Переходы оттуда:\n {2}P1S1: .* → node \.workflow\/src\/rails\/cli\.mjs goto P1S1 --quote '/);
+    assert.match(v, /Сессия та же\. Числишься в P1E1\. Переходы оттуда:\n {2}P1S1: .* → node \.workflow\/src\/rails\/cli\.mjs goto P1S1 --quote '/);
+    assert.match(v, /Команды рельс выполняй инструментом shell/);
+    assert.match(v, /Финальный ответ — только в P1S1\. Исправь и ответь заново\.\n\n$/);
+    assert.doesNotMatch(v, /start skill/, 'та же сессия — без нового старта графа');
+
+    const noGraph = outputCheckVerdict({ verdict: { ok: false, missing: ['x'] }, state: { node: 'P1E1' }, config, skillDir: path.join(sandbox, 'nope'), sameSession: true });
+    assert.match(noGraph, /Числишься в P1E1\. Команды рельс/, 'граф не читается — без переходов');
+  }));
+
+  test('output-check, новая сессия (по умолчанию) — не «числишься», а старт графа заново и сделанное в файлах', withRoots(({ sandbox }) => {
+    const skillDir = writeGraph(sandbox);
+    const v = outputCheckVerdict({ verdict: missing, state: { node: 'P1E1', skill: 'from-state' }, config, skillDir, skill: 'demo-skill' });
+    assert.match(v, /^RAILS: предыдущий ответ отклонён output-check — отсутствует: position:P1E1/);
+    assert.doesNotMatch(v, /Числишься/, 'узел прошлой сессии — не узел новой');
+    assert.doesNotMatch(v, /goto P1S1/, 'переходы прошлой сессии новой не предлагаются');
+    assert.match(v, /Прошлая сессия остановилась в P1E1, но это новая сессия: её рельсы начинаются с первого узла графа/);
+    assert.match(v, /`node \.workflow\/src\/rails\/cli\.mjs start demo-skill`/);
+    assert.match(v, /Сделанное прошлой сессией осталось только в файлах проекта \(в том числе в тикете, если он есть\)/);
     assert.match(v, /Финальный ответ — только в P1S1\. Исправь и ответь заново\.\n\n$/);
 
-    const noGraph = outputCheckVerdict({ verdict: { ok: false, missing: ['x'] }, state: { node: 'P1E1' }, config, skillDir: path.join(sandbox, 'nope') });
-    assert.match(noGraph, /Числишься в P1E1\. Финальный ответ/, 'граф не читается — без переходов');
+    // Без skill — из config, затем из состояния; без узла — без фразы о прошлом узле.
+    assert.match(outputCheckVerdict({ verdict: missing, state: { node: 'P1E1' }, config, skillDir }), /start skill`/);
+    assert.match(outputCheckVerdict({ verdict: missing, state: { skill: 'from-state' }, config: { terminal: ['P1S1'] }, skillDir }),
+      /\. Это новая сессия: .*start from-state`/);
   }));
 });
 

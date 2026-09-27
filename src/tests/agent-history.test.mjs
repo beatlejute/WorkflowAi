@@ -207,5 +207,27 @@ test('классификатор: каждый исход распознаётс
 
 test('классификатор: таймаут важнее сигнала, блокировка важнее лимита в stderr', () => {
   assert.equal(classifyAgentResult({ ...base, timedOut: true, signal: 'SIGTERM' }), 'timeout');
-  assert.equal(classifyAgentResult({ ...base, parsedResult: { status: 'blocked' }, stderr: '429' }), 'blocked');
+  assert.equal(classifyAgentResult({ ...base, parsedResult: { status: 'blocked' }, stderr: 'HTTP 429 Too Many Requests' }), 'blocked');
+});
+
+// rate_limit — только если запуск закончился на ограничении (три последние строки
+// stderr): статус даёт градацию `throttled` без запрета модели (src/lib/agent-runs.mjs).
+// kilo пишет в stderr вывод инструментов и каждый 429, после которого сам повторил
+// запрос; такой запуск, упавший на другом, — сбой, а не ограничение.
+test('классификатор: rate_limit — по концу stderr, 429 из середины не в счёт', () => {
+  const retried = 'level=ERROR message="stream error" error.error="AI_APICallError: [Poolside] Rate limit exceeded"';
+  const work = ['→ Read src/a.ts', '→ Read src/b.ts', '$ npm test', '33/33 tests pass'].join('\n');
+  const cases = [
+    [`${work}\n${retried}\n${retried}\nError: [Poolside] Rate limit exceeded\n\n`, 'rate_limit'],
+    [`${work}\nError: quota\n* Quota exceeded for metric: x\nPlease retry in 18s.`, 'rate_limit'],
+    [`${retried}\n${work}\nError: TypeError: x is undefined`, 'error'],
+    [`${retried}\n${work}\nconnect ECONNREFUSED 127.0.0.1:443`, 'network_error'],
+    [`${retried}\n${work}\nHTTP 401 Unauthorized`, 'auth_error'],
+    ['Error: boom\n    at run (src/index.ts:429:17)', 'error'],
+    ['-rw-r--r-- 1 user 197121  429 Sep 27 IMPL-101.md', 'error'],
+    [`| 2026-09-22 09:03:01 | execute-task | agent-a | rate_limit |\n${work}`, 'error'],
+  ];
+  for (const [stderr, expected] of cases) {
+    assert.equal(classifyAgentResult({ ...base, exitCode: 1, stderr }), expected, JSON.stringify(stderr));
+  }
 });

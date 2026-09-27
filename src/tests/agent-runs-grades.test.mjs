@@ -7,8 +7,11 @@
  * без файлов: журнал, файл открытого запуска и раннер здесь не участвуют.
  *
  * Что охраняется:
- *  - все восемь градаций (crashed, refused, stopped, empty, artifacts_failed,
- *    review_failed, accepted, pending) и поле artifacts_passed в каждой;
+ *  - все девять градаций (crashed, refused, stopped, throttled, empty,
+ *    artifacts_failed, review_failed, accepted, pending) и поле artifacts_passed
+ *    в каждой;
+ *  - rate_limit (ограничение провайдера) — throttled при любых изменениях и любом
+ *    контроле, не сбой: флаг crash не взведён, artifacts_passed — null;
  *  - «ближайшее» окно контроля и ревью при нескольких запусках по одному
  *    тикету — fallback другого агента внутри той же попытки и повторная
  *    попытка тикета после провала получают каждый свою градацию и своё окно;
@@ -91,7 +94,7 @@ function reviewEvent(overrides = {}) {
   };
 }
 
-describe('gradeRuns: все восемь градаций и artifacts_passed', () => {
+describe('gradeRuns: все девять градаций и artifacts_passed', () => {
   test('crashed: сбой процесса, ни одного изменённого файла', () => {
     const [run] = gradeRuns([runEvent({ status: 'error', changed_files: 0 })]);
     assert.equal(run.grade, 'crashed');
@@ -110,6 +113,14 @@ describe('gradeRuns: все восемь градаций и artifacts_passed', 
     const [run] = gradeRuns([runEvent({ status: 'model_banned', changed_files: 3 })]);
     assert.equal(run.grade, 'stopped');
     assert.equal(run.artifacts_passed, null);
+  });
+
+  test('throttled: агент упал на ограничении провайдера (rate_limit), файлов не изменено', () => {
+    const [run] = gradeRuns([runEvent({ status: 'rate_limit', exit_code: 1, changed_files: 0 })]);
+    assert.equal(run.grade, 'throttled');
+    assert.equal(run.artifacts_passed, null);
+    assert.equal(run.crashed_after_work, false);
+    assert.equal(run.crash, false);
   });
 
   test('empty: не сбой, не blocked, не остановка, файлов не изменено', () => {
@@ -185,6 +196,22 @@ describe('gradeRuns: частные случаи и стыки правил', ()
     assert.equal(run.crashed_after_work, true);
     assert.equal(run.crash, true);
     assert.equal(run.artifacts_passed, true);
+  });
+
+  test('throttled при любых изменениях и любом контроле: не crashed_after_work, контроль о модели не говорит', () => {
+    // Случай 2026-09-27 PulseProxy: роутер 15 минут работал на модели, провайдер
+    // отвечал «Rate limit exceeded», запуск упал с одним изменённым файлом; в старом
+    // журнале у такого события есть crash_ttl_ms — градация его не читает.
+    for (const verify of [null, { status: 'failed', fail_reasons: ['missing_files'] }, { status: 'all_green' }]) {
+      const events = [runEvent({ status: 'rate_limit', exit_code: 1, changed_files: 1, crash_ttl_ms: 3600000 })];
+      if (verify) events.push(verifyEvent(verify));
+      const [run] = gradeRuns(events);
+      const label = JSON.stringify(verify);
+      assert.equal(run.grade, 'throttled', label);
+      assert.equal(run.crashed_after_work, false, label);
+      assert.equal(run.crash, false, label);
+      assert.equal(run.artifacts_passed, null, label);
+    }
   });
 
   test('stopped при любых изменениях: model_banned с изменёнными файлами — не accepted и не empty', () => {

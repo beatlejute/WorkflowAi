@@ -18,16 +18,19 @@
  *
  * Градация — только у запуска исполнителя (стадия со скилом `execute-task`), первая
  * ступень, на которой остановилась его работа: `crashed`, `refused`, `stopped`,
- * `empty`, `artifacts_failed`, `review_failed`, `accepted`, `pending` (gradeRuns).
- * Неудача модели — `empty` и `artifacts_failed`; успех — пройденный контроль
- * артефактов (`artifacts_passed: true`), даже если потом не пройдено ревью.
+ * `throttled`, `empty`, `artifacts_failed`, `review_failed`, `accepted`, `pending`
+ * (gradeRuns). Неудача модели — `empty` и `artifacts_failed`; успех — пройденный
+ * контроль артефактов (`artifacts_passed: true`), даже если потом не пройдено ревью.
+ * `stopped` и `throttled` (агент упал на ограничении провайдера, статус `rate_limit`)
+ * модели не засчитываются: ни неудачи, ни успеха, ни временного запрета.
  *
  * Запреты:
  *   - постоянный, модель + тип тикета, с последнего снятия (`unban` с этим типом):
  *     правило 1 — неудач ≥ 3 и ни одного успеха; правило 2 — не меньше 10 оценённых
  *     запусков и среди последних 10 успехов < 3 (permanentBans);
- *   - временный, модель целиком: последний запуск модели, кроме `stopped`, после
- *     последнего снятия (`unban` без типа) — сбой, и его TTL ещё не истёк (crashBans).
+ *   - временный, модель целиком: последний запуск модели, кроме `stopped` и
+ *     `throttled`, после последнего снятия (`unban` без типа) — сбой, и его TTL ещё
+ *     не истёк (crashBans).
  * Запуски с `model: null` (модель kilo не прочитана) ни в одно правило не идут.
  *
  * Запись открытого запуска `.workflow/state/agent-run-open.json` — файл состояния
@@ -59,19 +62,35 @@ export const RULE2_MIN_SUCCESS = 3;
 export const CRASH_TTL_DEFAULT_MS = 60 * 60 * 1000;
 // Наибольшее время, которое представимо в Date (ECMAScript: ±8.64e15 мс).
 const MAX_DATE_MS = 8.64e15;
-export const ROUTER_RESTARTS = 2;
 
 /**
  * Статусы запуска, которые считаются сбоем процесса. `aborted` — только без признака
  * остановки пайплайна (`stop_requested`, `interrupted`): агент снят сигналом мимо
  * остановки (решение 2026-09-27, вопрос 7: «Да, временный запрет»).
  */
-const CRASH_STATUSES = new Set(['error', 'timeout', 'rate_limit', 'network_error', 'auth_error', 'aborted']);
+const CRASH_STATUSES = new Set(['error', 'timeout', 'network_error', 'auth_error', 'aborted']);
+
+/**
+ * Статус запуска, упавшего на ограничении провайдера (HTTP 429, rate limit, quota
+ * exceeded в конце stderr — класс classifyAgentResult, PROVIDER_RATE_LIMIT_PATTERN;
+ * 429 из середины, после которых агент продолжил работу, не в счёт). Это не дефект
+ * модели: градация `throttled`, без временного запрета и вне правил 1 и 2. Случай
+ * 2026-09-27, PulseProxy: kilo-роутер
+ * 15 минут работал на модели, провайдер которой отвечал «Rate limit exceeded»; запуск
+ * записан сбоем, и часовой временный запрет модели снимал второй роутер всякий раз,
+ * когда тот выбирал ту же модель. Агента на это время выводит из выбора health-реестр:
+ * CLI-агента — общее правило `provider-rate-limit` (configs/agent-health-rules.yaml),
+ * агента `kind: http` и шага model_io — ошибка клиента модели `rate_limit` (src/runner.mjs).
+ */
+const THROTTLED_STATUS = 'rate_limit';
 
 export const GRADES = Object.freeze([
-  'crashed', 'refused', 'stopped', 'empty', 'artifacts_failed', 'review_failed', 'accepted', 'pending',
+  'crashed', 'refused', 'stopped', 'throttled', 'empty', 'artifacts_failed', 'review_failed', 'accepted', 'pending',
 ]);
 
+// Градации, которые модели не засчитываются: ни в правила 1 и 2, ни во временный запрет
+// (и не закрывают его — последним запуском модели не считаются).
+const UNCOUNTED_GRADES = new Set(['stopped', 'throttled']);
 const FAILURE_GRADES = new Set(['empty', 'artifacts_failed']);
 const ARTIFACTS_PASSED = new Set(['all_green', 'passed', 'legacy']);
 const REVIEW_VERDICTS = new Set(['passed', 'failed']);
@@ -219,7 +238,10 @@ function isStopped(run) {
     || (run.status === 'aborted' && (run.stop_requested === true || run.interrupted === true));
 }
 
-/** Статус запуска — сбой процесса (см. CRASH_STATUSES). */
+/**
+ * Статус запуска — сбой процесса (см. CRASH_STATUSES). Ограничение провайдера
+ * (`rate_limit`, THROTTLED_STATUS) — не сбой: `crash_ttl_ms` раннер ему не пишет.
+ */
 export function isCrashStatus(run) {
   return CRASH_STATUSES.has(run.status) && !isStopped(run);
 }
@@ -234,6 +256,9 @@ function verifyHasVerdict(event) {
 function gradeOf(run, verify, review) {
   if (isStopped(run)) return { grade: 'stopped', crashed_after_work: false, artifacts_passed: null };
   if (run.status === 'blocked') return { grade: 'refused', crashed_after_work: false, artifacts_passed: null };
+  // При любых изменениях, как `stopped`: работу оборвал провайдер, и контроль после
+  // такого запуска о модели ничего не говорит.
+  if (run.status === THROTTLED_STATUS) return { grade: 'throttled', crashed_after_work: false, artifacts_passed: null };
   const crash = isCrashStatus(run);
   if (crash && run.changed_files === 0) return { grade: 'crashed', crashed_after_work: false, artifacts_passed: null };
   const crashed_after_work = crash;
@@ -318,13 +343,14 @@ function lastUnbanIndex(events, match) {
 /**
  * Постоянные запреты пар «модель + тип тикета» по правилам 1 и 2. Счёт — с последнего
  * `unban` этой пары. Правило 2 — только при не меньше 10 оценённых запусках пары с
- * последнего снятия (решение 2026-09-26, вопрос 1: «С десяти запусков»).
+ * последнего снятия (решение 2026-09-26, вопрос 1: «С десяти запусков»). Запуски
+ * `stopped` и `throttled` не оцениваются.
  * @returns {Array<{model, ticket_type, rule: 1|2, failures, successes, evidence}>}
  */
 export function permanentBans(events) {
   const pairs = new Map();
   for (const { run, index } of gradeIndexed(events)) {
-    if (!run.model || run.grade === 'stopped') continue;
+    if (!run.model || UNCOUNTED_GRADES.has(run.grade)) continue;
     const failure = FAILURE_GRADES.has(run.grade);
     const success = run.artifacts_passed === true;
     if (!failure && !success) continue;
@@ -360,16 +386,18 @@ export function permanentBans(events) {
 
 /**
  * Временные запреты моделей за сбои. Модель под запретом, если её последний запуск
- * исполнителя без градации `stopped` после последнего `unban` этой модели без типа
- * тикета — сбой (`crashed` или `crashed_after_work`) и `ts + crash_ttl_ms` позже `now`.
- * Тип тикета не учитывается. `stopped` пропускается: остановка `model_banned` — тоже
- * запуск этой модели, и без пропуска первая же остановка снимала бы запрет.
+ * исполнителя без градаций `stopped` и `throttled` после последнего `unban` этой модели
+ * без типа тикета — сбой (`crashed` или `crashed_after_work`) и `ts + crash_ttl_ms`
+ * позже `now`. Тип тикета не учитывается. `stopped` пропускается: остановка
+ * `model_banned` — тоже запуск этой модели, и без пропуска первая же остановка снимала
+ * бы запрет. `throttled` пропускается по той же причине: ограничение провайдера о
+ * модели ничего не говорит — ни запрета не даёт, ни прежний не снимает.
  * @returns {Array<{model, until: string, crash_ttl_ms: number, evidence}>}
  */
 export function crashBans(events, now = Date.now()) {
   const lastByModel = new Map();
   for (const { run, index } of gradeIndexed(events)) {
-    if (!run.model || run.grade === 'stopped') continue;
+    if (!run.model || UNCOUNTED_GRADES.has(run.grade)) continue;
     lastByModel.set(run.model, { run, index });
   }
   const bans = [];
