@@ -1,9 +1,10 @@
 id: TC-EXECUTE-TASK-011
-title: "Скил не содержит внутренних противоречий: единый вход тикета, формат stdout, GATE-1, модель невыполнимого DoD, канон Result/DoD, единый источник соразмерности проверки"
+title: "Скил не содержит внутренних противоречий: единый вход тикета, формат stdout, GATE-1, модель невыполнимого DoD, канон Result/DoD, единый источник соразмерности проверки, правка файлов только с этапа выполнения"
 origin:
   chg: ["ad-hoc-2026-09-21-audit"]
   incidents:
     - "Аудит consistency 2026-09-21: SKILL.md/execute.md предписывали брать тикет из мёртвой ветки review/ (execute-task никогда туда не пишет — pipeline.yaml: execute-task всегда move-to-review; retry идёт review→ready→in-progress); SKILL.md секция «Формат вывода» противоречила строгому формату stdout шага 8; GATE-1 требовал ровно 2 вызова Edit (невыполнимо при continuation, где чекбоксы уже все [x]); execute.md GATE-2 допускал `[ ]` с пометкой при одновременном запрете `[ ]`; Result-секция называлась то `## Result`, то `## Результат выполнения`, DoD — то `## Definition of Done`, то `## Критерии готовности`, при каноне `templates/ticket-template.md`/`tickets.mjs`/`verify-artifacts.js` = `## Результат выполнения` + `## Критерии готовности (Definition of Done)`; правило «Соразмерность проверки критерию» дублировалось тремя разными формулировками в SKILL.md/execute.md/algorithms/execution-strategy.md; algorithms/execution-strategy.md ссылался на несуществующий «шаг 5»."
+    - "Инцидент 2026-09-27 (тикеты тестирования, claude-haiku): algorithms/execution-strategy.md, загружаемый на этапе 0, предписывал «Сразу выполнять: Read → Edit → Verify», а rails.yaml разрешает запись результата только на этапах 3 и 5 — агент писал и прогонял тесты на этапе 0, запись Result отклонялась уже после работы, попытка тикета пропадала."
   principle: "Consistency (coach/SKILL.md, принцип 12): одна версия правила/термина, обновить все места."
   backlog_sources: []
 tags: [consistency, regression-guard]
@@ -123,3 +124,17 @@ assertions:
       file: "algorithms/execution-strategy.md"
       pattern: "^(?![\\s\\S]*\\(шаг [0-9]\\))"
       reason: "algorithms/execution-strategy.md нигде не ссылается на висячий номер шага в скобках вида «(шаг N)» — только на имена пунктов раздела 3 «Выполнение»."
+
+    # Инцидент 2026-09-27: правка файлов — только с этапа выполнения, во всех местах скила
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: "^(?![\\s\\S]*[Сс]разу выполнять)"
+      reason: "Алгоритм читается на этапе 0: подход «сразу выполнять» толкает к правке файлов до этапа 3, где рельсы разрешают запись результата, — работа пропадает."
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: "[Пп]равка файлов[^\\n]{0,60}только с этапа 3"
+      reason: "Алгоритм прямо говорит, что правка файлов по выбранному подходу начинается на этапе 3 графа."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0E1\\[\"[^\"]*правка любых файлов открывается на этапе 3"
+      reason: "Вход графа задаёт порядок до первого действия: этапы 0–2 — чтение и план, правка файлов — с этапа 3 (согласовано с гардом edit_project в rails.yaml)."
