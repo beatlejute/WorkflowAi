@@ -1,3 +1,11 @@
+## [1.14.4] — 2026-09-27
+
+### Fixed
+- **Тип тикета из `createTicket` расходился с конфигом и раннером.** `createTicket` (`src/lib/operations/tickets.mjs`) писал тип как пришёл и строил из него же префикс ID: тип `COACH` (так его передавал MCP `create_coach_ticket`) не совпадал с ключом `agents_by_type.coach` — тикет коуча исполнялся общим списком агентов, а не ролью coach; тип `coach` или `qa` давал ID `coach-001`, `qa-001`. Теперь тип во frontmatter — строчными, префикс ID — прописными, в любом регистре входа: `qa` и `QA` дают `type: qa` и `QA-NNN`, признак `executor_type: human` — и для `HUMAN`.
+
+### Tests
+- `operations-tickets.test.mjs` TC20–TC23: тип строчными и префикс прописными для обоих регистров, общая нумерация, `HUMAN` с `executor_type`, тип по умолчанию `impl` → `IMPL-001`. На прежнем коде TC20–TC22 красные.
+
 ## [1.14.3] — 2026-09-27
 
 ### Fixed
