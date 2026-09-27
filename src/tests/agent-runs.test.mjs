@@ -94,6 +94,22 @@ test('readRunEvents: испорченная и посторонняя строк
   assert.deepEqual(readRunEvents(root), [good1, good2]);
 });
 
+test('appendRunEvent после оборванной последней строки пишет событие с новой строки — оно читается', () => {
+  const file = runsLogPath(root);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const good = { type: 'run', ticket: 'IMPL-1', ts: '2026-01-01T00:00:00.000Z' };
+  // Писатель снят посреди записи: хвост без перевода строки.
+  fs.writeFileSync(file, `${JSON.stringify(good)}\n{"type":"run","ts":"2026`, 'utf8');
+
+  const written = appendRunEvent(root, { type: 'unban', ts: '2026-01-02T00:00:00.000Z', model: 'model-a', reason: 'снято' });
+  assert.equal(written.ok, true);
+  assert.deepEqual(readRunEvents(root), [good, written.event]);
+
+  // Файл, который кончается переводом строки, лишней пустой строки не получает.
+  appendRunEvent(root, { type: 'run', ts: '2026-01-03T00:00:00.000Z', ticket: 'IMPL-2' });
+  assert.equal(fs.readFileSync(file, 'utf8').includes('\n\n'), false);
+});
+
 test('одновременная запись из двух процессов не перемешивает и не теряет строки', async () => {
   const libHref = new URL('../lib/agent-runs.mjs', import.meta.url).href;
   const COUNT = 300;

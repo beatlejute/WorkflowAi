@@ -84,6 +84,23 @@ export function runsLogPath(projectRoot) {
   return path.join(projectRoot, ...RUNS_LOG.split('/'));
 }
 
+// Файл есть, не пуст и последний байт — не перевод строки.
+function endsWithoutNewline(file) {
+  let fd;
+  try {
+    const { size } = fs.statSync(file);
+    if (size === 0) return false;
+    fd = fs.openSync(file, 'r');
+    const last = Buffer.alloc(1);
+    fs.readSync(fd, last, 0, 1, size - 1);
+    return last[0] !== 0x0a;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 /**
  * Дописывает событие одной строкой. `ts` (ISO UTC) ставится, если его нет. Ошибка
  * записи не бросается — возвращается: запись журнала не должна менять ход стадии.
@@ -95,10 +112,15 @@ export function appendRunEvent(projectRoot, event) {
   try {
     const file = runsLogPath(projectRoot);
     fs.mkdirSync(path.dirname(file), { recursive: true });
+    // Последняя строка оборвана (писатель снят посреди записи, ручная правка без
+    // перевода строки) — событие начинается с новой строки: склеенное с обрывком, оно
+    // не разобралось бы, и читатель пропустил бы его вместе с обрывком (снятие запрета
+    // из MCP отвечало бы «снято», а запрет оставался).
+    const lead = endsWithoutNewline(file) ? '\n' : '';
     // Одна запись одним вызовом: строка события не делится между двумя писателями
     // (раннер и снятие запрета из MCP) — проверено одновременной записью из двух
     // процессов (src/tests/agent-runs.test.mjs).
-    fs.appendFileSync(file, `${JSON.stringify(full)}\n`, 'utf8');
+    fs.appendFileSync(file, `${lead}${JSON.stringify(full)}\n`, 'utf8');
     return { ok: true, event: full };
   } catch (err) {
     return { ok: false, error: err.message };
