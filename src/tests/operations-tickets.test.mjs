@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { pickNext, moveTicket, getNextId, createTicket } from '../lib/operations/tickets.mjs';
+import { parseFrontmatter } from '../lib/utils.mjs';
 
 describe('operations/tickets.mjs', () => {
   let projectRoot;
@@ -425,6 +426,47 @@ blocked_reason: "Waiting for dependency"
 
       const content = readFileSync(result.path, 'utf8');
       assert.match(content, /parent_plan: PLAN-007/, 'plan_id must land in parent_plan');
+    });
+
+    // Тип во frontmatter — строчными, как ключи `agents_by_type` раннера и
+    // `task_types` конфига; префикс ID — прописными. До 2026-09-27 тип писался
+    // как пришёл: `COACH` уводил тикет коуча мимо роли coach, `coach` давал
+    // ID `coach-001`.
+    test('TC20: lowercase type → frontmatter type lowercase, ID prefix uppercase', async () => {
+      const result = await createTicket(projectRoot, { type: 'coach', title: 'Coach gap' });
+
+      assert.equal(result.id, 'COACH-001');
+      const { frontmatter } = parseFrontmatter(readFileSync(result.path, 'utf8'));
+      assert.equal(frontmatter.id, 'COACH-001');
+      assert.equal(frontmatter.type, 'coach');
+    });
+
+    test('TC21: uppercase type → the same: type lowercase, ID prefix uppercase, numbering shared', async () => {
+      const first = await createTicket(projectRoot, { type: 'QA', title: 'Upper' });
+      const second = await createTicket(projectRoot, { type: 'qa', title: 'Lower' });
+
+      assert.equal(first.id, 'QA-001');
+      assert.equal(second.id, 'QA-002', 'Both spellings continue one QA sequence');
+      assert.equal(parseFrontmatter(readFileSync(first.path, 'utf8')).frontmatter.type, 'qa');
+      assert.equal(parseFrontmatter(readFileSync(second.path, 'utf8')).frontmatter.type, 'qa');
+    });
+
+    test('TC22: type HUMAN in uppercase still gets executor_type human', async () => {
+      const result = await createTicket(projectRoot, { type: 'HUMAN', title: 'Manual' });
+
+      assert.equal(result.id, 'HUMAN-001');
+      const { frontmatter } = parseFrontmatter(readFileSync(result.path, 'utf8'));
+      assert.equal(frontmatter.type, 'human');
+      assert.equal(frontmatter.executor_type, 'human');
+    });
+
+    test('TC23: no type → default impl, ID IMPL-001, no executor_type', async () => {
+      const result = await createTicket(projectRoot, { title: 'No type' });
+
+      assert.equal(result.id, 'IMPL-001', 'Default type used to give impl-001');
+      const { frontmatter } = parseFrontmatter(readFileSync(result.path, 'utf8'));
+      assert.equal(frontmatter.type, 'impl');
+      assert.equal(frontmatter.executor_type, undefined);
     });
 
     test('TC19: explicit parent_plan wins over plan_id', async () => {

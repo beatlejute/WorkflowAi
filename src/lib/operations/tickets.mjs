@@ -349,6 +349,8 @@ function checkDependencies(projectRoot, dependencies) {
  * Создаёт новый тикет в tickets/backlog/ с автоинкрементированным ID
  * @param {string} projectRoot - Корень проекта
  * @param {object} data - Данные для frontmatter (title, type, priority, tags, context, etc.)
+ * @param {string} [data.type] - Тип в любом регистре: во frontmatter — строчными,
+ *   префикс ID — прописными (`qa` и `QA` дают `type: qa` и `QA-NNN`)
  * @param {string} [data.body] - Тело тикета; без него берётся пустой шаблон
  * @param {string} [data.plan_id] - План-родитель; синоним `parent_plan`
  * @returns {Promise<{id: string, path: string}>} Созданный ID и абсолютный путь
@@ -358,16 +360,20 @@ export async function createTicket(projectRoot, data) {
   const ticketsDir = join(root, '.workflow', 'tickets');
   const backlogDir = join(ticketsDir, 'backlog');
 
-  // 1. Получить следующий ID
-  const type = data.type ?? 'impl';
-  const id = await getNextId(root, type);
+  // 1. Получить следующий ID. Тип и префикс ID — одно слово в разном регистре:
+  // `task_types` конфига называет тип строчными (`coach`, `qa`), префикс —
+  // прописными (`COACH`, `QA`). Раннер выбирает агентов и роль по
+  // `agents_by_type[type]` с ключами строчными: тип `COACH` во frontmatter уводил
+  // тикет мимо своей роли, а тип `coach` без нормализации давал ID `coach-001`.
+  const type = String(data.type ?? 'impl').toLowerCase();
+  const id = await getNextId(root, type.toUpperCase());
 
   // 2. Сформировать frontmatter
   const frontmatter = {
     id,
     title: data.title ?? '',
     priority: data.priority ?? 3,
-    type: data.type ?? 'impl',
+    type,
     required_capabilities: data.required_capabilities ?? [],
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -385,7 +391,7 @@ export async function createTicket(projectRoot, data) {
   };
 
   // 3. Добавить executor_type если type === 'human'
-  if (data.type === 'human') {
+  if (type === 'human') {
     frontmatter.executor_type = 'human';
   }
 
