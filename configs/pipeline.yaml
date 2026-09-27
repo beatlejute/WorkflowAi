@@ -26,7 +26,8 @@ pipeline:
   #     command:      <string>   — исполняемый файл (должен быть в PATH)
   #     args:         <string[]> — аргументы командной строки
   #     workdir:      <string>   — рабочая директория (по умолчанию ".")
-  #     capabilities: <string[]> — возможности агента (text, multimodal, ...)
+  #     capabilities: <string[]> — возможности агента (text, multimodal, mcp, ...);
+  #                                 mcp — агент работает с MCP-серверами проекта
   #     description:  <string>   — описание агента (опционально)
   #     rails_host:   kilo|claude — CLI, в котором хук рельс видит инструменты агента
   #                                 (опционально; по умолчанию — по команде: `kilo … run`,
@@ -39,18 +40,24 @@ pipeline:
   # Скрипт-агенты (script-*) — детерминированы, capabilities к ним не применяются.
   # ===========================================================================
   agents:
+    # mcp у агентов claude: claude подключает серверы из .mcp.json проекта, разрешённые в
+    # .claude/settings.local.json (enabledMcpjsonServers). Проверено 2026-09-27 в PulseProxy:
+    # `claude -p` находит инструменты mcp__playwright__* через ToolSearch. kilo .mcp.json
+    # не читает (`kilo mcp list` показывает только серверы своего конфига), поэтому у
+    # kilo-агентов mcp нет. Доступность серверов перед тикетами типов из mcp_require_for
+    # проверяет стадия check-mcp.
     claude-haiku:
       command: "claude"
       args: ["--model", "claude-haiku-4-5-20251001", "--permission-mode", "bypassPermissions", "-p"]
       workdir: "."
-      capabilities: [text, multimodal]
+      capabilities: [text, multimodal, mcp]
       description: "Claude Haiku — лёгкая быстрая модель, поддержка изображений"
 
     claude-sonnet:
       command: "claude"
       args: ["--model", "claude-sonnet-5", "--permission-mode", "bypassPermissions", "-p"]
       workdir: "."
-      capabilities: [text, multimodal]
+      capabilities: [text, multimodal, mcp]
       description: "Claude Sonnet — быстрая модель, поддержка изображений"
 
     claude-opus:
@@ -60,7 +67,7 @@ pipeline:
       # Цена вызова судьи тестов скилов — для оценки перед прогоном: замер 2026-09-22,
       # 207 вызовов claude-opus-4-7 ($0.222). Для claude-opus-5 цена не измерена.
       cost_per_call: 0.222
-      capabilities: [text, multimodal]
+      capabilities: [text, multimodal, mcp]
       description: "Claude Opus — мощная модель, поддержка изображений"
 
     # Судья тестов скилов на модели решений Jev (TypeSafe через OpenRouter) — агент с

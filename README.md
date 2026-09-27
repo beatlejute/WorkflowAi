@@ -123,6 +123,23 @@ kilo CLI 7.7.x читает `SKILL.md` из проектного `.kilocode/skil
 Проверка: `kilo run "List the names of all skills available to you"` из корня
 проекта — без строк `failed to load skill`.
 
+## MCP-серверы у агентов
+
+Тикет с `required_capabilities: [mcp]` исполняет агент со способностью `mcp` в
+`capabilities`; без такого агента в списке стадии тикет уходит в `blocked/`
+(`no_capable_agent`). В `configs/pipeline.yaml` `mcp` есть у агентов `claude`:
+claude подключает серверы из `.mcp.json` проекта, разрешённые в
+`.claude/settings.local.json` (`enabledMcpjsonServers`), в том числе в режиме `-p`.
+kilo `.mcp.json` не читает — у kilo-агентов `mcp` нет. Перед тикетами типов из
+`context.mcp_require_for` стадия `check-mcp` проверяет, что серверы из `.mcp.json`
+разрешены, http-серверы отвечают, а команда stdio-сервера находится в `PATH`.
+
+Проверка: `claude -p` из корня проекта с просьбой найти инструменты сервера через
+ToolSearch — в ответе имена `mcp__<сервер>__…`. `claude mcp list` для сервера из
+`.mcp.json` может показывать `Pending approval` и при разрешении в
+`settings.local.json`: 2026-09-27 в PulseProxy так было, а `claude -p` инструменты
+`mcp__playwright__*` нашёл.
+
 ## Фактическая модель kilo-агента
 
 Роутеры kilo выбирают модель сами: `kilo/kilo-auto/free` — одну на сессию (от
