@@ -919,6 +919,36 @@ ${summary}
     assert.deepEqual(item.images, ['.workflow/evidence/screens/IMPL-804-export.png']);
   });
 
+  // Способности тикета описывают исполнителя: агент стадии ревью без инструментов,
+  // mcp у него не бывает. До 2026-09-27 способности тикета уходили в выбор
+  // ревьюера, и тикет с required_capabilities [mcp] не находил агента ревью.
+  test('способности тикета в выбор ревьюера не входят: [mcp, multimodal] и prose → только text', () => {
+    makeDod2Ticket('IMPL-814', {
+      capabilities: '[mcp, multimodal]',
+      dod: [GREEN, '- [x] Текст подсказки понятен', '  - prose: `понятность формулировки командой не проверить`'].join('\n'),
+    });
+
+    const result = runScript(reviewTicket('IMPL-814'), root);
+
+    assert.equal(result.status, 'passed', `fail_reasons=${result.fail_reasons || ''}`);
+    assert.deepEqual(JSON.parse(result.required_capabilities), ['text']);
+  });
+
+  test('тикет с [mcp] и пунктом visual → ревьюеру нужны text и multimodal, без mcp', () => {
+    const screens = join(root, '.workflow', 'evidence', 'screens');
+    mkdirSync(screens, { recursive: true });
+    writeFileSync(join(screens, 'IMPL-815-pool.png'), Buffer.from('89504e470d0a1a0a', 'hex'));
+    makeDod2Ticket('IMPL-815', {
+      capabilities: '[mcp]',
+      dod: '- [x] Блок пула не выходит за ширину попапа\n  - visual: `.workflow/evidence/screens/IMPL-815-*.png`',
+    });
+
+    const result = runScript(reviewTicket('IMPL-815'), root);
+
+    assert.equal(result.status, 'passed', `fail_reasons=${result.fail_reasons || ''}`);
+    assert.deepEqual(JSON.parse(result.required_capabilities), ['text', 'multimodal']);
+  });
+
   test('пункт visual без файла → failed, image_missing', () => {
     makeDod2Ticket('IMPL-805', {
       dod: '- [x] Экспорт стоит справа от поиска\n  - visual: `.workflow/evidence/screens/IMPL-805-*.png`',

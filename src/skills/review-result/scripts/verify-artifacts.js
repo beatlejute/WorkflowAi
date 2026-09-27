@@ -39,7 +39,8 @@
  *   missing_files: <comma-separated list or empty>
  *   Только у тикета dod_format: 2:
  *   evidence_file: <путь файла evidence от корня проекта>
- *   required_capabilities: <JSON-массив одной строкой>
+ *   required_capabilities: <JSON-массив одной строкой — способности агента стадии
+ *                           ревью: text, при пункте visual ещё multimodal>
  *   dod_check_total, dod_check_failed, dod_prose_total, dod_visual_total: <int>
  *   warnings: <предупреждения через "; "; строка печатается только при наличии>
  *   ---RESULT---
@@ -661,13 +662,18 @@ function writeEvidence(ticketPath, evidence) {
   return relPath;
 }
 
-// Способности для выбора агента стадии ревью: способности тикета плюс
-// multimodal при пункте visual. JSON-массив одной строкой — так поле из
-// контекста разбирает resolveAgent раннера (JSON.parse).
-function reviewCapabilities(ticketCapabilities, items) {
-  const capabilities = new Set(ticketCapabilities);
-  if (items.some((item) => item.kind === 'visual')) capabilities.add('multimodal');
-  return JSON.stringify([...capabilities]);
+// Способности для выбора агента стадии ревью — то, что нужно, чтобы прочесть
+// evidence: текст всегда, multimodal при пункте visual. Способности тикета
+// (required_capabilities) сюда не входят: они описывают исполнителя тикета, а
+// агент стадии ревью работает без инструментов, и способности исполнения
+// (например, работы с MCP-серверами проекта) у него не бывает — с ней ни один
+// ревьюер не подошёл бы, и исполненный тикет не прошёл бы ревью. JSON-массив
+// одной строкой — так поле из контекста разбирает resolveAgent раннера
+// (JSON.parse).
+function reviewCapabilities(items) {
+  const capabilities = ['text'];
+  if (items.some((item) => item.kind === 'visual')) capabilities.push('multimodal');
+  return JSON.stringify(capabilities);
 }
 
 function describeFailedItem(item) {
@@ -1027,7 +1033,7 @@ async function main() {
       const ofKind = (kind) => evidence.items.filter((item) => item.kind === kind);
       const checks = ofKind('check');
       console.log(`evidence_file: ${evidenceFile}`);
-      console.log(`required_capabilities: ${reviewCapabilities(result.required_capabilities, evidence.items)}`);
+      console.log(`required_capabilities: ${reviewCapabilities(evidence.items)}`);
       console.log(`dod_check_total: ${checks.length}`);
       console.log(`dod_check_failed: ${checks.filter((item) => item.status !== 'passed').length}`);
       console.log(`dod_prose_total: ${ofKind('prose').length}`);

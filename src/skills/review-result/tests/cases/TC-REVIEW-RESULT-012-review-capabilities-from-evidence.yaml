@@ -1,0 +1,35 @@
+id: TC-REVIEW-RESULT-012
+title: "Способности агента стадии ревью по evidence — из самих evidence, а не из required_capabilities тикета"
+origin:
+  chg: ["ad-hoc-2026-09-27-review-capabilities"]
+  incidents:
+    - "2026-09-27: способность mcp (работа с MCP-серверами проекта) появилась у агентов-исполнителей. verify-artifacts.js отдавал стадии ревью способности тикета плюс multimodal, а в стадии ревью только агенты без инструментов — у них mcp быть не может. Тикет dod_format: 2 с required_capabilities [mcp] и пунктом prose или visual после исполнения не находил ревьюера (no_capable_agent) и не проходил ревью. Источник — таблица способностей PLAN-002 («способности тикета + multimodal») расходилась с целью того же плана: скриншоты — агенту с multimodal, иначе — первому по приоритету. Стейкхолдер: «зачем mcp ревьюверу в нашей новой схеме?»."
+  principle: "Ревьюер по evidence работает без инструментов и читает только evidence: ему нужен текст, а при пункте visual — multimodal. Способности тикета описывают исполнителя и в выбор ревьюера не входят (scripts/verify-artifacts.js, reviewCapabilities)."
+  backlog_sources: []
+tags: [verify-artifacts, capabilities, evidence-review]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над скриптом скила. Способности ревью вычисляет скрипт
+    детерминированно, вывод агента их не меняет.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: 'function reviewCapabilities\(items\) \{\s*const capabilities = \[''text''\];'
+      reason: "Способности ревью строятся только из evidence и начинаются с text: способности тикета функция не принимает."
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: 'if \(items\.some\(\(item\) => item\.kind === ''visual''\)\) capabilities\.push\(''multimodal''\);'
+      reason: "multimodal требуется только при пункте visual — изображения оценивает агент со способностью multimodal."
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: 'required_capabilities: \$\{reviewCapabilities\(evidence\.items\)\}'
+      reason: "Поле required_capabilities для стадии ревью печатается из evidence, без required_capabilities тикета."
+
+execution:
+  timeout_s: 60
