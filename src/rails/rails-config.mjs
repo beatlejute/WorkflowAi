@@ -8,6 +8,38 @@ import { load } from '../lib/js-yaml.mjs';
 // §6: допустимые значения kind в stage_actions.*.kind.
 const VALID_KINDS = new Set(['shell', 'edit', 'write', 'read', 'agent', 'mcp', 'other']);
 
+// §3: идентификатор узла графа.
+const NODE_ID = /^P\d+[ERSGQ]\d+$/;
+
+/**
+ * Подстановка id тикета запуска в путь стража ребра (§4): раннер передаёт тикет в
+ * WORKFLOW_RAILS_TICKET, и страж смотрит на файл тикета ЭТОГО запуска, а не на любой.
+ */
+export const TICKET_PLACEHOLDER = '{ticket}';
+
+// Подстановки `{…}` в пути стража, кроме `{ticket}`: рельсы их не знают — ошибка конфига,
+// а не молча буквальное имя файла, которого в проекте никогда не будет (страж молчал бы).
+function unknownGuardPlaceholders(p) {
+  if (typeof p !== 'string') return [];
+  return [...new Set(p.match(/\{[^{}]*\}/g) || [])].filter((m) => m !== TICKET_PLACEHOLDER);
+}
+
+/**
+ * Путь стража ребра (`edge_guards[].deny_if_exists`, §4): от корня проекта, `*` — только
+ * в последнем сегменте, без `**` и без выхода выше корня; из подстановок — только
+ * `{ticket}` внутри сегментов. Проверка существования перечисляет один каталог, а не
+ * обходит дерево.
+ */
+export function isEdgeGuardPath(p) {
+  if (typeof p !== 'string' || p.trim() === '') return false;
+  if (/[{}]/.test(p.split(TICKET_PLACEHOLDER).join(''))) return false;
+  const segs = p.split(/[\\/]/).filter((s) => s.length > 0);
+  if (segs.length === 0) return false;
+  if (/^[A-Za-z]:$/.test(segs[0]) || p.startsWith('/') || p.startsWith('\\')) return false;
+  if (segs.some((s) => s === '..' || s === '**')) return false;
+  return segs.slice(0, -1).every((s) => !s.includes('*'));
+}
+
 const DEFAULTS = {
   version: 1,
   fragments: ['workflows/*.md'],
@@ -22,6 +54,7 @@ const DEFAULTS = {
   deny_mcp: [],
   stage_actions: {},
   cycles: [],
+  edge_guards: [],
   output: {
     final_requires: [],
     final_forbids: [],
@@ -217,6 +250,37 @@ export function validateRailsConfig(obj) {
         if (!Number.isFinite(c.to)) pushError(errors, 'bad-type', `${prefix}.to`, 'to должен быть числом (номер этапа)');
         if (!Number.isFinite(c.max) || c.max < 0) pushError(errors, 'bad-type', `${prefix}.max`, 'max должен быть неотрицательным числом');
         if (c.reason !== undefined && typeof c.reason !== 'string') pushError(errors, 'bad-type', `${prefix}.reason`, 'reason должен быть строкой');
+      });
+    }
+  }
+
+  if (obj.edge_guards !== undefined) {
+    if (!Array.isArray(obj.edge_guards)) {
+      pushError(errors, 'bad-type', 'edge_guards', 'edge_guards должен быть массивом');
+    } else {
+      obj.edge_guards.forEach((g, i) => {
+        const prefix = `edge_guards[${i}]`;
+        if (!isPlainObject(g)) {
+          pushError(errors, 'bad-type', prefix, 'страж ребра должен быть объектом {from, to, deny_if_exists, reason}');
+          return;
+        }
+        for (const key of ['from', 'to']) {
+          if (typeof g[key] !== 'string' || !NODE_ID.test(g[key])) {
+            pushError(errors, 'bad-type', `${prefix}.${key}`, `${key} должен быть идентификатором узла вида P0Q1`);
+          }
+        }
+        const unknown = unknownGuardPlaceholders(g.deny_if_exists);
+        if (unknown.length > 0) {
+          pushError(errors, 'bad-glob', `${prefix}.deny_if_exists`, `deny_if_exists: неизвестная подстановка ${unknown.join(', ')} — допустима только {ticket} (id тикета запуска)`);
+        } else if (!isEdgeGuardPath(g.deny_if_exists)) {
+          pushError(errors, 'bad-glob', `${prefix}.deny_if_exists`, 'deny_if_exists — путь от корня проекта; `*` допустим только в последнем сегменте, `**` и `..` — нет, из подстановок — только {ticket}');
+        }
+        if (typeof g.reason !== 'string' || g.reason.trim() === '') {
+          pushError(errors, 'bad-type', `${prefix}.reason`, 'reason обязателен: его текст получает агент в отказе');
+        }
+        if (g.incident !== undefined && typeof g.incident !== 'string') {
+          pushError(errors, 'bad-type', `${prefix}.incident`, 'incident должен быть строкой');
+        }
       });
     }
   }

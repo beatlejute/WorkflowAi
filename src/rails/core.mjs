@@ -708,10 +708,12 @@ function describeWhat(action) {
 // текущего этапа (stage_actions, чей rule.stages включает текущий этап). На
 // E-узле сами действия этапа ещё запрещены (E-прозрачность, §5) — перечислять
 // их как «доступные» противоречило бы причине отказа, поэтому на E-узле эта
-// часть подсказки либо опускается, либо помечается «после перехода».
-function describeAllowed(state, graph, config) {
+// часть подсказки либо опускается, либо помечается «после перехода». Ребро, закрытое
+// стражем (§4 edge_guards), — «закрыто: причина» без команды; `guardCtx` — корень проекта
+// и тикет запуска для `{ticket}`.
+function describeAllowed(state, graph, config, guardCtx) {
   const info = currentNodeInfo(state);
-  const transitions = describeTransitions(state, graph, config);
+  const transitions = describeTransitions(state, graph, config, guardCtx);
 
   const parts = [];
   if (transitions.length > 0) parts.push(`переходы: ${transitions.join('; ')}`);
@@ -904,8 +906,11 @@ function decideSkillMode({ root, action, ctx, state, config, graph }) {
     }
   }
 
+  // Тикет запуска для `{ticket}` в стражах рёбер — как у `goto` (cli.mjs runTicket): из
+  // состояния сессии, без него — хоста.
+  const guardCtx = { root, ticket: state?.ticket || hostTicket(ctx) };
   const deny = (what, why) =>
-    denyAndLog({ root, ctx, state, action, what, why, allowedText: describeAllowed(state, graph, config) });
+    denyAndLog({ root, ctx, state, action, what, why, allowedText: describeAllowed(state, graph, config, guardCtx) });
   const shellTexts = action?.kind === 'shell' ? commandTextVariants(action.command) : [];
 
   // 2. Канарейка.
@@ -1036,6 +1041,13 @@ function projectRootFromPath(absPath) {
 
 // --- decide: точка входа (§7) ---------------------------------------------------
 
+// Тикет запуска хоста для `{ticket}` в стражах рёбер (§4): ctx.ticket, иначе
+// WORKFLOW_RAILS_TICKET окружения процесса хука (ставит раннер, §11) — команда агента
+// его не меняет. Пусто — null.
+function hostTicket(ctx) {
+  return ctx?.ticket || process.env.WORKFLOW_RAILS_TICKET || null;
+}
+
 function decideInProject(root, action, ctx) {
   const role = ctx?.role ?? process.env.WORKFLOW_RAILS_ROLE;
   if (role === 'executor') return { decision: 'allow' };
@@ -1070,8 +1082,9 @@ function decideInProject(root, action, ctx) {
     }
     // §5: «если состояния нет, но задан WORKFLOW_RAILS_SKILL... хук создаёт
     // состояние сам при первом действии».
+    // Тикет запуска — в состояние: `goto` берёт его отсюда, а не из окружения CLI (§5).
     const { config } = loadSkillRuntime(root, skillEnv);
-    state = startState({ root, sessionId, skill: skillEnv, entry: config.entry, run: ctx?.run ?? null });
+    state = startState({ root, sessionId, skill: skillEnv, entry: config.entry, run: ctx?.run ?? null, ticket: hostTicket(ctx) });
   }
 
   const { config, graph } = loadSkillRuntime(root, state.skill);
@@ -1205,7 +1218,7 @@ function decideSandbox(sandboxRoot, action, ctx) {
  * худшем случае превращается в `{ decision: "allow" }` плюс строка в stderr и
  * запись `type: "error"` в журнал (если корень проекта уже был найден).
  *
- * @param {{action: object, ctx: {cwd: string, sessionId?: string, role?: string, event?: string, run?: string|null}}} args
+ * @param {{action: object, ctx: {cwd: string, sessionId?: string, role?: string, event?: string, run?: string|null, ticket?: string|null}}} args
  * @returns {{decision: 'allow'|'deny', reason?: string, context?: string, updatedCommand?: string}}
  */
 export function decide({ action, ctx } = {}) {

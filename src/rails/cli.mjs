@@ -61,9 +61,10 @@ function parseArgs(argv) {
   return { positional, flags };
 }
 
-// Переход — строкой «id: лейбл → готовая команда» (state.describeTransitions).
-function formatTransitions(state, graph, config) {
-  const lines = describeTransitions(state, graph, config);
+// Переход — строкой «id: лейбл → готовая команда» (state.describeTransitions); ребро,
+// закрытое стражем, — «закрыто: причина» без команды.
+function formatTransitions(state, graph, config, guardCtx) {
+  const lines = describeTransitions(state, graph, config, guardCtx);
   if (lines.length === 0) return 'Переходы: нет';
   return `Переходы:\n${lines.map((l) => `  ${l}`).join('\n')}`;
 }
@@ -100,6 +101,23 @@ function ambiguousSessionError(sessions) {
     code: 1,
     stdout: `Ошибка: в проекте ${sessions.length} сессии рельсов, --session не задан — команда могла бы уйти в чужую сессию.\nСессии (от свежей):\n${list}\nЗадай --session <id> или WORKFLOW_RAILS_SESSION.\n`,
   };
+}
+
+// Тикет запуска для `{ticket}` в стражах рёбер (§4 edge_guards): сначала из состояния
+// сессии — его пишет хук из окружения хоста при первом действии агента, раньше, чем
+// выполнится `start` (§5), и команда агента его не меняет; WORKFLOW_RAILS_TICKET окружения
+// CLI — только если в состоянии тикета нет (состояние создано без хука). Ревью стража
+// 2026-09-27: окружение CLI агент подменяет — `WORKFLOW_RAILS_TICKET=… node …cli.mjs goto`,
+// `export`/`env`/`unset` перед вызовом хук не считает cli-вызовом, но на P0Q1 execute-task
+// их пропускают общие правила (проверено decide()), а пустой или чужой тикет открывает страж.
+function runTicket(state, env) {
+  return (state && state.ticket) || (env && env.WORKFLOW_RAILS_TICKET) || null;
+}
+
+// Корень проекта и тикет запуска для стражей рёбер; `state` — состояние сессии, из которого
+// берётся тикет (runTicket).
+function guardContext(root, env, state) {
+  return { root, ticket: runTicket(state, env) };
 }
 
 // --- start -----------------------------------------------------------------------------
@@ -144,7 +162,7 @@ function foreignSkillRefusal({ root, skill, runSkill, sessionId, explicitSession
     }
     const label = graph ? graph.node(existing.node)?.label ?? '' : '';
     lines.push(`Сессия ${sessionId} уже идёт по "${runSkill}": числится ${existing.node} «${label}» — продолжай оттуда.`);
-    if (graph) lines.push(formatTransitions(existing, graph, config));
+    if (graph) lines.push(formatTransitions(existing, graph, config, guardContext(root, env, existing)));
   } else {
     const session = explicitSession ? ` --session ${sessionId}` : '';
     lines.push(`Старт скила запуска: node ${RAILS_CLI} start ${runSkill}${session}${existing ? ' --force' : ''}`);
@@ -199,14 +217,17 @@ function cmdStart(root, positional, flags, env) {
     return { code: 1, stdout: `Ошибка: rails.yaml скила "${skill}" не задаёт entry.\n` };
   }
 
-  const state = startState({ root, sessionId, skill, entry: config.entry, run: (env && env.WORKFLOW_RAILS_RUN) || null });
+  // Тикет запуска из состояния, которое хук создал при первом действии, переживает
+  // перезапись состояния: иначе `start` заменял бы его тикетом из окружения CLI (runTicket).
+  const ticket = runTicket(existing, env);
+  const state = startState({ root, sessionId, skill, entry: config.entry, run: (env && env.WORKFLOW_RAILS_RUN) || null, ticket });
   const entryNode = graph.node(config.entry);
   const label = entryNode ? entryNode.label : '';
 
   const lines = [
     `Старт: скил "${skill}", сессия ${sessionId}`,
     `${config.entry}: «${label}»`,
-    formatTransitions(state, graph, config),
+    formatTransitions(state, graph, config, guardContext(root, env, state)),
   ];
   return { code: 0, stdout: `${lines.join('\n')}\n` };
 }
@@ -239,7 +260,8 @@ function cmdGoto(root, positional, flags, env) {
     return { code: 1, stdout: `Ошибка загрузки скила "${state.skill}": ${err && err.message ? err.message : err}\n` };
   }
 
-  const result = applyGoto(state, graph, config, { node, quote });
+  const guardCtx = guardContext(root, env, state);
+  const result = applyGoto(state, graph, config, { node, quote, ...guardCtx });
   try {
     saveState(root, state); // и при успехе (node/history), и при отказе (denials) — applyGoto мутирует state на месте.
   } catch {
@@ -261,14 +283,14 @@ function cmdGoto(root, positional, flags, env) {
     const reason = buildDenyReason({
       what: `goto ${node}`,
       why: result.reason,
-      allowed: describeTransitions(state, graph, config),
+      allowed: describeTransitions(state, graph, config, guardCtx),
     });
     return { code: 2, stdout: `${reason}\n` };
   }
 
   const currentNode = graph.node(state.node);
   const label = currentNode ? currentNode.label : '';
-  const lines = [`RAILS: числится ${state.node} «${label}»`, formatTransitions(state, graph, config)];
+  const lines = [`RAILS: числится ${state.node} «${label}»`, formatTransitions(state, graph, config, guardCtx)];
   return { code: 0, stdout: `${lines.join('\n')}\n` };
 }
 

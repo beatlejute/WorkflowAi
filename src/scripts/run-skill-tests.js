@@ -116,6 +116,22 @@ function railsYamlExists(root, skill) {
 }
 
 /**
+ * Тикет запуска кейса для WORKFLOW_RAILS_TICKET (`{ticket}` в стражах рёбер, rails/README.md
+ * §4, §11): `ticket_id` первого входа `ticket_file`, который кладётся в in-progress/
+ * (`dest_dir` не задан — это in-progress/), иначе первого входа `ticket_file`; входов нет —
+ * null. Ревью стража 2026-09-27: брался первый вход при любом `dest_dir`, и чужой тикет из
+ * review/ или done/, записанный в кейсе первым, открыл бы страж `{ticket}` молча.
+ *
+ * @param {Array<object>|undefined} inputs `scenario.inputs` кейса
+ * @returns {string|null}
+ */
+function caseRunTicket(inputs) {
+  const tickets = (inputs || []).filter((i) => i && i.kind === 'ticket_file');
+  const own = tickets.find((i) => (i.dest_dir || 'in-progress') === 'in-progress') || tickets[0];
+  return (own && own.ticket_id) || null;
+}
+
+/**
  * Вызывает целевого агента (`WORKFLOW_RAILS_ROLE=coordinator`) и, если у
  * скила есть `rails.yaml`, проверяет финальный ответ через output-check по
  * состоянию с этим `run`; при нарушении — один повтор с вердиктом в начале
@@ -133,11 +149,17 @@ function railsYamlExists(root, skill) {
  * попытки проходили молча: 2026-09-25 gpt-luna без единого вызова инструмента
  * получила высший балл.
  *
+ * `ticket` — id тикета кейса (caseRunTicket): агент и повтор получают его в
+ * WORKFLOW_RAILS_TICKET, как у раннера стадии, — для `{ticket}` в стражах рёбер (§4).
+ *
  * @returns {Promise<object>} результат spawnAgent (плюс rails, railsRetried/railsVerdict при повторе)
  */
-async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, root, skill) {
+async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, root, skill, ticket = null) {
   const hasRails = railsYamlExists(root, skill);
   const runId = crypto.randomUUID();
+  if (hasRails && ticket) {
+    spawnOpts = { ...spawnOpts, env: { ...spawnOpts.env, WORKFLOW_RAILS_TICKET: ticket } };
+  }
   const railsOpts = hasRails
     ? { railsRole: 'coordinator', railsSkill: skill, railsRun: runId }
     : {};
@@ -1345,12 +1367,13 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
         // WORKFLOW_SANDBOX_ROOT — граница записи для хука рельс (core.decide,
         // «песочница тестов»): 2026-09-23 агенты кейсов create-plan и decompose-plan
         // записали планы и тикеты в настоящий проект.
+        const caseTicket = caseRunTicket(task.testCase.scenario?.inputs);
         const targetOutput = await spawnTargetAgentWithRailsCheck(task.agentConfig, targetPrompt, {
           timeout,
           stageId: `${caseId}-${task.agentId}-trial-${task.trial}`,
           projectRoot: taskWorkdir,
           env: { WORKFLOW_SANDBOX_ROOT: taskWorkdir }
-        }, taskWorkdir, skillName);
+        }, taskWorkdir, skillName, caseTicket);
 
         // Snapshot ticket files after target-run (for judge to inspect actual file state).
         let ticketFilesSection = '';

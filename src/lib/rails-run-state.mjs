@@ -232,7 +232,10 @@ export function railsNotEngagedVerdict({ skill, config }) {
  *
  * `sameSession: true` — повтор продолжает ту же сессию хоста (resumeSessionArgs): рельсы
  * помнят узел, и вердикт называет, где агент числится, и готовые команды переходов оттуда
- * (state.describeTransitions; граф не читается — без переходов).
+ * (state.describeTransitions; граф не читается — без переходов). Ребро, закрытое стражем
+ * (§4 edge_guards), — «закрыто: причина» без команды: иначе вердикт звал бы в переход,
+ * который `goto` отклонит. Для стражей нужны `root` (корень проекта) и `ticket` (тикет
+ * запуска, `{ticket}`); без `root` стражи не проверяются.
  *
  * По умолчанию повтор — новая сессия: её рельсы начинаются с `entry`, а прежний узел —
  * узел другой сессии. Прогон PulseProxy 2026-09-27: новой сессии сказали «Числишься в
@@ -242,10 +245,10 @@ export function railsNotEngagedVerdict({ skill, config }) {
  * `start`, и что сделанное осталось только в файлах.
  *
  * @param {{verdict: {missing: string[]}, state: object, config: object, skillDir: string,
- *   skill?: string, sameSession?: boolean}} args
+ *   skill?: string, sameSession?: boolean, root?: string, ticket?: string|null}} args
  *   skill — имя скила для команды `start` (иначе `config.skill`, затем `state.skill`)
  */
-export function outputCheckVerdict({ verdict, state, config, skillDir, skill, sameSession = false }) {
+export function outputCheckVerdict({ verdict, state, config, skillDir, skill, sameSession = false, root, ticket }) {
   const head = `RAILS: предыдущий ответ отклонён output-check — отсутствует: ${verdict.missing.join('; ')}.`;
   const tail = `${RUN_COMMANDS_TEXT} ${terminalText(config)} Исправь и ответь заново.\n\n`;
   if (!sameSession) {
@@ -259,7 +262,7 @@ export function outputCheckVerdict({ verdict, state, config, skillDir, skill, sa
   let where = '';
   try {
     const graph = loadSkillGraph(skillDir, config);
-    const lines = describeTransitions(state, graph, config);
+    const lines = describeTransitions(state, graph, config, { root, ticket });
     where = ` Сессия та же. Числишься в ${state.node}.${lines.length > 0 ? ` Переходы оттуда:\n${lines.map((l) => `  ${l}`).join('\n')}\n` : ''}`;
   } catch {
     where = state?.node ? ` Сессия та же. Числишься в ${state.node}.` : '';

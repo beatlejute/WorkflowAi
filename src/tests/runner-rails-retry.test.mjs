@@ -21,7 +21,10 @@
  *    командой `start`, сделанное — в файлах, затем исходный промпт;
  *  - ответ повтора проходит output-check (`railsRetryVerdict`): нарушение и повтор без
  *    единого вызова инструмента — предупреждение в лог, ответ отдаётся стадии, третьего
- *    запуска нет.
+ *    запуска нет;
+ *  - тикет запуска (`context.ticket_id`) агент и повтор получают в `WORKFLOW_RAILS_TICKET`
+ *    (`{ticket}` в стражах рёбер), а вердикт той же сессии показывает ребро, закрытое
+ *    стражем, строкой «закрыто» без команды перехода.
  *
  * Фейковый хост — один скрипт за обёртками `claude`/`kilo` (имя команды задаёт хост,
  * railsHost) и за `node`: на каждом вызове берёт строку плана, выбирает сессию (из
@@ -79,7 +82,7 @@ const write = (id, node) => {
 };
 if (!step.noState) write(session, step.node);
 if (step.extraSession) write(session + '-sub', 'P1E1');
-fs.writeFileSync(path.join(ctl, 'call-' + n + '.json'), JSON.stringify({ args, prompt, run, session }));
+fs.writeFileSync(path.join(ctl, 'call-' + n + '.json'), JSON.stringify({ args, prompt, run, session, ticket: process.env.WORKFLOW_RAILS_TICKET || null }));
 process.stdout.write((step.marker ? 'RAILS: P1S1\\n' : (step.text || '')) + '---RESULT---\\nstatus: passed\\n---RESULT---\\n');
 `);
 
@@ -105,9 +108,10 @@ let seq = 0;
 /**
  * Проект со скилом на рельсах (граф P1E1 → P1S1, терминал P1S1, по умолчанию — маркер в
  * ответе) и планом фейкового хоста. `finalRequires` — строка `output.final_requires` в
- * записи YAML (как в файле, с экранированием).
+ * записи YAML (как в файле, с экранированием). `railsExtra` — строки в конец rails.yaml,
+ * `graphExtra` — строки в конец mermaid-графа.
  */
-function makeProject({ kind, calls, finalRequires = '"RAILS:\\\\s*P1S1"' }) {
+function makeProject({ kind, calls, finalRequires = '"RAILS:\\\\s*P1S1"', railsExtra = [], graphExtra = [] }) {
   seq += 1;
   const root = path.join(BASE, `p${seq}`);
   const skillDir = path.join(root, '.workflow', 'src', 'skills', SKILL);
@@ -122,6 +126,7 @@ function makeProject({ kind, calls, finalRequires = '"RAILS:\\\\s*P1S1"' }) {
     '  final_requires:',
     `    - ${finalRequires}`,
     '  max_stop_blocks: 2',
+    ...railsExtra,
   ].join('\n'));
   fs.writeFileSync(path.join(skillDir, 'SKILL.md'), [
     '```mermaid',
@@ -129,6 +134,7 @@ function makeProject({ kind, calls, finalRequires = '"RAILS:\\\\s*P1S1"' }) {
     '    P1E1["П1 ВХОД: начало этапа проверки повтора раннера по вердикту"]',
     '    P1S1["П1 ШАГ: выдать результат проверки и остановиться на этом шаге"]',
     '    P1E1 --> P1S1',
+    ...graphExtra,
     '```',
     '',
   ].join('\n'));
@@ -153,10 +159,10 @@ function makeLogger() {
  * читает промпт из stdin на любой ОС. `false` — запись как у claude/kilo в configs/pipeline.yaml,
  * без `prompt_stdin`: однострочный промпт раннер кладёт в командную строку.
  */
-async function callAgent(project, agent, { promptStdin = true } = {}) {
+async function callAgent(project, agent, { promptStdin = true, context = {} } = {}) {
   const logger = makeLogger();
   const config = { pipeline: { name: 'rails-retry', version: '1.0', agents: {}, stages: {}, execution: { timeout_per_stage: 30 } } };
-  const executor = new StageExecutor(config, {}, {}, {}, null, logger, project.root);
+  const executor = new StageExecutor(config, context, {}, {}, null, logger, project.root);
   const saved = process.env.FAKE_HOST_CTL;
   process.env.FAKE_HOST_CTL = project.ctl;
   try {
@@ -320,5 +326,54 @@ describe('StageExecutor.callAgent — повтор по вердикту рел�
     assert.equal(result.railsRetrySession, 'new');
     assert.deepEqual(result.railsRetryVerdict, { ok: false, missing: ['ни одного вызова инструмента под рельсами'] });
     assert.ok(warns(logger).some((l) => l.includes('повтор без единого вызова инструмента под рельсами — ответ принят без процедуры скила')), logText(logger));
+  });
+
+  // Страж ребра P1E1 → P1S2 по файлу тикета запуска (ревью стража 2026-09-27): закрытое ребро
+  // вердикт не должен рекламировать готовой командой — слабые модели её копируют.
+  const GUARD_RAILS = [
+    'edge_guards:',
+    '  - from: P1E1',
+    '    to: P1S2',
+    '    deny_if_exists: ".workflow/tickets/in-progress/{ticket}.md"',
+    '    reason: "Тикет запуска в in-progress/ есть — ветка закрыта"',
+  ];
+  const GUARD_GRAPH = [
+    '    P1S2["П1 ШАГ: сообщить, что тикета нет, и остановиться на этом шаге"]',
+    '    P1E1 --> P1S2',
+  ];
+
+  test('тикет запуска — WORKFLOW_RAILS_TICKET у агента и повтора; вердикт той же сессии: ребро, закрытое стражем, — «закрыто» без команды', async () => {
+    const project = makeProject({ kind: 'claude', calls: VIOLATE_THEN_FIX, railsExtra: GUARD_RAILS, graphExtra: GUARD_GRAPH });
+    const dir = path.join(project.root, '.workflow', 'tickets', 'in-progress');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'QA-001.md'), '# QA-001\n');
+    const { result } = await callAgent(project, { command: CLAUDE, args: CLAUDE_ARGS }, { context: { ticket_id: 'QA-001' } });
+
+    assert.equal(calls(project), 2);
+    const [first, retry] = [call(project, 1), call(project, 2)];
+    assert.equal(first.ticket, 'QA-001');
+    assert.equal(retry.ticket, 'QA-001');
+    assert.equal(result.railsRetrySession, 'same');
+    assertSameSessionVerdict(retry.prompt);
+    assert.match(retry.prompt, /\n {2}P1S2: .* — закрыто: Тикет запуска в in-progress\/ есть — ветка закрыта \(есть \.workflow\/tickets\/in-progress\/QA-001\.md\)\n/);
+    assert.doesNotMatch(retry.prompt, /goto P1S2/);
+  });
+
+  test('тикет запуска — повтор в новой сессии тоже получает WORKFLOW_RAILS_TICKET; без ticket_id в контексте переменной нет', async () => {
+    const saved = process.env.WORKFLOW_RAILS_TICKET;
+    delete process.env.WORKFLOW_RAILS_TICKET; // окружение раннера наследуется агентом
+    try {
+      const withTicket = makeProject({ kind: 'claude', calls: VIOLATE_THEN_FIX });
+      const args = ['--no-session-persistence', ...CLAUDE_ARGS];
+      const { result } = await callAgent(withTicket, { command: CLAUDE, args }, { context: { ticket_id: 'QA-001' } });
+      assert.equal(result.railsRetrySession, 'new');
+      assert.deepEqual([call(withTicket, 1).ticket, call(withTicket, 2).ticket], ['QA-001', 'QA-001']);
+
+      const without = makeProject({ kind: 'claude', calls: VIOLATE_THEN_FIX });
+      await callAgent(without, { command: CLAUDE, args: CLAUDE_ARGS });
+      assert.deepEqual([call(without, 1).ticket, call(without, 2).ticket], [null, null]);
+    } finally {
+      if (saved !== undefined) process.env.WORKFLOW_RAILS_TICKET = saved;
+    }
   });
 });

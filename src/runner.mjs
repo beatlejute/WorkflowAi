@@ -2354,9 +2354,11 @@ class StageExecutor {
    *
    * Целевой агент стадии — всегда `WORKFLOW_RAILS_ROLE=coordinator` (раннер
    * не различает судью и целевого агента внутри обычного pipeline — судья
-   * есть только в run-skill-tests.js). После успешного завершения, если у
-   * скила стадии есть `rails.yaml`, ищем состояние сессии по `run` и гоним
-   * его через `output-check`; при нарушении — один повтор с вердиктом (§8).
+   * есть только в run-skill-tests.js). Тикет запуска (`context.ticket_id`) агент и его
+   * повтор получают в `WORKFLOW_RAILS_TICKET` — для `{ticket}` в стражах рёбер (§4).
+   * После успешного завершения, если у скила стадии есть `rails.yaml`, ищем состояние
+   * сессии по `run` и гоним его через `output-check`; при нарушении — один повтор с
+   * вердиктом (§8).
    * Ошибка/таймаут агента rails не касаются — пробрасываются как есть, ретрая на
    * них нет.
    *
@@ -2395,6 +2397,10 @@ class StageExecutor {
     const runId = crypto.randomUUID();
     const railsEnv = { WORKFLOW_RAILS_ROLE: 'coordinator', WORKFLOW_RAILS_RUN: runId };
     if (skillId) railsEnv.WORKFLOW_RAILS_SKILL = skillId;
+    // Тикет запуска — для `{ticket}` в стражах рёбер (rails/README.md §4): страж смотрит
+    // на файл тикета этого запуска, а не на любой тикет в каталоге.
+    const ticket = (this.context && this.context.ticket_id) || null;
+    if (ticket) railsEnv.WORKFLOW_RAILS_TICKET = ticket;
 
     const result = await this._callAgentTracked(agent, prompt, stageId, skillId, agentId, railsEnv, { bannedCheck });
 
@@ -2442,7 +2448,8 @@ class StageExecutor {
       // Продолжение с промптом через stdin проверено запуском (resumeSessionArgs).
       retryAgent = { ...agent, args: resumeArgs, prompt_stdin: true };
       retryRun = runId;
-      retryPrompt = outputCheckVerdict({ verdict, state, config, skillDir, skill: skillId, sameSession: true }).trimEnd();
+      // root/ticket — ребро, закрытое стражем, вердикт показывает «закрыто» без команды.
+      retryPrompt = outputCheckVerdict({ verdict, state, config, skillDir, skill: skillId, sameSession: true, root: this.projectRoot, ticket }).trimEnd();
       sessionNote = `та же (${state.session})`;
     } else {
       retryRun = crypto.randomUUID();
@@ -2464,6 +2471,7 @@ class StageExecutor {
       WORKFLOW_RAILS_RUN: retryRun,
       WORKFLOW_RAILS_SKILL: skillId
     };
+    if (ticket) retryEnv.WORKFLOW_RAILS_TICKET = ticket;
     const retryResult = await this._callAgentTracked(retryAgent, retryPrompt, stageId, skillId, agentId, retryEnv, { bannedCheck });
     retryResult.railsRetried = true;
     retryResult.railsVerdict = verdict;

@@ -215,3 +215,82 @@ test('validateRailsConfig: stage_actions с корректным правило�
   });
   assert.deepEqual(result.errors, []);
 });
+
+// --- edge_guards: страж ребра (§4) ------------------------------------------
+
+test('validateRailsConfig: edge_guards с корректным стражем — без ошибок', () => {
+  const result = validateRailsConfig({
+    version: 1,
+    skill: 'x',
+    entry: 'P0E1',
+    edge_guards: [
+      { from: 'P0Q1', to: 'P7E1', deny_if_exists: '.workflow/tickets/in-progress/*.md', reason: 'тикет есть', incident: '2026-09-27' },
+      { from: 'P2G1', to: 'P7E1', deny_if_exists: 'marker.flag', reason: 'маркер есть' },
+    ],
+  });
+  assert.deepEqual(result.errors, []);
+});
+
+test('validateRailsConfig: edge_guards — не массив, не объект, плохие узлы, путь и reason', () => {
+  assert.deepEqual(codes(validateRailsConfig({ version: 1, skill: 'x', entry: 'P0E1', edge_guards: {} })), ['bad-type']);
+  const result = validateRailsConfig({
+    version: 1,
+    skill: 'x',
+    entry: 'P0E1',
+    edge_guards: [
+      'P0Q1>P7E1',
+      { from: 'Q1', to: 'P7E1', deny_if_exists: 'a/*.md', reason: 'r' },
+      { from: 'P0Q1', to: 'P7E1', deny_if_exists: '.workflow/**/x.md', reason: 'r' },
+      { from: 'P0Q1', to: 'P7E1', deny_if_exists: '*/x.md', reason: 'r' },
+      { from: 'P0Q1', to: 'P7E1', deny_if_exists: '../x.md', reason: 'r' },
+      { from: 'P0Q1', to: 'P7E1', deny_if_exists: '/abs/x.md', reason: 'r' },
+      { from: 'P0Q1', to: 'P7E1', deny_if_exists: 'a/x.md', reason: ' ' },
+      { from: 'P0Q1', to: 'P7E1', deny_if_exists: 'a/x.md', reason: 'r', incident: 5 },
+    ],
+  });
+  assert.deepEqual(fields(result), [
+    'edge_guards[0]',
+    'edge_guards[1].from',
+    'edge_guards[2].deny_if_exists',
+    'edge_guards[3].deny_if_exists',
+    'edge_guards[4].deny_if_exists',
+    'edge_guards[5].deny_if_exists',
+    'edge_guards[6].reason',
+    'edge_guards[7].incident',
+  ]);
+});
+
+// `{ticket}` — id тикета запуска (WORKFLOW_RAILS_TICKET): допустим в любом сегменте. Другие
+// подстановки рельсы не знают — страж молча смотрел бы на файл `{id}.md`, которого нет.
+test('validateRailsConfig: edge_guards — {ticket} в пути допустим, другая подстановка — bad-glob с её именем', () => {
+  const guard = (deny_if_exists) => ({ from: 'P0Q1', to: 'P7E1', deny_if_exists, reason: 'r' });
+  const ok = validateRailsConfig({
+    version: 1,
+    skill: 'x',
+    entry: 'P0E1',
+    edge_guards: [
+      guard('.workflow/tickets/in-progress/{ticket}.md'),
+      guard('.workflow/work/{ticket}/done.flag'),
+      guard('.workflow/tickets/review/{ticket}*.md'),
+    ],
+  });
+  assert.deepEqual(ok.errors, []);
+
+  const bad = validateRailsConfig({
+    version: 1,
+    skill: 'x',
+    entry: 'P0E1',
+    edge_guards: [
+      guard('.workflow/tickets/in-progress/{id}.md'),
+      guard('.workflow/{run}/{ticket}.md'),
+      guard('.workflow/tickets/{ticket}{Ticket}.md'),
+      guard('.workflow/tickets/in-progress/{ticket.md'),
+    ],
+  });
+  assert.deepEqual(codes(bad), ['bad-glob', 'bad-glob', 'bad-glob', 'bad-glob']);
+  assert.deepEqual(fields(bad), [0, 1, 2, 3].map((i) => `edge_guards[${i}].deny_if_exists`));
+  assert.match(bad.errors[0].message, /неизвестная подстановка \{id\} — допустима только \{ticket\}/);
+  assert.match(bad.errors[1].message, /неизвестная подстановка \{run\} —/);
+  assert.match(bad.errors[2].message, /неизвестная подстановка \{Ticket\} —/);
+  assert.match(bad.errors[3].message, /из подстановок — только \{ticket\}/, 'непарная скобка — общее правило пути');
+});

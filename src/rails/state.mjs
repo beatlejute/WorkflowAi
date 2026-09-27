@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { normalizeLabel } from './graph.mjs';
+import { isEdgeGuardPath, TICKET_PLACEHOLDER } from './rails-config.mjs';
 
 export { normalizeLabel };
 
@@ -156,15 +157,20 @@ export function deleteState(root, sessionId) {
  * просто создаёт/перезаписывает состояние, а решение «можно ли стартовать»
  * принимает `cli.mjs` (читает `loadState` до вызова).
  *
- * @param {{root: string, sessionId: string, skill: string, entry: string, run?: string|null}} args
+ * `ticket` — id тикета запуска для `{ticket}` в стражах рёбер (§4): хук пишет его из
+ * окружения хоста, и `goto` берёт тикет отсюда, а не из окружения CLI, которое команда
+ * агента меняет (ревью стража 2026-09-27).
+ *
+ * @param {{root: string, sessionId: string, skill: string, entry: string, run?: string|null, ticket?: string|null}} args
  * @returns {object} созданное состояние
  */
-export function startState({ root, sessionId, skill, entry, run = null }) {
+export function startState({ root, sessionId, skill, entry, run = null, ticket = null }) {
   const now = new Date().toISOString();
   const state = {
     version: 1,
     session: sanitizeSessionId(sessionId),
     run: run ?? null,
+    ticket: ticket || null,
     skill,
     node: entry,
     started: now,
@@ -274,14 +280,24 @@ export function gotoCommand(id, label, quoteMin = 25) {
 /**
  * Допустимые переходы строками «id: лейбл → команда» для отказа и вывода CLI.
  *
+ * Ребро, которое сейчас закрывает страж (`edgeGuardHit`), — строкой «id: лейбл — закрыто:
+ * причина (есть путь)» без команды: слабые модели копируют готовую команду не читая, и
+ * переход, который `goto` всё равно отклонит, рекламировать нельзя (ревью стража
+ * 2026-09-27). `allowedTransitions` рёбра не фильтрует — это список рёбер графа.
+ *
  * @param {object} state
  * @param {object} graph
- * @param {object} [config] rails.yaml (quote_min)
+ * @param {object} [config] rails.yaml (quote_min, edge_guards)
+ * @param {{root?: string, ticket?: string|null}} [guardCtx] корень проекта и тикет запуска
+ *   для стражей рёбер; без `root` стражи не проверяются
  * @returns {string[]}
  */
-export function describeTransitions(state, graph, config) {
+export function describeTransitions(state, graph, config, { root, ticket } = {}) {
   const quoteMin = config?.quote_min ?? 25;
+  const from = normalizeState(state).node;
   return allowedTransitions(state, graph).map((t) => {
+    const guard = edgeGuardHit(config, from, t.id, { root, ticket });
+    if (guard) return `${t.id}: ${t.label} — закрыто: ${guard.reason} (есть ${guard.path})`;
     const full = graph.node(t.id)?.label ?? t.label;
     return `${t.id}: ${t.label} → ${gotoCommand(t.id, full, quoteMin)}`;
   });
@@ -363,6 +379,88 @@ function describeQuoteMismatch(normQuote, normLabel, rawLabel) {
   return `совпадает до «…${matchedTail}», дальше в цитате «${quoteNext}», в лейбле «${labelNext}»${hint}; `;
 }
 
+// Обычный файл (симлинк — по цели). Каталог по маске стража не считается: каталог
+// `QA-001.md/` в in-progress/ — не тикет (ревью стража 2026-09-27).
+function isRegularFile(p) {
+  try {
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Первый существующий обычный файл по шаблону стража ребра (§4 `edge_guards`) или `null`.
+ * Шаблон — от корня проекта, `*` только в последнем сегменте (`isEdgeGuardPath`):
+ * перечисляется один каталог. На Windows имя сравнивается без учёта регистра.
+ * Как в shell-glob, `*` не ловит точечные файлы, если маска сама не начинается с точки:
+ * `.gitkeep.md` в каталоге тикетов служебный (так его отсекает и `utils.mjs`), иначе
+ * страж `in-progress/*.md` закрывал бы ребро и при пустом in-progress/.
+ * Возвращает путь от корня через `/` — он попадает в текст отказа.
+ */
+function firstExistingGuardPath(root, pattern) {
+  if (!isEdgeGuardPath(pattern)) return null;
+  const segs = pattern.split(/[\\/]/).filter((s) => s.length > 0);
+  const last = segs.pop();
+  const dir = path.join(root, ...segs);
+  const rel = (name) => [...segs, name].join('/');
+  if (!last.includes('*')) return isRegularFile(path.join(dir, last)) ? rel(last) : null;
+  const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`^${last.split('*').map(escape).join('.*')}$`, process.platform === 'win32' ? 'i' : '');
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const skipDotted = !last.startsWith('.');
+  const hit = entries
+    .filter((e) => !(skipDotted && e.name.startsWith('.')) && re.test(e.name))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    .find((e) => e.isFile() || (e.isSymbolicLink() && isRegularFile(path.join(dir, e.name))));
+  return hit ? rel(hit.name) : null;
+}
+
+// id тикета для `{ticket}`: одно имя без разделителей и масок, не `.`/`..` — подстановка
+// не выводит путь из каталога шаблона и не расширяет маску.
+const TICKET_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+// Шаблон стража с подставленным тикетом; null — страж пропускается (тикета нет или он не id).
+function resolveGuardPattern(pattern, ticket) {
+  if (typeof pattern !== 'string') return null;
+  if (!pattern.includes(TICKET_PLACEHOLDER)) return pattern;
+  if (typeof ticket !== 'string' || !TICKET_ID_RE.test(ticket)) return null;
+  return pattern.split(TICKET_PLACEHOLDER).join(ticket);
+}
+
+/**
+ * Страж, который сейчас закрывает ребро `from → to` (§4 `edge_guards`): первый страж этого
+ * ребра, у которого по `deny_if_exists` в проекте есть обычный файл, — `{reason, path}`
+ * (`path` — от корня через `/`), иначе `null`. Без `root` — `null`: стражи не проверяются.
+ *
+ * `{ticket}` в пути — id тикета этого запуска (`ticket`; раннер передаёт его агенту в
+ * WORKFLOW_RAILS_TICKET). Инцидент 2026-09-27 и ревью стража: маска `in-progress/*.md`
+ * закрывала ветку «тикет не найден» из-за ЛЮБОГО тикета в in-progress/, в том числе чужого.
+ * Тикета нет или он не похож на id — страж с `{ticket}` пропускается (ребро открыто): вне
+ * запуска раннера рельсы тикет не знают, а ложный отказ там закрыл бы честный выход.
+ *
+ * @param {object} config распарсенный `rails.yaml`
+ * @param {string} from
+ * @param {string} to
+ * @param {{root?: string, ticket?: string|null}} [ctx]
+ * @returns {{reason: string, path: string}|null}
+ */
+export function edgeGuardHit(config, from, to, { root, ticket } = {}) {
+  if (!root || !Array.isArray(config?.edge_guards)) return null;
+  for (const g of config.edge_guards) {
+    if (!g || g.from !== from || g.to !== to) continue;
+    const pattern = resolveGuardPattern(g.deny_if_exists, ticket);
+    const hit = pattern === null ? null : firstExistingGuardPath(root, pattern);
+    if (hit) return { reason: g.reason || `переход ${from} → ${to} закрыт`, path: hit };
+  }
+  return null;
+}
+
 /**
  * Переход `goto <node> --quote "<текст>"` (§5).
  *
@@ -371,13 +469,16 @@ function describeQuoteMismatch(normQuote, normLabel, rawLabel) {
  *  2. цитата не короче `config.quote_min`, по умолчанию 25 (`code: "short-quote"`);
  *  3. нормализованная цитата — подстрока нормализованного лейбла цели
  *     (`code: "quote-mismatch"`);
- *  4. потолок цикла (`config.cycles`), если пара (текущий этап → этап цели)
+ *  4. страж ребра (`config.edge_guards`, `edgeGuardHit`): если для ребра задан
+ *     `deny_if_exists` и такой обычный файл в проекте есть — отказ (`code: "edge_guard"`).
+ *     Нужен `root`, без него страж не проверяется; `{ticket}` в пути — `ticket`;
+ *  5. потолок цикла (`config.cycles`), если пара (текущий этап → этап цели)
  *     в нём числится, не превышен (`code: "cycle_limit"`, есть `key`).
  *
  * При отказе — инкремент `state.denials[текущий узел]`. При успехе —
  * запись в `history`, перевод `state.node`, инкремент счётчика цикла, если
  * применим. Состояние мутируется на месте; сохранение на диск (`saveState`)
- * — забота вызывающего кода (эта функция не получает `root`).
+ * — забота вызывающего кода (`root` здесь только для чтения путей стража ребра).
  * `state.counters`/`state.denials`/`state.history` инициализируются, если их
  * нет (повреждённый или собранный вручную JSON).
  *
@@ -389,10 +490,12 @@ function describeQuoteMismatch(normQuote, normLabel, rawLabel) {
  * @param {object} state
  * @param {{ node(id: string): object|undefined, outgoing(id: string): Array<{to: string, label: string|null}> }} graph
  * @param {object} config распарсенный `rails.yaml`
- * @param {{node: string, quote: string}} params
+ * @param {{node: string, quote: string, root?: string, ticket?: string|null}} params `root` —
+ *   корень проекта, от которого считаются пути `edge_guards[].deny_if_exists`; `ticket` —
+ *   id тикета запуска для `{ticket}` в этих путях (WORKFLOW_RAILS_TICKET)
  * @returns {{ok: boolean, code?: string, key?: string, reason?: string, allowed: Array<{id: string, label: string}>}}
  */
-export function applyGoto(state, graph, config, { node, quote } = {}) {
+export function applyGoto(state, graph, config, { node, quote, root, ticket } = {}) {
   const s = normalizeState(state);
   s.counters ??= {};
   s.denials ??= {};
@@ -426,6 +529,13 @@ export function applyGoto(state, graph, config, { node, quote } = {}) {
   if (!targetNode || !targetLabel.includes(normQuote)) {
     return deny('quote-mismatch', `цитата «${shownQuote}» не найдена в лейбле узла ${node} — ${describeQuoteMismatch(normQuote, targetLabel, targetNode?.label)}нужна дословная подстрока лейбла`);
   }
+
+  // Страж ребра: ответ на выборе или гейте агент даёт сам, рельсы его не проверяют.
+  // Там, где ответ проверяется файлом проекта, ребро закрывается фактом (инцидент
+  // 2026-09-27: исполнитель ответил «тикет не найден» при тикете в in-progress/ и
+  // ушёл к выводу со status blocked, минуя выполнение).
+  const guard = edgeGuardHit(config, current, node, { root, ticket });
+  if (guard) return deny('edge_guard', `${guard.reason} (есть ${guard.path})`);
 
   const fromInfo = parseNodeId(current);
   const toInfo = parseNodeId(node);

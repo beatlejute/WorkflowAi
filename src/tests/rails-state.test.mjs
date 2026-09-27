@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, rmSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readdirSync, writeFileSync, existsSync, symlinkSync, unlinkSync } from 'node:fs';
 import {
   loadState,
   saveState,
@@ -11,6 +11,8 @@ import {
   startState,
   applyGoto,
   allowedTransitions,
+  describeTransitions,
+  edgeGuardHit,
   checkActionLimit,
   currentNodeInfo,
   bumpCounter,
@@ -64,6 +66,232 @@ const CONFIG = {
     { from: 5, to: 4, max: 3, reason: 'Три круга «правка → тест» не сошлись — выход к человеку' },
   ],
 };
+
+// --- страж ребра (edge_guards): ответ «нет» на выборе опровергается файлом проекта ----
+// Инцидент 2026-09-27: исполнитель ответил «тикет не найден» при тикете в in-progress/ и
+// ушёл к выводу со status blocked, минуя выполнение.
+
+const GUARD_NODES = [
+  { id: 'P0Q1', type: 'Q', stage: 0, label: 'П0 ВЫБОР: тикет найден в in-progress и прочитан?' },
+  { id: 'P1E1', type: 'E', stage: 1, label: 'П1 ВХОД: проверить существующий прогресс тикета' },
+  { id: 'P7E1', type: 'E', stage: 7, label: 'П7 ВХОД: вывести структурированный результат' },
+];
+const GUARD_EDGES = [
+  { from: 'P0Q1', to: 'P1E1', label: 'да' },
+  { from: 'P0Q1', to: 'P7E1', label: 'нет' },
+];
+const GUARD_CONFIG = {
+  quote_min: 25,
+  edge_guards: [{
+    from: 'P0Q1',
+    to: 'P7E1',
+    deny_if_exists: '.workflow/tickets/in-progress/*.md',
+    reason: 'Тикет в in-progress/ есть — ветка «тикет не найден» закрыта',
+  }],
+};
+const guardState = () => ({ node: 'P0Q1', history: [], counters: {}, denials: {} });
+
+test('applyGoto: страж ребра — файл по deny_if_exists есть, переход отклонён с причиной и путём', () => {
+  withRoot((root) => {
+    mkdirSync(join(root, '.workflow', 'tickets', 'in-progress'), { recursive: true });
+    writeFileSync(join(root, '.workflow', 'tickets', 'in-progress', 'QA-001.md'), '# QA-001\n', 'utf8');
+    const state = guardState();
+    const r = applyGoto(state, makeGraph(GUARD_NODES, GUARD_EDGES), GUARD_CONFIG, { node: 'P7E1', quote: 'вывести структурированный результат', root });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'edge_guard');
+    assert.match(r.reason, /ветка «тикет не найден» закрыта/);
+    assert.match(r.reason, /\.workflow\/tickets\/in-progress\/QA-001\.md/);
+    assert.equal(state.node, 'P0Q1');
+    assert.equal(state.denials.P0Q1, 1);
+  });
+});
+
+test('applyGoto: страж ребра — файла нет, переход разрешён; другое ребро стражем не закрыто', () => {
+  withRoot((root) => {
+    mkdirSync(join(root, '.workflow', 'tickets', 'in-progress'), { recursive: true });
+    const graph = makeGraph(GUARD_NODES, GUARD_EDGES);
+    const empty = guardState();
+    assert.equal(applyGoto(empty, graph, GUARD_CONFIG, { node: 'P7E1', quote: 'вывести структурированный результат', root }).ok, true);
+
+    writeFileSync(join(root, '.workflow', 'tickets', 'in-progress', 'QA-001.md'), '# QA-001\n', 'utf8');
+    const other = guardState();
+    assert.equal(applyGoto(other, graph, GUARD_CONFIG, { node: 'P1E1', quote: 'проверить существующий прогресс тикета', root }).ok, true);
+  });
+});
+
+test('applyGoto: страж ребра — файл не по маске (.txt) и отсутствие каталога переход не закрывают', () => {
+  withRoot((root) => {
+    const graph = makeGraph(GUARD_NODES, GUARD_EDGES);
+    assert.equal(applyGoto(guardState(), graph, GUARD_CONFIG, { node: 'P7E1', quote: 'вывести структурированный результат', root }).ok, true);
+    mkdirSync(join(root, '.workflow', 'tickets', 'in-progress'), { recursive: true });
+    writeFileSync(join(root, '.workflow', 'tickets', 'in-progress', 'notes.txt'), 'x', 'utf8');
+    assert.equal(applyGoto(guardState(), graph, GUARD_CONFIG, { node: 'P7E1', quote: 'вывести структурированный результат', root }).ok, true);
+  });
+});
+
+// `.gitkeep.md` кладут в каталоги тикетов (так в D:/Dev/documentaions/.workflow/tickets/in-progress);
+// остальной код считает точечные файлы служебными (utils.mjs, pick-next-task-core.js). Если бы
+// `*` их ловила, ветка «тикет не найден» была бы закрыта навсегда и при пустом in-progress/.
+test('applyGoto: страж ребра — `*` не ловит точечные файлы (.gitkeep.md), явная точка в маске ловит', () => {
+  withRoot((root) => {
+    const dir = join(root, '.workflow', 'tickets', 'in-progress');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '.gitkeep.md'), '# In Progress\n', 'utf8');
+    const graph = makeGraph(GUARD_NODES, GUARD_EDGES);
+    assert.equal(applyGoto(guardState(), graph, GUARD_CONFIG, { node: 'P7E1', quote: 'вывести структурированный результат', root }).ok, true);
+
+    const dotted = { ...GUARD_CONFIG, edge_guards: [{ ...GUARD_CONFIG.edge_guards[0], deny_if_exists: '.workflow/tickets/in-progress/.*.md' }] };
+    const r = applyGoto(guardState(), graph, dotted, { node: 'P7E1', quote: 'вывести структурированный результат', root });
+    assert.equal(r.code, 'edge_guard');
+    assert.match(r.reason, /in-progress\/\.gitkeep\.md/);
+
+    writeFileSync(join(dir, 'QA-001.md'), '# QA-001\n', 'utf8');
+    const hit = applyGoto(guardState(), graph, GUARD_CONFIG, { node: 'P7E1', quote: 'вывести структурированный результат', root });
+    assert.equal(hit.code, 'edge_guard');
+    assert.match(hit.reason, /in-progress\/QA-001\.md/);
+  });
+});
+
+test('applyGoto: страж ребра — путь без маски проверяется существованием файла', () => {
+  withRoot((root) => {
+    const graph = makeGraph(GUARD_NODES, GUARD_EDGES);
+    const config = { ...GUARD_CONFIG, edge_guards: [{ ...GUARD_CONFIG.edge_guards[0], deny_if_exists: 'marker.flag' }] };
+    assert.equal(applyGoto(guardState(), graph, config, { node: 'P7E1', quote: 'вывести структурированный результат', root }).ok, true);
+    writeFileSync(join(root, 'marker.flag'), '', 'utf8');
+    const r = applyGoto(guardState(), graph, config, { node: 'P7E1', quote: 'вывести структурированный результат', root });
+    assert.equal(r.code, 'edge_guard');
+    assert.match(r.reason, /есть marker\.flag/);
+  });
+});
+
+test('applyGoto: страж ребра — без root не проверяется, ошибка цитаты важнее стража', () => {
+  withRoot((root) => {
+    mkdirSync(join(root, '.workflow', 'tickets', 'in-progress'), { recursive: true });
+    writeFileSync(join(root, '.workflow', 'tickets', 'in-progress', 'QA-001.md'), '# QA-001\n', 'utf8');
+    const graph = makeGraph(GUARD_NODES, GUARD_EDGES);
+    assert.equal(applyGoto(guardState(), graph, GUARD_CONFIG, { node: 'P7E1', quote: 'вывести структурированный результат' }).ok, true);
+    const bad = applyGoto(guardState(), graph, GUARD_CONFIG, { node: 'P7E1', quote: 'совсем другой текст, не из лейбла', root });
+    assert.equal(bad.code, 'quote-mismatch');
+  });
+});
+
+// --- `{ticket}`: страж смотрит на тикет ЭТОГО запуска (ревью стража 2026-09-27) --------
+// Маска `in-progress/*.md` закрывала ветку «тикет не найден» из-за любого тикета в
+// in-progress/, в том числе чужого.
+
+const TICKET_GUARD_CONFIG = {
+  ...GUARD_CONFIG,
+  edge_guards: [{ ...GUARD_CONFIG.edge_guards[0], deny_if_exists: '.workflow/tickets/in-progress/{ticket}.md' }],
+};
+const P7E1_QUOTE = 'вывести структурированный результат';
+
+function inProgress(root, ...names) {
+  const dir = join(root, '.workflow', 'tickets', 'in-progress');
+  mkdirSync(dir, { recursive: true });
+  for (const n of names) writeFileSync(join(dir, n), `# ${n}\n`, 'utf8');
+  return dir;
+}
+
+test('applyGoto: страж ребра — {ticket} подставляется: свой тикет закрывает ребро, чужой нет', () => {
+  withRoot((root) => {
+    inProgress(root, 'QA-001.md');
+    const graph = makeGraph(GUARD_NODES, GUARD_EDGES);
+    const own = applyGoto(guardState(), graph, TICKET_GUARD_CONFIG, { node: 'P7E1', quote: P7E1_QUOTE, root, ticket: 'QA-001' });
+    assert.equal(own.code, 'edge_guard');
+    assert.match(own.reason, /ветка «тикет не найден» закрыта \(есть \.workflow\/tickets\/in-progress\/QA-001\.md\)$/);
+    assert.deepEqual(edgeGuardHit(TICKET_GUARD_CONFIG, 'P0Q1', 'P7E1', { root, ticket: 'QA-001' }), {
+      reason: TICKET_GUARD_CONFIG.edge_guards[0].reason,
+      path: '.workflow/tickets/in-progress/QA-001.md',
+    });
+    assert.equal(edgeGuardHit(TICKET_GUARD_CONFIG, 'P0Q1', 'P7E1', { ticket: 'QA-001' }), null, 'без root стражи не проверяются');
+
+    // В in-progress/ только чужой тикет — ветка «тикет не найден» для QA-002 открыта.
+    const foreign = applyGoto(guardState(), graph, TICKET_GUARD_CONFIG, { node: 'P7E1', quote: P7E1_QUOTE, root, ticket: 'QA-002' });
+    assert.equal(foreign.ok, true, foreign.reason);
+  });
+});
+
+// Тикета нет (вне запуска раннера) или он не id — страж с {ticket} пропускается, ребро
+// открыто. Файл с буквальным именем `{ticket}.md` тоже не считается: шаблон без тикета не
+// проверяется вовсе. `QA-*` и `sub/QA-001` без проверки id расширили бы маску или путь.
+test('applyGoto: страж ребра — тикета нет или он не id -> страж с {ticket} пропускается', () => {
+  withRoot((root) => {
+    const dir = inProgress(root, 'QA-001.md', '{ticket}.md');
+    mkdirSync(join(dir, 'sub'));
+    writeFileSync(join(dir, 'sub', 'QA-001.md'), '# QA-001\n', 'utf8');
+    const graph = makeGraph(GUARD_NODES, GUARD_EDGES);
+    for (const ticket of [undefined, null, '', 'QA-*', 'sub/QA-001', 'sub\\QA-001', '..', '.hidden', 42]) {
+      const r = applyGoto(guardState(), graph, TICKET_GUARD_CONFIG, { node: 'P7E1', quote: P7E1_QUOTE, root, ticket });
+      assert.equal(r.ok, true, `ticket=${JSON.stringify(ticket)}: ${r.reason}`);
+      assert.equal(edgeGuardHit(TICKET_GUARD_CONFIG, 'P0Q1', 'P7E1', { root, ticket }), null, `ticket=${JSON.stringify(ticket)}`);
+    }
+  });
+});
+
+// Каталог `QA-001.md/` в in-progress/ — не тикет; до ревью 2026-09-27 и маска (readdir
+// по именам), и путь без маски (existsSync) считали его файлом.
+test('applyGoto: страж ребра — каталог с именем по маске или пути ребро не закрывает, файл закрывает', () => {
+  withRoot((root) => {
+    const dir = inProgress(root);
+    mkdirSync(join(dir, 'QA-001.md'));
+    mkdirSync(join(root, 'marker.flag'));
+    const graph = makeGraph(GUARD_NODES, GUARD_EDGES);
+    const literal = { ...GUARD_CONFIG, edge_guards: [{ ...GUARD_CONFIG.edge_guards[0], deny_if_exists: 'marker.flag' }] };
+    const cases = [
+      [GUARD_CONFIG, undefined],
+      [TICKET_GUARD_CONFIG, 'QA-001'],
+      [literal, undefined],
+    ];
+    for (const [config, ticket] of cases) {
+      const r = applyGoto(guardState(), graph, config, { node: 'P7E1', quote: P7E1_QUOTE, root, ticket });
+      assert.equal(r.ok, true, `${config.edge_guards[0].deny_if_exists}: ${r.reason}`);
+    }
+
+    writeFileSync(join(dir, 'QA-002.md'), '# QA-002\n', 'utf8');
+    const hit = applyGoto(guardState(), graph, GUARD_CONFIG, { node: 'P7E1', quote: P7E1_QUOTE, root });
+    assert.equal(hit.code, 'edge_guard');
+    assert.match(hit.reason, /in-progress\/QA-002\.md\)$/, 'каталог QA-001.md пропущен, найден файл QA-002.md');
+  });
+});
+
+// Ссылка — по цели: junction (на Windows без прав администратора — единственная ссылка,
+// Dirent.isSymbolicLink() === true) на каталог — не тикет.
+test('applyGoto: страж ребра — ссылка на каталог с именем по маске ребро не закрывает', () => {
+  withRoot((root) => {
+    const dir = inProgress(root);
+    mkdirSync(join(root, 'target-dir'));
+    const link = join(dir, 'QA-001.md');
+    symlinkSync(join(root, 'target-dir'), link, 'junction');
+    try {
+      const graph = makeGraph(GUARD_NODES, GUARD_EDGES);
+      for (const [config, ticket] of [[GUARD_CONFIG, undefined], [TICKET_GUARD_CONFIG, 'QA-001']]) {
+        const r = applyGoto(guardState(), graph, config, { node: 'P7E1', quote: P7E1_QUOTE, root, ticket });
+        assert.equal(r.ok, true, `${config.edge_guards[0].deny_if_exists}: ${r.reason}`);
+      }
+    } finally {
+      unlinkSync(link); // ссылку снять до удаления каталога теста
+    }
+  });
+});
+
+test('describeTransitions: ребро, закрытое стражем, — «закрыто» без команды, остальные с командой', () => {
+  withRoot((root) => {
+    inProgress(root, 'QA-001.md');
+    const graph = makeGraph(GUARD_NODES, GUARD_EDGES);
+    const [yes, no] = describeTransitions(guardState(), graph, TICKET_GUARD_CONFIG, { root, ticket: 'QA-001' });
+    assert.match(yes, /^P1E1: .* → node \.workflow\/src\/rails\/cli\.mjs goto P1E1 --quote '/);
+    assert.equal(no, `P7E1: ${GUARD_NODES[2].label} — закрыто: ${TICKET_GUARD_CONFIG.edge_guards[0].reason} (есть .workflow/tickets/in-progress/QA-001.md)`);
+    assert.doesNotMatch(no, /goto/);
+
+    // Чужой тикет, без тикета, без root — ребро открыто, команда на месте.
+    for (const ctx of [{ root, ticket: 'QA-002' }, { root }, { ticket: 'QA-001' }, undefined]) {
+      const lines = describeTransitions(guardState(), graph, TICKET_GUARD_CONFIG, ctx);
+      assert.match(lines[1], /^P7E1: .* → node \.workflow\/src\/rails\/cli\.mjs goto P7E1 --quote '/, JSON.stringify(ctx));
+    }
+    // allowedTransitions рёбра не фильтрует — это список рёбер графа.
+    assert.deepEqual(allowedTransitions(guardState(), graph).map((t) => t.id), ['P1E1', 'P7E1']);
+  });
+});
 
 // --- цикл внутри этапа (from == to): считается только возврат назад ----------
 // Первый прогон коуча 2026-09-22: три штатных шага вперёд P1R1 → P1R2 → P1R3 упёрлись

@@ -2749,3 +2749,53 @@ test('decide: отказ даёт готовую команду перехода
     assert.equal(loadState(root, sessionId).node, 'P4S1');
   });
 });
+
+// --- страж ребра в «Доступно» отказа хука (ревью стража 2026-09-27) ---------------------
+//
+// Ребро, закрытое стражем, отказ не рекламирует готовой командой: слабые модели её копируют,
+// а goto её всё равно отклонит. Тикет для `{ticket}` — как у goto: из состояния сессии, без
+// него — ctx.ticket, иначе WORKFLOW_RAILS_TICKET окружения хоста (ставит раннер).
+test('decide: отказ — ребро, закрытое стражем {ticket}, «закрыто» без команды; тикет из состояния, ctx или окружения', () => {
+  withProject(({ root, skillDir }) => {
+    writeFileSync(join(skillDir, 'rails.yaml'), `${railsYaml()}${[
+      'edge_guards:',
+      '  - from: P4S1',
+      '    to: P5E1',
+      '    deny_if_exists: ".workflow/tickets/in-progress/{ticket}.md"',
+      '    reason: "Тикет запуска в in-progress/ есть — ветка закрыта"',
+      '',
+    ].join('\n')}`, 'utf8');
+    mkdirSync(join(root, '.workflow', 'tickets', 'in-progress'), { recursive: true });
+    writeFileSync(join(root, '.workflow', 'tickets', 'in-progress', 'QA-001.md'), '# QA-001\n', 'utf8');
+    const canary = { tool: 'Bash', kind: 'shell', command: 'echo RAILS_CANARY' };
+    const closed = /Доступно: переходы: P5E1: [^;\n]* — закрыто: Тикет запуска в in-progress\/ есть — ветка закрыта \(есть \.workflow\/tickets\/in-progress\/QA-001\.md\)/;
+
+    const prev = process.env.WORKFLOW_RAILS_TICKET;
+    delete process.env.WORKFLOW_RAILS_TICKET;
+    try {
+      const { sessionId } = makeState(root, 'P4S1');
+      const viaCtx = decide({ action: canary, ctx: { cwd: root, sessionId, ticket: 'QA-001' } });
+      assert.equal(viaCtx.decision, 'deny');
+      assert.match(viaCtx.reason, closed);
+      assert.doesNotMatch(viaCtx.reason, /goto P5E1/);
+
+      process.env.WORKFLOW_RAILS_TICKET = 'QA-001';
+      const viaEnv = decide({ action: canary, ctx: { cwd: root, sessionId } });
+      assert.match(viaEnv.reason, closed);
+      assert.doesNotMatch(viaEnv.reason, /goto P5E1/);
+
+      process.env.WORKFLOW_RAILS_TICKET = 'QA-002'; // в in-progress/ только чужой тикет
+      const foreign = decide({ action: canary, ctx: { cwd: root, sessionId } });
+      assert.match(foreign.reason, /P5E1: [^\n]*→ node \.workflow\/src\/rails\/cli\.mjs goto P5E1 --quote '/);
+
+      // Тикет в состоянии (его пишет хук, создавая состояние) важнее окружения — как у goto.
+      const { sessionId: withTicket } = makeState(root, 'P4S1', { ticket: 'QA-001' });
+      const fromState = decide({ action: canary, ctx: { cwd: root, sessionId: withTicket } });
+      assert.match(fromState.reason, closed);
+      assert.doesNotMatch(fromState.reason, /goto P5E1/);
+    } finally {
+      if (prev === undefined) delete process.env.WORKFLOW_RAILS_TICKET;
+      else process.env.WORKFLOW_RAILS_TICKET = prev;
+    }
+  });
+});

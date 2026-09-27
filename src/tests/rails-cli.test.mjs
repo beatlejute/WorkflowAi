@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 import { run } from '../rails/cli.mjs';
+import { decide } from '../rails/core.mjs';
 import { startState, loadState } from '../rails/state.mjs';
 import { readJournal } from '../rails/journal.mjs';
 import { createJunction } from '../junction-manager.mjs';
@@ -280,6 +281,162 @@ test('run goto: без активной сессии -> code 1', () => {
   withProject(({ root }) => {
     const r = run(['goto', 'P4S1', '--quote', 'x'], { cwd: root, env: {} });
     assert.equal(r.code, 1);
+  });
+});
+
+// Страж ребра (edge_guards) проверяется только при переданном `root`, а в проде его
+// передаёт один вызов — cmdGoto. Без этого теста потеря аргумента выключила бы страж
+// молча (инцидент 2026-09-27: «тикет не найден» при тикете в in-progress/).
+// cwd — подкаталог проекта: пути стража считаются от найденного корня, а не от cwd.
+test('run goto: страж ребра — файл есть -> code 2 с причиной и путём, файла нет -> переход', () => {
+  withProject(({ root, skillDir }) => {
+    writeFileSync(join(skillDir, 'rails.yaml'), `${RAILS_YAML}${[
+      'edge_guards:',
+      '  - from: P4E1',
+      '    to: P4S1',
+      '    deny_if_exists: ".workflow/tickets/in-progress/*.md"',
+      '    reason: "В in-progress/ есть тикет — ветка закрыта стражем"',
+      '',
+    ].join('\n')}`, 'utf8');
+    const inProgress = join(root, '.workflow', 'tickets', 'in-progress');
+    mkdirSync(inProgress, { recursive: true });
+    writeFileSync(join(inProgress, 'TASK-001.md'), '# TASK-001\n', 'utf8');
+    const sub = join(root, 'src', 'deep');
+    mkdirSync(sub, { recursive: true });
+
+    const sessionId = randomUUID();
+    assert.equal(run(['start', 'clitest', '--session', sessionId], { cwd: root, env: {} }).code, 0);
+    const argv = ['goto', 'P4S1', '--quote', 'Выполнить шаг мини-скила теста CLI и продолжить дальше', '--session', sessionId];
+
+    for (const cwd of [root, sub]) {
+      const denied = run(argv, { cwd, env: {} });
+      assert.equal(denied.code, 2, cwd);
+      assert.match(denied.stdout, /Почему: В in-progress\/ есть тикет — ветка закрыта стражем \(есть \.workflow\/tickets\/in-progress\/TASK-001\.md\)/, cwd);
+      assert.equal(loadState(root, sessionId).node, 'P4E1', cwd);
+    }
+    const journal = readJournal(root);
+    assert.equal(journal.filter((e) => /ветка закрыта стражем/.test(e.reason || '')).length, 2);
+
+    rmSync(join(inProgress, 'TASK-001.md'));
+    const passed = run(argv, { cwd: sub, env: {} });
+    assert.equal(passed.code, 0, passed.stdout);
+    assert.match(passed.stdout, /RAILS: числится P4S1/);
+  });
+});
+
+// `{ticket}` — тикет запуска; без хука состояние создаёт `start` и берёт тикет из
+// WORKFLOW_RAILS_TICKET окружения CLI (ставит раннер). Ревью стража 2026-09-27: страж
+// закрывал ребро из-за любого тикета в in-progress/, а закрытое ребро перечни переходов
+// рекламировали готовой командой — слабые модели её копируют.
+// Второе ребро P4E1 → P5E1 — чтобы видеть, что открытое ребро команду сохраняет.
+test('run start/goto: страж с {ticket} — свой тикет: code 2, в «Доступно» ребро «закрыто» без команды; только чужой тикет — переход', () => {
+  withProject(({ root, skillDir }) => {
+    writeFileSync(join(skillDir, 'SKILL.md'), SKILL_MD.replace('    P4E1 --> P4S1\n', '    P4E1 --> P4S1\n    P4E1 --> P5E1\n'), 'utf8');
+    writeFileSync(join(skillDir, 'rails.yaml'), `${RAILS_YAML}${[
+      'edge_guards:',
+      '  - from: P4E1',
+      '    to: P4S1',
+      '    deny_if_exists: ".workflow/tickets/in-progress/{ticket}.md"',
+      '    reason: "Тикет запуска в in-progress/ есть — ветка закрыта стражем"',
+      '',
+    ].join('\n')}`, 'utf8');
+    const checked = run(['check', '--skill', 'clitest'], { cwd: root, env: {} });
+    assert.equal(checked.code, 0, `rails.yaml со стражем {ticket} проходит check:\n${checked.stdout}`);
+    const inProgress = join(root, '.workflow', 'tickets', 'in-progress');
+    mkdirSync(inProgress, { recursive: true });
+    writeFileSync(join(inProgress, 'TASK-001.md'), '# TASK-001\n', 'utf8');
+    const closed = /P4S1: .* — закрыто: Тикет запуска в in-progress\/ есть — ветка закрыта стражем \(есть \.workflow\/tickets\/in-progress\/TASK-001\.md\)/;
+    const own = { WORKFLOW_RAILS_TICKET: 'TASK-001' };
+
+    const sessionId = randomUUID();
+    const started = run(['start', 'clitest', '--session', sessionId], { cwd: root, env: own });
+    assert.equal(started.code, 0, started.stdout);
+    assert.match(started.stdout, closed);
+    assert.doesNotMatch(started.stdout, /goto P4S1/);
+    assert.match(started.stdout, /P5E1: .* → node \.workflow\/src\/rails\/cli\.mjs goto P5E1 --quote '/);
+
+    const argv = ['goto', 'P4S1', '--quote', 'Выполнить шаг мини-скила теста CLI и продолжить дальше', '--session', sessionId];
+    const denied = run(argv, { cwd: root, env: own });
+    assert.equal(denied.code, 2, denied.stdout);
+    assert.match(denied.stdout, /Почему: Тикет запуска в in-progress\/ есть — ветка закрыта стражем \(есть \.workflow\/tickets\/in-progress\/TASK-001\.md\)/);
+    const available = denied.stdout.split('\n').find((l) => l.startsWith('Доступно: ')) ?? '';
+    assert.match(available, closed);
+    assert.doesNotMatch(available, /goto P4S1/);
+    assert.match(available, /goto P5E1 --quote '/);
+    assert.equal(loadState(root, sessionId).node, 'P4E1');
+
+    // В in-progress/ только чужой тикет, а тикет запуска другой — ветка открыта.
+    const foreignSession = randomUUID();
+    assert.equal(run(['start', 'clitest', '--session', foreignSession], { cwd: root, env: { WORKFLOW_RAILS_TICKET: 'TASK-002' } }).code, 0);
+    const passed = run(['goto', 'P4S1', '--quote', 'Выполнить шаг мини-скила теста CLI и продолжить дальше', '--session', foreignSession], { cwd: root, env: {} });
+    assert.equal(passed.code, 0, passed.stdout);
+    assert.match(passed.stdout, /RAILS: числится P4S1/);
+  });
+});
+
+// Тикет запуска — из состояния сессии (§5): хук пишет его из окружения хоста при первом
+// действии агента, раньше, чем выполнится `start`. Ревью стража 2026-09-27: `goto` брал
+// тикет из окружения CLI, и агент открывал страж подменой — `WORKFLOW_RAILS_TICKET=… node
+// …cli.mjs goto`, пустым значением или `unset`: такие команды общие правила хука пропускают.
+// Там же два перечня переходов, которые не проверял ни один тест: после успешного `goto`
+// (рёбра нового узла агент видит именно там) и в отказе `start` чужого скила.
+test('run start/goto: тикет {ticket} — из состояния, созданного хуком: подмена окружения CLI страж не открывает; «закрыто» и после goto, и в отказе start чужого скила', () => {
+  withProject(({ root, skillDir }) => {
+    writeFileSync(join(skillDir, 'rails.yaml'), `${RAILS_YAML}${[
+      'edge_guards:',
+      '  - from: P4S1',
+      '    to: P5E1',
+      '    deny_if_exists: ".workflow/tickets/in-progress/{ticket}.md"',
+      '    reason: "Тикет запуска в in-progress/ есть — ветка закрыта стражем"',
+      '',
+    ].join('\n')}`, 'utf8');
+    const inProgress = join(root, '.workflow', 'tickets', 'in-progress');
+    mkdirSync(inProgress, { recursive: true });
+    writeFileSync(join(inProgress, 'TASK-001.md'), '# TASK-001\n', 'utf8');
+    const closed = /P5E1: .* — закрыто: Тикет запуска в in-progress\/ есть — ветка закрыта стражем \(есть \.workflow\/tickets\/in-progress\/TASK-001\.md\)/;
+
+    // Хук под окружением хоста раннера (скил и тикет запуска): состояния нет — создаёт его.
+    const sessionId = randomUUID();
+    const prevSkill = process.env.WORKFLOW_RAILS_SKILL;
+    const prevTicket = process.env.WORKFLOW_RAILS_TICKET;
+    process.env.WORKFLOW_RAILS_SKILL = 'clitest';
+    process.env.WORKFLOW_RAILS_TICKET = 'TASK-001';
+    try {
+      assert.equal(decide({ action: { tool: 'Read', kind: 'read' }, ctx: { cwd: root, sessionId } }).decision, 'allow');
+    } finally {
+      if (prevSkill === undefined) delete process.env.WORKFLOW_RAILS_SKILL;
+      else process.env.WORKFLOW_RAILS_SKILL = prevSkill;
+      if (prevTicket === undefined) delete process.env.WORKFLOW_RAILS_TICKET;
+      else process.env.WORKFLOW_RAILS_TICKET = prevTicket;
+    }
+    assert.equal(loadState(root, sessionId).ticket, 'TASK-001', 'хук пишет тикет хоста в состояние');
+
+    // Агент: окружение CLI с чужим тикетом, пустым и без переменной.
+    const spoofed = [{ WORKFLOW_RAILS_TICKET: 'zzz' }, { WORKFLOW_RAILS_TICKET: '' }, {}];
+    const started = run(['start', 'clitest', '--session', sessionId], { cwd: root, env: spoofed[0] });
+    assert.equal(started.code, 0, started.stdout);
+    assert.equal(loadState(root, sessionId).ticket, 'TASK-001', 'start сохраняет тикет состояния, созданного хуком');
+
+    const moved = run(['goto', 'P4S1', '--quote', 'Выполнить шаг мини-скила теста CLI и продолжить дальше', '--session', sessionId], { cwd: root, env: spoofed[0] });
+    assert.equal(moved.code, 0, moved.stdout);
+    assert.match(moved.stdout, /RAILS: числится P4S1/);
+    assert.match(moved.stdout, closed);
+    assert.doesNotMatch(moved.stdout, /goto P5E1/);
+
+    const argv = ['goto', 'P5E1', '--quote', 'Переход к финальному этапу мини-скила теста CLI процедуры', '--session', sessionId];
+    for (const env of spoofed) {
+      const denied = run(argv, { cwd: root, env });
+      assert.equal(denied.code, 2, `${JSON.stringify(env)}: ${denied.stdout}`);
+      assert.match(denied.stdout, /Почему: Тикет запуска в in-progress\/ есть — ветка закрыта стражем/);
+    }
+    assert.equal(loadState(root, sessionId).node, 'P4S1');
+
+    // Отказ `start` чужого скила при скиле запуска: переходы из узла сессии — тоже «закрыто».
+    const refused = run(['start', 'other', '--session', sessionId], { cwd: root, env: { WORKFLOW_RAILS_SKILL: 'clitest' } });
+    assert.equal(refused.code, 2, refused.stdout);
+    assert.match(refused.stdout, /числится P4S1/);
+    assert.match(refused.stdout, closed);
+    assert.doesNotMatch(refused.stdout, /goto P5E1/);
   });
 });
 

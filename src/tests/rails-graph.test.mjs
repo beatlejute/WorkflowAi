@@ -490,3 +490,18 @@ test('loadSkillGraph: fragments включает SKILL.md — не дублир�
   assert.ok(!result.errors.some((e) => e.code === 'dup-id'), 'SKILL.md не должен попасть в files дважды');
   assert.deepEqual(result.stats.files, ['SKILL.md', 'workflows/extra.md']);
 });
+
+test('validate: unknown-guard-edge — страж на ребро, которого нет в графе', () => {
+  const dir = join(FIXTURES, 'unknown-terminal-pause');
+  const config = {
+    entry: 'P0E1',
+    terminal: ['P0S1'],
+    edge_guards: [
+      { from: 'P0E1', to: 'P0S1', deny_if_exists: 'x.md', reason: 'есть ребро' },
+      { from: 'P0S1', to: 'P0E1', deny_if_exists: 'x.md', reason: 'нет ребра' },
+    ],
+  };
+  const errs = loadSkillGraph(dir, config).validate(config).errors.filter((e) => e.code === 'unknown-guard-edge');
+  assert.equal(errs.length, 1);
+  assert.equal(errs[0].id, 'P0S1');
+});

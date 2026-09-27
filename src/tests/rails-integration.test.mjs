@@ -770,6 +770,7 @@ describe('run-skill-tests.js — rails в изолированном test workdi
     const judgeScript = path.join(pipelineDir, 'rails-mock-judge.mjs');
     const retryTargetScript = path.join(pipelineDir, 'rails-mock-retry-target.mjs');
     const retryCounterPath = path.join(pipelineDir, 'retry-call-count.txt');
+    const retryTicketsPath = path.join(pipelineDir, 'retry-tickets.txt');
     const targetCounterPath = path.join(pipelineDir, 'target-call-count.txt');
 
     // Целевой агент: пишет rails-состояние в terminal-узле с RAILS-маркером
@@ -791,6 +792,7 @@ describe('run-skill-tests.js — rails в изолированном test workdi
       "fs.writeFileSync(path.join(stateDir, `${run || 'norun'}.json`), JSON.stringify({ run, node: 'P1S1', skill }));",
       "const report = {",
       "  role, skill, run,",
+      "  ticket: process.env.WORKFLOW_RAILS_TICKET || null,",
       "  railsReadme: fs.existsSync(path.join(cwd, '.workflow', 'src', 'rails', 'README.md')),",
       "  settings: fs.existsSync(path.join(cwd, '.claude', 'settings.local.json')),",
       "  kiloPlugin: fs.existsSync(path.join(cwd, '.kilo', 'plugin', 'workflow-rails.js'))",
@@ -825,6 +827,7 @@ describe('run-skill-tests.js — rails в изолированном test workdi
       "const prev = fs.existsSync(counterPath) ? parseInt(fs.readFileSync(counterPath, 'utf8'), 10) : 0;",
       "const calls = prev + 1;",
       "fs.writeFileSync(counterPath, String(calls));",
+      `fs.appendFileSync(${JSON.stringify(retryTicketsPath)}, (process.env.WORKFLOW_RAILS_TICKET || '-') + '\\n');`,
       "if (calls === 1) {",
       "  fs.writeFileSync(path.join(stateDir, `${run}.json`), JSON.stringify({ run, node: 'P1E1', skill }));",
       "  process.stdout.write('---RESULT---\\nstatus: passed\\n---RESULT---\\nfirst attempt, no marker\\n');",
@@ -871,9 +874,23 @@ describe('run-skill-tests.js — rails в изолированном test workdi
       '  max_stop_blocks: 2'
     ].join('\n'));
     fs.writeFileSync(path.join(TESTS_DIR, 'rubrics', 'rubric.md'), '# Rubric\nScore >= 4: pass\nscore ≥ 4\n');
+    // Вход ticket_file: его ticket_id целевой агент получает в WORKFLOW_RAILS_TICKET
+    // (`{ticket}` в стражах рёбер, rails/README.md §4, §11). Первым в кейсе — чужой тикет
+    // в done/: тикет запуска — вход, который кладётся в in-progress/, а не первый по порядку.
+    fs.writeFileSync(path.join(TESTS_DIR, 'ticket-fixture.md'), '# TASK-777\n');
+    fs.writeFileSync(path.join(TESTS_DIR, 'foreign-ticket-fixture.md'), '# TASK-776\n');
     fs.writeFileSync(path.join(TESTS_DIR, 'tc-rails-001.yaml'), [
       'description: "rails e2e smoke"',
       'prompt: "Do the thing"',
+      'scenario:',
+      '  inputs:',
+      '    - kind: ticket_file',
+      '      path: "foreign-ticket-fixture.md"',
+      '      ticket_id: TASK-776',
+      '      dest_dir: done',
+      '    - kind: ticket_file',
+      '      path: "ticket-fixture.md"',
+      '      ticket_id: TASK-777',
       'severity: normal',
       'assertions:',
       '  rubric:',
@@ -905,9 +922,15 @@ describe('run-skill-tests.js — rails в изолированном test workdi
       '  max_stop_blocks: 2'
     ].join('\n'));
     fs.writeFileSync(path.join(TESTS_DIR_RETRY, 'rubrics', 'rubric.md'), '# Rubric\nScore >= 4: pass\nscore ≥ 4\n');
+    fs.writeFileSync(path.join(TESTS_DIR_RETRY, 'ticket-fixture.md'), '# TASK-778\n');
     fs.writeFileSync(path.join(TESTS_DIR_RETRY, 'tc-rails-002.yaml'), [
       'description: "rails e2e retry"',
       'prompt: "Do the thing"',
+      'scenario:',
+      '  inputs:',
+      '    - kind: ticket_file',
+      '      path: "ticket-fixture.md"',
+      '      ticket_id: TASK-778',
       'severity: normal',
       'assertions:',
       '  rubric:',
@@ -958,6 +981,7 @@ describe('run-skill-tests.js — rails в изолированном test workdi
     assert.equal(report.role, 'coordinator');
     assert.equal(report.skill, SKILL_NAME);
     assert.ok(report.run && report.run.length > 0, 'WORKFLOW_RAILS_RUN должен быть задан');
+    assert.equal(report.ticket, 'TASK-777', 'WORKFLOW_RAILS_TICKET — ticket_id входа ticket_file кейса в in-progress/, а не первого по порядку');
     assert.equal(report.railsReadme, true, 'в test workdir должно быть видно содержимое ядра rails через junction src/rails');
     assert.equal(report.settings, true, '.claude/settings.local.json должен существовать в test workdir');
     assert.equal(report.kiloPlugin, true, '.kilo/plugin/workflow-rails.js должен существовать в test workdir');
@@ -990,5 +1014,7 @@ describe('run-skill-tests.js — rails в изолированном test workdi
 
     const calls = fs.readFileSync(path.join(pipelineDir, 'retry-call-count.txt'), 'utf8');
     assert.equal(calls, '2', 'целевой агент должен быть вызван ровно дважды: первый ответ + один повтор с вердиктом');
+    const tickets = fs.readFileSync(path.join(pipelineDir, 'retry-tickets.txt'), 'utf8');
+    assert.equal(tickets, 'TASK-778\nTASK-778\n', 'WORKFLOW_RAILS_TICKET — и у первого запуска, и у повтора');
   });
 });
