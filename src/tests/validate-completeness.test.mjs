@@ -29,7 +29,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, rmSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -94,10 +94,10 @@ RULE = 3
 - [ ] критерий
 `;
 
-function validate(name, content) {
+function validate(name, content, env = process.env) {
   const file = join(DIR, name);
   writeFileSync(file, content);
-  const out = execFileSync('node', [SCRIPT, file], { encoding: 'utf8', cwd: DIR });
+  const out = execFileSync(process.execPath, [SCRIPT, file], { encoding: 'utf8', cwd: DIR, env });
   return JSON.parse(out.split('---RESULT---')[1]);
 }
 
@@ -153,7 +153,7 @@ const VALID_TASKS = `### 1. Команда
 ### 2. Несколько записей
 
 **Проверка:**
-- check: \`rg -c "ключ: значение" docs/x.md\`, expect: \`stdout matches /^[1-9]/\`
+- check: \`git grep -q --untracked "ключ: значение" -- docs/x.md\`, expect: \`exit 0\`
 - check: \`npm test\`, expect: \`exit 0\`, regression: \`true\`
 - prose: \`понятность формулировки командой не проверить\`
 
@@ -180,6 +180,48 @@ test('check: без expect: — ошибка записи с номером за
   assert.equal(result.valid, false);
   assert.deepEqual(taskErrors(result), [
     { task: 1, message: 'Задача 1: запись проверки 1 не по формату (check_without_expect)' }
+  ]);
+});
+
+test('команда check без исполняемого файла на машине — ошибка с перечнем установленных', () => {
+  // PATH из одного каталога, где есть только git: validate запускает скрипт по полному
+  // пути node, исполняемый файл проверки ищется по этому PATH. Содержимое git не запускается.
+  const bin = mkdtempSync(join(tmpdir(), 'validate-completeness-bin-'));
+  const git = join(bin, process.platform === 'win32' ? 'git.exe' : 'git');
+  writeFileSync(git, '');
+  chmodSync(git, 0o755);
+  try {
+    const tasks = [
+      '### 1. Задача',
+      '',
+      '**Проверка:**',
+      '- check: `rg -c "ключ" docs/x.md`, expect: `exit 0`',
+      '- check: `git grep -q --untracked "ключ" -- docs/x.md`, expect: `exit 0`'
+    ].join('\n');
+    const result = validate('checks-no-tool.md', withTasks(tasks), { ...process.env, PATH: bin });
+    assert.equal(result.valid, false);
+    assert.deepEqual(taskErrors(result), [
+      { task: 1, message: 'Задача 1: запись проверки 1 — на машине нет «rg» (установлены: git)' }
+    ]);
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test('команда check, которую отклонит исполнитель проверок, — ошибка с причиной', () => {
+  const tasks = [
+    '### 1. Задача',
+    '',
+    '**Проверка:**',
+    '- check: `curl https://example.com`, expect: `exit 0`',
+    '- check: `node a.js; rm x`, expect: `exit 0`, regression: `true`',
+    '- prose: `текст`'
+  ].join('\n');
+  const result = validate('checks-denied.md', withTasks(tasks));
+  assert.equal(result.valid, false);
+  assert.deepEqual(taskErrors(result), [
+    { task: 1, message: 'Задача 1: запись проверки 1 отклонит исполнитель проверок (executable_not_allowed: curl)' },
+    { task: 1, message: 'Задача 1: запись проверки 2 отклонит исполнитель проверок (shell_operator: ;)' }
   ]);
 });
 

@@ -9,7 +9,9 @@
  * Проверяет:
  * - Обязательные поля frontmatter (id, title, status, author, created_at)
  * - Обязательные секции (# Цель, ## Контекст, ## Справочные данные, ## Scope, ## Высокоуровневые задачи, ## Риски, ## Критерии успеха)
- * - Строку **Проверка:** у каждой задачи «Высокоуровневых задач» и формат её записей
+ * - Строку **Проверка:** у каждой задачи «Высокоуровневых задач» и формат её записей;
+ *   команда записи check исполнима на этой машине: исполнитель проверок её не отклонит,
+ *   исполняемый файл установлен
  * - Красные флаги (отсылки вместо содержания, пустые секции)
  *
  * Вывод: JSON {errors, warnings, valid} через ---RESULT---
@@ -19,7 +21,7 @@ import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { printResult } from 'workflow-ai/lib/utils.mjs';
-import { parseCheckRecord } from 'workflow-ai/lib/check-runner.mjs';
+import { parseCheckRecord, checkStartProblem, availableCheckTools } from 'workflow-ai/lib/check-runner.mjs';
 
 const REQUIRED_FRONTMATTER_FIELDS = ['id', 'title', 'status', 'author', 'created_at'];
 
@@ -171,6 +173,11 @@ const LIST_ITEM = /^\s*[-*]\s+(.*)$/;
  * переносит проверки без изменений, и verify-atomicity отклоняет такие тикеты
  * (`only_regression_checks`) на каждом проходе.
  *
+ * Команда записи check, которую исполнитель проверок отклонит или которой нет
+ * исполняемого файла на машине (checkStartProblem, check-runner.mjs), — ошибка:
+ * такая проверка красная всегда, и пункт DoD не закроется. Ошибка отсутствующего
+ * файла перечисляет доступные (availableCheckTools) — из них выбирается замена.
+ *
  * Подсказки `<!-- … -->` и блоки кода пропускаются: пример записи в них — не проверка
  * задачи (в шаблоне плана подсказка секции перечисляет все формы). Секции нет — ошибок
  * здесь нет: её отсутствие называет checkSections.
@@ -242,9 +249,18 @@ function checkTaskVerifications(content) {
       errors.push({ task: number, message: `Задача ${number}: запись и в строке **Проверка:**, и списком под ней` });
     }
     const parsed = records.map((record) => parseCheckRecord(record));
-    parsed.forEach(({ error }, i) => {
+    parsed.forEach(({ kind, command, expect, error }, i) => {
       if (error) {
         errors.push({ task: number, message: `Задача ${number}: запись проверки ${i + 1} не по формату (${error})` });
+        return;
+      }
+      if (kind !== 'check') return;
+      const problem = checkStartProblem({ check: command, expect });
+      if (problem?.status === 'denied') {
+        errors.push({ task: number, message: `Задача ${number}: запись проверки ${i + 1} отклонит исполнитель проверок (${problem.reason})` });
+      } else if (problem?.status === 'tool_missing') {
+        const available = availableCheckTools().join(', ') || 'ни одного';
+        errors.push({ task: number, message: `Задача ${number}: запись проверки ${i + 1} — на машине нет «${problem.tool}» (установлены: ${available})` });
       }
     });
     if (parsed.length > 0 && parsed.every(({ kind, regression, error }) => kind === 'check' && regression && !error)) {

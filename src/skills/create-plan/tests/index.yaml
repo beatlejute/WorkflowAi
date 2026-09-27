@@ -48,3 +48,8 @@ cases:
     origin_chg: ["PLAN-002 задача 5 (2026-09-26)"]
     tags: [verification-line, check-forms, plan-quality]
     severity: high
+  - id: TC-CREATE-PLAN-008
+    file: cases/TC-CREATE-PLAN-008-check-tool-installed.yaml
+    origin_chg: ["ad-hoc-2026-09-26-check-tools"]
+    tags: [verification-line, check-tools, plan-quality]
+    severity: high

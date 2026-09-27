@@ -84,9 +84,9 @@ function checkLine(command, extra = '') {
   return `  - check: \`${command}\`, expect: \`exit 0\`${extra}`;
 }
 
-function moveToReady(ids) {
+function moveToReady(ids, env = process.env) {
   const prompt = `move-to-ready\n\nContext:\n  ready_tickets: ${ids.join(', ')}\n`;
-  const run = spawnSync('node', [SCRIPT, prompt], { cwd: root, encoding: 'utf8' });
+  const run = spawnSync(process.execPath, [SCRIPT, prompt], { cwd: root, encoding: 'utf8', env });
   const output = `${run.stdout}\n${run.stderr}`;
   assert.equal(run.status, 0, `move-to-ready завершился с ${run.status}:\n${output}`);
   const block = run.stdout.split('---RESULT---')[1] ?? '';
@@ -192,6 +192,43 @@ test('неполная запись проверки — тикет в blocked/ 
 
   assert.equal(columnOf('IMPL-MALFORMED'), 'blocked', output);
   assert.equal(frontmatterOf('IMPL-MALFORMED').blocked_reason, 'check_malformed: пункт 1 (check_without_expect)');
+});
+
+test('проверка без исполняемого файла на машине, и регрессионная тоже, — тикет в blocked/ с check_tool_missing', () => {
+  putTicket('IMPL-NO-TOOL', {
+    dod: [
+      '- [ ] Поиск находит строку',
+      checkLine('rg -c needle root-marker.txt'),
+      '- [ ] Прежние тесты зелёные',
+      checkLine('pytest -q', ', regression: `true`')
+    ]
+  });
+  // PATH без единого исполняемого файла: скрипт запускается по полному пути node.
+  const emptyBin = fs.mkdtempSync(path.join(os.tmpdir(), 'move-to-ready-bin-'));
+
+  try {
+    const { output, result } = moveToReady(['IMPL-NO-TOOL'], { ...process.env, PATH: emptyBin });
+
+    assert.equal(columnOf('IMPL-NO-TOOL'), 'blocked', output);
+    assert.equal(
+      frontmatterOf('IMPL-NO-TOOL').blocked_reason,
+      'check_tool_missing: пункт 1 (rg); check_tool_missing: пункт 2 (pytest)'
+    );
+    assert.equal(result.blocked, '1');
+  } finally {
+    fs.rmSync(emptyBin, { recursive: true, force: true });
+  }
+});
+
+test('регрессионная проверка, которую исполнитель отклонит, — тикет в blocked/ с check_denied', () => {
+  putTicket('IMPL-REGRESSION-DENIED', {
+    dod: ['- [ ] Прежний сервис отвечает', checkLine('curl https://example.com', ', regression: `true`')]
+  });
+
+  const { output } = moveToReady(['IMPL-REGRESSION-DENIED']);
+
+  assert.equal(columnOf('IMPL-REGRESSION-DENIED'), 'blocked', output);
+  assert.equal(frontmatterOf('IMPL-REGRESSION-DENIED').blocked_reason, 'check_denied: пункт 1 (executable_not_allowed: curl)');
 });
 
 test('пункты prose и visual гейт не проверяет — тикет в ready/', () => {

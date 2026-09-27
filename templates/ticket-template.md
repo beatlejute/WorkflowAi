@@ -78,7 +78,11 @@ tags: []
 - check: `<команда>`, expect: `<ожидание>` — одна команда без операторов
   оболочки (; && || | > < ` $( ), запуск от корня проекта. Разрешены node,
   npm (test, run <скрипт>), git (status, diff, log, show, ls-files, rev-parse,
-  grep), pytest, python, dotnet, rg, grep. Ожидание: `exit <N>` |
+  grep), pytest, python, dotnet, rg, grep. Исполняемый файл должен быть на
+  машине, где идёт пайплайн: проверку без него отклоняют валидатор плана и гейт
+  перед работой. rg и grep установлены не везде — текст в репозитории ищет
+  `git grep -q --untracked "<текст>" -- <путь>` (без --untracked новый файл не
+  виден, пока его не добавят в git). Ожидание: `exit <N>` |
   `stdout contains <текст>` | `stdout not contains <текст>` |
   `stdout matches /<регэксп>/`. Закрывает скрипт, без модели.
 - regression: `true` после check и expect — проверка зелёная и до работы:

@@ -18,6 +18,8 @@ import path from 'node:path';
 
 import {
   runCheck,
+  checkStartProblem,
+  availableCheckTools,
   parseDodChecks,
   parseCheckRecord,
   isDodFormat2,
@@ -273,6 +275,72 @@ test('процесс не стартовал — failed с причиной spaw
   assert.equal(result.status, 'failed');
   assert.ok(result.reason.startsWith('spawn_failed: '), result.reason);
   assert.equal(result.exit_code, null);
+});
+
+// ---------------------------------------------------------------------------
+// Проверка без запуска: checkStartProblem, availableCheckTools
+// ---------------------------------------------------------------------------
+
+// Каталог-«PATH» с исполняемым файлом tool: на Windows запуск находит <имя>.exe, вне
+// Windows — файл с правом исполнения. Содержимое не запускается.
+function binWith(tool, { executable = true } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'check-runner-bin-'));
+  const file = path.join(dir, process.platform === 'win32' ? `${tool}.exe` : tool);
+  fs.writeFileSync(file, '', 'utf8');
+  if (process.platform !== 'win32') fs.chmodSync(file, executable ? 0o755 : 0o644);
+  return dir;
+}
+
+function withPath(dir, fn) {
+  const saved = process.env.PATH;
+  process.env.PATH = dir;
+  try {
+    return fn();
+  } finally {
+    process.env.PATH = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('checkStartProblem: исполняемый файл есть в PATH — null', () => {
+  const problem = withPath(binWith('rg'), () => checkStartProblem({ check: 'rg -c probe probe.txt', expect: 'exit 0' }));
+  assert.equal(problem, null);
+});
+
+test('checkStartProblem: исполняемого файла нет в PATH — tool_missing с именем', () => {
+  for (const check of ['rg -c probe probe.txt', 'npm test', 'node -e "process.exit(0)"']) {
+    const tool = check.split(' ')[0];
+    const problem = withPath(binWith('other'), () => checkStartProblem({ check, expect: 'exit 0' }));
+    assert.deepEqual(problem, { status: 'tool_missing', reason: `tool_missing: ${tool}`, tool }, check);
+  }
+});
+
+test('checkStartProblem: файл без права исполнения — tool_missing', { skip: process.platform === 'win32' }, () => {
+  const problem = withPath(binWith('rg', { executable: false }), () => checkStartProblem({ check: 'rg x', expect: 'exit 0' }));
+  assert.equal(problem?.status, 'tool_missing');
+});
+
+test('checkStartProblem: отказ исполнителя — denied с той же причиной, что у runCheck', async () => {
+  for (const [check, expect] of [
+    ['curl https://example.com', 'exit 0'],
+    ['node a.js; rm x', 'exit 0'],
+    ['rg --pre=sh x', 'exit 0'],
+    ['node -e "1"', 'exit code 0']
+  ]) {
+    const problem = checkStartProblem({ check, expect });
+    const result = await run(check, expect);
+    assert.deepEqual(problem, { status: 'denied', reason: result.reason }, check);
+  }
+});
+
+test('checkStartProblem: node из PATH процесса находится — null', () => {
+  assert.equal(checkStartProblem({ check: 'node -e "process.exit(0)"', expect: 'exit 0' }), null);
+});
+
+test('availableCheckTools: только разрешённые исполняемые файлы, найденные в PATH', () => {
+  const dir = binWith('rg');
+  fs.writeFileSync(path.join(dir, process.platform === 'win32' ? 'curl.exe' : 'curl'), '', { mode: 0o755 });
+  assert.deepEqual(withPath(dir, () => availableCheckTools()), ['rg']);
 });
 
 // ---------------------------------------------------------------------------

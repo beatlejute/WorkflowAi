@@ -17,7 +17,9 @@
  *   - рабочий каталог — корень проекта, таймаут — 120 с, stdout и stderr в
  *     результате — по 4000 символов, в памяти — не больше CHECK_CAPTURE_LIMIT
  *     байт каждого потока.
- * Нарушение даёт `denied`, процесс не запускается. Хуки Claude Code команды
+ * Нарушение даёт `denied`, процесс не запускается. checkStartProblem называет без
+ * запуска и отказ, и отсутствие исполняемого файла на машине — для валидатора плана
+ * и гейта move-to-ready. Хуки Claude Code команды
  * исполнителя не видят: их запускает скрипт пайплайна через spawn, а не
  * инструмент Claude Code, — защита только в этом модуле.
  *
@@ -215,6 +217,31 @@ function resolveExecutable(argv) {
   return { file: executable, args };
 }
 
+// Где spawn без оболочки находит исполняемый файл: каталоги PATH по порядку; на
+// Windows имя без расширения — с .com или .exe, а файл без расширения, .cmd и файл
+// в рабочем каталоге не запускаются (проверено запуском).
+function findOnPath(file) {
+  const windows = process.platform === 'win32';
+  const names = windows && !path.extname(file) ? [`${file}.com`, `${file}.exe`] : [file];
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (!dir) continue;
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      try {
+        if (!fs.statSync(candidate).isFile()) continue;
+        if (!windows) fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch {}
+    }
+  }
+  return null;
+}
+
+function executableFound(argv) {
+  const { file } = resolveExecutable(argv);
+  return path.isAbsolute(file) ? fs.existsSync(file) : findOnPath(file) !== null;
+}
+
 // Дерево целиком: `npm test` запускает дочерний node, и без этого он пережил бы
 // таймаут, держа открытыми трубы вывода (проверено запуском на Windows: после
 // kill() одного npm close пришёл, лишь когда внук доработал).
@@ -309,6 +336,42 @@ function clip({ text, totalBytes, overflow }) {
   return `[усечено: последние ${CHECK_OUTPUT_LIMIT} из ${text.length} символов]\n${tail}`;
 }
 
+// Разбор и ограничения до запуска: argv и ожидание или причина отказа.
+function prepareCheck(check, expect) {
+  const parsed = splitCommand(String(check ?? '').trim());
+  if (parsed.error) return { error: parsed.error };
+  const violation = commandViolation(parsed.argv);
+  if (violation) return { error: violation };
+  const expectation = parseExpect(expect);
+  if (expectation.error) return { error: expectation.error };
+  return { argv: parsed.argv, expectation };
+}
+
+/**
+ * Что помешает проверке исполниться, без запуска. Проверка, которой нечем
+ * исполниться, красная всегда: пункт DoD не закроется, тикет из ревью не выйдет.
+ *
+ * @param {object} params
+ * @param {string} params.check - команда
+ * @param {string} params.expect - ожидание
+ * @returns {{status: 'denied', reason: string} | {status: 'tool_missing', reason: string,
+ *   tool: string} | null} `denied` — причина, с которой откажет runCheck;
+ *   `tool_missing` — исполняемого файла нет там, где его найдёт запуск (PATH процесса,
+ *   для npm на Windows — npm.cmd с npm-cli.js); null — проверка запустится
+ */
+export function checkStartProblem({ check, expect }) {
+  const prepared = prepareCheck(check, expect);
+  if (prepared.error) return { status: 'denied', reason: prepared.error };
+  const tool = prepared.argv[0];
+  if (!executableFound(prepared.argv)) return { status: 'tool_missing', reason: `tool_missing: ${tool}`, tool };
+  return null;
+}
+
+/** Разрешённые исполняемые файлы, которые есть на машине, — в порядке списка. */
+export function availableCheckTools() {
+  return [...ALLOWED_EXECUTABLES].filter(tool => executableFound([tool]));
+}
+
 /**
  * Исполняет проверку пункта DoD.
  *
@@ -330,14 +393,11 @@ function clip({ text, totalBytes, overflow }) {
 export async function runCheck({ check, expect, projectRoot, timeoutMs = CHECK_TIMEOUT_MS, captureLimit = CHECK_CAPTURE_LIMIT }) {
   const denied = reason => ({ status: 'denied', exit_code: null, stdout: '', stderr: '', duration_ms: 0, reason });
 
-  const parsed = splitCommand(String(check ?? '').trim());
-  if (parsed.error) return denied(parsed.error);
-  const violation = commandViolation(parsed.argv);
-  if (violation) return denied(violation);
-  const expectation = parseExpect(expect);
-  if (expectation.error) return denied(expectation.error);
+  const prepared = prepareCheck(check, expect);
+  if (prepared.error) return denied(prepared.error);
+  const { argv, expectation } = prepared;
 
-  const run = await spawnCheck(parsed.argv, projectRoot, timeoutMs, captureLimit);
+  const run = await spawnCheck(argv, projectRoot, timeoutMs, captureLimit);
   const report = {
     exit_code: run.exitCode,
     stdout: clip(run.stdout),

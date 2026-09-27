@@ -12,7 +12,9 @@
  * проверки `check` его DoD без пометки `regression` исполняются и обязаны быть
  * красными — работа ещё не начата. Зелёная, отклонённая (`denied`), упавшая по
  * таймауту или неполная проверка отправляет тикет в blocked/ с причиной в
- * `blocked_reason` (PLAN-002, задача 18).
+ * `blocked_reason` (PLAN-002, задача 18). Туда же — любая проверка `check`, в том
+ * числе регрессионная, которую исполнитель отклонит или которой нет исполняемого
+ * файла на машине: она красная всегда.
  *
  * Выводит результат:
  *   ---RESULT---
@@ -28,7 +30,7 @@ import path from 'path';
 import YAML from 'workflow-ai/lib/js-yaml.mjs';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { parseFrontmatter, serializeFrontmatter, replaceFileAtomicSync } from 'workflow-ai/lib/utils.mjs';
-import { runCheck, parseDodChecks, isDodFormat2 } from '../lib/check-runner.mjs';
+import { runCheck, checkStartProblem, parseDodChecks, isDodFormat2 } from '../lib/check-runner.mjs';
 
 // Корень проекта
 const PROJECT_DIR = findProjectRoot();
@@ -51,24 +53,33 @@ function parseReadyTickets(prompt) {
  *
  * Зелёная проверка до работы значит пустой критерий или уже сделанную задачу.
  * Проверки с пометкой `regression` (существующие тесты) зелёные по определению и
- * не запускаются; пункты prose и visual не проверяются. Статус `failed` —
- * ожидаемое состояние, в том числе когда процесс проверки не стартовал.
+ * не запускаются, но, как и остальные, не должны быть отклонены исполнителем или
+ * остаться без исполняемого файла (checkStartProblem); пункты prose и visual не
+ * проверяются. Статус `failed` — ожидаемое состояние.
  *
  * @returns {Promise<string[]>} причины блокировки; пустой список — тикет идёт в ready/
  */
 async function checksBlockingStart(body) {
   const problems = [];
   for (const item of parseDodChecks(body)) {
-    if (item.kind !== 'check' || item.regression) continue;
+    if (item.kind !== 'check') continue;
     if (item.error) {
       problems.push(`check_malformed: пункт ${item.index} (${item.error})`);
       continue;
     }
+    const startProblem = checkStartProblem({ check: item.command, expect: item.expect });
+    if (startProblem?.status === 'denied') {
+      problems.push(`check_denied: пункт ${item.index} (${startProblem.reason})`);
+      continue;
+    }
+    if (startProblem?.status === 'tool_missing') {
+      problems.push(`check_tool_missing: пункт ${item.index} (${startProblem.tool})`);
+      continue;
+    }
+    if (item.regression) continue;
     const result = await runCheck({ check: item.command, expect: item.expect, projectRoot: PROJECT_DIR });
     if (result.status === 'passed') {
       problems.push(`check_green_before_start: пункт ${item.index}`);
-    } else if (result.status === 'denied') {
-      problems.push(`check_denied: пункт ${item.index} (${result.reason})`);
     } else if (result.status === 'timeout') {
       problems.push(`check_timeout: пункт ${item.index} (${result.reason})`);
     }

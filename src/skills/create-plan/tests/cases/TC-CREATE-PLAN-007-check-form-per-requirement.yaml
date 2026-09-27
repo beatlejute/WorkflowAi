@@ -39,7 +39,7 @@ scenario:
     - kind: dir
       path: "../fixtures/plan-template-check-forms"
       dest_dir: ".workflow/templates"
-      description: "Фрагмент templates/plan-template.md (строки 47–99): секция задач с тремя формами записи проверки. В рабочем каталоге прогона шаблонов нет — createTestWorkdir их не создаёт."
+      description: "Фрагмент templates/plan-template.md (строки 47–103): секция задач с тремя формами записи проверки. В рабочем каталоге прогона шаблонов нет — createTestWorkdir их не создаёт."
 
 assertions:
   static:
