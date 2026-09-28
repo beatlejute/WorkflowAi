@@ -342,6 +342,12 @@ pipeline:
       workdir: "."
       description: "Завершает план (status: completed) и архивирует done-тикеты"
 
+    script-check-created-tickets:
+      command: "node"
+      args: [".workflow/src/scripts/check-created-tickets.js"]
+      workdir: "."
+      description: "Проверяет, что decompose-gaps записал новые тикеты на доску"
+
     script-verify-atomicity:
       command: "node"
       args: [".workflow/src/skills/decompose-plan/scripts/verify-atomicity.js"]
@@ -1184,6 +1190,21 @@ pipeline:
       agents: [claude-sonnet, gpt-luna, deepseek-flash]
       skill: decompose-gaps
       goto:
+        default:
+          stage: check-decompose-result
+          params:
+            created_tickets: "$result.created_tickets"
+
+    # Без новых тикетов круг check-conditions → create-report → analyze-report повторяет
+    # отчёт и разбор на той же доске с тем же итогом: 2026-09-28 PulseProxy, пробел вне
+    # плана отклонён с `created_tickets: []`, и отчёт с разбором написаны ещё раз (~15 мин).
+    check-decompose-result:
+      description: "Создала ли decompose-gaps тикеты на доске"
+      agent: script-check-created-tickets
+      timeout: 60
+      goto:
+        created: check-conditions
+        none: end
         default: check-conditions
 
   # ===========================================================================
