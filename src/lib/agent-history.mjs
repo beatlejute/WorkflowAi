@@ -118,6 +118,16 @@ export function parseAgentHistory(content) {
 }
 
 /**
+ * Тикет уже брал исполнитель: в «Истории работы» есть строка скила execute-task (раннер
+ * пишет её после каждого запуска исполнителя, _auditAgentRun). По ней гейт dod_format: 2
+ * (dodStartProblems) отличает новый тикет от вернувшегося в backlog/ после работы.
+ */
+export function hasExecuteTaskRun(content) {
+  const section = String(content ?? '').match(/(^|\n)## История работы\s*\n([\s\S]*?)(?=\n## |$)/);
+  return Boolean(section) && /^\|[^|\n]*\|\s*execute-task\s*\|/m.test(section[2]);
+}
+
+/**
  * Ограничение провайдера, на котором закончился запуск: текст лимита (rate limit,
  * quota exceeded, too many requests — в обычных записях регистра) или код 429 после
  * `status`, `code`, `error`, `HTTP` — в одной из трёх последних строк stderr (пустые

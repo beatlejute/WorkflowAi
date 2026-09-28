@@ -31,6 +31,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { hasExecuteTaskRun } from './agent-history.mjs';
 
 export const CHECK_TIMEOUT_MS = 120_000;
 export const CHECK_OUTPUT_LIMIT = 4000;
@@ -557,11 +558,19 @@ export function parseCheckRecord(text) {
  * тикет попадёт на доску: 2026-09-28 тикет доработки PulseProxy FIX-031 был записан с
  * проверками через `|` и проверкой, зелёной до начала, и гейт сразу отправил его в blocked/.
  *
+ * Тикет, который исполнитель уже брал (строка execute-task в «Истории работы»,
+ * hasExecuteTaskRun), проверки не запускает: зелёные пункты — его прежняя работа, а не
+ * пустой критерий. Так тикет возвращается из backlog/, куда его отправил check-conditions
+ * при невыполненных зависимостях. 2026-09-28 PulseProxy DOCS-10: отчёт написан в прошлых
+ * прогонах, тикету добавили зависимости, check-conditions вернул его в backlog/, и при
+ * повторном входе гейт отправил его в blocked/ за шесть зелёных проверок.
+ *
  * @param {{body: string, projectRoot: string}} args - тело тикета и корень проекта
  * @returns {Promise<string[]>} причины блокировки; пустой список — тикет можно брать в работу
  */
 export async function dodStartProblems({ body, projectRoot }) {
   const problems = [];
+  const executedBefore = hasExecuteTaskRun(body);
   for (const item of parseDodChecks(body)) {
     if (item.kind !== 'check') continue;
     if (item.error) {
@@ -577,7 +586,7 @@ export async function dodStartProblems({ body, projectRoot }) {
       problems.push(`check_tool_missing: пункт ${item.index} (${startProblem.tool})`);
       continue;
     }
-    if (item.regression) continue;
+    if (item.regression || executedBefore) continue;
     const result = await runCheck({ check: item.command, expect: item.expect, projectRoot });
     if (result.status === 'passed') {
       problems.push(`check_green_before_start: пункт ${item.index}`);

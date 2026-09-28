@@ -54,7 +54,7 @@ const ran = name => fs.existsSync(path.join(root, name));
 /**
  * Тикет в backlog/. dod — строки секции DoD как есть (пункты и вложенные проверки).
  */
-function putTicket(id, { dodFormat = 2, type = 'impl', dod }) {
+function putTicket(id, { dodFormat = 2, type = 'impl', dod, history = [] }) {
   const frontmatter = [
     '---',
     `id: "${id}"`,
@@ -75,6 +75,9 @@ function putTicket(id, { dodFormat = 2, type = 'impl', dod }) {
     '',
     '## Результат выполнения',
     '',
+    ...(history.length > 0
+      ? ['## История работы', '', '| Дата/время | Скил | Агент | Статус |', '|------------|------|-------|--------|', ...history, '']
+      : []),
     ''
   ].join('\n');
   fs.writeFileSync(path.join(tickets, 'backlog', `${id}.md`), text, 'utf8');
@@ -144,6 +147,50 @@ test('та же зелёная проверка с regression: true не зап�
   assert.equal(result.status, 'moved');
   assert.equal(result.moved, '1');
   assert.equal(result.blocked, '0');
+});
+
+// 2026-09-28 PulseProxy DOCS-10: отчёт написан в прошлых прогонах, check-conditions вернул
+// тикет в backlog/ из-за новых зависимостей, и при повторном входе гейт отправил его в
+// blocked/ за шесть зелёных проверок — прежнюю работу он принял за пустые критерии.
+test('тикет, который исполнитель уже брал, — зелёные проверки не запускаются, тикет в ready/', () => {
+  putTicket('DOCS-AGAIN', {
+    dod: ['- [x] Отчёт написан', checkLine(trace('again-ran')), '- [ ] Сверка с доской', checkLine(RED)],
+    history: [
+      '| 2026-09-28 08:25:49 | execute-task | kilo-free(model-a) | ok |',
+      '| 2026-09-28 08:41:59 | review-result | model-b | ok |',
+    ],
+  });
+
+  const { output, result } = moveToReady(['DOCS-AGAIN']);
+
+  assert.equal(columnOf('DOCS-AGAIN'), 'ready', output);
+  assert.equal(ran('again-ran'), false, 'проверка тикета, который уже выполнялся, запускалась');
+  assert.equal(frontmatterOf('DOCS-AGAIN').blocked_reason, undefined);
+  assert.equal(result.moved, '1');
+});
+
+test('тикет, который исполнитель уже брал, — отклонённая проверка по-прежнему в blocked/', () => {
+  putTicket('DOCS-AGAIN-DENIED', {
+    dod: ['- [ ] Критерий', checkLine('node -e "process.exit(0)" | cat')],
+    history: ['| 2026-09-28 08:25:49 | execute-task | model-a | ok |'],
+  });
+
+  const { output } = moveToReady(['DOCS-AGAIN-DENIED']);
+
+  assert.equal(columnOf('DOCS-AGAIN-DENIED'), 'blocked', output);
+  assert.match(frontmatterOf('DOCS-AGAIN-DENIED').blocked_reason, /^check_denied: пункт 1/);
+});
+
+test('в истории только ревью, исполнителя не было — зелёная проверка в blocked/', () => {
+  putTicket('DOCS-REVIEW-ONLY', {
+    dod: ['- [ ] Критерий', checkLine(GREEN)],
+    history: ['| 2026-09-28 08:41:59 | review-result | model-b | ok |'],
+  });
+
+  const { output } = moveToReady(['DOCS-REVIEW-ONLY']);
+
+  assert.equal(columnOf('DOCS-REVIEW-ONLY'), 'blocked', output);
+  assert.equal(frontmatterOf('DOCS-REVIEW-ONLY').blocked_reason, 'check_green_before_start: пункт 1');
 });
 
 test('красная проверка — тикет в ready/', () => {

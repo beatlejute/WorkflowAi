@@ -26,7 +26,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { appendAgentRun, parseAgentHistory, classifyAgentResult } from '../lib/agent-history.mjs';
+import { appendAgentRun, parseAgentHistory, classifyAgentResult, hasExecuteTaskRun } from '../lib/agent-history.mjs';
 
 const ENTRY = { timestamp: '2026-09-24 10:00', skill: 'execute-task', agent: 'claude-sonnet', status: 'ok' };
 
@@ -170,6 +170,21 @@ test('разбор: строка неверной ширины пропуска�
   }
   assert.equal(warned.length, 1);
   assert.match(warned[0], /Invalid row/);
+});
+
+// ---------- hasExecuteTaskRun ----------
+
+test('исполнитель брал тикет: строка execute-task в «Истории работы»', () => {
+  const table = (...rows) => ['## История работы', '', '| Дата/время | Скил | Агент | Статус |', '|---|---|---|---|', ...rows].join('\n');
+  assert.equal(hasExecuteTaskRun(`# Тикет\n\n${table('| 2026-09-28 08:25:49 | execute-task | kilo-free(a) | rate_limit |')}\n`), true);
+  assert.equal(hasExecuteTaskRun(`# Тикет\n\n${table('| 2026-09-28 08:41:59 | review-result | b | ok |')}\n`), false, 'только ревью');
+  assert.equal(hasExecuteTaskRun('# Тикет\n\n## Ревью\n'), false, 'секции нет');
+  assert.equal(hasExecuteTaskRun(undefined), false, 'текста нет');
+  assert.equal(
+    hasExecuteTaskRun(`${table('| 2026-09-28 | review-result | b | ok |')}\n\n## Заметки\n\n| x | execute-task | y | ok |\n`),
+    false,
+    'строка другой секции не в счёт',
+  );
 });
 
 // ---------- classifyAgentResult ----------
