@@ -248,6 +248,9 @@ test('состояние прежнего формата подписи — ка
 test('действующий конфиг: check-conditions.empty → check-report-needed; unchanged → end, close_plan → complete-plan, analyze → analyze-report', () => {
   const { stages, agents } = yaml.load(fs.readFileSync(CONFIG, 'utf8')).pipeline;
   assert.equal(stages['check-conditions'].goto.empty, 'check-report-needed');
+  // Разбиение без новых тикетов завершает этот гейт, а не разбор поля created_tickets:
+  // 2026-09-28 список без отступа под ключом потерялся, и FIX-032, QA-163 не взяты в работу.
+  assert.deepEqual(stages['decompose-gaps'].goto, { default: 'check-conditions' });
   const gate = stages['check-report-needed'];
   assert.equal(gate.goto.needed, 'create-report');
   assert.equal(gate.goto.unchanged, 'end');

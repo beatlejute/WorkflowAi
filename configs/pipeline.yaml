@@ -348,12 +348,6 @@ pipeline:
       workdir: "."
       description: "Сверяет доску с последним отчётом: нужен ли новый"
 
-    script-check-created-tickets:
-      command: "node"
-      args: [".workflow/src/scripts/check-created-tickets.js"]
-      workdir: "."
-      description: "Проверяет, что decompose-gaps записал новые тикеты на доску"
-
     script-verify-atomicity:
       command: "node"
       args: [".workflow/src/skills/decompose-plan/scripts/verify-atomicity.js"]
@@ -1218,22 +1212,12 @@ pipeline:
       description: "Декомпозировать недочёты из отчёта в новые тикеты"
       agents: [claude-sonnet, gpt-luna, deepseek-flash]
       skill: decompose-gaps
+      # Без новых тикетов check-conditions → empty → check-report-needed: доска та же, после
+      # разбора было разбиение — unchanged, конец. Прежняя стадия check-decompose-result
+      # (1.16.3) читала поле created_tickets блока RESULT, а список без отступа под ключом
+      # парсер RESULT теряет: 2026-09-28 PulseProxy, созданные FIX-032 и QA-163 прочитаны
+      # как «тикетов нет», и пайплайн завершился, не взяв их в работу.
       goto:
-        default:
-          stage: check-decompose-result
-          params:
-            created_tickets: "$result.created_tickets"
-
-    # Без новых тикетов круг check-conditions → create-report → analyze-report повторяет
-    # отчёт и разбор на той же доске с тем же итогом: 2026-09-28 PulseProxy, пробел вне
-    # плана отклонён с `created_tickets: []`, и отчёт с разбором написаны ещё раз (~15 мин).
-    check-decompose-result:
-      description: "Создала ли decompose-gaps тикеты на доске"
-      agent: script-check-created-tickets
-      timeout: 60
-      goto:
-        created: check-conditions
-        none: end
         default: check-conditions
 
   # ===========================================================================
