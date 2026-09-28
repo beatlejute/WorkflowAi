@@ -128,9 +128,13 @@ pipeline:
     # Селектор участника пула (models.selector, агент jev-select 1.16) из поставляемого
     # конфига убран: пулы стоят только в списках execute-task, где пул селектора не зовут.
     # Путь селектора пула в коде остался — для стадий без selection и конфигов проекта.
+    # --timeout 45: запрос models — два вопроса (уровень и порядок) по ~40 кандидатам; первый
+    # живой ответ 2026-09-28 пришёл за 35 с, при 15 с второй вызов оборвался по времени и
+    # выбор ушёл в лестницу снизу вверх. Потолок процесса селектора в раннере — 60 с
+    # (SELECTOR_TIMEOUT_MS).
     jev-place:
       command: "node"
-      args: [".workflow/src/scripts/decisions-select.js", "--model", "typesafe/jev-1.13", "--url", "https://openrouter.ai/api/alpha/decisions", "--key-file", "~/.workflow/secrets/openrouter.key", "--timeout", "15", "--level-quantile", "0.5"]
+      args: [".workflow/src/scripts/decisions-select.js", "--model", "typesafe/jev-1.13", "--url", "https://openrouter.ai/api/alpha/decisions", "--key-file", "~/.workflow/secrets/openrouter.key", "--timeout", "45", "--level-quantile", "0.5"]
       workdir: "."
       prompt_stdin: true
       tool_less: true
