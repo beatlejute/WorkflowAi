@@ -637,6 +637,13 @@ pipeline:
           stage: analyze-report
           params:
             report_id: "$result.report_id"
+        # Разбор по этой доске — completed: закрытие плана бесплатно и повтор ничего не
+        # меняет, а прогон с этим разбором могли остановить до complete-plan. plan_id —
+        # план отчёта: без него complete-plan закрыл бы первый активный план.
+        close_plan:
+          stage: complete-plan
+          params:
+            plan_id: "$result.plan_id"
         unchanged: end
         default: create-report
         error: create-report

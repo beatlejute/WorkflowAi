@@ -215,6 +215,8 @@ describe('событие run: успех, ошибка, fallback', () => {
       status: 'ok',
       exit_code: 0,
       changed_files: 1,
+      // Статус блока RESULT ответа — по нему гейт отчёта отличает разбор completed от has_gaps.
+      result_status: 'passed',
     });
     assert.ok(!('crash_ttl_ms' in event), 'у успеха нет crash_ttl_ms');
     assert.ok(!('stop_requested' in event), 'stop_requested только у остановки пайплайна');

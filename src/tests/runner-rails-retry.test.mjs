@@ -415,6 +415,8 @@ describe('StageExecutor.callAgent — повтор по вердикту рел�
     const runs = fs.readFileSync(path.join(project.root, '.workflow', 'metrics', 'agent-runs.jsonl'), 'utf8')
       .split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.type === 'run');
     assert.deepEqual(runs.map((r) => [r.agent, r.status]), [['agent-a', 'error'], ['agent-b', 'ok']]);
+    // Статус блока RESULT — в событии: по нему гейт отчёта отличает разбор completed от has_gaps.
+    assert.deepEqual(runs.map((r) => r.result_status), [undefined, 'passed']);
   });
 
   // Страж ребра P1E1 → P1S2 по файлу тикета запуска (ревью стража 2026-09-27): закрытое ребро

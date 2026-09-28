@@ -1742,7 +1742,7 @@ class StageExecutor {
         };
         const status = stopRequested ? 'aborted' : this._classifyRun(agentId, callResult);
         const event = this._closeAgentRun(run, {
-          status, exitCode: callResult.exitCode, changedFiles, stopRequested,
+          status, exitCode: callResult.exitCode, changedFiles, stopRequested, resultStatus: result.status,
           kiloModels: result.kiloModels, modelIoModel: result.modelIo?.model,
           crashTtlMs: result.modelError ? ttlToMs(MODEL_ERROR_HEALTH[result.modelError.class]?.ttl) : null,
         });
@@ -1943,9 +1943,13 @@ class StageExecutor {
    * снятый между ними, оставит файл при записанном событии, и следующий старт второго
    * события не допишет (closeInterruptedRun сверяет run_key). Сбой записи — WARN,
    * ход стадии не меняется.
+   *
+   * `resultStatus` — статус блока RESULT ответа (`result_status` события): по нему
+   * scripts/check-report-needed.js отличает разбор `completed` от `has_gaps` — класс
+   * запуска у обоих `ok`.
    * @returns {object} событие (поле `model` — ключ модели запуска)
    */
-  _closeAgentRun(run, { status, exitCode, changedFiles, stopRequested, kiloModels = null, modelIoModel = null, crashTtlMs = null }) {
+  _closeAgentRun(run, { status, exitCode, changedFiles, stopRequested, resultStatus = null, kiloModels = null, modelIoModel = null, crashTtlMs = null }) {
     const { ts, ...record } = run.record;
     const event = { type: 'run', ...record, status };
     try {
@@ -1957,6 +1961,7 @@ class StageExecutor {
         changed_files: typeof changedFiles === 'number' ? changedFiles : null,
         duration_ms: Date.now() - run.startedAt,
       });
+      if (typeof resultStatus === 'string' && resultStatus) event.result_status = resultStatus;
       if (stopRequested) event.stop_requested = true;
       else if (isCrashStatus(event)) event.crash_ttl_ms = crashTtlMs ?? CRASH_TTL_DEFAULT_MS;
       const written = appendRunEvent(this.projectRoot, event);
