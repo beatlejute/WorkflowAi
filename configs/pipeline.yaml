@@ -342,6 +342,12 @@ pipeline:
       workdir: "."
       description: "Завершает план (status: completed) и архивирует done-тикеты"
 
+    script-check-report-needed:
+      command: "node"
+      args: [".workflow/src/scripts/check-report-needed.js"]
+      workdir: "."
+      description: "Сверяет доску с последним отчётом: нужен ли новый"
+
     script-check-created-tickets:
       command: "node"
       args: [".workflow/src/scripts/check-created-tickets.js"]
@@ -616,7 +622,23 @@ pipeline:
           params:
             ready_tickets: "$result.ready_tickets"
         default: pick-next-task
-        empty: create-report
+        empty: check-report-needed
+        error: create-report
+
+    # Работы нет — отчёт, только если доска изменилась с прошлого: иначе каждый запуск
+    # писал новый отчёт на той же доске (2026-09-28 PulseProxy, REPORT-024…026 подряд).
+    check-report-needed:
+      description: "Нужен ли новый отчёт: доска изменилась с последнего отчёта?"
+      agent: script-check-report-needed
+      timeout: 60
+      goto:
+        needed: create-report
+        analyze:
+          stage: analyze-report
+          params:
+            report_id: "$result.report_id"
+        unchanged: end
+        default: create-report
         error: create-report
 
     # -------------------------------------------------------------------------
