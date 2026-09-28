@@ -145,6 +145,49 @@ function resolveWorkStartBaseline(frontmatter, nowMs = Date.now()) {
   return skip;
 }
 
+// Каталоги, которые обход каталога-артефакта пропускает: зависимости и служебные данные git.
+const NEWEST_MTIME_SKIP = new Set(['node_modules', '.git']);
+// Потолок записей обхода: каталог-артефакт — выход сборки, а не весь репозиторий.
+const NEWEST_MTIME_LIMIT = 20000;
+
+/**
+ * Самое свежее время изменения внутри каталога (сам каталог и файлы в глубину).
+ *
+ * mtime каталога меняется только при создании, удалении и переименовании записей в нём:
+ * перезапись файлов внутри его не трогает. 2026-09-28, PulseProxy QA-148: исполнитель
+ * указал в «Изменённых файлах» каталог сборки `dist/`, `npm run build` перезаписал бандлы,
+ * mtime каталога остался августовским, и проверка трижды ложно отклонила работу как
+ * «файлы не были изменены».
+ */
+function newestMtimeMs(dirPath) {
+  let newest = fs.statSync(dirPath).mtimeMs;
+  const stack = [dirPath];
+  let seen = 0;
+  while (stack.length > 0 && seen < NEWEST_MTIME_LIMIT) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (++seen > NEWEST_MTIME_LIMIT) break;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!NEWEST_MTIME_SKIP.has(entry.name)) stack.push(full);
+        continue;
+      }
+      try {
+        newest = Math.max(newest, fs.statSync(full).mtimeMs);
+      } catch {
+        // файл исчез между чтением каталога и stat — не артефакт работы
+      }
+    }
+  }
+  return newest;
+}
+
 function checkFilesExist(filePaths, workStartTime) {
   const ticketWorkStart = workStartTime ? new Date(workStartTime) : null;
   return filePaths.map(filePath => {
@@ -160,11 +203,24 @@ function checkFilesExist(filePaths, workStartTime) {
     }
 
     const stats = fs.statSync(fullPath);
-    const fileMtime = new Date(stats.mtime);
-    const unchanged = fileMtime < ticketWorkStart;
+    const mtimeMs = stats.isDirectory() ? newestMtimeMs(fullPath) : stats.mtimeMs;
+    const unchanged = mtimeMs < ticketWorkStart.getTime();
 
     return { path: filePath, exists: true, unchanged };
   });
+}
+
+/**
+ * Путь на доске тикетов (.workflow/tickets/) — не артефакт работы: файл тикета переезжает
+ * между колонками в том же прогоне. 2026-09-28, PulseProxy DOCS-012: исполнитель вписал в
+ * «Изменённые файлы» `.workflow/tickets/in-progress/DOCS-012.md`, к проверке тикет уже лежал
+ * в review/, и проверка дважды отклонила работу как «файл не найден». Дифф для ревью доску
+ * исключает так же (collectDiff).
+ */
+function isBoardPath(filePath) {
+  const fullPath = path.isAbsolute(filePath) ? filePath : path.join(PROJECT_DIR, filePath);
+  const rel = path.relative(TICKETS_DIR, path.resolve(fullPath));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
 function parseDoDCompletion(body) {
@@ -273,7 +329,7 @@ const SOURCE_REF_FILE_LINE = /[\w][\w/\\.-]+\.\w{1,10}:\d+/;
  *
  * @returns {{ required: boolean, satisfied: boolean }}
  */
-function checkSourceGrounding(body) {
+function checkSourceGrounding(body, { dodFormat2 = false } = {}) {
   // Извлекаем DoD секцию
   const dodSectionRegex = /^##\s*(?:Критерии готовности|Definition of Done)(?:\s*\([^)]*\))?\s*$/gm;
   const dodMatch = dodSectionRegex.exec(body);
@@ -284,10 +340,16 @@ function checkSourceGrounding(body) {
   const dodEnd = dodNextH2 === -1 ? body.length : dodNextH2;
   const dodContent = body.substring(dodStart, dodEnd);
 
-  // Только выполненные пункты ([x]) — незавершённые не в scope проверки
-  const completedItems = dodContent
-    .split('\n')
-    .filter(line => /^\s*-\s*\[x\]/i.test(line));
+  // Только выполненные пункты ([x]) — незавершённые не в scope проверки. У тикета
+  // dod_format: 2 пункт с проверкой check закрывает команда, которую исполняет этот же
+  // скрипт, а не заявление исполнителя, — ссылка на source ему не нужна. 2026-09-28,
+  // PulseProxy QA-155 и QA-160: все проверки зелёные, но в пунктах слова «команд»,
+  // «baseline», и тикеты отклонены за отсутствие file:line в Result.
+  const completedItems = dodFormat2
+    ? parseDodChecks(body).filter((item) => item.checked && item.kind !== 'check').map((item) => item.text)
+    : dodContent
+      .split('\n')
+      .filter(line => /^\s*-\s*\[x\]/i.test(line));
 
   const hasSourceGroundingDod = completedItems.some(line =>
     SOURCE_GROUNDING_DOD_INDICATORS.some(re => re.test(line))
@@ -689,7 +751,7 @@ function verifyTicket(ticketPath) {
   const content = fs.readFileSync(ticketPath, 'utf8');
   const { frontmatter, body } = parseFrontmatter(content);
 
-  const filePaths = parseChangedFiles(body);
+  const filePaths = parseChangedFiles(body).filter((filePath) => !isBoardPath(filePath));
   // Точка отсчёта для mtime — created_at: это стабильная метка, которая не
   // перезаписывается при move-ticket / retry-циклах. updated_at мутирует на
   // каждом перемещении (ready → in-progress → review → ready → …), поэтому
@@ -705,10 +767,10 @@ function verifyTicket(ticketPath) {
   const resultStats = checkResultSection(body);
 
   const assertions = parseImplementationAssertions(body);
-  const sourceGrounding = checkSourceGrounding(body);
 
   // Проверки пунктов DoD и ссылки Result нужны только evidence тикета нового формата.
   const dodFormat2 = isDodFormat2(frontmatter);
+  const sourceGrounding = checkSourceGrounding(body, { dodFormat2 });
 
   return {
     ticket_id: frontmatter.id,

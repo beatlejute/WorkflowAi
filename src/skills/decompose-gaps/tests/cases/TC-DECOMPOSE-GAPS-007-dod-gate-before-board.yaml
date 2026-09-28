@@ -1,0 +1,31 @@
+id: TC-DECOMPOSE-GAPS-007
+title: "Проверки DoD созданного тикета проходят гейт проверок до чеклиста завершения"
+origin:
+  chg: ["ad-hoc-2026-09-28"]
+  incidents:
+    - "PulseProxy FIX-031, 2026-09-28: тикет доработки записан с проверками DoD через `|` и с проверкой, зелёной до начала работы (существующие тесты по тому же фильтру). Гейт move-to-ready.js отправил тикет в blocked/ сразу после создания: check_denied: пункт 1 (shell_operator: |); check_denied: пункт 2 (shell_operator: |); check_green_before_start: пункт 3. Правила записи проверок были только в комментарии шаблона тикета, скил их не проверял."
+  principle: "Точка контроля — выходной слой автора тикета, до доски: тот же гейт, что перед ready/, запускается скриптом check-ticket-dod.js по каждому сохранённому тикету; отказ — исправление проверок и повтор (узлы P10G4, P10S10 фрагмента workflows/decompose.md)."
+  backlog_sources: []
+tags: [dod-checks, gate, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "P10G4\\{\"П10 ГЕЙТ: node \\.workflow/src/scripts/check-ticket-dod\\.js [^\\n]*по каждому сохранённому тикету печатает «ok»"
+      reason: "Гейт запускает скрипт гейта проверок по каждому сохранённому тикету, а не полагается на комментарий шаблона."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "P10S9 --> P10G4\\s+P10G4 -->\\|\"да\"\\| P10G3\\s+P10G4 -->\\|\"нет\"\\| P10S10\\s+P10S10 --> P10G4"
+      reason: "Гейт стоит между записью тикета и чеклистом завершения, отказ ведёт в исправление и обратно в гейт."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: "P10S10\\[\"[^\\n]*check_denied[^\\n]*без операторов оболочки[^\\n]*check_green_before_start[^\\n]*regression: `true`"
+      reason: "Шаг исправления называет, как чинить каждую причину скрипта: команда без операторов оболочки, прогон существующих тестов — с regression."

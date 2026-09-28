@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { withProject, atNode, ctx, claude, decide, ticket } from './_project.mjs';
 
 test('H2: тикеты вне in-progress/ — отказ на любом узле', () => {
@@ -19,15 +20,40 @@ test('H2: тикеты вне in-progress/ — отказ на любом узл
   });
 });
 
-test('H2: создание плана в .workflow/plans/ — отказ, в том числе shell-редиректом', () => {
+test('H2: создание плана в .workflow/plans/current/ и archive/ — отказ, в том числе shell-редиректом', () => {
   withProject(({ root }) => {
     const s = atNode(root, 'P3S1');
-    const plan = join(root, '.workflow', 'plans', 'PLAN-002.md');
-    assert.equal(decide({ action: claude('Write', { file_path: plan }), ctx: ctx(root, s) }).decision, 'deny');
+    for (const dir of ['current', 'archive']) {
+      const plan = join(root, '.workflow', 'plans', dir, 'PLAN-002.md');
+      assert.equal(decide({ action: claude('Write', { file_path: plan }), ctx: ctx(root, s) }).decision, 'deny', dir);
+    }
     assert.equal(
-      decide({ action: claude('Bash', { command: 'echo "# PLAN-002" > .workflow/plans/PLAN-002.md' }), ctx: ctx(root, s) }).decision,
+      decide({ action: claude('Bash', { command: 'echo "# PLAN-002" > .workflow/plans/current/PLAN-002.md' }), ctx: ctx(root, s) }).decision,
       'deny',
     );
+  });
+});
+
+// 2026-09-28: административный тикет «обновить шаблон плана» встал в blocked/ — запрет всего
+// .workflow/plans/** не давал исполнителю тронуть свой единственный результат.
+test('H2: шаблон плана в .workflow/plans/templates/ — пишется на этапе 3', () => {
+  withProject(({ root }) => {
+    const s = atNode(root, 'P3S1');
+    const template = join(root, '.workflow', 'plans', 'templates', 'TMPL-001.md');
+    assert.equal(decide({ action: claude('Edit', { file_path: template }), ctx: ctx(root, s) }).decision, 'allow');
+  });
+});
+
+// 2026-09-27: исполнитель тикета тестирования правил SKILL.md и rails.yaml другого скила через
+// .workflow/src/skills/ — в общей копии скилов всех проектов; рельсы не отклонили.
+test('H2: чужой скил в .workflow/src/skills/ — отказ', () => {
+  withProject(({ root }) => {
+    const other = join(root, '.workflow', 'src', 'skills', 'other-skill');
+    mkdirSync(other, { recursive: true });
+    const s = atNode(root, 'P3S1');
+    for (const name of ['SKILL.md', 'rails.yaml']) {
+      assert.equal(decide({ action: claude('Edit', { file_path: join(other, name) }), ctx: ctx(root, s) }).decision, 'deny', name);
+    }
   });
 });
 

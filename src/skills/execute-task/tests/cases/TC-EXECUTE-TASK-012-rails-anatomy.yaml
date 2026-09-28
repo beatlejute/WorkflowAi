@@ -64,8 +64,12 @@ assertions:
       reason: "Тикеты вне in-progress/ закрыты гардом записи (инцидент COACH-SYNTH-1)."
     - kind: skill_contains
       file: "rails.yaml"
-      pattern: "write_deny:[\\s\\S]*\\.workflow/plans/\\*\\*"
-      reason: "Создание планов исполнителем закрыто гардом записи (инциденты CHG-051, CHG-047)."
+      pattern: "write_deny:[\\s\\S]*\\.workflow/plans/current/\\*\\*[\\s\\S]*\\.workflow/plans/archive/\\*\\*"
+      reason: "Создание планов исполнителем закрыто гардом записи (инциденты CHG-051, CHG-047); шаблоны plans/templates/ открыты административному тикету (2026-09-28)."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: "write_deny:[\\s\\S]*\\.workflow/src/skills/\\*\\*"
+      reason: "Каталог скилов закрыт целиком: 2026-09-27 исполнитель правил чужой скил в общей копии скилов всех проектов."
     - kind: skill_contains
       file: "rails.yaml"
       pattern: "deny_shell:[\\s\\S]*move-ticket"

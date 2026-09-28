@@ -77,3 +77,8 @@ cases:
     origin_chg: ["PLAN-002 задача 9 (2026-09-26)"]
     tags: [visual-evidence, dod-fill, dod-format-2]
     severity: high
+  - id: TC-EXECUTE-TASK-014
+    file: cases/TC-EXECUTE-TASK-014-check-item-closed-by-script.yaml
+    origin_chg: ["ad-hoc-2026-09-28"]
+    tags: [dod-format-2, dod-checks, regression-guard]
+    severity: high

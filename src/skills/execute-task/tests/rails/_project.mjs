@@ -32,7 +32,7 @@ export function withProject(fn) {
   const root = join(base, 'root');
   const skillsDir = join(root, '.workflow', 'src', 'skills');
   mkdirSync(skillsDir, { recursive: true });
-  for (const d of ['plans', 'reports', 'logs', 'src/rails',
+  for (const d of ['plans/current', 'plans/archive', 'plans/templates', 'reports', 'logs', 'src/rails',
     'tickets/backlog', 'tickets/ready', 'tickets/in-progress', 'tickets/review', 'tickets/done']) {
     mkdirSync(join(root, '.workflow', d), { recursive: true });
   }

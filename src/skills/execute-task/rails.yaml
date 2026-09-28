@@ -21,14 +21,20 @@ allow_temp: true
 # и CHG-047 (дефекты фиксируются в QA-тикете, не в отдельных сущностях): без запрета возникает
 # каскад «выполнение создаёт план → декомпозиция создаёт тикеты → backlog без контроля».
 # Инцидент COACH-SYNTH-1: правка тикета вне in-progress/ (e2e-проверка coach-preview).
+# Планы — только current/ и archive/: их читает пайплайн. Шаблоны планов (plans/templates/)
+# правит административный тикет, и запрет всего .workflow/plans/** 2026-09-28 сделал такой
+# тикет невыполнимым — исполнитель заблокировал его, не тронув шаблон.
+# Каталог скилов закрыт целиком: 2026-09-27 исполнитель на тикете тестирования правил
+# SKILL.md и rails.yaml другого скила через ссылку .workflow/src/skills/ — в общей копии
+# скилов, которую читают все проекты. Сюда же входят собственные гарды (принцип 17).
 write_deny:
   - ".workflow/tickets/backlog/**"
   - ".workflow/tickets/ready/**"
   - ".workflow/tickets/review/**"
   - ".workflow/tickets/done/**"
-  - ".workflow/plans/**"
-  - ".workflow/src/skills/execute-task/rails.yaml"
-  - ".workflow/src/skills/execute-task/tests/rails/**"
+  - ".workflow/plans/current/**"
+  - ".workflow/plans/archive/**"
+  - ".workflow/src/skills/**"
   - ".workflow/src/rails/**"
 
 # H3 — перемещение тикета и смена статуса: это работа пайплайна, не исполнителя.

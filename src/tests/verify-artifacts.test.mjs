@@ -1134,3 +1134,108 @@ ${files.map((file) => `- \`${file}\``).join('\n')}
     assert.doesNotMatch(readFileSync(ticketPath, 'utf8'), /## Ревью/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Ложные отказы проверки артефактов (PulseProxy, прогон 2026-09-27/28):
+//  - QA-148: в «Изменённых файлах» каталог сборки `dist/`; сборка перезаписала файлы в нём,
+//    а mtime каталога от этого не меняется — трижды «файлы не были изменены»;
+//  - DOCS-012: в «Изменённых файлах» путь самого тикета в in-progress/; к проверке тикет
+//    уже в review/ — дважды «не найдены заявленные файлы»;
+//  - QA-155, QA-160: все проверки check зелёные, но в тексте пунктов слова «команд»,
+//    «baseline» — отказ за отсутствие ссылок file:line в Result.
+// Каждый тест красный без своей правки verify-artifacts.js.
+// ---------------------------------------------------------------------------
+
+describe('verify-artifacts: ложные отказы 2026-09-28', () => {
+  let root;
+
+  before(() => {
+    root = mkdtempSync(join(tmpdir(), 'verify-artifacts-false-'));
+    mkdirSync(join(root, '.workflow', 'tickets', 'review'), { recursive: true });
+  });
+
+  after(() => rmSync(root, { recursive: true, force: true }));
+
+  const GREEN_CHECK = '  - check: `node -e "process.exit(0)"`, expect: `exit 0`';
+
+  function writeTicket(id, { dod, files, summary = 'fixture summary.' }) {
+    const ticketPath = join(root, '.workflow', 'tickets', 'review', `${id}.md`);
+    writeFileSync(ticketPath, `---
+id: ${id}
+type: qa
+dod_format: 2
+created_at: "2026-04-21T00:00:00Z"
+updated_at: "2026-04-21T10:00:00Z"
+---
+## Критерии готовности (Definition of Done)
+
+${dod}
+
+## Результат выполнения
+
+### Summary
+${summary}
+
+### Изменённые файлы
+
+${files.map((file) => `- \`${file}\``).join('\n')}
+`, 'utf8');
+    return ticketPath;
+  }
+
+  test('каталог в «Изменённых файлах»: свежий файл внутри при старом mtime каталога — не unchanged', () => {
+    const dist = join(root, 'dist');
+    mkdirSync(dist, { recursive: true });
+    writeFileSync(join(dist, 'bundle.js'), 'rebuilt', 'utf8');
+    const old = new Date('2026-04-20T00:00:00Z');
+    utimesSync(dist, old, old);
+    const ticketPath = writeTicket('QA-948', { dod: `- [x] Сборка собрана\n${GREEN_CHECK}`, files: ['dist/'] });
+
+    const result = runScript(ticketPath, root);
+
+    assert.equal(result.unchanged_files, '', `каталог со свежим файлом не «не изменён»: ${result.fail_reasons || ''}`);
+    assert.equal(result.status, 'all_green', `fail_reasons=${result.fail_reasons || ''}`);
+  });
+
+  test('каталог, где всё старое, — по-прежнему unchanged', () => {
+    const stale = join(root, 'stale');
+    mkdirSync(stale, { recursive: true });
+    writeFileSync(join(stale, 'old.js'), 'old', 'utf8');
+    const old = new Date('2026-04-20T00:00:00Z');
+    utimesSync(join(stale, 'old.js'), old, old);
+    utimesSync(stale, old, old);
+    const ticketPath = writeTicket('QA-949', { dod: `- [x] Сборка собрана\n${GREEN_CHECK}`, files: ['stale/'] });
+
+    const result = runScript(ticketPath, root);
+
+    assert.equal(result.status, 'failed');
+    assert.match(result.unchanged_files || '', /stale/);
+  });
+
+  test('путь самого тикета на доске в «Изменённых файлах» — не missing', () => {
+    writeFileSync(join(root, 'README-pool.md'), 'docs', 'utf8');
+    const ticketPath = writeTicket('DOCS-912', {
+      dod: `- [x] README дополнен\n${GREEN_CHECK}`,
+      files: ['README-pool.md', '.workflow/tickets/in-progress/DOCS-912.md'],
+    });
+
+    const result = runScript(ticketPath, root);
+
+    assert.equal(result.missing_files, '', `путь тикета на доске — не артефакт: ${result.fail_reasons || ''}`);
+    assert.equal(result.status, 'all_green', `fail_reasons=${result.fail_reasons || ''}`);
+  });
+
+  test('dod_format 2: пункт с зелёной check и словами «команд», «baseline» — ссылки на source не требуются', () => {
+    writeFileSync(join(root, 'shot.txt'), 'x', 'utf8');
+    const ticketPath = writeTicket('QA-955', {
+      dod: `- [x] Команда сверки с baseline проходит\n${GREEN_CHECK}`,
+      files: ['shot.txt'],
+      summary: 'Скриншоты сверены, в строке 195 и 202.',
+    });
+
+    const result = runScript(ticketPath, root);
+
+    assert.doesNotMatch(result.fail_reasons || '', /source_grounding_missing/);
+    assert.equal(result.status, 'all_green', `fail_reasons=${result.fail_reasons || ''}`);
+  });
+});
