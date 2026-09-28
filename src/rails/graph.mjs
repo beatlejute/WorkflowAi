@@ -422,7 +422,7 @@ export class Graph {
     const guards = Array.isArray(cfg.edge_guards) ? cfg.edge_guards : [];
     for (const g of guards) {
       if (!g || typeof g.from !== 'string' || typeof g.to !== 'string') continue;
-      const hasEdge = (this.outgoing(g.from) || []).some((e) => e.to === g.to);
+      const hasEdge = this.outgoing(g.from).some((e) => e.to === g.to);
       if (!hasEdge) {
         errors.push({ code: 'unknown-guard-edge', message: `rails.yaml.edge_guards ссылается на ребро «${g.from} → ${g.to}», которого нет в графе`, id: g.from });
       }

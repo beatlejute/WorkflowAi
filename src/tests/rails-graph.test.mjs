@@ -505,3 +505,19 @@ test('validate: unknown-guard-edge — страж на ребро, которо�
   assert.equal(errs.length, 1);
   assert.equal(errs[0].id, 'P0S1');
 });
+
+test('validate: unknown-guard-edge — битую запись стража пропускает (её ловит проверка rails.yaml), узел без рёбер — ошибка', () => {
+  const dir = join(FIXTURES, 'unknown-terminal-pause');
+  const config = {
+    entry: 'P0E1',
+    terminal: ['P0S1'],
+    edge_guards: [
+      null,
+      { from: 'P0E1', deny_if_exists: 'x.md', reason: 'нет to' },
+      { from: 7, to: 'P0S1', deny_if_exists: 'x.md', reason: 'from не строка' },
+      { from: 'P9X9', to: 'P0S1', deny_if_exists: 'x.md', reason: 'узла нет' },
+    ],
+  };
+  const errs = loadSkillGraph(dir, config).validate(config).errors.filter((e) => e.code === 'unknown-guard-edge');
+  assert.deepEqual(errs.map((e) => e.id), ['P9X9']);
+});
