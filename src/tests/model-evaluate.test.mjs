@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { evaluate, extractFirstJsonObject } from '../lib/model-evaluate.mjs';
+import { evaluate, extractFirstJsonObject, validateInput, MAX_CHOICE_LEVELS } from '../lib/model-evaluate.mjs';
 import { ModelClientError } from '../lib/model-client.mjs';
 import { TEST_KEY, startModelServer, sendJson, decisionsResponse, chatResponse } from './_model-server.mjs';
 
@@ -264,5 +264,30 @@ describe('model-evaluate: проверка входа', () => {
   it('extractFirstJsonObject пропускает битый объект и берёт следующий', () => {
     assert.deepEqual(extractFirstJsonObject('{не json} потом {"a":1}'), { a: 1 });
     assert.equal(extractFirstJsonObject('без объекта'), null);
+  });
+});
+
+// Предел уровней — по типу вопроса: score 2..10, choice 2..255 (выбор кандидатов стадии,
+// scripts/decisions-select.js); явный minLevels/maxLevels — один диапазон для всех типов.
+describe('model-evaluate: предел уровней по типу вопроса', () => {
+  const levels = (n) => Array.from({ length: n }, (_, i) => `вариант ${i}`);
+  const input = (type, n) => ({ data: 'x', questions: [{ id: 'q1', text: 'Вопрос', levels: levels(n), ...(type ? { type } : {}) }] });
+  const rejects = (value, pattern) => assert.throws(() => validateInput(value), (err) => err instanceof ModelClientError && err.class === 'bad_request' && pattern.test(err.message));
+
+  it('choice: 255 вариантов принимается, 256 — bad_request', () => {
+    assert.equal(MAX_CHOICE_LEVELS, 255);
+    validateInput(input('choice', 255));
+    rejects(input('choice', 256), /needs 2\.\.255 non-empty levels/);
+  });
+
+  it('score (и без type): 10 принимается, 11 — bad_request', () => {
+    validateInput(input('score', 10));
+    rejects(input('score', 11), /needs 2\.\.10 non-empty levels/);
+    rejects(input(null, 11), /needs 2\.\.10 non-empty levels/);
+  });
+
+  it('явный диапазон действует на оба типа', () => {
+    assert.throws(() => validateInput(input('choice', 6), { minLevels: 5, maxLevels: 5 }), /exactly 5/);
+    validateInput(input('choice', 5), { minLevels: 5, maxLevels: 5 });
   });
 });

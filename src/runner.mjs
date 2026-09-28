@@ -24,6 +24,7 @@ import {
   EXECUTOR_SKILL, CRASH_TTL_DEFAULT_MS,
   appendRunEvent, readRunEvents, activeBans, findBan, describeBan, configuredModelKey, runModelKey,
   requestedModel, ticketTypeOf, isCrashStatus, newRunKey, writeOpenRun, clearOpenRun, closeInterruptedRun,
+  gradeRuns,
 } from './lib/agent-runs.mjs';
 import { captureRunChanges, countRunChanges } from './lib/agent-run-changes.mjs';
 import {
@@ -31,6 +32,10 @@ import {
   SELECTOR_TIMEOUT_MS, SELECTOR_MAX_CANDIDATES, poolSelectorData, selectorTicket, buildSelectorPrompt, selectorRanking,
   GATE_TIMEOUT_MS, runPoolCommand,
 } from './lib/model-pools.mjs';
+import {
+  isGoverned, flattenSurvivors, computeBands, levelOf, ticketFloor, capFloor, walkOrder, selectionTicket,
+  buildSelectionPrompt, parseRequiredLevel, loadStageFacts, hasStageFacts, stageFactsInfo, factsOf,
+} from './lib/stage-selection.mjs';
 
 // Как часто, пока kilo-агент работает, смотреть в базу kilo, какие модели ответили.
 const KILO_MODELS_POLL_MS = 15000;
@@ -1240,7 +1245,39 @@ class StageExecutor {
    * Пул в списке дважды — у мест общие участники и общий счёт max_per_attempt.
    */
   resolveAgent(stage, stageId, options = {}) {
-    const excludeAgents = options.excludeAgents || [];
+    const survivors = this._stageSurvivors(stage, stageId, options.excludeAgents || []);
+    if (survivors.blocked) return survivors;
+    return this._cursorPick(survivors, stageId);
+  }
+
+  /**
+   * Место курсора среди выживших _stageSurvivors: курсор resolveAgent и выбор модели
+   * стадии, когда ни у одного выжившего нет оценки (_resolveGoverned).
+   */
+  _cursorPick(survivors, stageId) {
+    const { places, attempt, effectiveStage, isPool, poolOf } = survivors;
+
+    // Курсор = (attempt - 1) % length — ротация по кругу
+    const cursor = (attempt - 1) % places.length;
+
+    const place = places[cursor];
+    if (!isPool(place)) {
+      return { agentId: place, effectiveStage, attempt, compatible: places };
+    }
+    const poolCandidates = this._preferNotRunOnTicket(poolOf(place).untried, stageId);
+    return { agentId: poolCandidates[0], effectiveStage, attempt, compatible: places, pool: place, poolCandidates };
+  }
+
+  /**
+   * Выжившие места списка стадии — фильтры 1–5 resolveAgent (способности, health-реестр,
+   * запреты моделей, excludeAgents и max_per_attempt пула) без выбора места курсором.
+   * Общий шаг курсора (resolveAgent) и выбора модели стадии (_resolveGoverned).
+   * @returns {{places: string[], attempt: number, effectiveStage: object, isPool: (id) => boolean,
+   *   poolOf: (id) => {members: string[], untried: string[]}} | {blocked: string, reason: string, attempt: number}}
+   *   places — выжившие места в порядке списка (пул — одним местом), poolOf(id).untried —
+   *   участники места-пула, прошедшие фильтры
+   */
+  _stageSurvivors(stage, stageId, excludeAgents) {
     // Семантика: counter = число УЖЕ ИСЧЕРПАННЫХ попыток (0 на старте, инкрементируется
     // стадией `increment-*-attempts` ПОСЛЕ каждой неудачи). attempt — номер текущей
     // (1-based). Читаем counter через ?? 0, чтобы отличать «ещё не запускались»
@@ -1386,17 +1423,9 @@ class StageExecutor {
       };
     }
 
-    // Курсор = (attempt - 1) % length — ротация по кругу
-    const cursor = (attempt - 1) % afterExclude.length;
-
-    const place = afterExclude[cursor];
     // Клонируем stage с подменой instructions (для agents_by_type override)
     const effectiveStage = { ...stage, instructions };
-    if (!isPool(place)) {
-      return { agentId: place, effectiveStage, attempt, compatible: afterExclude };
-    }
-    const poolCandidates = this._preferNotRunOnTicket(poolOf(place).untried, stageId);
-    return { agentId: poolCandidates[0], effectiveStage, attempt, compatible: afterExclude, pool: place, poolCandidates };
+    return { places: afterExclude, attempt, effectiveStage, isPool, poolOf };
   }
 
   /**
@@ -1520,54 +1549,15 @@ class StageExecutor {
     const prompt = buildSelectorPrompt({ pool: poolId, ticket, candidates, citation });
     const started = Date.now();
     let ranked = [];
-    let fallback = 'none';
-    let errorClass = null;
-    let errorText = '';
-    let earlyKillRule = null;
-    let cost = null;
-    try {
-      // Промпт — всегда через stdin, данные промпта в лог не копируются.
-      const result = await this._callAgentOnce({ ...selector, prompt_stdin: true }, prompt, stageId, skillId, selectorId,
-        { WORKFLOW_RAILS_ROLE: 'executor' },
-        { promptSummary: `selector pool=${poolId} candidates=${candidates.length} prompt_chars=${prompt.length}`, timeoutMs: this.selectorTimeoutMs });
-      cost = resultNumber(result.result?.cost_usd);
-      if (result.status === 'error') {
-        fallback = 'error';
-        errorClass = result.result?.error_class || null;
-        errorText = redactNetworkDetail(String(result.result?.error || ''));
-      } else {
-        ranked = selectorRanking(result.result?.ranking, candidates.map(c => c.id));
-        if (ranked.length === 0) fallback = 'unknown_id';
-      }
-    } catch (err) {
-      fallback = err.timedOut ? 'timeout' : 'error';
-      errorClass = err.timedOut ? 'timeout' : null;
-      errorText = err.message;
-      earlyKillRule = err.code === 'EARLY_KILL' ? err.rule ?? null : null;
+    const call = await this._runSelector(selectorId, selector, prompt, stageId, skillId,
+      `selector pool=${poolId} candidates=${candidates.length} prompt_chars=${prompt.length}`);
+    let fallback = call.fallback ?? 'none';
+    if (!call.fallback) {
+      ranked = selectorRanking(call.result.result?.ranking, candidates.map(c => c.id));
+      if (ranked.length === 0) fallback = 'unknown_id';
     }
-
-    // error_class — текст ответа селектора: только собственные ключи таблицы, иначе
-    // `constructor` и прочие свойства прототипа нашлись бы как класс.
-    const tableHealth = errorClass && Object.hasOwn(MODEL_ERROR_HEALTH, errorClass) ? MODEL_ERROR_HEALTH[errorClass] : null;
-    // Снятие онлайн-сканом по правилу health самого селектора — пометка по классу и TTL
-    // правила, как у агентов стадии.
-    const health = earlyKillRule
-      ? { class: earlyKillRule.class, ttl: earlyKillRule.ttl, ruleId: earlyKillRule.rule_id, label: `rule ${earlyKillRule.rule_id}` }
-      : tableHealth && { class: tableHealth.class, ttl: tableHealth.ttl, ruleId: `selector-${errorClass}`, label: errorClass };
-    // Остановка пайплайна сняла селектора — это не его сбой.
-    if (health && !this.stopRequested) {
-      try {
-        markUnhealthy(this.projectRoot, selectorId, {
-          class: health.class,
-          ttl: health.ttl,
-          rule_id: health.ruleId,
-          reason: errorText,
-        });
-        if (this.logger) this.logger.info(`agent ${selectorId} marked unhealthy: class=${health.class} (selector ${health.label})`, stageId);
-      } catch (markErr) {
-        if (this.logger) this.logger.warn(`health mark failed for ${selectorId}: ${markErr.message}`, stageId);
-      }
-    }
+    const cost = call.cost;
+    this._markSelectorFailure(selectorId, call, stageId);
     const member = fallback === 'none' ? ranked[0] : candidates[0].id;
     if (this.logger) {
       this.logger.info(
@@ -1577,6 +1567,295 @@ class StageExecutor {
       );
     }
     return fallback === 'none' ? ranked.map(id => `${poolId}@${id}`) : null;
+  }
+
+  /**
+   * Вызов агента-селектора (селектор пула и селектор модели стадии): промпт через stdin,
+   * путём агентов с командой (_callAgentOnce) с ролью рельс executor и таймаутом
+   * selectorTimeoutMs; журнал запусков, снимки и строка истории тикета не пишутся.
+   * @returns {Promise<{result: object|null, fallback: null|'error'|'timeout', errorClass: string|null,
+   *   errorText: string, earlyKillRule: object|null, cost: number|null}>} fallback null — ответ
+   *   без `status: error`, его разбор — у вызывающего
+   */
+  async _runSelector(selectorId, selector, prompt, stageId, skillId, promptSummary) {
+    const call = { result: null, fallback: null, errorClass: null, errorText: '', earlyKillRule: null, cost: null };
+    try {
+      // Промпт — всегда через stdin, данные промпта в лог не копируются.
+      const result = await this._callAgentOnce({ ...selector, prompt_stdin: true }, prompt, stageId, skillId, selectorId,
+        { WORKFLOW_RAILS_ROLE: 'executor' },
+        { promptSummary, timeoutMs: this.selectorTimeoutMs });
+      call.result = result;
+      call.cost = resultNumber(result.result?.cost_usd);
+      if (result.status === 'error') {
+        call.fallback = 'error';
+        call.errorClass = result.result?.error_class || null;
+        call.errorText = redactNetworkDetail(String(result.result?.error || ''));
+      }
+    } catch (err) {
+      call.fallback = err.timedOut ? 'timeout' : 'error';
+      call.errorClass = err.timedOut ? 'timeout' : null;
+      call.errorText = err.message;
+      call.earlyKillRule = err.code === 'EARLY_KILL' ? err.rule ?? null : null;
+    }
+    return call;
+  }
+
+  /**
+   * Пометка агента-селектора после сбоя вызова (_runSelector) в health-реестре — по
+   * MODEL_ERROR_HEALTH, как _modelIoFailure: класс — `error_class` ответа, таймаут
+   * раннера — `timeout`; снятие онлайн-сканом по правилу health самого селектора — класс
+   * и TTL правила. Помечается только сам селектор (`selectorId`).
+   */
+  _markSelectorFailure(selectorId, { errorClass, errorText, earlyKillRule }, stageId) {
+    // error_class — текст ответа селектора: только собственные ключи таблицы, иначе
+    // `constructor` и прочие свойства прототипа нашлись бы как класс.
+    const tableHealth = errorClass && Object.hasOwn(MODEL_ERROR_HEALTH, errorClass) ? MODEL_ERROR_HEALTH[errorClass] : null;
+    // Снятие онлайн-сканом по правилу health самого селектора — пометка по классу и TTL
+    // правила, как у агентов стадии.
+    const health = earlyKillRule
+      ? { class: earlyKillRule.class, ttl: earlyKillRule.ttl, ruleId: earlyKillRule.rule_id, label: `rule ${earlyKillRule.rule_id}` }
+      : tableHealth && { class: tableHealth.class, ttl: tableHealth.ttl, ruleId: `selector-${errorClass}`, label: errorClass };
+    // Остановка пайплайна сняла селектора — это не его сбой.
+    if (!health || this.stopRequested) return;
+    try {
+      markUnhealthy(this.projectRoot, selectorId, {
+        class: health.class,
+        ttl: health.ttl,
+        rule_id: health.ruleId,
+        reason: errorText,
+      });
+      if (this.logger) this.logger.info(`agent ${selectorId} marked unhealthy: class=${health.class} (selector ${health.label})`, stageId);
+    } catch (markErr) {
+      if (this.logger) this.logger.warn(`health mark failed for ${selectorId}: ${markErr.message}`, stageId);
+    }
+  }
+
+  /**
+   * Выбор модели стадии с `selection` (README, «Выбор модели стадии»; lib/stage-selection.mjs):
+   * следующий кандидат попытки вместо курсора resolveAgent. Вызывается на каждом витке
+   * executeWithFallback; `sel` — состояние попытки (один вызов executeWithFallback):
+   *   1. выжившие — фильтры 1–5 (_stageSurvivors), те же типизированные blocked; пулы
+   *      раскрыты в участников, прошедших фильтры (flattenSurvivors);
+   *   2. шлагбаумы пулов — один проход на попытку, до селектора и пока нет остановки:
+   *      `closed` закрывает место (id пула в `tried`), `open` — пул в `sel.fresh`: его
+   *      участник, запускаемый первым в попытке, шлагбаум не опрашивает; первый же
+   *      запуск попытки очищает `sel.fresh`, дальше опрос — перед каждым запуском;
+   *   3. полосы уровней — по оценкам выживших после прохода шлагбаумов, заморожены на попытку;
+   *      ни у одного выжившего нет оценки — вся попытка идёт прежним курсором по местам
+   *      (_cursorPick), без границы и селектора (`fallback=skipped:no_scores`,
+   *      `selection: cursor`); шлагбаум при запуске участника — как при выборе (`sel.fresh`);
+   *   4. нижняя граница — из журнала на каждом витке (gradeRuns: отказ, пусто, провал
+   *      контроля или ревью на этом тикете), не выше уровня сильнейшего выжившего − 1, и не
+   *      ниже уровня отказавшего в этой попытке (эскалация);
+   *   5. селектор — не больше одного вызова на попытку (_stageSelection), кэш в `sel`;
+   *   6. порядок обхода — walkOrder по выжившим над границей: сначала бесплатные ≥ R, затем
+   *      платные ≥ R, затем хвост ниже R. Отсеянного id в порядке нет (правило 2).
+   * @returns {Promise<object>} как resolveAgent (`compatible` — порядок обхода, у курсора —
+   *   места списка) и
+   *   `selection` — поля события run (§7), или blocked
+   */
+  async _resolveGoverned(stage, stageId, tried, sel) {
+    let survivors = this._stageSurvivors(stage, stageId, tried);
+    if (survivors.blocked) return survivors;
+    if (!sel.swept) {
+      sel.swept = true;
+      let closed = false;
+      for (const place of new Set(survivors.places)) {
+        if (this.stopRequested) break;
+        if (!survivors.isPool(place) || !this.pipeline.agents[place]?.models?.gate) continue;
+        const status = await this._poolGate(place, stageId);
+        if (status === 'closed') {
+          tried.push(place);
+          closed = true;
+        } else if (status === 'open') {
+          sel.fresh.add(place);
+        }
+      }
+      if (closed) {
+        survivors = this._stageSurvivors(stage, stageId, tried);
+        if (survivors.blocked) return survivors;
+      }
+    }
+
+    const agents = this.pipeline.agents;
+    const candidates = flattenSurvivors(survivors.places, { isPool: survivors.isPool, membersOf: (place) => survivors.poolOf(place).untried });
+    const ids = candidates.map((c) => c.id);
+    const poolById = new Map(candidates.map((c) => [c.id, c.pool]));
+    const listIndex = new Map(ids.map((id, i) => [id, i]));
+    const fact = (id) => factsOf(this.pipeline, stageId, id);
+    const scoreOf = (id) => fact(id)?.intelligence ?? null;
+    sel.bands ??= computeBands(ids.map(scoreOf), sel.N);
+    // Кандидат не ниже уровня 1: уровень 0 — только у запуска слабее всех (для границы).
+    const level = (id) => Math.max(1, levelOf(sel.bands, scoreOf(id)));
+    // Бесплатность — из фактов; факта нет (сбой команды фактов, модели нет в ответе) —
+    // по самому id: `:free` на конце (правило 2 бесплатности), иначе платная.
+    const free = (id) => {
+      const f = fact(id);
+      return f ? f.free === true : /:free$/.test(requestedModel(agents[id]) ?? '');
+    };
+
+    // Ни у одного выжившего нет оценки (сбой команды фактов, каталог OpenRouter не
+    // загружен): все на уровне 1, граница не растёт, и обход уровней пускал бы подряд
+    // участников пулов. Попытка идёт прежним курсором по местам (_cursorPick: те же
+    // выжившие, ротация по номеру попытки), шлагбаум при запуске — как на стадии с
+    // выбором, селектор не вызывается (`skipped:no_scores`).
+    if (sel.bands.min === null) {
+      const picked = this._cursorPick(survivors, stageId);
+      sel.decision ??= { R: null, ranking: [], mode: 'cursor', requiredLevel: null, fallback: 'skipped:no_scores', cost: null, durationMs: 0 };
+      this._logSelectModel(stage, stageId, sel, { candidates: ids.length, floor: 0, agentId: picked.agentId, level: 1, free: free(picked.agentId) });
+      return {
+        ...picked,
+        pool: picked.pool ?? null,
+        selection: {
+          selection: 'cursor', level: 1, levels: sel.N, required_level: null, floor_level: 0,
+          score: null, free: free(picked.agentId),
+        },
+      };
+    }
+
+    const ticket = this.context?.ticket_id || null;
+    let events = [];
+    try {
+      events = readRunEvents(this.projectRoot);
+    } catch (err) {
+      if (this.logger) this.logger.warn(`agent-runs: journal not readable, stage floor and ticket runs not applied: ${err.message}`, stageId);
+    }
+    // Оценка запуска для границы: факт агента процесса; агента в фактах нет — оценка,
+    // записанная в событии (поле `score` запуска на стадии с выбором); у агента без id
+    // модели оценки нет по определению — уровень 1. Иначе запуск пропускается с WARN.
+    const runScore = (run) => {
+      const known = agents[run.agent] ? fact(run.agent) : null;
+      if (known) return { known: true, score: known.intelligence };
+      if (Object.hasOwn(run, 'score')) return { known: true, score: typeof run.score === 'number' ? run.score : null };
+      if (agents[run.agent] && !requestedModel(agents[run.agent])) return { known: true, score: null };
+      return { known: false };
+    };
+    const floorInfo = ticketFloor(gradeRuns(events), ticket, runScore, sel.bands);
+    for (const agent of floorInfo.skipped) {
+      if (sel.warnedSkips.has(agent) || !this.logger) continue;
+      sel.warnedSkips.add(agent);
+      this.logger.warn(`selection: failed run of "${agent}" on ${ticket} has no score (agent not in stage facts) — not counted in floor`, stageId);
+    }
+    // Потолок границы — сильнейший уровень выживших в начале попытки, заморожен с полосами:
+    // после провала на верхнем уровне верхний уровень берётся снова (решение 6), но
+    // исчерпанные в попытке сильные уровни не открывают слабые — ни после отказа
+    // (эскалация), ни после сбоев.
+    sel.maxLevel ??= Math.max(...ids.map(level));
+    const floor = capFloor(Math.max(floorInfo.floor, sel.escalationFloor), sel.maxLevel);
+    const above = ids.filter((id) => level(id) > floor);
+    if (above.length === 0) {
+      return {
+        blocked: 'all_unhealthy',
+        reason: `All candidates above stage floor ${floor} tried in fallback`,
+        attempt: survivors.attempt,
+      };
+    }
+    const ran = new Set(events.filter((e) => e.type === 'run' && ticket && e.ticket === ticket && e.model).map((e) => e.model));
+    const notRun = new Set(above.filter((id) => !ran.has(configuredModelKey(agents[id], id))));
+
+    if (!sel.decision) {
+      const started = Date.now();
+      sel.decision = await this._stageSelection({
+        stage, stageId, skillId: survivors.effectiveStage.skill, ticket, above, level, free, fact,
+        floor, floorInfo, notRun, listIndex,
+      });
+      sel.decision.durationMs = Date.now() - started;
+    }
+    const order = walkOrder({
+      survivors: above, levelOf: level, freeOf: free, R: sel.decision.R, floor,
+      ranking: sel.decision.ranking, notRun, listIndex,
+    });
+    const agentId = order[0];
+    this._logSelectModel(stage, stageId, sel, { candidates: above.length, floor, agentId, level: level(agentId), free: free(agentId) });
+    return {
+      agentId,
+      effectiveStage: survivors.effectiveStage,
+      attempt: survivors.attempt,
+      compatible: order,
+      pool: poolById.get(agentId) ?? null,
+      selection: {
+        selection: sel.decision.mode,
+        level: level(agentId),
+        levels: sel.N,
+        required_level: sel.decision.requiredLevel,
+        floor_level: floor,
+        score: scoreOf(agentId),
+        free: free(agentId),
+      },
+    };
+  }
+
+  /** Строка SELECT_MODEL — один раз на попытку, при первом выборе. */
+  _logSelectModel(stage, stageId, sel, { candidates, floor, agentId, level, free }) {
+    if (sel.logged) return;
+    sel.logged = true;
+    const d = sel.decision;
+    if (!this.logger) return;
+    this.logger.info(
+      `SELECT_MODEL stage="${stageId}" selector="${stage.selection.selector}" candidates=${candidates} levels=${sel.N} `
+        + `range=${sel.bands.min ?? 'n/a'}..${sel.bands.max ?? 'n/a'} floor=${floor} required_level=${d.requiredLevel ?? '-'} `
+        + `ranked=${d.ranking.length} pick="${agentId}" level=${level} free=${free} fallback=${d.fallback} `
+        + `cost_usd=${d.cost ?? 'unknown'} duration_ms=${d.durationMs}`,
+      stageId,
+    );
+  }
+
+  /**
+   * Решение селектора модели стадии на попытку: `{R, ranking, mode, requiredLevel, fallback,
+   * cost}`. Вызова нет (`fallback: skipped:<причина>`) — нет тикета, селектор нездоров,
+   * запрошена остановка, выживших над границей меньше двух или все на одном уровне. Сбой
+   * вызова (выход ≠ 0, `status: error`, таймаут) — `error`/`timeout`, ответ без целого
+   * `required_level` в 1..N — `unknown_level` (его ранжир всё равно идёт в порядок внутри
+   * уровня). Без ответа R — наименьший уровень выживших: обход — лестница от слабых.
+   * Ответ R не выше границы поднимается до границы + 1. Сбой помечает селектора
+   * (_markSelectorFailure) — только его, не селекторы пулов.
+   */
+  async _stageSelection({ stage, stageId, skillId, ticket, above, level, free, fact, floor, floorInfo, notRun, listIndex }) {
+    const selectorId = stage.selection.selector;
+    const selector = this.pipeline.agents[selectorId];
+    const lowest = Math.min(...above.map(level));
+    const ladder = (fallback, ranking = [], cost = null) => ({ R: lowest, ranking, mode: 'ladder', requiredLevel: null, fallback, cost });
+    let skip = null;
+    if (!ticket) skip = 'no_ticket';
+    else if (!selector || !isHealthy(this.projectRoot, selectorId)) skip = 'unhealthy';
+    else if (this.stopRequested) skip = 'stopped';
+    else if (above.length < 2) skip = 'single_candidate';
+    else if (new Set(above.map(level)).size < 2) skip = 'single_level';
+    if (skip) return ladder(`skipped:${skip}`);
+
+    // Кандидаты промпта — в порядке обхода без ответа (лестница от границы): так
+    // обёртка, у которой выбор ограничен 255 вариантами, берёт первых по обходу.
+    const preliminary = walkOrder({ survivors: above, levelOf: level, freeOf: free, R: null, floor, notRun, listIndex });
+    const candidates = preliminary.map((id) => {
+      const f = fact(id);
+      return {
+        id,
+        kind: this.pipeline.agents[id]?.pool ? 'pool_member' : 'agent',
+        free: free(id),
+        level: level(id),
+        scores: f && typeof f.intelligence === 'number' ? { intelligence: f.intelligence, coding: f.coding, agentic: f.agentic } : null,
+      };
+    });
+    const levels = stage.selection.levels;
+    const ticketData = selectionTicket(findTicketPathForId(ticket, this.projectRoot), {
+      id: ticket,
+      type: ticketTypeOf(this.context),
+      executorRuns: floorInfo.executorRuns,
+      floorLevel: floor,
+      history: floorInfo.history,
+    });
+    const prompt = buildSelectionPrompt({
+      stage: stageId, ticket: ticketData, levels, candidates, citation: stageFactsInfo(this.pipeline, stageId)?.citation ?? null,
+    });
+    const call = await this._runSelector(selectorId, selector, prompt, stageId, skillId,
+      `selector stage=${stageId} candidates=${candidates.length} prompt_chars=${prompt.length}`);
+    this._markSelectorFailure(selectorId, call, stageId);
+    if (call.fallback) return ladder(call.fallback, [], call.cost);
+    const ranking = selectorRanking(call.result.result?.ranking, above);
+    const required = parseRequiredLevel(call.result.result?.required_level, levels.length);
+    if (required === null) return ladder('unknown_level', ranking, call.cost);
+    const R = required <= floor ? floor + 1 : required;
+    return { R, ranking, mode: 'selector', requiredLevel: R, fallback: 'none', cost: call.cost };
   }
 
   /**
@@ -1632,8 +1911,41 @@ class StageExecutor {
       snapshotMaxFileSize: this.pipeline.execution?.snapshot_max_file_size ?? 524288,
     };
 
+    // Выбор модели стадии (`selection`, _resolveGoverned) вместо курсора; тип с
+    // `selection: false` и стадия без `selection` идут прежним путём без изменений.
+    const governed = isGoverned(stage, ticketTypeOf(this.context || {}));
+    let sel = null;
+    if (governed) {
+      // Факты грузит PipelineRunner.run один раз на процесс; исполнитель, созданный без
+      // него (тесты, стадия вне pipeline.stages), грузит факты своей стадии сам.
+      if (!hasStageFacts(this.pipeline, stageId)) {
+        await loadStageFacts(this.pipeline, {
+          projectRoot: this.projectRoot, logger: this.logger, stageId, signal: this.stopAbort?.signal,
+          stages: { [stageId]: stage },
+        });
+      }
+      const levels = stage.selection.levels;
+      sel = {
+        N: Array.isArray(levels) && levels.length > 0 ? levels.length : 1,
+        escalateOn: new Set(Array.isArray(stage.selection.escalate_on) ? stage.selection.escalate_on : []),
+        swept: false,
+        fresh: new Set(),
+        bands: null,
+        decision: null,
+        logged: false,
+        escalationFloor: 0,
+        warnedSkips: new Set(),
+      };
+    }
+    // Следующий кандидат, уже выбранный эскалацией: виток его не пересчитывает.
+    let pending = null;
+
     while (true) {
-      const resolved = this.resolveAgent(stage, stageId, { excludeAgents: triedInThisAttempt });
+      const resolved = pending
+        ?? (governed
+          ? await this._resolveGoverned(stage, stageId, triedInThisAttempt, sel)
+          : this.resolveAgent(stage, stageId, { excludeAgents: triedInThisAttempt }));
+      pending = null;
 
       if (resolved.blocked) {
         const exhausted = resolved.blocked === 'all_unhealthy' || resolved.blocked === 'all_banned';
@@ -1657,7 +1969,16 @@ class StageExecutor {
       // После запроса остановки шлагбаум и селектор не запускаются — стадию остановит
       // проверка ниже. Шлагбаум, запущенный до остановки, снимает killCurrentChild
       // (stopAbort); остановка, пришедшая за время шлагбаума, селектора не запускает.
-      if (resolved.pool && !this.stopRequested) {
+      if (governed && resolved.pool && !this.stopRequested) {
+        // Стадия с выбором: шлагбаум прошёл в начале попытки (_resolveGoverned). Участник
+        // открытого пула, запускаемый первым в попытке, его не опрашивает; любой запуск
+        // после другого запуска попытки — опрашивает (sel.fresh очищается при запуске).
+        // Селектор пула на такой стадии не вызывается: участников ранжирует селектор стадии.
+        if (!sel.fresh.delete(resolved.pool) && await this._poolGate(resolved.pool, stageId) === 'closed') {
+          triedInThisAttempt.push(resolved.pool);
+          continue;
+        }
+      } else if (resolved.pool && !this.stopRequested) {
         // Шлагбаум — перед каждым запуском участника, до селектора (П14). Закрытое место
         // держит health-реестр; id пула в excludeAgents закрывает место и в этой попытке,
         // если запись реестра не удалась, — иначе цикл выбирал бы его снова.
@@ -1685,7 +2006,11 @@ class StageExecutor {
         throw Object.assign(new Error(`Stage "${stageId}" stopped before agent ${agentId}`), { code: 'STOPPED' });
       }
 
-      const run = this._openAgentRun(stageId, effectiveStage, agentId, agent, resolved.attempt);
+      const run = this._openAgentRun(stageId, effectiveStage, agentId, agent, resolved.attempt, resolved.selection ?? null);
+      // Показание шлагбаума из прохода свежо только до первого запуска попытки: пока шёл
+      // этот запуск, квоту пула могли израсходовать (другой проект на том же ключе), и
+      // первый запуск участника после него опрашивает шлагбаум заново.
+      if (sel) sel.fresh.clear();
 
       try {
         if (this.logger) {
@@ -1769,6 +2094,32 @@ class StageExecutor {
             }
           } catch (err) {
             if (this.logger) this.logger.warn(`review agent normalize threw: ${err.message}`, stageId);
+          }
+        }
+
+        // Эскалация (решение 3): агент сам ответил `status: blocked` (у blocked раннера
+        // всегда есть blocked_reason) — в этой же попытке следующий кандидат строго
+        // сильнее уровнем; событие run уже записано с result_status: blocked (gradeOf —
+        // refused). Сделанное записано в тикет, как после MODEL_BANNED. Сильнее нет —
+        // blocked уходит стадии, в goto.blocked, как раньше.
+        if (governed && sel.escalateOn.has('blocked') && result.status === 'blocked' && !result.blocked_reason) {
+          const from = resolved.selection.level;
+          triedInThisAttempt.push(agentId);
+          sel.escalationFloor = Math.max(sel.escalationFloor, from);
+          const next = await this._resolveGoverned(stage, stageId, triedInThisAttempt, sel);
+          const stronger = !next.blocked && next.selection.level > from;
+          if (this.logger) {
+            this.logger.info(
+              `ESCALATE stage="${stageId}" from="${agentId}" level=${from} to="${stronger ? next.agentId : 'none'}" `
+                + `level=${stronger ? next.selection.level : '-'}`,
+              stageId,
+            );
+          }
+          if (stronger) {
+            pending = next;
+            lastErr = null;
+            lastModelFailure = null;
+            continue;
           }
         }
 
@@ -1884,8 +2235,11 @@ class StageExecutor {
    * ответившей модели ещё нет — ключ модели без данных запуска, у kilo-агента null),
    * снимок для подсчёта изменённых файлов и проверка ответивших моделей kilo-агента
    * на стадии исполнителя. Ошибка записи не меняет ход стадии: WARN, агент запускается.
+   * `selection` — поля выбора модели стадии (`selection`, `level`, `levels`,
+   * `required_level`, `floor_level`, `score`, `free`) — только на стадии с `selection`:
+   * у прочих стадий ключи записи и события прежние.
    */
-  _openAgentRun(stageId, effectiveStage, agentId, agent, attempt) {
+  _openAgentRun(stageId, effectiveStage, agentId, agent, attempt, selection = null) {
     const context = this.context || {};
     const ticket = context.ticket_id || null;
     const modelIo = agent.kind === 'http' || Boolean(effectiveStage.model_io);
@@ -1901,6 +2255,7 @@ class StageExecutor {
       agent: agentId,
       requested: requestedModel(agent),
       model: runModelKey(agent, agentId),
+      ...(selection ?? {}),
     };
     // Стадия с model_io файлов не касается: вход собирает prepare, записи делает apply.
     const changes = modelIo ? null : captureRunChanges(this.projectRoot, findTicketPathForId(ticket, this.projectRoot));
@@ -3610,6 +3965,12 @@ class PipelineRunner {
     await expandModelPools(this.pipeline, {
       projectRoot: this.projectRoot, logger: this.logger, stageId: 'PipelineRunner', signal: this.stopAbort.signal,
     });
+    // Факты стадий с выбором модели (`selection.scores`) — тоже один раз на процесс, после
+    // раскрытия пулов: на вход идут модели участников. Сбой — все кандидаты без оценок
+    // (бесплатны только id с `:free`), попытки идут прежним курсором (_resolveGoverned).
+    await loadStageFacts(this.pipeline, {
+      projectRoot: this.projectRoot, logger: this.logger, stageId: 'PipelineRunner', signal: this.stopAbort.signal,
+    });
 
     while (this.running && this.stepCount < maxSteps) {
       if (this.currentStage !== 'end') {
@@ -4192,14 +4553,8 @@ function validateModelPool(agentId, agent, agents, errors) {
     errors.push(`Agent "${agentId}" has invalid models.max_per_attempt: must be an integer >= 1`);
   }
   if (selector !== undefined) {
-    const target = typeof selector === 'string' && Object.hasOwn(agents, selector) ? agents[selector] : undefined;
-    if (!isPlainObject(target)) {
-      errors.push(`Agent "${agentId}" has invalid models.selector: ${JSON.stringify(selector)} is not an agent in pipeline.agents`);
-    } else if (target.kind === 'http') {
-      errors.push(`Agent "${agentId}" has invalid models.selector "${selector}": selector must be an agent with a command, not kind: http`);
-    } else if (target.models !== undefined) {
-      errors.push(`Agent "${agentId}" has invalid models.selector "${selector}": selector must not be a model pool`);
-    }
+    const problem = selectorProblem(selector, agents);
+    if (problem) errors.push(`Agent "${agentId}" has invalid models.selector${problem}`);
   }
   if (scores !== undefined) {
     if (!isNonEmptyStringArray(scores)) {
@@ -4213,6 +4568,19 @@ function validateModelPool(agentId, agent, agents, errors) {
   if (gate !== undefined && !isNonEmptyStringArray(gate)) {
     errors.push(`Agent "${agentId}" has invalid models.gate: expected non-empty array of non-empty strings (command and its args)`);
   }
+}
+
+/**
+ * Проверка агента-селектора (`models.selector` пула и `selection.selector` стадии):
+ * агент есть в pipeline.agents, у него команда (не kind: http) и он не пул. Нарушение —
+ * хвост сообщения после имени поля, иначе null.
+ */
+function selectorProblem(selector, agents) {
+  const target = typeof selector === 'string' && Object.hasOwn(agents, selector) ? agents[selector] : undefined;
+  if (!isPlainObject(target)) return `: ${JSON.stringify(selector)} is not an agent in pipeline.agents`;
+  if (target.kind === 'http') return ` "${selector}": selector must be an agent with a command, not kind: http`;
+  if (target.models !== undefined) return ` "${selector}": selector must not be a model pool`;
+  return null;
 }
 
 function validateAgentEntry(agentId, agent, errors, agents = {}) {
@@ -4394,6 +4762,100 @@ function validatePoolPlacement(pipeline, errors) {
   }
 }
 
+const SELECTION_KEYS = Object.freeze(['selector', 'scores', 'escalate_on', 'levels']);
+const SELECTION_ESCALATE_ON = Object.freeze(['blocked']);
+
+/**
+ * Выбор модели стадии `selection` (README, «Выбор модели стадии»):
+ *  1. объект только с ключами SELECTION_KEYS;
+ *  2. стадия исполнителя (`skill: execute-task`) без model_io и одиночного `agent`:
+ *     выбор идёт по списку агентов исполнителя, а запреты и нижняя граница — по его
+ *     журналу;
+ *  3. `selector` — агент с командой, не пул (те же проверки, что у models.selector);
+ *  4. `scores` — команда фактов, непустой массив непустых строк;
+ *  5. `levels` — 2..10 непустых строк (рубрика сложности, от слабого к сильному);
+ *  6. `escalate_on` — подмножество SELECTION_ESCALATE_ON без повторов;
+ *  7. `agents_by_type.<тип>.selection` — только `false` и только у стадии с `selection`.
+ * И мёртвый конфиг пула: `models.selector`/`models.scores` пула, все списки которого под
+ * выбором модели, не вызывается никогда — селектор пула на такой стадии не зовут.
+ */
+function validateStageSelection(pipeline, errors) {
+  const agents = pipeline.agents;
+  // Списки стадий с признаком «под выбором» — для проверки мёртвого селектора пула.
+  const listUses = [];
+  for (const [stageId, stage] of Object.entries(pipeline.stages)) {
+    if (!isPlainObject(stage)) continue;
+    const selection = stage.selection;
+    const byType = isPlainObject(stage.agents_by_type) ? stage.agents_by_type : {};
+    for (const [type, entry] of Object.entries(byType)) {
+      if (!isPlainObject(entry) || entry.selection === undefined) continue;
+      if (entry.selection !== false) {
+        errors.push(`Stage "${stageId}" has invalid agents_by_type.${type}.selection: only false (opt the type out of stage selection) is allowed`);
+      } else if (selection === undefined) {
+        errors.push(`Stage "${stageId}" has agents_by_type.${type}.selection: false, but the stage has no selection`);
+      }
+    }
+    const governed = isPlainObject(selection);
+    // Список стадии (без него — default_agents) служит типам без своего списка; тип с
+    // `selection: false` без своего списка идёт по нему курсором.
+    const optedOutOnDefault = Object.values(byType).some((e) => isPlainObject(e) && e.selection === false && !Array.isArray(e.agents));
+    // Встроенные типы (update-counter, manual-gate) PipelineRunner выполняет без
+    // StageExecutor: агента они не выбирают, и default_agents у них — не использование пула.
+    const picksAgent = stage.type !== 'update-counter' && stage.type !== 'manual-gate';
+    if (picksAgent && Array.isArray(stage.agents)) listUses.push({ list: stage.agents, governed: governed && !optedOutOnDefault });
+    else if (picksAgent && !stage.agent && Array.isArray(pipeline.default_agents)) listUses.push({ list: pipeline.default_agents, governed: governed && !optedOutOnDefault });
+    for (const entry of Object.values(byType)) {
+      if (picksAgent && isPlainObject(entry) && Array.isArray(entry.agents)) listUses.push({ list: entry.agents, governed: governed && entry.selection !== false });
+    }
+    if (selection === undefined) continue;
+
+    const where = `Stage "${stageId}"`;
+    if (!governed) {
+      errors.push(`${where} has invalid selection: expected object with selector, scores and levels`);
+      continue;
+    }
+    for (const key of Object.keys(selection)) {
+      if (!SELECTION_KEYS.includes(key)) errors.push(`${where} has unknown selection key: ${key} (expected: ${SELECTION_KEYS.join(', ')})`);
+    }
+    if (stage.skill !== EXECUTOR_SKILL) {
+      errors.push(`${where} has selection, but skill is ${JSON.stringify(stage.skill ?? null)}: selection is only for the executor stage (skill: ${EXECUTOR_SKILL})`);
+    }
+    if (stage.model_io !== undefined) errors.push(`${where} has selection and model_io: selection picks CLI agents, not a model exchange`);
+    if (stage.agent !== undefined) errors.push(`${where} has selection and a single agent: selection picks from an agents list`);
+    if (selection.selector === undefined) {
+      errors.push(`${where} selection missing required field: selector`);
+    } else {
+      const problem = selectorProblem(selection.selector, agents);
+      if (problem) errors.push(`${where} has invalid selection.selector${problem}`);
+    }
+    if (selection.scores === undefined) {
+      errors.push(`${where} selection missing required field: scores`);
+    } else if (!isNonEmptyStringArray(selection.scores)) {
+      errors.push(`${where} has invalid selection.scores: expected non-empty array of non-empty strings (command and its args)`);
+    }
+    const { levels } = selection;
+    if (!Array.isArray(levels) || levels.length < 2 || levels.length > 10
+      || !levels.every((level) => typeof level === 'string' && level.trim() !== '')) {
+      errors.push(`${where} has invalid selection.levels: expected 2..10 non-empty strings (task difficulty, weakest first)`);
+    }
+    const escalateOn = selection.escalate_on;
+    if (escalateOn !== undefined && (!Array.isArray(escalateOn)
+      || !escalateOn.every((item) => SELECTION_ESCALATE_ON.includes(item))
+      || new Set(escalateOn).size !== escalateOn.length)) {
+      errors.push(`${where} has invalid selection.escalate_on: expected a list of distinct values from [${SELECTION_ESCALATE_ON.join(', ')}]`);
+    }
+  }
+
+  for (const [poolId, pool] of Object.entries(agents)) {
+    if (!isPlainObject(pool) || !isPlainObject(pool.models)) continue;
+    if (pool.models.selector === undefined && pool.models.scores === undefined) continue;
+    const uses = listUses.filter(({ list }) => list.includes(poolId));
+    if (uses.length > 0 && uses.every(({ governed }) => governed)) {
+      errors.push(`Agent "${poolId}" has models.selector/models.scores that is never called: every stage listing pool ${poolId} uses selection (drop them from the pool)`);
+    }
+  }
+}
+
 function validateConfig(config, projectRoot = null) {
   const errors = [];
 
@@ -4473,6 +4935,7 @@ function validateConfig(config, projectRoot = null) {
 
     validateHttpAgentPlacement(pipeline, errors);
     validatePoolPlacement(pipeline, errors);
+    validateStageSelection(pipeline, errors);
   }
 
   return errors;

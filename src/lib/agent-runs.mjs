@@ -257,7 +257,14 @@ function verifyHasVerdict(event) {
 
 function gradeOf(run, verify, review) {
   if (isStopped(run)) return { grade: 'stopped', crashed_after_work: false, artifacts_passed: null };
-  if (run.status === 'blocked') return { grade: 'refused', crashed_after_work: false, artifacts_passed: null };
+  // Отказ исполнителя — и класс запуска `blocked`, и `status: blocked` блока RESULT
+  // (`result_status`): статус RESULT раннер держит вне данных ответа, и класс
+  // `blocked` агенту не достаётся никогда. Без второго условия отказ оценивался по
+  // изменениям: PulseProxy FIX-032 2026-09-28 (claude-haiku, `result_status: blocked`,
+  // 3 изменённых файла) — `pending`, отказ без изменений был бы `empty` — провалом.
+  if (run.status === 'blocked' || run.result_status === 'blocked') {
+    return { grade: 'refused', crashed_after_work: false, artifacts_passed: null };
+  }
   // При любых изменениях, как `stopped`: работу оборвал провайдер, и контроль после
   // такого запуска о модели ничего не говорит.
   if (run.status === THROTTLED_STATUS) return { grade: 'throttled', crashed_after_work: false, artifacts_passed: null };

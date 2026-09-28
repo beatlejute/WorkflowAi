@@ -114,24 +114,28 @@ pipeline:
       capabilities: [text]
       description: "Jev (TypeSafe) через OpenRouter — судья тестов скилов и модель ревью по evidence"
 
-    # Селектор участника пула (models.selector) — модель решений Jev через обёртку
-    # decisions-select.js: промпт селектора из stdin, ответ `ranking: <id>, <id>, …`.
-    # Контракт (README, «Пулы моделей»): в промпте — JSON с тикетом (тип, заголовок, DoD
-    # до 4000 символов) и кандидатами (до 10: id, способности, note, оценки Artificial
-    # Analysis); обёртка задаёт один вопрос decisions типа choice и отдаёт всех кандидатов
-    # по убыванию вероятности. Сбой, таймаут или ответ без id кандидатов — порядок маски.
-    # Раннер вызывает селектор один раз на место пула в попытке (не больше 12 вызовов на
-    # тикет при двух пулах и 6 попытках) и снимает его через 60 с: --timeout 15 даёт
-    # 3 × 15 + 6 = 51 с на все повторы клиента. Цена — живой вызов 2026-09-28 с 10
-    # кандидатами: $0.000075 (usage.cost ответа, печатается в строке SELECT).
-    jev-select:
+    # Селектор модели стадии (selection.selector, README «Выбор модели стадии») — модель
+    # решений Jev через обёртку decisions-select.js в режиме models: промпт из stdin, в нём
+    # JSON с тикетом, рубрикой уровней стадии и выжившими кандидатами (id, бесплатная или
+    # платная, уровень, оценки Artificial Analysis). Обёртка задаёт два вопроса decisions:
+    # самый низкий достаточный уровень (score по рубрике; required_level — наименьший
+    # уровень с накопленной вероятностью ≥ --level-quantile 0.5) и порядок кандидатов
+    # внутри уровня (choice). Сбой, таймаут или ответ без уровня — лестница от слабых.
+    # Раннер вызывает его не больше одного раза на попытку и снимает через 60 с: --timeout
+    # 15 даёт 3 × 15 + 6 = 51 с на все повторы клиента. Отдельный id от селектора пула:
+    # сбой одного не помечает нездоровым другого. Цена вызова с ~35 кандидатами не
+    # измерена — cost_usd печатается в строке SELECT_MODEL.
+    # Селектор участника пула (models.selector, агент jev-select 1.16) из поставляемого
+    # конфига убран: пулы стоят только в списках execute-task, где пул селектора не зовут.
+    # Путь селектора пула в коде остался — для стадий без selection и конфигов проекта.
+    jev-place:
       command: "node"
-      args: [".workflow/src/scripts/decisions-select.js", "--model", "typesafe/jev-1.13", "--url", "https://openrouter.ai/api/alpha/decisions", "--key-file", "~/.workflow/secrets/openrouter.key", "--timeout", "15"]
+      args: [".workflow/src/scripts/decisions-select.js", "--model", "typesafe/jev-1.13", "--url", "https://openrouter.ai/api/alpha/decisions", "--key-file", "~/.workflow/secrets/openrouter.key", "--timeout", "15", "--level-quantile", "0.5"]
       workdir: "."
       prompt_stdin: true
       tool_less: true
       capabilities: [text]
-      description: "Jev (TypeSafe) через OpenRouter — выбор участника пула под тикет"
+      description: "Jev (TypeSafe) через OpenRouter — выбор модели стадии под тикет"
 
     # Claude без инструментов для пунктов DoD со скриншотами (visual) в стадии ревью по
     # evidence. Решение стейкхолдера 2026-09-26: скриншоты оценивает Claude Haiku.
@@ -221,11 +225,17 @@ pipeline:
     #  - openrouter/nvidia/nemotron-3.5-content-safety:free исключена отрицательным
     #    просмотром вперёд: единственная модель `:free` без вызова инструментов;
     #  - free-openrouter тратит дневной счётчик бесплатных запросов аккаунта OpenRouter
-    #    (50/сутки): шлагбаум gate перед каждым запуском участника читает GET /api/v1/key
-    #    и при `remaining: 0` закрывает место пула до 00:00 UTC — стадия берёт следующее
-    #    место списка (П14). Маршруты kilo/* счётчик аккаунта не тратят, gate у них нет.
-    # Якоря &free_pool_args и &free_pool_scores отдают обоим пулам один и тот же массив:
-    # раннер строит запись участника копией, массив пула на месте не правит.
+    #    (50/сутки): шлагбаум gate читает GET /api/v1/key и при `remaining: 0` закрывает
+    #    место пула до 00:00 UTC (П14). На execute-task (selection) шлагбаум опрашивается
+    #    один раз в начале попытки и перед каждым запуском участника, кроме запуска первым
+    #    в попытке; закрытый пул выбывает из кандидатов попытки. Маршруты kilo/* счётчик аккаунта не тратят,
+    #    gate у них нет.
+    # selector и scores у пулов нет: пулы стоят только в списках execute-task, где участников
+    # вместе с остальными кандидатами ранжирует селектор стадии (jev-place), а оценки и
+    # бесплатность даёт selection.scores. Селектор пула там не вызывался бы никогда —
+    # validateConfig такой мёртвый конфиг отклоняет.
+    # Якорь &free_pool_args отдаёт обоим пулам один и тот же массив: раннер строит запись
+    # участника копией, массив пула на месте не правит.
     free-kilo:
       command: "kilo"
       args: &free_pool_args ["-m", "{model}", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
@@ -239,8 +249,6 @@ pipeline:
           - '^kilo/nvidia/nemotron-3-ultra-550b-a55b:free$'
           - '^kilo/[^/]+/[^/]+:free$'
         max_per_attempt: 3
-        selector: jev-select
-        scores: &free_pool_scores ["node", ".workflow/src/scripts/model-scores.js", "--benchmarks-url", "https://openrouter.ai/api/v1/benchmarks?source=artificial-analysis", "--models-url", "https://openrouter.ai/api/v1/models", "--key-file", "~/.workflow/secrets/openrouter.key"]
 
     free-openrouter:
       command: "kilo"
@@ -254,8 +262,6 @@ pipeline:
           - '^openrouter/nvidia/nemotron-3-ultra-550b-a55b:free$'
           - '^openrouter/(?!nvidia/nemotron-3\.5-content-safety:free$)[^/]+/[^/]+:free$'
         max_per_attempt: 3
-        selector: jev-select
-        scores: *free_pool_scores
         gate: ["node", ".workflow/src/scripts/free-quota-gate.js", "--url", "https://openrouter.ai/api/v1/key", "--key-file", "~/.workflow/secrets/openrouter.key", "--timeout", "10"]
 
     script-move:
@@ -380,20 +386,36 @@ pipeline:
   #       <type>:
   #         agents: <id[]>
   #         instructions: <string>
+  #         selection: false       — тип без выбора модели стадии (курсор попытки)
+  #     selection:                 — выбор модели стадии (только skill: execute-task; README,
+  #                                   «Выбор модели стадии»)
+  #       selector:  <agent-id>    — агент с командой (не пул): уровень и порядок кандидатов
+  #       scores:    <string[]>    — команда фактов: оценка и бесплатность моделей кандидатов
+  #       levels:    <string[]>    — рубрика сложности тикета, 2..10 текстов от слабого к
+  #                                   сильному; её длина — число уровней кандидатов
+  #       escalate_on: [blocked]   — агент ответил blocked — следующий сильнее в той же попытке
   #     goto:                      — логика переходов по результату
   #       <status>:                — ключ = статус результата агента
   #         stage:  <stage-id>     — следующий stage
   #         params: <map>          — параметры, передаваемые в context следующего stage
   #       default:                 — fallback если статус не совпал ни с одним ключом
   #
-  # Логика выбора агента (единая для всех стейджей):
+  # Логика выбора агента (StageExecutor.resolveAgent, src/runner.mjs):
   #   1. Взять список: agents_by_type[task_type].agents (если задан), иначе stage.agents,
   #      иначе pipeline.default_agents.
-  #   2. Отфильтровать по required_capabilities тикета: агент должен покрывать ВСЕ.
-  #   3. Если список пуст → тикет/стейдж уходит в blocked со статусом "no_capable_agent".
-  #   4. Попытка N (1-based) берёт элемент N списка.
-  #   5. Если N > длины списка → blocked "attempts_exhausted".
-  #   6. Любая неудача (exit≠0 / review: failed) → cursor++, attempt++.
+  #   2. Отфильтровать: агент покрывает ВСЕ required_capabilities тикета, здоров по
+  #      health-реестру (у пула — и id пула), без запрета модели (стадия исполнителя), не
+  #      пробован в этой попытке; пул — одно место, пока в попытке пробовано меньше
+  #      max_per_attempt его участников.
+  #   3. Никого не осталось → status: blocked (no_capable_agent, all_unhealthy, all_banned).
+  #   4. Попытка N (1-based) берёт место (N − 1) % длины отфильтрованного списка — курсор
+  #      идёт по кругу, «attempts_exhausted» нет: попытки ограничивает счётчик стадии.
+  #   5. Неудача агента с пустым diff, ошибка модели или запрет модели — следующее место
+  #      в той же попытке; неудача стадии — следующая попытка (счётчик +1).
+  # Стадия с selection (execute-task) шаг 4 заменяет выбором модели: кандидаты шага 2 (пулы —
+  # участниками) делятся на уровни по оценкам, селектор называет самый низкий достаточный
+  # уровень, обход — сначала бесплатные от этого уровня вверх, затем платные, затем слабее;
+  # проваленные на тикете уровни не берутся (README, «Выбор модели стадии»).
   #
   # Специальные значения stage:
   #   "end" — завершение пайплайна
@@ -787,6 +809,20 @@ pipeline:
       description: "Выполнить выбранную задачу"
       skill: execute-task
       counter: task_attempts
+      # Выбор модели стадии (README, «Выбор модели стадии»): самая слабая достаточная модель
+      # среди выживших фильтров, бесплатные — первыми. Уровни — полосы оценок кандидатов,
+      # их число — число текстов levels; уровней агентам и порогов в конфиге нет.
+      # agents_by_type ниже наследуют выбор; `selection: false` у типа — прежний курсор.
+      selection:
+        selector: jev-place
+        scores: ["node", ".workflow/src/scripts/model-scores.js", "--benchmarks-url", "https://openrouter.ai/api/v1/benchmarks?source=artificial-analysis", "--models-url", "https://openrouter.ai/api/v1/models", "--key-file", "~/.workflow/secrets/openrouter.key"]
+        escalate_on: [blocked]
+        levels:
+          - "mechanical edit from a precise recipe, 1-2 files, DoD checked by one command"
+          - "routine change in a known place, clear DoD, up to ~5 files"
+          - "change needing mcp/browser checks, or debugging with a known cause"
+          - "unknown root cause, several modules, repeat after a failed attempt"
+          - "regression after others failed, architecture, ambiguous DoD"
       agents: [free-kilo, free-openrouter, gpt-luna, gemini-flash-lite, claude-haiku, claude-sonnet, claude-opus, deepseek-flash]
       # instructions типа — содержание работы, а не скил. Скил стадии раннер передаёт агенту в
       # WORKFLOW_RAILS_SKILL: по нему хук ведёт состояние рельс, по его терминалу раннер
@@ -810,12 +846,13 @@ pipeline:
             ticket_id: "$context.ticket_id"
             attempt: "$counter.task_attempts"
             target: review
-        # Runner возвращает status=blocked при no_capable_agent / attempts_exhausted
-        # (resolveAgent в runner.mjs, строка ~926). Направляем тикет сразу в blocked/,
-        # минуя move-to-review → verify-artifacts → increment-task-attempts: иначе
-        # тикет крутится 6 итераций вхолостую (execute-task не может его взять,
-        # verify-artifacts фейлится с пустым result, счётчик достигает max → blocked
-        # всё равно). Прямой маршрут экономит ~6 пустых итераций на тикет.
+        # status: blocked — раннер не нашёл агента (no_capable_agent; all_unhealthy или
+        # all_banned, пока в попытке не было сбоя; StageExecutor.executeWithFallback) или
+        # агент сам ответил blocked, а сильнее его уровня кандидатов нет (эскалация selection).
+        # Направляем тикет сразу в blocked/, минуя move-to-review → verify-artifacts →
+        # increment-task-attempts: иначе тикет крутится 6 итераций вхолостую (execute-task
+        # не может его взять, verify-artifacts фейлится с пустым result, счётчик достигает
+        # max → blocked всё равно). Прямой маршрут экономит ~6 пустых итераций на тикет.
         blocked:
           stage: move-ticket
           params:

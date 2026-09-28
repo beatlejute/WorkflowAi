@@ -42,7 +42,9 @@
  *
  * Селектор (П1, П15) и шлагбаум (П14) вызывает StageExecutor.executeWithFallback: здесь —
  * данные промпта селектора (poolSelectorData, selectorTicket, buildSelectorPrompt), разбор
- * ранжира (selectorRanking) и их пределы.
+ * ранжира (selectorRanking) и их пределы. На стадии с выбором модели (`selection`,
+ * lib/stage-selection.mjs) пул раскрывается в участников-кандидатов стадии, и селектор
+ * пула там не вызывается: участников ранжирует селектор стадии.
  */
 
 import fs from 'node:fs';

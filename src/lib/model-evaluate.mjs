@@ -25,21 +25,27 @@
  * `type: choice` с вариантами `{ "0": уровень 1, …, "n-1": уровень n }`: имена
  * вариантов — индексы, поэтому вероятности ответа приходят по тем же индексам,
  * что у `score`. Документация Decisions API: choice — до 255 вариантов, score —
- * до 10 уровней; предел 2..10 здесь общий. Протокол chat тип не различает.
+ * до 10 уровней (по документации, живым вызовом не проверено); предел — по типу:
+ * `score` 2..10, `choice` 2..255 (вопрос-выбор кандидатов стадии, scripts/
+ * decisions-select.js, — до 35 вариантов в поставляемом конфиге). Протокол chat тип
+ * не различает.
  */
 
 import { chat, decide, ModelClientError } from './model-client.mjs';
 
 export const MIN_LEVELS = 2;
 export const MAX_LEVELS = 10;
+/** Предел вариантов вопроса `choice` — предел Decisions API по его документации. */
+export const MAX_CHOICE_LEVELS = 255;
 export const QUESTION_TYPES = Object.freeze(['score', 'choice']);
 
 /**
  * Проверка входа: вопросы с непустыми уникальными id, текстом и уровнями.
- * `minLevels`/`maxLevels` сужают диапазон 2..10 — раннер задаёт ровно пять для
- * агента с командой (промпт судьи фиксирован на баллах 1..5). Нарушение — bad_request.
+ * Предел уровней — по типу вопроса: `score` 2..10, `choice` 2..255.
+ * `minLevels`/`maxLevels` задают один диапазон для всех типов — раннер задаёт ровно
+ * пять для агента с командой (промпт судьи фиксирован на баллах 1..5). Нарушение — bad_request.
  */
-export function validateInput(input, { minLevels = MIN_LEVELS, maxLevels = MAX_LEVELS } = {}) {
+export function validateInput(input, { minLevels = MIN_LEVELS, maxLevels = null } = {}) {
   if (input === null || typeof input !== 'object') {
     throw new ModelClientError('bad_request', 'Evaluation input must be an object');
   }
@@ -67,9 +73,10 @@ export function validateInput(input, { minLevels = MIN_LEVELS, maxLevels = MAX_L
       throw new ModelClientError('bad_request', `Question ${id} has no text`);
     }
     const levels = question.levels;
-    if (!Array.isArray(levels) || levels.length < minLevels || levels.length > maxLevels
+    const max = maxLevels ?? (question.type === 'choice' ? MAX_CHOICE_LEVELS : MAX_LEVELS);
+    if (!Array.isArray(levels) || levels.length < minLevels || levels.length > max
       || levels.some((level) => typeof level !== 'string' || level.trim() === '')) {
-      const range = minLevels === maxLevels ? `exactly ${minLevels}` : `${minLevels}..${maxLevels}`;
+      const range = minLevels === max ? `exactly ${minLevels}` : `${minLevels}..${max}`;
       throw new ModelClientError('bad_request', `Question ${id} needs ${range} non-empty levels`);
     }
   }

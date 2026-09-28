@@ -14,7 +14,8 @@
  * pipeline.yaml, а не код системы.
  *
  *   node decisions-select.js --model <id> --url <https://…/decisions> --key-file <путь>
- *     [--timeout <с>]   промпт — из stdin (агент с `prompt_stdin: true`) или последним аргументом
+ *     [--timeout <с>] [--level-quantile <q>]
+ *     промпт — из stdin (агент с `prompt_stdin: true`) или последним аргументом
  *
  * Тип вопроса — `choice`: по документации Decisions API это выбор одного из
  * вариантов без порядка между ними, с вероятностью по каждому варианту и до 255
@@ -39,10 +40,32 @@
  * Ошибка (нет ключа, отказ сети или модели, ответ без вероятностей, промпт без
  * JSON-блока, кандидатов меньше двух или больше десяти) — `status: error`,
  * `error_class`, `error` и код выхода 1: раннер берёт порядок маски.
+ *
+ * Режим models — выбор модели стадии (README, «Выбор модели стадии»; агент
+ * `selection.selector`, в поставляемом конфиге jev-place). Его признак — поле `levels`
+ * JSON-блока: рубрика сложности тикета, 2..10 текстов от слабого уровня к сильному.
+ * Блок без `levels` — режим пула выше, без изменений. В блоке ещё тикет и кандидаты
+ * стадии (`id`, `kind`, `free`, `level`, `scores`). Один вызов evaluate, два вопроса:
+ *   - `level` (score, уровни — тексты рубрики) — самый НИЗКИЙ достаточный уровень;
+ *   - `pick` (choice, варианты — кандидаты; только при двух и больше, первые 255 в
+ *     порядке промпта) — порядок кандидатов внутри одного уровня.
+ * `required_level` — наименьший уровень k, у которого сумма вероятностей уровней 1..k
+ * не меньше `--level-quantile` (по умолчанию 0.5, в (0, 1]); сумма не набралась —
+ * уровень наибольшей вероятности. Правило берёт наименьший достаточный уровень, а не
+ * самый вероятный (правило стейкхолдера «самая слабая достаточная модель»): у ответа
+ * «уровень 2 — 0.5, уровень 4 — 0.5» это 2. Ответ:
+ *   ---RESULT---
+ *   required_level: <1..N>
+ *   level_confidence: <0..1 или null>
+ *   ranking: <id>, <id>, …   все кандидаты по вероятности pick
+ *   cost_usd, model, reason
+ *   ---RESULT---
+ * Уровней меньше двух или больше десяти, нет кандидатов или повтор id — bad_prompt,
+ * запроса нет.
  */
 
 import fs from 'node:fs';
-import { evaluate, MIN_LEVELS, MAX_LEVELS } from '../lib/model-evaluate.mjs';
+import { evaluate, MIN_LEVELS, MAX_LEVELS, MAX_CHOICE_LEVELS } from '../lib/model-evaluate.mjs';
 import { ModelClientError, redactNetworkDetail } from '../lib/model-client.mjs';
 
 const JSON_BLOCK = /```json[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/;
@@ -52,6 +75,16 @@ const INSTRUCTIONS = [
   'Weigh the ticket type, title and definition of done against each candidate\'s capabilities and benchmark scores',
   '(intelligence, coding, agentic: higher is better; n/a means no data).',
 ].join(' ');
+
+const LEVEL_QUESTION = 'level';
+const PICK_QUESTION = 'pick';
+const DEFAULT_LEVEL_QUANTILE = 0.5;
+const LEVEL_INSTRUCTIONS = [
+  'Which is the LOWEST level whose models can reliably complete this ticket end to end?',
+  'Levels are strength bands of the listed candidates (1 = weakest). Do not pick higher than needed;',
+  'weigh type, complexity, DoD, description, required capabilities and history of failed levels.',
+].join(' ');
+const PICK_INSTRUCTIONS = 'Which candidate fits this ticket best? Used only to order candidates inside one level.';
 
 class SelectError extends Error {
   constructor(errorClass, message) {
@@ -75,6 +108,7 @@ function parseArgs(argv) {
     else if (arg === '--url') opts.url = take();
     else if (arg === '--key-file') opts.keyFile = take();
     else if (arg === '--timeout') opts.timeout = Number(take());
+    else if (arg === '--level-quantile') opts.levelQuantile = Number(take());
     else rest.push(arg);
   }
   for (const [flag, value] of [['--model', opts.model], ['--url', opts.url], ['--key-file', opts.keyFile]]) {
@@ -83,24 +117,27 @@ function parseArgs(argv) {
   if (opts.timeout !== undefined && !(Number.isFinite(opts.timeout) && opts.timeout > 0)) {
     throw new SelectError('usage', '--timeout must be a number > 0');
   }
+  if (opts.levelQuantile !== undefined
+    && !(Number.isFinite(opts.levelQuantile) && opts.levelQuantile > 0 && opts.levelQuantile <= 1)) {
+    throw new SelectError('usage', '--level-quantile must be a number in (0, 1]');
+  }
+  opts.levelQuantile ??= DEFAULT_LEVEL_QUANTILE;
   opts.prompt = rest.length > 0 ? rest[rest.length - 1] : null;
   return opts;
 }
 
-/** JSON-блок промпта селектора: { pool, ticket, candidates }. */
-function parseSelectorPrompt(prompt) {
+/** JSON-блок промпта — объект из ограждения ```json. */
+function promptBlock(prompt) {
   const match = String(prompt ?? '').match(JSON_BLOCK);
   if (!match) throw new SelectError('bad_prompt', 'prompt has no ```json block');
-  let block;
   try {
-    block = JSON.parse(match[1]);
+    return JSON.parse(match[1]);
   } catch (err) {
     throw new SelectError('bad_prompt', `prompt json block is not JSON: ${err.message}`);
   }
-  const candidates = block?.candidates;
-  if (!Array.isArray(candidates) || candidates.length < MIN_LEVELS || candidates.length > MAX_LEVELS) {
-    throw new SelectError('bad_prompt', `prompt needs ${MIN_LEVELS}..${MAX_LEVELS} candidates, got ${Array.isArray(candidates) ? candidates.length : 'none'}`);
-  }
+}
+
+function checkCandidateIds(candidates) {
   const ids = new Set();
   for (const candidate of candidates) {
     const id = candidate?.id;
@@ -108,10 +145,39 @@ function parseSelectorPrompt(prompt) {
     if (ids.has(id)) throw new SelectError('bad_prompt', `duplicate candidate id: ${id}`);
     ids.add(id);
   }
+}
+
+/** JSON-блок промпта селектора пула: { pool, ticket, candidates }. */
+function parseSelectorPrompt(block) {
+  const candidates = block?.candidates;
+  if (!Array.isArray(candidates) || candidates.length < MIN_LEVELS || candidates.length > MAX_LEVELS) {
+    throw new SelectError('bad_prompt', `prompt needs ${MIN_LEVELS}..${MAX_LEVELS} candidates, got ${Array.isArray(candidates) ? candidates.length : 'none'}`);
+  }
+  checkCandidateIds(candidates);
   return { pool: block.pool ?? null, ticket: block.ticket ?? null, candidates };
 }
 
+/** JSON-блок промпта выбора модели стадии: { stage, ticket, levels, candidates, scores_citation }. */
+function parseModelsPrompt(block) {
+  const { levels, candidates } = block;
+  if (!Array.isArray(levels) || levels.length < MIN_LEVELS || levels.length > MAX_LEVELS
+    || levels.some((level) => typeof level !== 'string' || level.trim() === '')) {
+    throw new SelectError('bad_prompt', `prompt needs ${MIN_LEVELS}..${MAX_LEVELS} non-empty levels, got ${Array.isArray(levels) ? levels.length : 'none'}`);
+  }
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    throw new SelectError('bad_prompt', 'prompt has no candidates');
+  }
+  checkCandidateIds(candidates);
+  return { stage: block.stage ?? null, ticket: block.ticket ?? null, levels, candidates, citation: block.scores_citation ?? null };
+}
+
 const scoreText = (value) => (typeof value === 'number' ? String(value) : 'n/a');
+
+function scoresText(scores) {
+  return scores && typeof scores === 'object'
+    ? `scores: intelligence ${scoreText(scores.intelligence)}, coding ${scoreText(scores.coding)}, agentic ${scoreText(scores.agentic)}`
+    : 'scores: n/a';
+}
 
 /** Текст варианта: id, способности, оценки, note. */
 function candidateText(candidate) {
@@ -119,12 +185,35 @@ function candidateText(candidate) {
   if (Array.isArray(candidate.capabilities) && candidate.capabilities.length > 0) {
     parts.push(`capabilities: ${candidate.capabilities.join(', ')}`);
   }
-  const scores = candidate.scores;
-  parts.push(scores && typeof scores === 'object'
-    ? `scores: intelligence ${scoreText(scores.intelligence)}, coding ${scoreText(scores.coding)}, agentic ${scoreText(scores.agentic)}`
-    : 'scores: n/a');
+  parts.push(scoresText(candidate.scores));
   if (typeof candidate.note === 'string' && candidate.note.trim() !== '') parts.push(`note: ${candidate.note.trim()}`);
   return parts.join(' | ');
+}
+
+/** Текст варианта кандидата стадии: id, уровень, бесплатный или платный, оценки. */
+function modelCandidateText(candidate) {
+  return [
+    candidate.id,
+    `level ${Number.isInteger(candidate.level) ? candidate.level : 'n/a'}`,
+    candidate.free === true ? 'free' : 'paid',
+    scoresText(candidate.scores),
+  ].join(' | ');
+}
+
+/**
+ * Требуемый уровень 1..count по вероятностям ответа (ключи — индексы 0..count-1):
+ * наименьший k, у которого сумма вероятностей уровней 1..k не меньше quantile; сумма
+ * не набралась — `fallback` (уровень наибольшей вероятности).
+ */
+function quantileLevel(count, probabilities, quantile, fallback) {
+  let sum = 0;
+  for (let i = 0; i < count; i++) {
+    const value = probabilities?.[String(i)];
+    if (typeof value === 'number' && !Number.isNaN(value)) sum += value;
+    // Погрешность сложения с плавающей точкой: 0.1 + 0.2 + 0.2 в double меньше 0.5.
+    if (sum >= quantile - 1e-9) return i + 1;
+  }
+  return fallback;
 }
 
 /** Индексы кандидатов по убыванию вероятности; при равенстве — меньший индекс. */
@@ -152,9 +241,8 @@ function printResult(fields) {
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 
-async function select(opts, prompt) {
-  const { pool, ticket, candidates } = parseSelectorPrompt(prompt);
-  const agent = {
+function decisionsAgent(opts) {
+  return {
     id: 'decisions-select',
     kind: 'http',
     protocol: 'decisions',
@@ -163,7 +251,42 @@ async function select(opts, prompt) {
     auth: { file: opts.keyFile },
     ...(opts.timeout ? { timeout_s: opts.timeout } : {}),
   };
-  const evaluation = await evaluate(agent, {
+}
+
+async function selectModel(opts, block) {
+  const { stage, ticket, levels, candidates, citation } = parseModelsPrompt(block);
+  // Выбор — среди первых MAX_CHOICE_LEVELS кандидатов в порядке промпта (раннер кладёт
+  // их в порядке обхода); остальные идут в ранжир после них, по порядку промпта.
+  const choice = candidates.slice(0, MAX_CHOICE_LEVELS);
+  const questions = [{ id: LEVEL_QUESTION, type: 'score', text: LEVEL_INSTRUCTIONS, levels }];
+  if (choice.length >= MIN_LEVELS) {
+    questions.push({ id: PICK_QUESTION, type: 'choice', text: PICK_INSTRUCTIONS, levels: choice.map(modelCandidateText) });
+  }
+  const evaluation = await evaluate(decisionsAgent(opts), {
+    data: { stage, ticket, candidates, scores_citation: citation },
+    questions,
+  });
+  const level = evaluation.answers[LEVEL_QUESTION];
+  const requiredLevel = quantileLevel(levels.length, level.probabilities, opts.levelQuantile, level.level);
+  const pick = evaluation.answers[PICK_QUESTION];
+  const ranked = pick ? rankIndices(choice.length, pick.probabilities).map((i) => choice[i].id) : choice.map((c) => c.id);
+  return {
+    required_level: requiredLevel,
+    level_confidence: level.confidence ?? 'null',
+    ranking: [...ranked, ...candidates.slice(choice.length).map((c) => c.id)].join(', '),
+    cost_usd: evaluation.cost_usd ?? 'null',
+    model: evaluation.model,
+    reason: `level ${requiredLevel} of ${levels.length} at quantile ${opts.levelQuantile}, pick of ${pick ? choice.length : 0} candidates by decisions model`,
+  };
+}
+
+async function select(opts, prompt) {
+  const block = promptBlock(prompt);
+  if (block && typeof block === 'object' && !Array.isArray(block) && block.levels !== undefined) {
+    return selectModel(opts, block);
+  }
+  const { pool, ticket, candidates } = parseSelectorPrompt(block);
+  const evaluation = await evaluate(decisionsAgent(opts), {
     data: { pool, ticket },
     questions: [{ id: QUESTION_ID, type: 'choice', text: INSTRUCTIONS, levels: candidates.map(candidateText) }],
   });

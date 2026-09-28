@@ -34,7 +34,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { gradeRuns } from '../lib/agent-runs.mjs';
+import { gradeRuns, permanentBans, crashBans } from '../lib/agent-runs.mjs';
 
 let seq = 0;
 function nextTs() {
@@ -287,5 +287,40 @@ describe('gradeRuns: частные случаи и стыки правил', ()
     const result = gradeRuns(events);
     assert.equal(result.length, 1);
     assert.equal(result[0].ticket, 'IMPL-1');
+  });
+});
+
+// Отказ исполнителя в блоке RESULT: раннер держит статус RESULT вне данных ответа, и в
+// событии он — `result_status`, а класс запуска — `ok`. Журнал PulseProxy 2026-09-28,
+// FIX-032: claude-haiku, `status: ok`, `result_status: blocked`, 3 изменённых файла —
+// до 1.17.0 градация `pending`.
+describe('gradeRuns: отказ агента в RESULT (result_status: blocked)', () => {
+  test('result_status: blocked — refused и с изменёнными файлами, и без них (было empty)', () => {
+    const graded = gradeRuns([
+      runEvent({ result_status: 'blocked', changed_files: 3 }),
+      verifyEvent({ status: 'failed', fail_reasons: ['dod'] }),
+      runEvent({ result_status: 'blocked', changed_files: 0 }),
+    ]);
+    assert.deepEqual(graded.map((r) => [r.grade, r.artifacts_passed, r.crash]), [['refused', null, false], ['refused', null, false]]);
+  });
+
+  test('другие result_status градацию не меняют', () => {
+    const graded = gradeRuns([runEvent({ result_status: 'passed', changed_files: 0 })]);
+    assert.equal(graded[0].grade, 'empty');
+  });
+
+  test('запреты по журналу без отказов в RESULT прежние', () => {
+    const now = Date.parse('2026-09-27T00:10:00.000Z');
+    const events = [
+      runEvent({ ticket: 'IMPL-1', changed_files: 0 }),
+      runEvent({ ticket: 'IMPL-2', changed_files: 0 }),
+      runEvent({ ticket: 'IMPL-3', changed_files: 0 }),
+      runEvent({ ticket: 'IMPL-4', model: 'model-b', status: 'error', changed_files: 0, crash_ttl_ms: 3600000 }),
+    ];
+    assert.deepEqual(permanentBans(events).map((b) => [b.model, b.rule, b.failures]), [['model-a', 1, 3]]);
+    assert.deepEqual(crashBans(events, now).map((b) => b.model), ['model-b']);
+    // Отказ в RESULT не неудача: три отказа запрета не дают.
+    const refusals = [1, 2, 3].map((i) => runEvent({ ticket: `IMPL-${10 + i}`, model: 'model-c', result_status: 'blocked', changed_files: 0 }));
+    assert.deepEqual(permanentBans(refusals), []);
   });
 });

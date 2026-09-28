@@ -208,3 +208,130 @@ describe('decisions-select: ранжир участников пула моде�
     assert.equal(field(stdout, 'ranking').split(', ').length, 10);
   });
 });
+
+// Режим models — выбор модели стадии: блок с `levels` (рубрика), тикетом и кандидатами
+// стадии. Два вопроса одним запросом: `level` (score по рубрике) и `pick` (choice).
+describe('decisions-select: режим models — уровень и порядок кандидатов стадии', () => {
+  let server;
+  let respond;
+  let root;
+  let keyFile;
+
+  before(async () => {
+    server = await startModelServer((req, res) => respond(req, res));
+  });
+  after(async () => {
+    await server?.close();
+  });
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'wf-decisions-models-'));
+    keyFile = join(root, 'service.key');
+    writeFileSync(keyFile, `${TEST_KEY}\n`);
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const LEVELS = ['l1 mechanical', 'l2 routine', 'l3 checks', 'l4 unknown cause', 'l5 architecture'];
+  const stageCandidate = (id, level, free = false) => ({ id, kind: 'agent', free, level, scores: { intelligence: 10 * level, coding: null, agentic: null } });
+  const CANDIDATES_M = [stageCandidate('agent-a', 1), stageCandidate('pool-x@vendor-a/m-1:free', 2, true), stageCandidate('agent-c', 5)];
+  const modelsPrompt = ({ levels = LEVELS, candidates = CANDIDATES_M } = {}) => [
+    'Выбери уровень.',
+    '',
+    '```json',
+    JSON.stringify({ mode: 'models', stage: 'stage-a', ticket: { id: 'IMPL-7', type: 'impl', title: 't', history: [] }, levels, candidates, scores_citation: 'c' }, null, 2),
+    '```',
+    '',
+  ].join('\n');
+  const args = (extra = []) => ['--model', 'vendor/decider', '--url', server.url('/decisions'), '--key-file', keyFile, '--timeout', '5', ...extra];
+  const select = async (prompt, extra) => {
+    const seen = server.requests.length;
+    const result = await run(args(extra), prompt);
+    return { ...result, requests: server.requests.slice(seen) };
+  };
+  // Ответ на все вопросы запроса: level — levelProbs, pick — pickProbs.
+  const answer = (levelProbs, pickProbs = { 0: 0.2, 1: 0.5, 2: 0.3 }) => (req, res) => {
+    const answers = {};
+    for (const [id, q] of Object.entries(req.json.questions)) {
+      answers[id] = q.type === 'choice'
+        ? { type: 'choice', choice: '0', confidence: 0.5, probabilities: pickProbs }
+        : { type: 'score', score: 0, legend: {}, confidence: 0.7, probabilities: levelProbs };
+    }
+    sendJson(res, 200, { model: 'vendor/decider-20260901', answers, usage: { input_tokens: 10, output_tokens: 2, cost: 0.0004 } });
+  };
+
+  it('один запрос: вопрос score по рубрике и вопрос choice по кандидатам; ответ required_level, ranking', async () => {
+    respond = answer({ 0: 0.1, 1: 0.5, 2: 0.2, 3: 0.1, 4: 0.1 });
+    const { stdout, exitCode, requests } = await select(modelsPrompt());
+    assert.equal(exitCode, 0, stdout);
+    assert.equal(requests.length, 1);
+    const { questions } = requests[0].json;
+    assert.deepEqual(Object.keys(questions), ['level', 'pick']);
+    assert.equal(questions.level.type, 'score');
+    assert.deepEqual(questions.level.criteria, LEVELS);
+    assert.match(questions.level.instructions, /LOWEST level/);
+    assert.equal(questions.pick.type, 'choice');
+    assert.deepEqual(Object.keys(questions.pick.criteria), ['0', '1', '2']);
+    assert.match(questions.pick.criteria[1], /^pool-x@vendor-a\/m-1:free \| level 2 \| free \| scores: intelligence 20/);
+    assert.equal(requests[0].json.state.ticket.id, 'IMPL-7');
+    assert.equal(field(stdout, 'required_level'), '2');
+    assert.equal(field(stdout, 'level_confidence'), '0.7');
+    assert.equal(field(stdout, 'ranking'), 'pool-x@vendor-a/m-1:free, agent-c, agent-a');
+    assert.equal(field(stdout, 'cost_usd'), '0.0004');
+  });
+
+  it('квантиль: 0.5 — наименьший уровень с суммой ≥ 0.5, 0.8 — выше; сумма не набралась — наибольшая вероятность', async () => {
+    respond = answer({ 0: 0.3, 1: 0.2, 2: 0.1, 3: 0.3, 4: 0.1 });
+    assert.equal(field((await select(modelsPrompt())).stdout, 'required_level'), '2');
+    assert.equal(field((await select(modelsPrompt(), ['--level-quantile', '0.8'])).stdout, 'required_level'), '4');
+    respond = answer({ 0: 0.1, 3: 0.2 });
+    assert.equal(field((await select(modelsPrompt(), ['--level-quantile', '1'])).stdout, 'required_level'), '4');
+  });
+
+  it('--level-quantile вне (0, 1] — ошибка usage без запроса', async () => {
+    respond = answer({ 0: 1 });
+    for (const bad of ['0', '1.5', 'x']) {
+      const { stdout, exitCode, requests } = await select(modelsPrompt(), ['--level-quantile', bad]);
+      assert.equal(exitCode, 1);
+      assert.equal(field(stdout, 'error_class'), 'usage');
+      assert.equal(requests.length, 0);
+    }
+  });
+
+  it('один кандидат — только вопрос уровня', async () => {
+    respond = answer({ 0: 0.9, 1: 0.1 });
+    const { stdout, exitCode, requests } = await select(modelsPrompt({ candidates: [CANDIDATES_M[0]] }));
+    assert.equal(exitCode, 0, stdout);
+    assert.deepEqual(Object.keys(requests[0].json.questions), ['level']);
+    assert.equal(field(stdout, 'ranking'), 'agent-a');
+    assert.equal(field(stdout, 'required_level'), '1');
+  });
+
+  it('уровней меньше двух или больше десяти, нет кандидатов, повтор id — bad_prompt без запроса', async () => {
+    respond = answer({ 0: 1 });
+    const prompts = [
+      modelsPrompt({ levels: ['one'] }),
+      modelsPrompt({ levels: Array.from({ length: 11 }, (_, i) => `l${i}`) }),
+      modelsPrompt({ levels: ['a', ''] }),
+      modelsPrompt({ candidates: [] }),
+      modelsPrompt({ candidates: [CANDIDATES_M[0], CANDIDATES_M[0]] }),
+    ];
+    for (const prompt of prompts) {
+      const { stdout, exitCode, requests } = await select(prompt);
+      assert.equal(exitCode, 1);
+      assert.equal(field(stdout, 'error_class'), 'bad_prompt');
+      assert.equal(requests.length, 0);
+    }
+  });
+
+  it('выбор из 35 кандидатов принимается', async () => {
+    const many = Array.from({ length: 35 }, (_, i) => stageCandidate(`agent-${i}`, 1 + (i % 5)));
+    respond = answer({ 0: 1 }, Object.fromEntries(many.map((_, i) => [i, i === 34 ? 0.5 : 0.01])));
+    const { stdout, exitCode, requests } = await select(modelsPrompt({ candidates: many }));
+    assert.equal(exitCode, 0, stdout);
+    assert.equal(Object.keys(requests[0].json.questions.pick.criteria).length, 35);
+    const ranking = field(stdout, 'ranking').split(', ');
+    assert.equal(ranking.length, 35);
+    assert.equal(ranking[0], 'agent-34');
+  });
+});
