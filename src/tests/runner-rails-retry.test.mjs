@@ -22,6 +22,9 @@
  *  - ответ повтора проходит output-check (`railsRetryVerdict`): нарушение и повтор без
  *    единого вызова инструмента — предупреждение в лог, ответ отдаётся стадии, третьего
  *    запуска нет;
+ *  - ответ повтора с нарушением и без блока ---RESULT--- — скил брошен на середине: ошибка
+ *    RAILS_INCOMPLETE вместо `default` по словам текста, стадия берёт следующего агента,
+ *    запуск в журнале — `error` (прогон PulseProxy 2026-09-28, DOCS-10);
  *  - тикет запуска (`context.ticket_id`) агент и повтор получают в `WORKFLOW_RAILS_TICKET`
  *    (`{ticket}` в стражах рёбер), а вердикт той же сессии показывает ребро, закрытое
  *    стражем, строкой «закрыто» без команды перехода.
@@ -83,7 +86,7 @@ const write = (id, node) => {
 if (!step.noState) write(session, step.node);
 if (step.extraSession) write(session + '-sub', 'P1E1');
 fs.writeFileSync(path.join(ctl, 'call-' + n + '.json'), JSON.stringify({ args, prompt, run, session, ticket: process.env.WORKFLOW_RAILS_TICKET || null }));
-process.stdout.write((step.marker ? 'RAILS: P1S1\\n' : (step.text || '')) + '---RESULT---\\nstatus: passed\\n---RESULT---\\n');
+process.stdout.write((step.marker ? 'RAILS: P1S1\\n' : (step.text || '')) + (step.noResult ? '' : '---RESULT---\\nstatus: passed\\n---RESULT---\\n'));
 `);
 
 function wrapper(name) {
@@ -326,6 +329,92 @@ describe('StageExecutor.callAgent — повтор по вердикту рел�
     assert.equal(result.railsRetrySession, 'new');
     assert.deepEqual(result.railsRetryVerdict, { ok: false, missing: ['ни одного вызова инструмента под рельсами'] });
     assert.ok(warns(logger).some((l) => l.includes('повтор без единого вызова инструмента под рельсами — ответ принят без процедуры скила')), logText(logger));
+  });
+
+  // Прогон PulseProxy 2026-09-28: бесплатная модель остановила DOCS-10 в узле P3R3 текстом
+  // «Continuing through P3 nodes» без блока результата, fallbackParse дал `default`, и
+  // брошенная работа ушла в ревью как сделанная.
+  test('повтор нарушил output-check и без ---RESULT--- — сбой RAILS_INCOMPLETE, а не ответ стадии', async () => {
+    const project = makeProject({
+      kind: 'claude',
+      calls: [
+        { node: 'P1E1', marker: false, noResult: true, text: 'Continuing through the graph\n' },
+        { node: 'P1E1', marker: false, noResult: true, text: 'Task completed, continuing\n' },
+      ],
+    });
+    const err = await callAgent(project, { command: CLAUDE, args: CLAUDE_ARGS }).then(
+      () => null,
+      (e) => e,
+    );
+
+    assert.ok(err, 'callAgent отклонён');
+    assert.equal(err.code, 'RAILS_INCOMPLETE');
+    assert.equal(err.exitCode, -1);
+    assert.match(err.stdout, /Task completed, continuing/, 'ответ повтора — в stdout ошибки');
+    assert.equal(calls(project), 2, 'повтор один, третьего запуска нет');
+  });
+
+  test('повтор без единого вызова инструмента и без ---RESULT--- — тоже сбой RAILS_INCOMPLETE', async () => {
+    const project = makeProject({
+      kind: 'node',
+      calls: [
+        { node: 'P1E1', marker: false, noResult: true },
+        { noState: true, noResult: true, text: 'node .workflow/src/rails/cli.mjs goto P1S1\n' },
+      ],
+    });
+    const err = await callAgent(project, { command: 'node', args: [STUB] }).then(() => null, (e) => e);
+
+    assert.equal(err?.code, 'RAILS_INCOMPLETE', String(err));
+    assert.equal(calls(project), 2);
+  });
+
+  test('первый ответ без ---RESULT---, повтор его дал — ответ стадии как обычно', async () => {
+    const project = makeProject({
+      kind: 'claude',
+      calls: [{ node: 'P1E1', marker: false, noResult: true }, { node: 'P1S1', marker: true }],
+    });
+    const { result } = await callAgent(project, { command: CLAUDE, args: CLAUDE_ARGS });
+
+    assert.equal(result.status, 'passed');
+    assert.equal(result.railsRetryVerdict.ok, true);
+  });
+
+  test('executeWithFallback: брошенный без итога скил — следующий агент стадии, запуск в журнале — error', async () => {
+    const project = makeProject({
+      kind: 'node',
+      calls: [
+        { node: 'P1E1', marker: false, noResult: true, text: 'Continuing through the graph\n' },
+        { node: 'P1E1', marker: false, noResult: true, text: 'Continuing through the graph\n' },
+        { node: 'P1S1', marker: true },
+      ],
+    });
+    const logger = makeLogger();
+    const record = { command: 'node', args: [STUB], prompt_stdin: true, workdir: '.', capabilities: ['text'] };
+    const config = {
+      pipeline: {
+        name: 'rails-retry', version: '1.0',
+        agents: { 'agent-a': record, 'agent-b': { ...record } },
+        stages: {},
+        execution: { timeout_per_stage: 30, snapshot_paths: ['src'] },
+      },
+    };
+    const executor = new StageExecutor(config, { ticket_id: 'IMPL-1' }, {}, {}, null, logger, project.root);
+    const saved = process.env.FAKE_HOST_CTL;
+    process.env.FAKE_HOST_CTL = project.ctl;
+    let result;
+    try {
+      result = await executor.executeWithFallback('stage-1', { agents: ['agent-a', 'agent-b'], skill: SKILL });
+    } finally {
+      if (saved === undefined) delete process.env.FAKE_HOST_CTL; else process.env.FAKE_HOST_CTL = saved;
+    }
+
+    assert.equal(result.status, 'passed', logText(logger));
+    assert.equal(result.agentId, 'agent-b', 'стадию закрыл следующий агент');
+    assert.equal(calls(project), 3, 'agent-a — запуск и повтор, agent-b — один запуск');
+    assert.ok(warns(logger).some((l) => l.includes('блока ---RESULT--- нет — работа брошена')), logText(logger));
+    const runs = fs.readFileSync(path.join(project.root, '.workflow', 'metrics', 'agent-runs.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.type === 'run');
+    assert.deepEqual(runs.map((r) => [r.agent, r.status]), [['agent-a', 'error'], ['agent-b', 'ok']]);
   });
 
   // Страж ребра P1E1 → P1S2 по файлу тикета запуска (ревью стража 2026-09-27): закрытое ребро

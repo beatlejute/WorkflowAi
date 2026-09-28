@@ -1804,6 +1804,11 @@ class StageExecutor {
           status = 'aborted';
         } else if (banned) {
           status = 'model_banned';
+        } else if (err.code === 'RAILS_INCOMPLETE') {
+          // Скил брошен без итога (callAgent), хост вышел с кодом 0. stderr kilo — лог его
+          // инструментов: «403» и «network» там — текст проекта, и ни класс
+          // classifyAgentResult, ни правила health по нему не строятся — это не отказ хоста.
+          status = 'error';
         } else {
           status = this._classifyRun(agentId, callResult);
           classification = await classify(this.rules, healthRulesId(agent, agentId), { exitCode, stderr });
@@ -2705,6 +2710,15 @@ class StageExecutor {
    * артефактов судит сделанное по тикету: работа, записанная до сбоя рельс, проходит, а
    * пустой результат — неудача с событием `verify` для правил отсева моделей.
    *
+   * Исключение — ответ повтора без блока ---RESULT---: агент бросил скил на середине, и
+   * `fallbackParse` дал бы ему `default` (успех) по словам текста. Такой ответ — сбой
+   * запуска: ошибка с кодом `RAILS_INCOMPLETE` и кодом выхода -1, как у PERMISSION_REJECTED.
+   * executeWithFallback пишет запуск статусом `error` и берёт следующего агента стадии,
+   * если файлы снимка не менялись, иначе стадия уходит в goto.error. Прогон PulseProxy
+   * 2026-09-28: бесплатная модель остановила DOCS-10 в узле P3R3 без итога, стадия
+   * получила `default`, запуск в истории тикета — `ok`, недоделку поймали только
+   * проверки DoD.
+   *
    * `bannedCheck` — проверка ответивших моделей kilo-агента по запретам журнала
    * запусков (_callAgentTracked): и у первого вызова, и у повтора рельс.
    *
@@ -2795,7 +2809,7 @@ class StageExecutor {
     retryResult.railsRetrySession = resumeArgs ? 'same' : 'new';
 
     // Ответ повтора — через тот же output-check. Третьего запуска нет: нарушение — в лог,
-    // ответ — стадии (почему так — в JSDoc выше).
+    // ответ — стадии, ответ без ---RESULT--- — сбой запуска (почему так — в JSDoc выше).
     // Та же сессия — её собственное состояние: за повтор у запуска могла появиться сессия субагента.
     const retryState = resumeArgs
       ? railsStatesByRun(this.projectRoot, retryRun).find((s) => s.session === state.session) ?? null
@@ -2804,12 +2818,24 @@ class StageExecutor {
       ? checkRailsOutput(retryResult.output || '', config, retryState)
       : { ok: false, missing: ['ни одного вызова инструмента под рельсами'] };
     retryResult.railsRetryVerdict = retryVerdict;
-    if (!retryVerdict.ok && this.logger) {
-      const what = retryState
-        ? `повтор тоже нарушил output-check — отсутствует: ${retryVerdict.missing.join('; ')}`
-        : 'повтор без единого вызова инструмента под рельсами';
-      this.logger.warn(`rails: ${what} — ответ принят без процедуры скила, дальше — по переходам стадии`, stageId);
+    if (retryVerdict.ok) return retryResult;
+    const what = retryState
+      ? `повтор тоже нарушил output-check — отсутствует: ${retryVerdict.missing.join('; ')}`
+      : 'повтор без единого вызова инструмента под рельсами';
+    // Блока ---RESULT--- нет — агент бросил скил на середине: сбой запуска, а не ответ
+    // стадии (почему — в JSDoc выше).
+    if (!retryResult.parsed) {
+      if (this.logger) this.logger.warn(`rails: ${what}; блока ---RESULT--- нет — работа брошена, сбой запуска агента`, stageId);
+      const err = new Error(`Agent "${agentId}" left skill "${skillId}" unfinished: no ---RESULT--- after the rails retry`);
+      err.code = 'RAILS_INCOMPLETE';
+      err.exitCode = -1;
+      err.stdout = retryResult.output || '';
+      err.stderr = retryResult.stderr || '';
+      if (retryResult.agentLabel) err.agentLabel = retryResult.agentLabel;
+      if (retryResult.kiloModels) err.kiloModels = retryResult.kiloModels;
+      throw err;
     }
+    if (this.logger) this.logger.warn(`rails: ${what} — ответ принят без процедуры скила, дальше — по переходам стадии`, stageId);
     return retryResult;
   }
 
