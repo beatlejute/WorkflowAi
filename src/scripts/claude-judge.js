@@ -50,7 +50,10 @@ const DEFAULT_TIMEOUT_S = 180;
 // Секции промпта CLI-судьи — как в decisions-judge.js: данные до ПОСЛЕДНЕГО `## Task`
 // перед постоянным хвостом промпта.
 const PROMPT_SECTIONS = /## Rubric\s*\n[\s\S]*?\n## Target Agent Output\s*\n([\s\S]*)\n## Task\s*\n[\s\S]*?\n\s*Please evaluate the output/;
-const IMAGES_HEADER = 'Изображения:';
+// Строка перед путями: `Изображения:`, у вопроса по частям — с пометкой части
+// `Изображения (часть 1 из 2: …):` (раннер, _askCommandAgent). Без пометки в шаблоне
+// судья терял снимки частей: PulseProxy QA-160, 2026-09-28, `images: 0` в обеих частях.
+const IMAGES_HEADER = /^Изображения(?: \(.*\))?:$/;
 const NEUTRAL_AT = '＠';
 
 class JudgeError extends Error {
@@ -86,7 +89,8 @@ function parseArgs(argv) {
 }
 
 /**
- * Пути изображений промпта: строки после последнего `Изображения:` в секции
+ * Пути изображений промпта: строки после последней строки `Изображения:` (с пометкой
+ * части или без) в секции
  * `## Target Agent Output` — раннер дописывает их в конец данных.
  */
 function promptImages(prompt) {
@@ -95,7 +99,7 @@ function promptImages(prompt) {
     throw new JudgeError('bad_prompt', 'prompt has no "## Rubric", "## Target Agent Output", "## Task" sections of the judge prompt');
   }
   const lines = match[1].split('\n');
-  const header = lines.lastIndexOf(IMAGES_HEADER);
+  const header = lines.findLastIndex((line) => IMAGES_HEADER.test(line));
   if (header === -1) return [];
   return lines.slice(header + 1).map((line) => line.trim()).filter(Boolean);
 }

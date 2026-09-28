@@ -208,6 +208,34 @@ test('mark-blocked: промпт стадии пайплайна — причи�
   cleanup(dir);
 });
 
+test('mark-blocked: промпт стадии без ticket_id — выход с ошибкой, тикет не помечен', () => {
+  const { dir, ticketsDir } = makeProject();
+  const ticket = writeTicket(ticketsDir, 'review', 'QA-161');
+  const prompt = ['mark-blocked', '', '', 'Context:', '  attempts: 6', '  reason: max_review_attempts'].join('\n');
+
+  const result = run(MARK_BLOCKED, [prompt], dir);
+
+  assert.notStrictEqual(result.code, 0, 'без id скрипт не знает, какой тикет блокировать');
+  assert.match(result.stderr, /недостаточно аргументов/);
+  assert.doesNotMatch(readTicket(ticket), /blocked_reason/, 'тикет не должен быть помечен блокированным после отказа');
+
+  cleanup(dir);
+});
+
+test('mark-blocked: без --attempts — в blocked_reason только причина', () => {
+  const { dir, ticketsDir } = makeProject();
+  const ticket = writeTicket(ticketsDir, 'review', 'IMPL-205');
+
+  // Три аргумента: проверка «мало аргументов» пропускает, число попыток не задано.
+  const result = run(MARK_BLOCKED, ['IMPL-205', '--reason=human_gate_rejected', '--stage=review-result'], dir);
+
+  assert.strictEqual(result.code, 0, `стадия обязана пройти: ${result.stderr}`);
+  const text = readTicket(ticket);
+  assert.match(text, /^blocked_reason: "?human_gate_rejected"?$/m, 'без попыток — причина без приписки «(попыток: …)»');
+
+  cleanup(dir);
+});
+
 test('mark-blocked: битый frontmatter тикета — выход с ошибкой, а не тихая порча файла', () => {
   const { dir, ticketsDir } = makeProject();
   const ticket = writeBrokenTicket(ticketsDir, 'ready', 'IMPL-204');

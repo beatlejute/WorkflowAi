@@ -75,6 +75,19 @@ test('изображение уходит блоком base64, текст — п
   assert.match(text.text, /Кнопка видна справа от поиска/);
 });
 
+test('строка изображений с пометкой части (вопрос по частям) — снимки уходят блоками', () => {
+  // Так раннер (_askCommandAgent) пишет часть вопроса при снимках больше лимита запроса.
+  const header = 'Изображения (часть 1 из 2: остальные снимки пункта оцениваются отдельными запросами, оценивай только приложенные):';
+  const r = run(buildCliJudgePrompt({
+    rubric: RUBRIC,
+    agent_output: `Результат исполнителя.\n${header}\nshots/a.png`,
+    criterion: 'Кнопка видна справа от поиска',
+  }));
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.equal(r.field('images'), '1');
+  assert.equal(r.sent.message.message.content[0].type, 'image');
+});
+
 test('без строки «Изображения:» — только текст', () => {
   const r = run(prompt('Только текст.'));
   assert.equal(r.code, 0, r.out + r.err);
