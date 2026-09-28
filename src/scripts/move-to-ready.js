@@ -30,7 +30,7 @@ import path from 'path';
 import YAML from 'workflow-ai/lib/js-yaml.mjs';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { parseFrontmatter, serializeFrontmatter, replaceFileAtomicSync } from 'workflow-ai/lib/utils.mjs';
-import { runCheck, checkStartProblem, parseDodChecks, isDodFormat2 } from '../lib/check-runner.mjs';
+import { dodStartProblems, isDodFormat2 } from '../lib/check-runner.mjs';
 
 // Корень проекта
 const PROJECT_DIR = findProjectRoot();
@@ -46,45 +46,6 @@ function parseReadyTickets(prompt) {
   const match = prompt.match(/ready_tickets:\s*(.+)/);
   if (!match || !match[1].trim()) return [];
   return match[1].split(',').map(id => id.trim()).filter(Boolean);
-}
-
-/**
- * Гейт dod_format: 2 — проверки результата до начала работы.
- *
- * Зелёная проверка до работы значит пустой критерий или уже сделанную задачу.
- * Проверки с пометкой `regression` (существующие тесты) зелёные по определению и
- * не запускаются, но, как и остальные, не должны быть отклонены исполнителем или
- * остаться без исполняемого файла (checkStartProblem); пункты prose и visual не
- * проверяются. Статус `failed` — ожидаемое состояние.
- *
- * @returns {Promise<string[]>} причины блокировки; пустой список — тикет идёт в ready/
- */
-async function checksBlockingStart(body) {
-  const problems = [];
-  for (const item of parseDodChecks(body)) {
-    if (item.kind !== 'check') continue;
-    if (item.error) {
-      problems.push(`check_malformed: пункт ${item.index} (${item.error})`);
-      continue;
-    }
-    const startProblem = checkStartProblem({ check: item.command, expect: item.expect });
-    if (startProblem?.status === 'denied') {
-      problems.push(`check_denied: пункт ${item.index} (${startProblem.reason})`);
-      continue;
-    }
-    if (startProblem?.status === 'tool_missing') {
-      problems.push(`check_tool_missing: пункт ${item.index} (${startProblem.tool})`);
-      continue;
-    }
-    if (item.regression) continue;
-    const result = await runCheck({ check: item.command, expect: item.expect, projectRoot: PROJECT_DIR });
-    if (result.status === 'passed') {
-      problems.push(`check_green_before_start: пункт ${item.index}`);
-    } else if (result.status === 'timeout') {
-      problems.push(`check_timeout: пункт ${item.index} (${result.reason})`);
-    }
-  }
-  return problems;
 }
 
 /**
@@ -112,7 +73,8 @@ async function moveToReady(ticketId) {
   if (frontmatter.type === 'human') {
     console.log(`[INFO] ${ticketId}: type is 'human' (выполняется человеком через manual-gate)`);
   } else if (isDodFormat2(frontmatter)) {
-    const problems = await checksBlockingStart(body);
+    // Гейт — dodStartProblems (lib/check-runner.mjs); его же зовёт автор тикета через check-ticket-dod.js.
+    const problems = await dodStartProblems({ body, projectRoot: PROJECT_DIR });
     if (problems.length > 0) {
       // blocked_reason снимают move-ticket.js и operations/tickets.mjs при выходе из blocked/.
       frontmatter.blocked_reason = problems.join('; ');

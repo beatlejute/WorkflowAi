@@ -40,7 +40,7 @@ const KILO_FINAL_READ_DELAY_MS = 300;
 import { loadRailsConfig } from './rails/rails-config.mjs';
 import { check as checkRailsOutput } from './rails/output-check.mjs';
 import { evaluate as evaluateWithModel, validateInput } from './lib/model-evaluate.mjs';
-import { ModelClientError, assertModelUrl, redactNetworkDetail } from './lib/model-client.mjs';
+import { ModelClientError, assertModelUrl, redactNetworkDetail, imageBatches } from './lib/model-client.mjs';
 import { buildCliJudgePrompt, parseJudgeScore, parseJudgeExtras } from './lib/skill-judge.mjs';
 import { RUBRIC_LEVEL_COUNT } from './lib/rubric-levels.mjs';
 
@@ -2219,9 +2219,18 @@ class StageExecutor {
   async _askCommandAgent(agent, agentId, input, stageId, skillId, signal) {
     const questions = commandAgentQuestions(input);
     const data = typeof input.data === 'string' ? input.data : JSON.stringify(input.data ?? null, null, 2);
-    const images = Array.isArray(input.images) && input.images.length > 0
-      ? `\nИзображения:\n${input.images.join('\n')}`
-      : '';
+    // Изображений больше лимита одного запроса (buildImageParts) — вопрос задаётся по частям
+    // (imageBatches, lib/model-client.mjs), ответ вопроса — худший уровень частей. Иначе судья
+    // падал `Too many images` до вызова модели: PulseProxy QA-160, 2026-09-28, 12 снимков.
+    const batches = imageBatches(Array.isArray(input.images) ? input.images : []);
+    const imageParts = batches.length > 0 ? batches : [[]];
+    const imageText = (part, index) => {
+      if (part.length === 0) return '';
+      const note = imageParts.length > 1
+        ? ` (часть ${index + 1} из ${imageParts.length}: остальные снимки пункта оцениваются отдельными запросами, оценивай только приложенные)`
+        : '';
+      return `\nИзображения${note}:\n${part.join('\n')}`;
+    };
     const started = Date.now();
     const answers = {};
     const raw = {};
@@ -2229,42 +2238,61 @@ class StageExecutor {
     let cost = 0;
     let costKnown = true;
     for (const question of questions) {
-      if (signal.aborted) throw new ModelClientError('aborted', `stage stopped before question ${question.id}`);
-      const prompt = buildCliJudgePrompt({
-        // Перевод строки в тексте уровня разорвал бы строку таблицы.
-        rubric: question.levels.map((level, i) => `| ${i + 1} | ${level.trim().replace(/\s*[\r\n]+\s*/g, ' ')} |`).join('\n'),
-        agent_output: data + images,
-        criterion: question.text,
-      });
-      let result;
-      try {
-        // Роль executor — как у судьи тестов скилов (skill-judge.mjs): рельсы агента не ведут.
-        // В лог — id вопроса и длина промпта, данные вопроса не копируются.
-        result = await this._callAgentOnce(agent, prompt, stageId, skillId, agentId, { WORKFLOW_RAILS_ROLE: 'executor' },
-          { promptSummary: `question=${question.id} prompt_chars=${prompt.length}` });
-      } catch (err) {
-        if (signal.aborted) throw new ModelClientError('aborted', `stage stopped during question ${question.id}`);
-        throw err;
+      const partAnswers = [];
+      for (const [index, part] of imageParts.entries()) {
+        if (signal.aborted) throw new ModelClientError('aborted', `stage stopped before question ${question.id}`);
+        const prompt = buildCliJudgePrompt({
+          // Перевод строки в тексте уровня разорвал бы строку таблицы.
+          rubric: question.levels.map((level, i) => `| ${i + 1} | ${level.trim().replace(/\s*[\r\n]+\s*/g, ' ')} |`).join('\n'),
+          agent_output: data + imageText(part, index),
+          criterion: question.text,
+        });
+        const partLabel = imageParts.length > 1 ? ` part=${index + 1}/${imageParts.length}` : '';
+        let result;
+        try {
+          // Роль executor — как у судьи тестов скилов (skill-judge.mjs): рельсы агента не ведут.
+          // В лог — id вопроса и длина промпта, данные вопроса не копируются.
+          result = await this._callAgentOnce(agent, prompt, stageId, skillId, agentId, { WORKFLOW_RAILS_ROLE: 'executor' },
+            { promptSummary: `question=${question.id}${partLabel} prompt_chars=${prompt.length}` });
+        } catch (err) {
+          if (signal.aborted) throw new ModelClientError('aborted', `stage stopped during question ${question.id}`);
+          throw err;
+        }
+        const output = result.output || '';
+        const score = parseJudgeScore(output);
+        const extras = parseJudgeExtras(output);
+        if (score === null || extras.error_class) {
+          const errorClass = extras.error_class || 'unparsed';
+          throw new ModelClientError(errorClass, extras.error_class
+            ? `question ${question.id}${partLabel}: ${errorClass}: ${redactNetworkDetail(extras.error || '')}`
+            : `question ${question.id}${partLabel}: agent output has no score 1..${RUBRIC_LEVEL_COUNT}`);
+        }
+        partAnswers.push({
+          output,
+          level: score,
+          confidence: extras.confidence,
+          probabilities: extras.probabilities,
+          reason: typeof result.result?.reason === 'string' ? result.result.reason : null,
+        });
+        model = model ?? extras.model;
+        if (extras.cost_usd === null) costKnown = false;
+        else cost += extras.cost_usd;
       }
-      const output = result.output || '';
-      const score = parseJudgeScore(output);
-      const extras = parseJudgeExtras(output);
-      if (score === null || extras.error_class) {
-        const errorClass = extras.error_class || 'unparsed';
-        throw new ModelClientError(errorClass, extras.error_class
-          ? `question ${question.id}: ${errorClass}: ${redactNetworkDetail(extras.error || '')}`
-          : `question ${question.id}: agent output has no score 1..${RUBRIC_LEVEL_COUNT}`);
-      }
-      raw[question.id] = output;
+      // Пункт выполнен, только если выполнен на всех снимках: уровень — худший из частей,
+      // уверенность и распределение — той части, что дала этот уровень.
+      const worst = partAnswers.reduce((a, b) => (b.level < a.level ? b : a));
+      const several = partAnswers.length > 1;
+      raw[question.id] = several
+        ? partAnswers.map((p, i) => `--- часть ${i + 1} из ${partAnswers.length} ---\n${p.output}`).join('\n')
+        : worst.output;
       answers[question.id] = {
-        level: score,
-        confidence: extras.confidence,
-        probabilities: extras.probabilities,
-        reason: typeof result.result?.reason === 'string' ? result.result.reason : null,
+        level: worst.level,
+        confidence: worst.confidence,
+        probabilities: worst.probabilities,
+        reason: several
+          ? partAnswers.map((p, i) => `часть ${i + 1}: ${p.reason ?? '—'}`).join('; ')
+          : worst.reason,
       };
-      model = model ?? extras.model;
-      if (extras.cost_usd === null) costKnown = false;
-      else cost += extras.cost_usd;
     }
     return { answers, raw, model, usage: null, cost_usd: costKnown ? cost : null, duration_ms: Date.now() - started };
   }

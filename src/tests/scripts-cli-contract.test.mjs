@@ -179,6 +179,35 @@ test('mark-blocked: тикета нет на доске — выход с оши
   cleanup(dir);
 });
 
+// Вид вызова стадией пайплайна: один аргумент — промпт с блоком Context. Так скрипт зовёт
+// раннер (агент script-mark-blocked), и до 2026-09-28 скрипт на нём падал «недостаточно
+// аргументов» в каждом пайплайне: тикет уходил в blocked/ без причины (PulseProxy QA-160).
+// В промпте рядом лежат attempt (номер попытки) и счётчик task_attempts — брать надо attempts.
+test('mark-blocked: промпт стадии пайплайна — причина в blocked_reason, попытки из attempts', () => {
+  const { dir, ticketsDir, workflowDir } = makeProject();
+  const ticket = writeTicket(ticketsDir, 'review', 'QA-160');
+  const prompt = [
+    'mark-blocked', '', '', 'Context:',
+    '  ticket_id: QA-160',
+    '  target: review',
+    '  attempt: 5',
+    '  attempts: 6',
+    '  reason: max_review_attempts',
+    '', 'Counters:', '  task_attempts: 6',
+  ].join('\n');
+
+  const result = run(MARK_BLOCKED, [prompt], dir);
+
+  assert.strictEqual(result.code, 0, `стадия обязана пройти: ${result.stderr}`);
+  const text = readTicket(ticket);
+  assert.match(text, /blocked_reason: "?max_review_attempts \(попыток: 6\)"?/, 'причина — в поле, которое читают доска и MCP');
+  assert.match(text, /auto_blocked_attempts: 6/, 'число попыток — из attempts, а не из attempt или task_attempts');
+  assert.ok(fs.existsSync(path.join(workflowDir, 'state', 'alerts.jsonl')), 'алерт блокировки записан');
+  assert.strictEqual(parseResult(result.stdout)?.status, 'completed');
+
+  cleanup(dir);
+});
+
 test('mark-blocked: битый frontmatter тикета — выход с ошибкой, а не тихая порча файла', () => {
   const { dir, ticketsDir } = makeProject();
   const ticket = writeBrokenTicket(ticketsDir, 'ready', 'IMPL-204');

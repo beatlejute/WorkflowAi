@@ -72,6 +72,51 @@ export const DEFAULT_IMAGE_LIMITS = Object.freeze({
   maxCount: 8,
 });
 
+/**
+ * Изображения вопроса → части не больше `maxCount` для отдельных запросов модели.
+ *
+ * buildImageParts отказывает запросу, в котором изображений больше лимита. Вопрос ревью по
+ * скриншотам получает все файлы маски пункта: 2026-09-28 у PulseProxy QA-160 маска дала 12
+ * снимков (4 экрана × expected, actual, diff), судья пять раз упал `Too many images: 12
+ * (limit 8)`, и каждое падение стоило повторного исполнения тикета. Вызывающий задаёт вопрос
+ * по каждой части и сводит ответы.
+ *
+ * Снимки одного экрана — общее имя до последнего `-` (`QA-160-tab-promo-actual.png`,
+ * `…-diff.png`, `…-expected.png`) — держатся в одной части: сравнивать их модель может только
+ * вместе. Экран, у которого снимков больше лимита, режется по лимиту. Порядок файлов
+ * внутри экрана и порядок экранов — как во входе.
+ *
+ * @param {string[]} images - пути изображений
+ * @param {number} [maxCount] - лимит одного запроса
+ * @returns {string[][]} части; пустой вход — пустой список
+ */
+export function imageBatches(images, maxCount = DEFAULT_IMAGE_LIMITS.maxCount) {
+  const list = Array.isArray(images) ? images : [];
+  if (list.length === 0) return [];
+  if (list.length <= maxCount) return [list];
+  const screens = new Map();
+  for (const image of list) {
+    const base = path.basename(String(image)).replace(/\.[^.]+$/, '');
+    const key = base.includes('-') ? base.slice(0, base.lastIndexOf('-')) : base;
+    if (!screens.has(key)) screens.set(key, []);
+    screens.get(key).push(image);
+  }
+  const batches = [];
+  let current = [];
+  for (const screen of screens.values()) {
+    for (let i = 0; i < screen.length; i += maxCount) {
+      const part = screen.slice(i, i + maxCount);
+      if (current.length + part.length > maxCount) {
+        batches.push(current);
+        current = [];
+      }
+      current.push(...part);
+    }
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
 const RETRY_STATUSES = new Set([429, 500, 502, 503]);
 const PROXY_CONNECT_TIMEOUT_MS = 30000;
 const PROXY_ENV_NAMES = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy'];

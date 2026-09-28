@@ -91,6 +91,10 @@ export function markBlockedTicket({
   frontmatter.auto_blocked_reason = reason;
   frontmatter.auto_blocked_attempts = attempts;
   frontmatter.auto_blocked_at = now;
+  // Причину блокировки доска и MCP читают из blocked_reason (его же пишет гейт
+  // move-to-ready.js и снимает move-ticket.js при выходе из blocked/); поля auto_blocked_*
+  // никто не читает, и заблокированный пайплайном тикет показывался без причины.
+  frontmatter.blocked_reason = attempts == null ? reason : `${reason} (попыток: ${attempts})`;
 
   // Сериализация и запись обратно в файл.
   //

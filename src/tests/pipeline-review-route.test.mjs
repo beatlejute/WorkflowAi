@@ -196,6 +196,28 @@ const TOOLED_AGENT_ID = 'cli-with-tools';
 const TOOLED_AGENT = { command: 'claude', args: ['-p'], workdir: '.', capabilities: ['text'] };
 
 describe('pipeline-review-route: маршрут ревью в configs/pipeline.yaml', () => {
+  // PulseProxy QA-160, 2026-09-28: судья ревью пять раз упал «Too many images», ветка error
+  // вела в increment-task-attempts, и готовую работу пять раз исполняли заново, пока тикет
+  // не встал в blocked/. Сбой ревью — не отказ в работе: попытку исполнения он не тратит.
+  it('review-result: failed тратит попытку исполнения, error — повтор ревью со своим счётчиком', () => {
+    const config = loadConfig();
+    const check = (stageId, status, expected) => transitionProblems(config, stageId, status, expected);
+    const retry = findStage(config, 'increment-review-errors');
+    assert.deepEqual([
+      ...check('review-result', 'failed', { stage: 'increment-task-attempts', params: TICKET }),
+      ...check('review-result', 'error', { stage: 'increment-review-errors', params: TICKET }),
+      ...check('increment-review-errors', 'default', {
+        stage: 'review-result',
+        params: { ...ATTEMPT, evidence_file: '$context.evidence_file', required_capabilities: '$context.required_capabilities' },
+      }),
+      ...check('increment-review-errors', 'max_reached', { stage: 'mark-blocked', params: { ...TICKET, reason: 'review_error' } }),
+    ], []);
+    assert.equal(retry.type, 'update-counter');
+    assert.notEqual(retry.counter, 'task_attempts', 'сбой ревью не расходует попытки исполнения');
+    assert.match(retry.counter, /attempt/, 'раннер обнуляет при смене тикета только счётчики с attempt в имени');
+    assert.ok(Number.isInteger(retry.max) && retry.max > 0, 'повторов ревью — конечное число');
+  });
+
   it('verify-artifacts: all_green → done, legacy и error → review-result-legacy, в ревью — evidence', () => {
     assert.deepEqual(verifyArtifactsProblems(loadConfig()), []);
   });

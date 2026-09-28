@@ -9,6 +9,13 @@
  * Примеры:
  *   node mark-blocked.js IMPL-59 --attempts=6 --reason=max_review_attempts
  *   node mark-blocked.js QA-40 --attempts=3 --reason=human_gate_rejected
+ *
+ * Стадия пайплайна (агент script-mark-blocked) зовёт скрипт одним аргументом — промптом
+ * «mark-blocked\n\nContext:\n  ticket_id: X\n  attempts: N\n  reason: R\n…», как и
+ * move-ticket.js. Этот вид разбирается в те же три поля. До 2026-09-28 скрипт понимал
+ * только флаги и на стадии падал «недостаточно аргументов» в каждом пайплайне: тикет уходил
+ * в blocked/ обработчиком ошибки стадии, без причины и без алерта (PulseProxy, QA-160 и
+ * DOCS-10, прогон pipeline_2026-09-27_17-20-03).
  */
 
 import path from "path";
@@ -25,8 +32,30 @@ const TICKETS_DIR = path.join(WORKFLOW_DIR, "tickets");
 const STATE_DIR = path.join(PROJECT_DIR, ".workflow", "state");
 const ALERTS_FILE = path.join(STATE_DIR, "alerts.jsonl");
 
+/**
+ * Промпт стадии пайплайна → аргументы CLI. Поля берутся из блока Context построчно: в нём
+ * рядом лежат `attempt:` (номер попытки) и счётчик `task_attempts:`, поэтому имя поля
+ * сверяется целиком с начала строки.
+ */
+function argsFromStagePrompt(prompt) {
+  const field = (name) => {
+    const m = prompt.match(new RegExp(`^[ \\t]*${name}:[ \\t]*(.+?)[ \\t]*$`, "m"));
+    return m ? m[1].replace(/^["']|["']$/g, "") : null;
+  };
+  const ticket = field("ticket_id");
+  const out = ticket ? [ticket] : [];
+  const attemptsValue = field("attempts");
+  if (attemptsValue !== null) out.push(`--attempts=${attemptsValue}`);
+  const reasonValue = field("reason");
+  if (reasonValue !== null) out.push(`--reason=${reasonValue}`);
+  return out;
+}
+
 // Парсинг аргументов
-const args = process.argv.slice(2);
+const rawArgs = process.argv.slice(2);
+const args = rawArgs.length === 1 && /\bContext:/.test(rawArgs[0])
+  ? argsFromStagePrompt(rawArgs[0])
+  : rawArgs;
 if (args.length < 3) {
   console.error("Ошибка: недостаточно аргументов");
   console.error("Использование: node mark-blocked.js <ticket_id> --attempts=N --reason=<str>");

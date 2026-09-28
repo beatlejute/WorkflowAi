@@ -462,6 +462,47 @@ describe('runner: стадия с model_io и агентом с командой
     assert.deepEqual(readJson(join(root, '.workflow', 'tmp', 'apply-env.json')), { agent: 'judge-cli', questions: 2 });
   });
 
+  // PulseProxy QA-160, 2026-09-28: маска пункта дала 12 снимков (4 экрана × actual, diff,
+  // expected), buildImageParts судьи отказывал `Too many images: 12 (limit 8)`, и ревью падало
+  // до вызова модели. Теперь вопрос задаётся по частям, снимки одного экрана — в одной части,
+  // уровень вопроса — худший из частей: пункт не проходит, если провален хоть на одном экране.
+  it('снимков больше лимита — вопрос по частям, экраны целиком, уровень — худший из частей', async () => {
+    const root = makeProject();
+    writeFileSync(join(root, 'scripts', 'judge-by-screen.mjs'), `import fs from 'node:fs';
+const prompt = fs.readFileSync(0, 'utf8');
+fs.mkdirSync('.workflow/tmp', { recursive: true });
+fs.appendFileSync('.workflow/tmp/judge-calls.jsonl', JSON.stringify({ prompt }) + '\\n');
+const score = prompt.includes('tab-promo') ? 2 : 5;
+console.log('---RESULT---\\nscore: ' + score + '\\nconfidence: 0.9\\nreason: screens ' + (score === 2 ? 'broken' : 'ok') + '\\n---RESULT---');
+`);
+    const screens = ['modal-preset-templates', 'modal-public-proxies', 'tab-presets', 'tab-promo'];
+    const images = screens.flatMap((s) => ['actual', 'diff', 'expected'].map((k) => `shots/QA-160-${s}-${k}.png`));
+    const config = makeConfig(
+      { 'judge-cli': { command: 'node', args: ['scripts/judge-by-screen.mjs'], capabilities: ['text', 'multimodal'], prompt_stdin: true } },
+      ['judge-cli'],
+      { options: { levels: 5, questions: 1, pass_level: 4, images } }
+    );
+
+    const { result } = await runStage(root, config);
+
+    const calls = judgeCalls(root);
+    assert.equal(calls.length, 2, 'два запроса по 6 снимков вместо одного на 12');
+    for (const call of calls) {
+      const listed = images.filter((image) => call.prompt.includes(image));
+      assert.ok(listed.length <= 8, `в запросе не больше лимита: ${listed.length}`);
+      for (const screen of screens) {
+        const ofScreen = listed.filter((image) => image.includes(`-${screen}-`)).length;
+        assert.ok(ofScreen === 0 || ofScreen === 3, `снимки экрана ${screen} не разорваны: ${ofScreen}`);
+      }
+      assert.match(call.prompt, /часть [12] из 2/);
+    }
+    assert.equal(result.status, 'failed', 'провал на одном экране — провал пункта');
+    const answer = savedResponse(root).answers['dod-1'];
+    assert.equal(answer.level, 2);
+    assert.equal(answer.confidence, 0.9);
+    assert.match(answer.reason, /часть 1: screens ok; часть 2: screens broken/);
+  });
+
   it('ответ без score — status error, unparsed; apply не запускается, агент не помечен', async () => {
     const root = makeProject();
     const config = makeConfig({ 'judge-cli': judgeAgent('оценки не будет') }, ['judge-cli'], { options: { levels: 5 } });

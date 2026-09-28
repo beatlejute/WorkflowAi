@@ -543,3 +543,47 @@ export function parseCheckRecord(text) {
   const line = readCheckLine(String(text ?? '').trim());
   return describeForm(line ? [line] : []);
 }
+
+/**
+ * Проверки DoD тикета, которые не дают начать работу, — гейт dod_format: 2 перед ready/.
+ *
+ * Зелёная проверка до работы значит пустой критерий или уже сделанную задачу.
+ * Проверки с пометкой `regression` (существующие тесты) зелёные по определению и
+ * не запускаются, но, как и остальные, не должны быть отклонены исполнителем или
+ * остаться без исполняемого файла (checkStartProblem); пункты prose и visual не
+ * проверяются. Статус `failed` — ожидаемое состояние.
+ *
+ * Гейт зовёт move-to-ready.js, а автор тикета — scripts/check-ticket-dod.js до того, как
+ * тикет попадёт на доску: 2026-09-28 тикет доработки PulseProxy FIX-031 был записан с
+ * проверками через `|` и проверкой, зелёной до начала, и гейт сразу отправил его в blocked/.
+ *
+ * @param {{body: string, projectRoot: string}} args - тело тикета и корень проекта
+ * @returns {Promise<string[]>} причины блокировки; пустой список — тикет можно брать в работу
+ */
+export async function dodStartProblems({ body, projectRoot }) {
+  const problems = [];
+  for (const item of parseDodChecks(body)) {
+    if (item.kind !== 'check') continue;
+    if (item.error) {
+      problems.push(`check_malformed: пункт ${item.index} (${item.error})`);
+      continue;
+    }
+    const startProblem = checkStartProblem({ check: item.command, expect: item.expect });
+    if (startProblem?.status === 'denied') {
+      problems.push(`check_denied: пункт ${item.index} (${startProblem.reason})`);
+      continue;
+    }
+    if (startProblem?.status === 'tool_missing') {
+      problems.push(`check_tool_missing: пункт ${item.index} (${startProblem.tool})`);
+      continue;
+    }
+    if (item.regression) continue;
+    const result = await runCheck({ check: item.command, expect: item.expect, projectRoot });
+    if (result.status === 'passed') {
+      problems.push(`check_green_before_start: пункт ${item.index}`);
+    } else if (result.status === 'timeout') {
+      problems.push(`check_timeout: пункт ${item.index} (${result.reason})`);
+    }
+  }
+  return problems;
+}

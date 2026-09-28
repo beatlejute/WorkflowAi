@@ -1087,6 +1087,10 @@ node src/scripts/compare-judges.js --judge jev --out … --disagreements …
   в том числе регрессионная, которую исполнитель отклонит, которой нет исполняемого
   файла (`check_tool_missing`) или которую не разобрать, — тоже: она красная всегда.
   Тикет `type: human` переносится без гейта.
+- `check-ticket-dod.js <id|файл> [...]` — тот же гейт для автора тикета до доски: печатает
+  причины (`check_denied`, `check_tool_missing`, `check_green_before_start`, `check_timeout`),
+  тикет не двигает; код выхода 1 при проблемах. Его зовёт скил доработок по пробелам после
+  записи каждого тикета.
 
 ### Evidence и исходы предпроверки
 
@@ -1139,15 +1143,20 @@ node src/scripts/compare-judges.js --judge jev --out … --disagreements …
    `evidence_mismatch` (evidence другого тикета), `evidence_failed_items`,
    `agent_without_multimodal` (есть изображения, а у агента нет `multimodal`).
 2. Модель отвечает уровнем на каждый вопрос: агент с командой — отдельным запуском
-   на вопрос, агент `kind: http` — одним запросом.
+   на вопрос, агент `kind: http` — одним запросом. Изображений больше лимита запроса (8)
+   — агент с командой получает вопрос по частям, снимки одного экрана (общее имя до
+   последнего `-`) — в одной части; уровень вопроса — худший из частей.
 3. `apply-review.js` засчитывает пункт при уровне не ниже `pass_level` и уверенности
    не ниже `min_confidence` или без уверенности (агент её не сообщает). Неуверенная
    оценка — провал, переоценки нет. Уровни, уверенность, агент и модель пишутся в
    раздел `review` файла evidence и строкой в `## Ревью`; результат `passed` ведёт в
-   `move-ticket` `done`, `failed` и `error` — в `increment-task-attempts`, то есть в
+   `move-ticket` `done`, `failed` — в `increment-task-attempts`, то есть в
    `ready/` на повторное исполнение тикета, а когда счётчик `task_attempts` доходит
-   до `max: 6` (`max_reached`) — в `mark-blocked` и `blocked/`; `default` — в
-   `move-ticket` `backlog`. Следующее ревью по счётчику `task_attempts` берёт
+   до `max: 6` (`max_reached`) — в `mark-blocked` и `blocked/`; `error` (модель ревью
+   не ответила) — в `increment-review-errors`: ревью повторяется без траты попытки
+   исполнения, третий сбой на тикете — `mark-blocked` с причиной `review_error`;
+   `default` — в `move-ticket` `backlog`. Причину блокировки `mark-blocked` пишет в
+   `blocked_reason`. Следующее ревью по счётчику `task_attempts` берёт
    следующего подходящего агента списка по кругу.
 
 **Выбор агента.** `verify-artifacts` отдаёт `required_capabilities` — то, что нужно,

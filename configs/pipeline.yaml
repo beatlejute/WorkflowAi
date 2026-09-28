@@ -419,6 +419,9 @@ pipeline:
             task_type: "$result.type"
             required_capabilities: "$result.required_capabilities"
             target: in-progress
+            # evidence_file предыдущего тикета: контекст раннера между тикетами не очищается,
+            # и исполнитель читал чужой файл evidence (PulseProxy, 2026-09-27, шесть сессий).
+            evidence_file: ""
         human_ready:
           stage: manual-gate-human
           params:
@@ -440,6 +443,7 @@ pipeline:
             ticket_id: "$result.ticket_id"
             task_type: "$result.type"
             required_capabilities: "$result.required_capabilities"
+            evidence_file: ""
         empty: check-plan-templates
         error: create-report
 
@@ -636,6 +640,9 @@ pipeline:
             task_type: "$result.type"
             required_capabilities: "$result.required_capabilities"
             target: in-progress
+            # evidence_file предыдущего тикета: контекст раннера между тикетами не очищается,
+            # и исполнитель читал чужой файл evidence (PulseProxy, 2026-09-27, шесть сессий).
+            evidence_file: ""
         human_ready:
           stage: manual-gate-human
           params:
@@ -657,6 +664,7 @@ pipeline:
             ticket_id: "$result.ticket_id"
             task_type: "$result.type"
             required_capabilities: "$result.required_capabilities"
+            evidence_file: ""
         empty: check-conditions
         default: check-conditions
         error: create-report
@@ -944,6 +952,10 @@ pipeline:
     # без инструментов (kind: http или tool_less: true): модель видит только evidence.
     # Скриншоты — первый агент списка с multimodal (required_capabilities от
     # verify-artifacts). При failed — increment-task-attempts для учёта попытки.
+    # При error (модель ревью не ответила: bad_request, сеть, неразобранный ответ) —
+    # increment-review-errors: ревью повторяется, попытка исполнения не тратится.
+    # До 2026-09-28 error тоже вёл в increment-task-attempts: у PulseProxy QA-160 судья
+    # пять раз упал «Too many images», и готовую работу пять раз переделывали заново.
     # -------------------------------------------------------------------------
     review-result:
       description: "Оценить прозаические пункты и пункты со скриншотами по собранным evidence"
@@ -969,7 +981,7 @@ pipeline:
             ticket_id: "$context.ticket_id"
             target: backlog
         error:
-          stage: increment-task-attempts
+          stage: increment-review-errors
           params:
             ticket_id: "$context.ticket_id"
 
@@ -1026,6 +1038,34 @@ pipeline:
             ticket_id: "$context.ticket_id"
             attempts: "$counter.task_attempts"
             reason: "max_review_attempts"
+
+    # -------------------------------------------------------------------------
+    # 4c. increment-review-errors
+    # Сбой самого ревью (review-result → error): модель не ответила или ответ не
+    # разобран. Работа исполнителя не отклонена, поэтому попытка исполнения не
+    # тратится — ревью повторяется. Третий сбой ревью на одном тикете — блокировка с
+    # причиной review_error: такой сбой повтором не лечится. Имя счётчика содержит
+    # attempt — раннер обнуляет его при смене тикета.
+    # -------------------------------------------------------------------------
+    increment-review-errors:
+      description: "Учесть сбой ревью, не расходуя попытки исполнения"
+      type: update-counter
+      counter: review_error_attempts
+      max: 3
+      goto:
+        default:
+          stage: review-result
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+            evidence_file: "$context.evidence_file"
+            required_capabilities: "$context.required_capabilities"
+        max_reached:
+          stage: mark-blocked
+          params:
+            ticket_id: "$context.ticket_id"
+            attempts: "$counter.review_error_attempts"
+            reason: "review_error"
 
     # -------------------------------------------------------------------------
     # 5. move-ticket
