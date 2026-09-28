@@ -48,3 +48,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-28"]
     tags: [dod-checks, gate, regression-guard]
     severity: high
+  - id: TC-DECOMPOSE-GAPS-008
+    file: cases/TC-DECOMPOSE-GAPS-008-recheck-after-fix.yaml
+    origin_chg: ["ad-hoc-2026-09-28"]
+    tags: [scope-check, recheck, regression-guard]
+    severity: high

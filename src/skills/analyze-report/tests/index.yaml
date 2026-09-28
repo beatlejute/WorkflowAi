@@ -38,3 +38,8 @@ cases:
     origin_chg: ["convert-2026-09-22"]
     tags: [rails, anatomy, regression-guard]
     severity: critical
+  - id: TC-ANALYZE-REPORT-006
+    file: cases/TC-ANALYZE-REPORT-006-gaps-without-decisions.yaml
+    origin_chg: ["ad-hoc-2026-09-28"]
+    tags: [gaps, output, regression-guard]
+    severity: high
