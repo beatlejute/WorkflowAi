@@ -26,6 +26,10 @@
  *     останавливает вызов модели по SIGINT/SIGTERM.
  *   - Ошибка — ModelClientError с полем `class` (MODEL_ERROR_CLASSES).
  *
+ * `getJson` — GET одной попыткой без повторов (скрипты пулов моделей: оценки
+ * model-scores.js и шлагбаум free-quota-gate.js). Ключ (готовой строкой), прокси,
+ * допуск `http:`, `signal` и классы ошибок — те же, что у протоколов; повторов нет.
+ *
  * Имена переменных окружения на Windows не зависят от регистра, но копия
  * `{ ...process.env }` (так env собирает lib/agent-env.mjs) эту особенность теряет:
  * `Openrouter_Api_Key` в системе не находился бы по имени `OPENROUTER_API_KEY`,
@@ -281,11 +285,12 @@ function openProxyTunnel(proxyUrl, host, port, handles) {
 }
 
 /**
- * Одна попытка POST. Возвращает `{ status, body }`; сетевой сбой — исключение с
- * `network: true`, таймаут — с `timedOut: true`, прерывание — с `aborted: true`.
- * Таймаут и прерывание снимают запрос, CONNECT и сокет туннеля.
+ * Одна попытка запроса: `payload` — тело POST, null — GET без тела. Возвращает
+ * `{ status, body }`; сетевой сбой — исключение с `network: true`, таймаут — с
+ * `timedOut: true`, прерывание — с `aborted: true`. Таймаут и прерывание снимают
+ * запрос, CONNECT и сокет туннеля.
  */
-async function postOnce(target, headers, payload, { timeoutMs, env, platform, signal, ca }) {
+async function requestOnce(target, headers, payload, { timeoutMs, env, platform, signal, ca }) {
   // Уже прерванный signal: запрос не отправляется вовсе (без этого `attempt` ниже
   // синхронно доходил до req.end — платный вызов уходил, ответ выбрасывался).
   if (signal?.aborted) throw Object.assign(new Error('request aborted'), { aborted: true });
@@ -332,8 +337,8 @@ async function postOnce(target, headers, payload, { timeoutMs, env, platform, si
         hostname,
         port,
         path: `${target.pathname}${target.search}`,
-        method: 'POST',
-        headers: { ...headers, 'Content-Length': Buffer.byteLength(payload) },
+        method: payload === null ? 'GET' : 'POST',
+        headers: payload === null ? headers : { ...headers, 'Content-Length': Buffer.byteLength(payload) },
       };
       if (isHttps && ca) options.ca = ca;
       if (handles.socket) {
@@ -353,7 +358,8 @@ async function postOnce(target, headers, payload, { timeoutMs, env, platform, si
       });
       handles.req = req;
       req.on('error', (err) => reject(Object.assign(err, { network: true })));
-      req.end(payload);
+      if (payload === null) req.end();
+      else req.end(payload);
     });
   })();
 
@@ -417,7 +423,7 @@ async function postJson(agent, body, options) {
     const canRetry = attempt < retryDelays.length;
     let response;
     try {
-      response = await postOnce(target, headers, payload, transport);
+      response = await requestOnce(target, headers, payload, transport);
     } catch (err) {
       if (err.aborted) throw abortedError(attempt + 1);
       if (err.timedOut) {
@@ -442,12 +448,48 @@ async function postJson(agent, body, options) {
       await pause(attempt);
       continue;
     }
-    const detail = `HTTP ${status}: ${excerpt(text, key)}`;
-    const extra = { status, attempts: attempt + 1 };
-    if (status === 401 || status === 403) throw new ModelClientError('auth', `Model auth failed, ${detail}`, extra);
-    if (status === 429) throw new ModelClientError('rate_limit', `Model rate limit, ${detail}`, extra);
-    if (status >= 500) throw new ModelClientError('server', `Model server error, ${detail}`, extra);
-    throw new ModelClientError('bad_request', `Model rejected request, ${detail}`, extra);
+    throw httpStatusError(status, text, key, attempt + 1);
+  }
+}
+
+/** Ответ не 2xx → ModelClientError по классу статуса; ключ из тела вырезан. */
+function httpStatusError(status, text, key, attempts) {
+  const detail = `HTTP ${status}: ${excerpt(text, key)}`;
+  const extra = { status, attempts };
+  if (status === 401 || status === 403) return new ModelClientError('auth', `Model auth failed, ${detail}`, extra);
+  if (status === 429) return new ModelClientError('rate_limit', `Model rate limit, ${detail}`, extra);
+  if (status >= 500) return new ModelClientError('server', `Model server error, ${detail}`, extra);
+  return new ModelClientError('bad_request', `Model rejected request, ${detail}`, extra);
+}
+
+/**
+ * GET JSON одной попыткой, без повторов: вызывающий скрипт сам решает, что делать
+ * при сбое (прежний кэш оценок, открытый шлагбаум), а повторы с паузами не
+ * уложились бы в таймаут команды раннера.
+ * @param {string} url - https — любой, http — только своя машина (assertModelUrl)
+ * @param {object} [options]
+ * @param {string|null} [options.key] - ключ для `Authorization: Bearer` (resolveModelKey); null — без заголовка
+ * @param {number} [options.timeoutS] - таймаут запроса, с
+ * @returns {Promise<any>} разобранный JSON ответа 2xx; ошибка — ModelClientError
+ */
+export async function getJson(url, { key = null, timeoutS = DEFAULT_TIMEOUT_S, env = process.env, platform = process.platform, signal, ca } = {}) {
+  const target = assertModelUrl(url);
+  const timeoutMs = Math.round(timeoutS * 1000);
+  const headers = { Accept: 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) };
+  let response;
+  try {
+    response = await requestOnce(target, headers, null, { timeoutMs, env, platform, signal, ca });
+  } catch (err) {
+    if (err.aborted) throw abortedError(1);
+    if (err.timedOut) throw new ModelClientError('timeout', `Request timed out after ${timeoutMs / 1000}s`, { attempts: 1 });
+    throw new ModelClientError('network', `Request failed: ${scrub(err.message, key)}`, { attempts: 1 });
+  }
+  const { status, body: text } = response;
+  if (status < 200 || status >= 300) throw httpStatusError(status, text, key, 1);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ModelClientError('bad_response', `Response is not JSON: ${excerpt(text, key)}`);
   }
 }
 

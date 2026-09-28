@@ -26,6 +26,11 @@ import {
   requestedModel, ticketTypeOf, isCrashStatus, newRunKey, writeOpenRun, clearOpenRun, closeInterruptedRun,
 } from './lib/agent-runs.mjs';
 import { captureRunChanges, countRunChanges } from './lib/agent-run-changes.mjs';
+import {
+  MODEL_PLACEHOLDER, expandModelPools, isModelPool, maxPerAttempt as poolMaxPerAttempt, poolMembers, healthRulesId,
+  SELECTOR_TIMEOUT_MS, SELECTOR_MAX_CANDIDATES, poolSelectorData, selectorTicket, buildSelectorPrompt, selectorRanking,
+  GATE_TIMEOUT_MS, runPoolCommand,
+} from './lib/model-pools.mjs';
 
 // Как часто, пока kilo-агент работает, смотреть в базу kilo, какие модели ответили.
 const KILO_MODELS_POLL_MS = 15000;
@@ -1097,9 +1102,18 @@ class StageExecutor {
     // агента уже после запроса на остановку.
     this.stopRequested = false;
 
+    // Остановка для команд пула моделей (шлагбаум, runPoolCommand): у них нет записи в
+    // currentChild, killCurrentChild снимает их дерево через этот signal.
+    this.stopAbort = new AbortController();
+
     // run_id пайплайна (PipelineRunner.runId): имя файла ответа модели в
     // .workflow/state/model-io/ привязывает вызов к запуску и его логу.
     this.pipelineRunId = options.runId || null;
+
+    // Таймауты вызовов пула моделей (src/lib/model-pools.mjs): агент-селектор — 60 с (П4),
+    // шлагбаум — 15 с (П14); тесты их уменьшают.
+    this.selectorTimeoutMs = options.selectorTimeoutMs ?? SELECTOR_TIMEOUT_MS;
+    this.gateTimeoutMs = options.gateTimeoutMs ?? GATE_TIMEOUT_MS;
 
     // Правила health-классификатора (инициализируются один раз в конструкторе)
     this.rules = loadRules(projectRoot);
@@ -1156,6 +1170,7 @@ class StageExecutor {
   killCurrentChild() {
     this.stopRequested = true;
     this.currentModelAbort?.abort();
+    this.stopAbort?.abort();
     const child = this.currentChild;
     if (!child || !child.pid) return;
     if (process.platform === 'win32') {
@@ -1175,6 +1190,7 @@ class StageExecutor {
   forceKillCurrentChild() {
     this.stopRequested = true;
     this.currentModelAbort?.abort();
+    this.stopAbort?.abort();
     const child = this.currentChild;
     if (!child || !child.pid) return;
     if (process.platform === 'win32') {
@@ -1200,16 +1216,28 @@ class StageExecutor {
   /**
    * Строит список кандидатов-агентов для стейджа с учётом типа задачи,
    * required_capabilities и номера попытки. Возвращает:
-   *   { agentId, effectiveStage } — если кандидат найден,
-   *   { blocked: 'no_capable_agent' | 'attempts_exhausted', reason } — иначе.
+   *   { agentId, effectiveStage, attempt, compatible[, pool, poolCandidates] } — если кандидат найден,
+   *   { blocked: 'no_capable_agent' | 'all_unhealthy' | 'all_banned', reason } — иначе.
    *
    * Алгоритм:
    *   1. Список берётся из stage.agents_by_type[task_type].agents,
    *      иначе stage.agents, иначе pipeline.default_agents.
-   *   2. Список фильтруется: агент должен покрывать все required_capabilities.
-   *   3. Берётся элемент [attempt-1] (1-based attempt).
+   *   2. Список фильтруется: агент должен покрывать все required_capabilities,
+   *      быть здоровым по health-реестру, без запрета модели (стадия исполнителя)
+   *      и не пробованным в этой попытке (excludeAgents).
+   *   3. Берётся элемент [(attempt-1) % length] (1-based attempt).
    *   4. Скрипт-агенты (stage.agent: script-*) обрабатываются в отдельной ветке
    *      execute() — сюда не попадают.
+   *
+   * Пул моделей (запись с `models`, src/lib/model-pools.mjs) — одно место списка, а
+   * не его участники: развёрнутый пул при `max: 6` забрал бы все попытки курсором.
+   * Место пула проходит фильтр, если его проходит хотя бы один участник; здоровье
+   * проверяется и у самого id пула. Из попытки место уходит, когда в excludeAgents уже
+   * max_per_attempt участников пула или непробованных подходящих не осталось. Выбранное
+   * место-пул отдаёт первого по маске участника, прошедшего фильтры, — `agentId`
+   * участника (`<пул>@<id>`), `pool` и `poolCandidates` (кандидаты места по порядку).
+   * Участник, уже запускавшийся на тикете, уступает незапускавшимся (_preferNotRunOnTicket).
+   * Пул в списке дважды — у мест общие участники и общий счёт max_per_attempt.
    */
   resolveAgent(stage, stageId, options = {}) {
     const excludeAgents = options.excludeAgents || [];
@@ -1255,42 +1283,79 @@ class StageExecutor {
       }
     }
 
+    const agents = this.pipeline.agents;
+    const isPool = (id) => isModelPool(agents[id]);
+    // Участники мест-пулов по ступеням фильтров (id пула → { members, capable,
+    // healthy, allowed, untried }): считаются один раз, даже если пул стоит дважды.
+    const poolSteps = new Map();
+    const poolOf = (id) => {
+      if (!poolSteps.has(id)) poolSteps.set(id, { members: poolMembers(agents, id) });
+      return poolSteps.get(id);
+    };
+    const coversRequired = (agent) => {
+      const caps = Array.isArray(agent?.capabilities) ? agent.capabilities : [];
+      return required.every(r => caps.includes(r));
+    };
+
     // Фильтр по capability-совместимости
     const covers = (agentId) => {
-      const agent = this.pipeline.agents[agentId];
+      const agent = agents[agentId];
       if (!agent) return false;
-      const caps = Array.isArray(agent.capabilities) ? agent.capabilities : [];
-      return required.every(r => caps.includes(r));
+      if (!isModelPool(agent)) return coversRequired(agent);
+      const pool = poolOf(agentId);
+      pool.capable ??= pool.members.filter(id => coversRequired(agents[id]));
+      return pool.capable.length > 0;
     };
     const afterCapabilities = agentIds.filter(covers);
 
     // Фильтр по health-реестру: unhealthy-агенты с неистёкшим TTL пропускаются.
-    // Реестр персистентный между attempt'ами (план rev.3, решение 6.5).
-    const afterHealth = afterCapabilities.filter(id => isHealthy(this.projectRoot, id));
+    // Реестр персистентный между attempt'ами (план rev.3, решение 6.5). У места-пула —
+    // и id пула, и его участники (ключ участника — маршрут `<пул>@<id>`).
+    const healthy = (agentId) => {
+      if (!isHealthy(this.projectRoot, agentId)) return false;
+      if (!isPool(agentId)) return true;
+      const pool = poolOf(agentId);
+      pool.healthy ??= pool.capable.filter(id => isHealthy(this.projectRoot, id));
+      return pool.healthy.length > 0;
+    };
+    const afterHealth = afterCapabilities.filter(healthy);
 
     // Фильтр по запретам моделей из журнала запусков (PLAN-003) — только на стадии
     // исполнителя: одна модель стоит и у исполнителя, и у судьи ревью, и запрет за
     // провалы исполнителя не должен снимать судью (решение 2026-09-26, «Только
     // исполнитель»). Ключ модели — тот же, что у события run (configuredModelKey):
     // роутер kilo по ключу роутера не отсеивается, его модели отсеивает остановка
-    // в опросе базы kilo (_trackKiloModels).
+    // в опросе базы kilo (_trackKiloModels). Место-пул под запретом, когда запрещены
+    // модели всех его здоровых участников.
     const banned = new Map();
-    if (stage.skill === EXECUTOR_SKILL && afterHealth.length > 0) {
-      const bans = this._loadBans(stageId);
-      for (const id of afterHealth) {
-        const model = configuredModelKey(this.pipeline.agents[id], id);
-        const ban = findBan(bans, model, taskType);
-        if (!ban) continue;
-        banned.set(id, ban);
-        if (this.logger) this.logger.info(`agent ${id} skipped: model "${model}" — ${describeBan(ban)}`, stageId);
-      }
+    const bans = stage.skill === EXECUTOR_SKILL && afterHealth.length > 0 ? this._loadBans(stageId) : null;
+    const notBanned = (id) => {
+      if (!bans) return true;
+      const model = configuredModelKey(agents[id], id);
+      const ban = findBan(bans, model, taskType);
+      if (!ban) return true;
+      banned.set(id, ban);
+      if (this.logger) this.logger.info(`agent ${id} skipped: model "${model}" — ${describeBan(ban)}`, stageId);
+      return false;
+    };
+    for (const id of new Set(afterHealth)) {
+      if (!isPool(id)) notBanned(id);
+      else poolOf(id).allowed = poolOf(id).healthy.filter(notBanned);
     }
-    const afterBans = banned.size > 0 ? afterHealth.filter(id => !banned.has(id)) : afterHealth;
+    const afterBans = afterHealth.filter(id => (isPool(id) ? poolOf(id).allowed.length > 0 : !banned.has(id)));
 
     // Фильтр по excludeAgents (для in-stage fallback в рамках одной attempt)
-    const afterExclude = excludeAgents.length > 0
-      ? afterBans.filter(id => !excludeAgents.includes(id))
-      : afterBans;
+    const excluded = new Set(excludeAgents);
+    const untried = (id) => {
+      if (!isPool(id)) return !excluded.has(id);
+      // Id пула в excludeAgents — место закрыто шлагбаумом в этой попытке (executeWithFallback).
+      if (excluded.has(id)) return false;
+      const pool = poolOf(id);
+      pool.untried = pool.allowed.filter(member => !excluded.has(member));
+      const triedMembers = pool.members.filter(member => excluded.has(member)).length;
+      return triedMembers < poolMaxPerAttempt(agents[id]) && pool.untried.length > 0;
+    };
+    const afterExclude = afterBans.filter(untried);
 
     if (afterExclude.length === 0) {
       // Все агенты — под запретом модели: тикет уходит по goto.blocked, причина
@@ -1312,9 +1377,11 @@ class StageExecutor {
           attempt
         };
       }
+      const emptyPools = [...new Set(agentIds.filter(id => isPool(id) && poolOf(id).members.length === 0))];
       return {
         blocked: 'no_capable_agent',
-        reason: `No agent in [${agentIds.join(', ')}] covers required_capabilities [${required.join(', ')}]`,
+        reason: `No agent in [${agentIds.join(', ')}] covers required_capabilities [${required.join(', ')}]`
+          + (emptyPools.length > 0 ? `; model pools without members: ${emptyPools.join(', ')}` : ''),
         attempt
       };
     }
@@ -1322,10 +1389,194 @@ class StageExecutor {
     // Курсор = (attempt - 1) % length — ротация по кругу
     const cursor = (attempt - 1) % afterExclude.length;
 
-    const agentId = afterExclude[cursor];
+    const place = afterExclude[cursor];
     // Клонируем stage с подменой instructions (для agents_by_type override)
     const effectiveStage = { ...stage, instructions };
-    return { agentId, effectiveStage, attempt, compatible: afterExclude };
+    if (!isPool(place)) {
+      return { agentId: place, effectiveStage, attempt, compatible: afterExclude };
+    }
+    const poolCandidates = this._preferNotRunOnTicket(poolOf(place).untried, stageId);
+    return { agentId: poolCandidates[0], effectiveStage, attempt, compatible: afterExclude, pool: place, poolCandidates };
+  }
+
+  /**
+   * Мягкий фильтр 5 выбора участника пула (PLAN-004, П9): участники, модель которых
+   * ещё не запускалась на тикете контекста (нет события run журнала с тем же `ticket`
+   * и `model` = ключ участника), в порядке маски; таких нет — все кандидаты как есть.
+   * Журнал — сырые события: `reset` на фильтр не влияет. Без тикета в контексте или
+   * при нечитаемом журнале (WARN) фильтра нет.
+   */
+  _preferNotRunOnTicket(candidates, stageId) {
+    const ticket = this.context?.ticket_id;
+    if (!ticket) return candidates;
+    let events;
+    try {
+      events = readRunEvents(this.projectRoot);
+    } catch (err) {
+      if (this.logger) this.logger.warn(`agent-runs: journal not readable, pool members not ordered by ticket runs: ${err.message}`, stageId);
+      return candidates;
+    }
+    const ran = new Set(events.filter(e => e.type === 'run' && e.ticket === ticket && e.model).map(e => e.model));
+    const fresh = candidates.filter(id => !ran.has(configuredModelKey(this.pipeline.agents[id], id)));
+    return fresh.length > 0 ? fresh : candidates;
+  }
+
+  /**
+   * Шлагбаум места-пула `models.gate` (PLAN-004, П14, раздел плана «Шлагбаум пула») —
+   * перед каждым запуском участника пула, до селектора. Команда запускается по правилам
+   * команды списка (runPoolCommand: корень проекта, buildAgentEnv, shell на Windows кроме
+   * `node`) со своим таймаутом. Ответ — RESULT `status: open|closed`, `remaining: <число>`
+   * и выход 0. Это не roll-call: модель не вызывается.
+   *
+   * `closed` — место закрыто до ближайших 00:00 UTC: запись health-реестра по id пула с
+   * TTL `until_utc_midnight` (не меньше 30 мин, parseTtl). Фильтр здоровья resolveAgent
+   * проверяет id места-пула, поэтому закрытие действует во всех попытках и стадиях, на оба
+   * места пула, стоящего в списке дважды, и после перезапуска раннера. Выход ≠ 0, таймаут,
+   * ответ без RESULT или без `status: open|closed` — `error`: WARN, место не закрывается.
+   * Остановка пайплайна (killCurrentChild → stopAbort) снимает команду сразу — тоже `error`.
+   * Журнал запусков и строка истории тикета не пишутся.
+   *
+   * @returns {Promise<'open'|'closed'|'error'|null>} null — у пула нет шлагбаума
+   */
+  async _poolGate(poolId, stageId) {
+    const gate = this.pipeline.agents[poolId]?.models?.gate;
+    if (!gate) return null;
+    const started = Date.now();
+    // Остановка пайплайна снимает шлагбаум (stopAbort): `aborted` — это `error`, место не закрывается.
+    const run = await runPoolCommand(gate, {
+      cwd: this.projectRoot, timeoutMs: this.gateTimeoutMs, logger: this.logger, stageId, signal: this.stopAbort?.signal,
+    });
+    const parsed = this.resultParser.parse(run.stdout, stageId);
+    const data = parsed.parsed ? parsed.data : {};
+    const remaining = resultNumber(data.remaining);
+    let status = 'error';
+    let problem = null;
+    if (!run.ok) problem = run.reason;
+    else if (!parsed.parsed) problem = 'no ---RESULT--- block';
+    else if (parsed.status === 'open' || parsed.status === 'closed') status = parsed.status;
+    else problem = `status "${parsed.status}"`;
+
+    let until = null;
+    if (status === 'closed') {
+      until = new Date(parseTtl('until_utc_midnight', Date.now())).toISOString();
+      try {
+        markUnhealthy(this.projectRoot, poolId, {
+          class: 'unavailable',
+          ttl: 'until_utc_midnight',
+          rule_id: 'pool-gate-closed',
+          reason: `models.gate: closed, remaining=${remaining ?? 'unknown'}`,
+        });
+      } catch (markErr) {
+        if (this.logger) this.logger.warn(`health mark failed for ${poolId}: ${markErr.message}`, stageId);
+      }
+    }
+    if (this.logger) {
+      this.logger.info(
+        `GATE agent="${poolId}" status=${status} remaining=${remaining ?? 'unknown'} until=${until ?? '-'} ` +
+        `duration_ms=${Date.now() - started}`,
+        stageId
+      );
+      if (problem) {
+        const detail = data.error ? redactNetworkDetail(String(data.error)) : run.stderr.trim().split(/\r?\n/).pop();
+        this.logger.warn(`pool "${poolId}": models.gate error (${problem}${detail ? `: ${detail}` : ''}) — place stays open`, stageId);
+      }
+    }
+    return status;
+  }
+
+  /**
+   * Ранжир участников места-пула агентом-селектором `models.selector` (PLAN-004, П1,
+   * П15, раздел плана «Селектор»). Вызов — при всех условиях: у пула задан селектор, в
+   * контексте есть тикет, кандидатов не меньше двух, селектор здоров по health-реестру.
+   * Иначе вызова нет — null, порядок маски.
+   *
+   * Селектору — первые SELECTOR_MAX_CANDIDATES кандидатов в порядке маски: промпт
+   * buildSelectorPrompt (тикет — selectorTicket, кандидаты с оценками — poolSelectorData)
+   * через stdin, путём агентов с командой (_callAgentOnce) с ролью рельс executor и своим
+   * таймаутом. Журнал запусков, снимки и строка истории тикета не пишутся. Ответ —
+   * `ranking:` в RESULT (selectorRanking). Исходы строки SELECT: `none` — в ранжире есть
+   * кандидат; `unknown_id` — нет ни одного; `error` — выход ≠ 0 или `status: error`;
+   * `timeout` — снят по таймауту. Кроме `none` — null, порядок маски.
+   *
+   * Сбой помечает селектора в health-реестре по MODEL_ERROR_HEALTH, как _modelIoFailure:
+   * класс — `error_class` ответа, таймаут раннера — `timeout`; снятие онлайн-сканом по
+   * правилу health самого селектора — класс и TTL правила. Нездоровый селектор до конца
+   * TTL не вызывается.
+   *
+   * @returns {Promise<string[]|null>} id участников `<пул>@<id>` по ранжиру или null
+   */
+  async _poolSelectorOrder(poolId, poolCandidates, stageId, skillId) {
+    const selectorId = this.pipeline.agents[poolId]?.models?.selector;
+    const selector = selectorId ? this.pipeline.agents[selectorId] : null;
+    const ticketId = this.context?.ticket_id;
+    if (!selector || !ticketId || poolCandidates.length < 2) return null;
+    if (!isHealthy(this.projectRoot, selectorId)) {
+      if (this.logger) this.logger.info(`pool "${poolId}": selector "${selectorId}" unhealthy in registry — mask order`, stageId);
+      return null;
+    }
+
+    const { candidates, citation } = poolSelectorData(this.pipeline, poolId, poolCandidates.slice(0, SELECTOR_MAX_CANDIDATES));
+    const ticket = selectorTicket(findTicketPathForId(ticketId, this.projectRoot), { id: ticketId, type: ticketTypeOf(this.context) });
+    const prompt = buildSelectorPrompt({ pool: poolId, ticket, candidates, citation });
+    const started = Date.now();
+    let ranked = [];
+    let fallback = 'none';
+    let errorClass = null;
+    let errorText = '';
+    let earlyKillRule = null;
+    let cost = null;
+    try {
+      // Промпт — всегда через stdin, данные промпта в лог не копируются.
+      const result = await this._callAgentOnce({ ...selector, prompt_stdin: true }, prompt, stageId, skillId, selectorId,
+        { WORKFLOW_RAILS_ROLE: 'executor' },
+        { promptSummary: `selector pool=${poolId} candidates=${candidates.length} prompt_chars=${prompt.length}`, timeoutMs: this.selectorTimeoutMs });
+      cost = resultNumber(result.result?.cost_usd);
+      if (result.status === 'error') {
+        fallback = 'error';
+        errorClass = result.result?.error_class || null;
+        errorText = redactNetworkDetail(String(result.result?.error || ''));
+      } else {
+        ranked = selectorRanking(result.result?.ranking, candidates.map(c => c.id));
+        if (ranked.length === 0) fallback = 'unknown_id';
+      }
+    } catch (err) {
+      fallback = err.timedOut ? 'timeout' : 'error';
+      errorClass = err.timedOut ? 'timeout' : null;
+      errorText = err.message;
+      earlyKillRule = err.code === 'EARLY_KILL' ? err.rule ?? null : null;
+    }
+
+    // error_class — текст ответа селектора: только собственные ключи таблицы, иначе
+    // `constructor` и прочие свойства прототипа нашлись бы как класс.
+    const tableHealth = errorClass && Object.hasOwn(MODEL_ERROR_HEALTH, errorClass) ? MODEL_ERROR_HEALTH[errorClass] : null;
+    // Снятие онлайн-сканом по правилу health самого селектора — пометка по классу и TTL
+    // правила, как у агентов стадии.
+    const health = earlyKillRule
+      ? { class: earlyKillRule.class, ttl: earlyKillRule.ttl, ruleId: earlyKillRule.rule_id, label: `rule ${earlyKillRule.rule_id}` }
+      : tableHealth && { class: tableHealth.class, ttl: tableHealth.ttl, ruleId: `selector-${errorClass}`, label: errorClass };
+    // Остановка пайплайна сняла селектора — это не его сбой.
+    if (health && !this.stopRequested) {
+      try {
+        markUnhealthy(this.projectRoot, selectorId, {
+          class: health.class,
+          ttl: health.ttl,
+          rule_id: health.ruleId,
+          reason: errorText,
+        });
+        if (this.logger) this.logger.info(`agent ${selectorId} marked unhealthy: class=${health.class} (selector ${health.label})`, stageId);
+      } catch (markErr) {
+        if (this.logger) this.logger.warn(`health mark failed for ${selectorId}: ${markErr.message}`, stageId);
+      }
+    }
+    const member = fallback === 'none' ? ranked[0] : candidates[0].id;
+    if (this.logger) {
+      this.logger.info(
+        `SELECT agent="${poolId}" selector="${selectorId}" candidates=${candidates.length} ranked=${ranked.length} ` +
+        `member="${member}" fallback=${fallback} cost_usd=${cost ?? 'unknown'} duration_ms=${Date.now() - started}`,
+        stageId
+      );
+    }
+    return fallback === 'none' ? ranked.map(id => `${poolId}@${id}`) : null;
   }
 
   /**
@@ -1347,6 +1598,15 @@ class StageExecutor {
    * подряд выбрал ту же запрещённую модель, 11,5 минуты впустую. Агент при этом не
    * помечается нездоровым: в следующей попытке тикета он снова в списке.
    *
+   * Место-пул (resolveAgent отдаёт `pool` и `poolCandidates`): перед каждым запуском
+   * участника — шлагбаум пула (_poolGate, П14), `closed` закрывает место, и стадия берёт
+   * следующее место списка без запуска участников и селектора. При первом выборе
+   * участника места в попытке кандидатов ранжирует агент-селектор пула
+   * (_poolSelectorOrder, П15) — один вызов на место в попытке, пул в списке дважды —
+   * тоже один. Следующий участник того же места — следующий по ранжиру среди
+   * кандидатов, которых отдал resolveAgent (фильтры участника уже применены), кандидаты
+   * вне ранжира — после него в порядке маски.
+   *
    * @param {string} stageId - ID stage из конфигурации
    * @param {object} [stageOverride] - явный stage (для тестов и промежуточных вызовов); по умолчанию берётся из pipeline.stages
    * @returns {Promise<{status: string, output: string, result?: object}>}
@@ -1358,6 +1618,9 @@ class StageExecutor {
     }
 
     const triedInThisAttempt = [];
+    // Порядок участников мест-пулов в этой попытке: id пула → id участников по ранжиру
+    // селектора или null (порядок маски). Решение принимается при первом выборе места.
+    const poolOrders = new Map();
     let lastErr = null;
     // Результат последней ошибки шага «модель» обмена model_io (callModelAgent): её не
     // бросают, а возвращают стадии как status: error с error_class.
@@ -1389,7 +1652,24 @@ class StageExecutor {
         return { status: 'blocked', blocked_reason: resolved.blocked, reason: resolved.reason };
       }
 
-      const { agentId, effectiveStage } = resolved;
+      const { effectiveStage } = resolved;
+      let agentId = resolved.agentId;
+      // После запроса остановки шлагбаум и селектор не запускаются — стадию остановит
+      // проверка ниже. Шлагбаум, запущенный до остановки, снимает killCurrentChild
+      // (stopAbort); остановка, пришедшая за время шлагбаума, селектора не запускает.
+      if (resolved.pool && !this.stopRequested) {
+        // Шлагбаум — перед каждым запуском участника, до селектора (П14). Закрытое место
+        // держит health-реестр; id пула в excludeAgents закрывает место и в этой попытке,
+        // если запись реестра не удалась, — иначе цикл выбирал бы его снова.
+        if (await this._poolGate(resolved.pool, stageId) === 'closed') {
+          triedInThisAttempt.push(resolved.pool);
+          continue;
+        }
+        if (!this.stopRequested && !poolOrders.has(resolved.pool)) {
+          poolOrders.set(resolved.pool, await this._poolSelectorOrder(resolved.pool, resolved.poolCandidates, stageId, effectiveStage.skill));
+        }
+        agentId = poolOrders.get(resolved.pool)?.find(id => resolved.poolCandidates.includes(id)) ?? agentId;
+      }
       const agent = this.pipeline.agents[agentId];
       const prompt = this.promptBuilder.build(effectiveStage, stageId);
 
@@ -1517,6 +1797,7 @@ class StageExecutor {
         const banned = !stopRequested && err.code === 'MODEL_BANNED';
 
         // classify — до события: TTL сработавшего правила health идёт в crash_ttl_ms.
+        // Правила участника пула — правила пула (healthRulesId), пометка ниже — по id участника.
         let status;
         let classification = null;
         if (stopRequested) {
@@ -1525,7 +1806,7 @@ class StageExecutor {
           status = 'model_banned';
         } else {
           status = this._classifyRun(agentId, callResult);
-          classification = await classify(this.rules, agentId, { exitCode, stderr });
+          classification = await classify(this.rules, healthRulesId(agent, agentId), { exitCode, stderr });
         }
         this._closeAgentRun(run, {
           status, exitCode, changedFiles, stopRequested,
@@ -2035,13 +2316,19 @@ class StageExecutor {
    * (src/rails/README.md §11); вызывающий код — `callAgent` ниже.
    * `promptSummary` — строка в лог вместо построчного эха промпта: промпт судьи
    * в _askCommandAgent несёт данные вопроса целиком (дифф, вывод проверок).
+   * `timeoutMs` — свой таймаут вызова вместо таймаута стадии (агент-селектор пула,
+   * _poolSelectorOrder): по нему строки `TIMEOUT stage=…` нет — расширение VS Code
+   * считает её таймаутом стадии.
    */
-  _callAgentOnce(agent, prompt, stageId, skillId, agentId = null, railsEnv = {}, { promptSummary = null } = {}) {
+  _callAgentOnce(agent, prompt, stageId, skillId, agentId = null, railsEnv = {}, { promptSummary = null, timeoutMs = null } = {}) {
     return new Promise((resolve, reject) => {
-      const timeout = this.pipeline.execution?.timeout_per_stage || 300;
+      const ownTimeout = timeoutMs !== null;
+      const timeout = ownTimeout ? timeoutMs / 1000 : (this.pipeline.execution?.timeout_per_stage || 300);
       const healthRules = agentId ? this._getHealthRules() : null;
+      // Правила онлайн-скана участника пула — правила пула (healthRulesId).
+      const rulesId = agentId ? healthRulesId(agent, agentId) : null;
       const hasAgentRules = Boolean(
-        healthRules && agentId && healthRules.agents.get(agentId)?.length
+        healthRules && rulesId && healthRules.agents.get(rulesId)?.length
       );
       // kilo: метка сессии по run id — по ней после запуска находится фактическая
       // модель (lib/kilo-models.mjs, _trackKiloModels).
@@ -2125,10 +2412,12 @@ class StageExecutor {
         timedOut = true;
         // На Windows SIGTERM игнорируется — используем taskkill /T /F для убийства дерева
         killChild();
-        if (this.logger) {
+        if (this.logger && !ownTimeout) {
           this.logger.timeout(stageId, timeout);
         }
-        const err = new Error(`Stage "${stageId}" timed out after ${timeout}s`);
+        const err = new Error(ownTimeout
+          ? `Agent "${agentId}" timed out after ${timeout}s`
+          : `Stage "${stageId}" timed out after ${timeout}s`);
         err.timedOut = true;
         err.exitCode = -1;
         reject(err);
@@ -2181,7 +2470,7 @@ class StageExecutor {
         // Throttle: первый скан всегда, последующие — только после 200+ новых байт.
         if (lastScanSize > 0 && stderr.length - lastScanSize < 200) return;
         lastScanSize = stderr.length;
-        const match = scanStderrForFatalRule(healthRules, agentId, stderr);
+        const match = scanStderrForFatalRule(healthRules, rulesId, stderr);
         if (!match) return;
 
         earlyKilled = true;
@@ -2779,6 +3068,10 @@ class PipelineRunner {
     this.projectRoot = projectRoot;
     this.currentExecutor = null;
 
+    // Остановка раскрытия пулов моделей (команды списка и оценок, expandModelPools): до
+    // первой стадии currentExecutor нет, сигнал снимает команды через этот signal.
+    this.stopAbort = new AbortController();
+
     // Закрыть запись открытого запуска, оставленную прерванным раннером
     // (src/lib/agent-runs.mjs, closeInterruptedRun). Флаг ставит только runPipeline:
     // закрывать можно только под .pipeline.lock, а прямое создание раннера (тесты,
@@ -3250,6 +3543,15 @@ class PipelineRunner {
 
     if (this.closeOpenRunOnStart) this.closeInterruptedAgentRun();
 
+    // Пулы моделей раскрываются один раз на процесс, до первой стадии: участники
+    // регистрируются в общем config.pipeline.agents, который получает каждый
+    // StageExecutor (src/lib/model-pools.mjs). Сбой команды списка — пул без
+    // участников и строка POOL с причиной, пайплайн идёт дальше.
+    // Сигнал остановки снимает команды пула (stopAbort) — пулы без участников, цикл не идёт.
+    await expandModelPools(this.pipeline, {
+      projectRoot: this.projectRoot, logger: this.logger, stageId: 'PipelineRunner', signal: this.stopAbort.signal,
+    });
+
     while (this.running && this.stepCount < maxSteps) {
       if (this.currentStage !== 'end') {
         await this.waitWhilePauseRequested();
@@ -3495,7 +3797,8 @@ class PipelineRunner {
         this.logger.info(`Received ${signal}. Shutting down gracefully...`, 'PipelineRunner');
       }
       this.running = false;
-      // Убиваем текущего агента
+      // Команды раскрытия пулов (до первой стадии) и текущий агент
+      this.stopAbort?.abort();
       if (this.currentExecutor) {
         this.currentExecutor.killCurrentChild();
       }
@@ -3523,6 +3826,7 @@ class PipelineRunner {
    */
   forceStop() {
     this.running = false;
+    this.stopAbort?.abort();
     this.currentExecutor?.forceKillCurrentChild();
   }
 
@@ -3758,7 +4062,101 @@ function isValidHttpAuth(auth) {
   return false;
 }
 
-function validateAgentEntry(agentId, agent, errors) {
+function isNonEmptyStringArray(value) {
+  return Array.isArray(value) && value.length > 0
+    && value.every(item => typeof item === 'string' && item.trim() !== '');
+}
+
+// Встроенный модификатор регулярного выражения: `(?i)`, `(?i:…)`, `(?-i:…)`.
+const INLINE_MODIFIER_RE = /\(\?[a-z-]+[:)]/i;
+
+function countModelPlaceholders(args) {
+  if (!Array.isArray(args)) return 0;
+  return args.reduce((sum, arg) => sum + (typeof arg === 'string' ? arg.split(MODEL_PLACEHOLDER).length - 1 : 0), 0);
+}
+
+/**
+ * Пул моделей — агент с командой и полем `models`: участники — модели из вывода
+ * `models.list`, чей полный id совпал с `models.match`; полный id участника
+ * встаёт на место `{model}` в `args` (PLAN-004, «Запись пула в pipeline.yaml»,
+ * проверки 2–9).
+ */
+function validateModelPool(agentId, agent, agents, errors) {
+  const placeholders = countModelPlaceholders(agent.args);
+  if (agent.models === undefined) {
+    if (placeholders > 0) {
+      errors.push(`Agent "${agentId}" has ${MODEL_PLACEHOLDER} in args but no models: only a model pool substitutes it`);
+    }
+    return;
+  }
+  if (!isPlainObject(agent.models)) {
+    errors.push(`Agent "${agentId}" has invalid models: expected object with list and match`);
+    return;
+  }
+  const { list, match, max_per_attempt: maxPerAttempt, selector, scores, gate } = agent.models;
+  // `<пул>@<id модели>` — id участника: `@` в id пула сделал бы его неоднозначным.
+  if (agentId.includes('@')) {
+    errors.push(`Agent "${agentId}" is a model pool: its id must not contain "@" (reserved for pool members)`);
+  }
+  // Агент конфига с id `<пул>@…` занял бы место участника: раскрытие пула записало бы
+  // участника поверх него (expandModelPools).
+  for (const otherId of Object.keys(agents)) {
+    if (otherId.startsWith(`${agentId}@`)) {
+      errors.push(`Agent "${otherId}" has an id reserved for members of model pool "${agentId}" (<pool>@<model id>): rename the agent`);
+    }
+  }
+  if (placeholders !== 1) {
+    errors.push(`Agent "${agentId}" is a model pool: args must contain ${MODEL_PLACEHOLDER} exactly once, found ${placeholders}`);
+  }
+  if (!isNonEmptyStringArray(list)) {
+    errors.push(`Agent "${agentId}" has invalid models.list: expected non-empty array of non-empty strings (command and its args)`);
+  }
+  if (!Array.isArray(match) || match.length === 0 || !match.every(item => typeof item === 'string')) {
+    errors.push(`Agent "${agentId}" has invalid models.match: expected non-empty array of strings`);
+  } else {
+    // Без флагов, как шаблоны health: `(?i)` в JS не компилируется. Группа-модификатор
+    // `(?i:…)` компилируется только на новых Node, а engines — >=18: запрет по записи, как
+    // у шаблонов health (agent-health-rules-config.test.mjs), а не по компиляции здесь.
+    for (const source of match) {
+      if (INLINE_MODIFIER_RE.test(source)) {
+        errors.push(`Agent "${agentId}" has invalid models.match expression ${JSON.stringify(source)}: inline modifier groups like (?i:…) are not supported (Node before 23 cannot compile them)`);
+        continue;
+      }
+      try {
+        new RegExp(source);
+      } catch (err) {
+        errors.push(`Agent "${agentId}" has invalid models.match expression ${JSON.stringify(source)}: ${err.message}`);
+      }
+    }
+  }
+  if (maxPerAttempt !== undefined && !(Number.isInteger(maxPerAttempt) && maxPerAttempt >= 1)) {
+    errors.push(`Agent "${agentId}" has invalid models.max_per_attempt: must be an integer >= 1`);
+  }
+  if (selector !== undefined) {
+    const target = typeof selector === 'string' && Object.hasOwn(agents, selector) ? agents[selector] : undefined;
+    if (!isPlainObject(target)) {
+      errors.push(`Agent "${agentId}" has invalid models.selector: ${JSON.stringify(selector)} is not an agent in pipeline.agents`);
+    } else if (target.kind === 'http') {
+      errors.push(`Agent "${agentId}" has invalid models.selector "${selector}": selector must be an agent with a command, not kind: http`);
+    } else if (target.models !== undefined) {
+      errors.push(`Agent "${agentId}" has invalid models.selector "${selector}": selector must not be a model pool`);
+    }
+  }
+  if (scores !== undefined) {
+    if (!isNonEmptyStringArray(scores)) {
+      errors.push(`Agent "${agentId}" has invalid models.scores: expected non-empty array of non-empty strings (command and its args)`);
+    }
+    // Оценки читает только селектор: без него команда оценок — мёртвый конфиг.
+    if (selector === undefined) {
+      errors.push(`Agent "${agentId}" has models.scores without models.selector: scores are read only by the selector`);
+    }
+  }
+  if (gate !== undefined && !isNonEmptyStringArray(gate)) {
+    errors.push(`Agent "${agentId}" has invalid models.gate: expected non-empty array of non-empty strings (command and its args)`);
+  }
+}
+
+function validateAgentEntry(agentId, agent, errors, agents = {}) {
   if (!isPlainObject(agent)) {
     errors.push(`Agent "${agentId}" must be an object`);
     return;
@@ -3779,10 +4177,12 @@ function validateAgentEntry(agentId, agent, errors) {
     if (agent.prompt_stdin !== undefined && typeof agent.prompt_stdin !== 'boolean') {
       errors.push(`Agent "${agentId}" has invalid prompt_stdin: must be true or false`);
     }
+    validateModelPool(agentId, agent, agents, errors);
     return;
   }
 
-  for (const field of ['command', 'args']) {
+  // models — пул моделей: участник запускается командой, у `kind: http` её нет.
+  for (const field of ['command', 'args', 'models']) {
     if (agent[field] !== undefined) {
       errors.push(`Agent "${agentId}" (kind: http) must not have field: ${field}`);
     }
@@ -3892,6 +4292,49 @@ function validateHttpAgentPlacement(pipeline, errors) {
   }
 }
 
+/**
+ * Пул моделей — только место в списке агентов стадии (PLAN-004, проверки 10–11):
+ * - одиночный `stage.agent` запускает запись агента напрямую, минуя выбор
+ *   участника (`execute`, ветка `stage.agent && !stage.agents`) — `{model}` ушёл бы в команду;
+ * - на стадии с `model_io` пул запрещён решением В9 плана. Списки такой стадии —
+ *   `agents`, `agents_by_type.*.agents`, а без своего `agents` — ещё и
+ *   `default_agents` (источники списка — `resolveAgent`).
+ */
+function validatePoolPlacement(pipeline, errors) {
+  const pools = new Set(
+    Object.entries(pipeline.agents)
+      .filter(([, agent]) => isPlainObject(agent) && agent.models !== undefined)
+      .map(([id]) => id)
+  );
+  if (pools.size === 0) return;
+
+  for (const [stageId, stage] of Object.entries(pipeline.stages)) {
+    if (!isPlainObject(stage)) continue;
+    // Со списком agents одиночный stage.agent не запускается — условие как в execute.
+    if (pools.has(stage.agent) && !stage.agents) {
+      errors.push(`Stage "${stageId}" assigns model pool "${stage.agent}" as single agent: a pool can only be a place in an agents list`);
+    }
+    if (stage.model_io === undefined) continue;
+    const places = [];
+    for (const id of Array.isArray(stage.agents) ? stage.agents : []) places.push(['agents', id]);
+    for (const [type, byType] of Object.entries(isPlainObject(stage.agents_by_type) ? stage.agents_by_type : {})) {
+      for (const id of Array.isArray(byType?.agents) ? byType.agents : []) {
+        places.push([`agents_by_type.${type}.agents`, id]);
+      }
+    }
+    if (!Array.isArray(stage.agents) && !stage.agent) {
+      for (const id of Array.isArray(pipeline.default_agents) ? pipeline.default_agents : []) {
+        places.push(['pipeline.default_agents', id]);
+      }
+    }
+    for (const [where, id] of places) {
+      if (pools.has(id)) {
+        errors.push(`Stage "${stageId}" has model_io, but lists model pool "${id}" in ${where}: model pools are not allowed on model_io stages`);
+      }
+    }
+  }
+}
+
 function validateConfig(config, projectRoot = null) {
   const errors = [];
 
@@ -3925,7 +4368,7 @@ function validateConfig(config, projectRoot = null) {
 
   if (pipeline.agents && typeof pipeline.agents === 'object') {
     for (const [agentId, agent] of Object.entries(pipeline.agents)) {
-      validateAgentEntry(agentId, agent, errors);
+      validateAgentEntry(agentId, agent, errors, pipeline.agents);
     }
   }
 
@@ -3970,6 +4413,7 @@ function validateConfig(config, projectRoot = null) {
     }
 
     validateHttpAgentPlacement(pipeline, errors);
+    validatePoolPlacement(pipeline, errors);
   }
 
   return errors;

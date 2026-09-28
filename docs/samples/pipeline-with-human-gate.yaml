@@ -91,7 +91,7 @@ stages:
     description: "Выполнить выбранную задачу"
     skill: execute-task
     counter: task_attempts
-    agents: [kilo-free, openrouter-free, kilo-glm-air, claude-haiku, claude-sonnet]
+    agents: [free-kilo, free-openrouter, kilo-glm-air, claude-haiku, claude-sonnet]
     goto:
       default:
         stage: move-to-review

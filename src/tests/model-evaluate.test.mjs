@@ -122,6 +122,23 @@ describe('model-evaluate: decisions', () => {
     });
   });
 
+  // choice — варианты без порядка (кандидаты селектора пула): имена вариантов — индексы,
+  // вероятности ответа приходят по тем же индексам, что у score.
+  it('type: choice — вопрос choice с вариантами {"0": …, "n-1": …}, level по вероятностям', async () => {
+    await withServer((req, res) => sendJson(res, 200, decisionsFor({ pick: { 0: 0.2, 2: 0.7, 1: 0.1 } })), async (server) => {
+      const result = await evaluate(agent('decisions', server.url('/d')), {
+        data: 'x',
+        questions: [{ id: 'pick', text: 'Кого выбрать', levels: ['вариант a', 'вариант b', 'вариант c'], type: 'choice' }],
+      }, OPTIONS);
+
+      assert.deepEqual(server.requests[0].json.questions.pick, {
+        type: 'choice', instructions: 'Кого выбрать', criteria: { 0: 'вариант a', 1: 'вариант b', 2: 'вариант c' },
+      });
+      assert.equal(result.answers.pick.level, 3);
+      assert.deepEqual(result.answers.pick.probabilities, { 0: 0.2, 2: 0.7, 1: 0.1 });
+    });
+  });
+
   it('изображения — bad_request без запроса', async () => {
     await withServer((req, res) => sendJson(res, 200, decisionsFor({ q1: { 0: 1 } })), async (server) => {
       await rejectsWithClass(evaluate(agent('decisions', server.url('/d')),
@@ -201,6 +218,18 @@ describe('model-evaluate: chat', () => {
     });
   });
 
+  it('type: choice — chat тип не различает: ответ разбирается как у score', async () => {
+    const reply = JSON.stringify({ answers: [{ id: 'pick', level: 2, reason: 'второй' }] });
+    await withServer((req, res) => sendJson(res, 200, chatResponse(reply)), async (server) => {
+      const result = await evaluate(agent('chat', server.url('/c')), {
+        data: 'x',
+        questions: [{ id: 'pick', text: 'Кого выбрать', levels: ['вариант a', 'вариант b'], type: 'choice' }],
+      }, OPTIONS);
+      assert.equal(result.answers.pick.level, 2);
+      assert.equal(result.answers.pick.reason, 'второй');
+    });
+  });
+
   it('изображения передаются частями image_url', async () => {
     const reply = JSON.stringify({ answers: [{ id: 'q1', level: 3 }] });
     await withServer((req, res) => sendJson(res, 200, chatResponse(reply)), async (server) => {
@@ -221,6 +250,7 @@ describe('model-evaluate: проверка входа', () => {
     ['одиннадцать уровней', { data: 'x', questions: [question('q1', Array.from({ length: 11 }, (_, i) => `у${i}`))] }],
     ['повтор id', { data: 'x', questions: [question('q1'), question('q1')] }],
     ['вопрос без текста', { data: 'x', questions: [{ id: 'q1', text: '', levels: ['a', 'b'] }] }],
+    ['неизвестный type вопроса', { data: 'x', questions: [{ ...question('q1'), type: 'ranking' }] }],
   ];
   for (const [label, input] of cases) {
     it(`${label} — bad_request без запроса`, async () => {

@@ -9,7 +9,9 @@
  *                (дописывает следующий старт пайплайна, `interrupted: true`);
  *   - `verify` — завершилась стадия контроля артефактов с блоком RESULT;
  *   - `review` — завершилась стадия ревью;
- *   - `unban`  — человек снял запрет.
+ *   - `unban`  — человек снял запрет;
+ *   - `reset`  — человек обнулил историю модели (PLAN-004, решение 1): запуски модели,
+ *                записанные раньше её последнего `reset`, в градации не идут (gradeRuns).
  * Промптов, вывода агента и содержимого файлов в журнале нет. Строка, не разбираемая
  * как JSON, при чтении пропускается.
  *
@@ -283,6 +285,11 @@ function gradeOf(run, verify, review) {
  * «ближайшее ревью» — первое в окне событие `review` со статусом `passed` или
  * `failed` (`default` и `error` — не вердикт).
  *
+ * Запуск модели, записанный в журнале раньше последнего `reset` этой модели, в выдачу
+ * не попадает, а значит — ни в запреты, ни в таблицу статистики. «Раньше» — по позиции
+ * в журнале, как у `unban`. Окно такой запуск держит: иначе его контроль достался бы
+ * предыдущему запуску того же тикета.
+ *
  * @returns {Array<object>} поля события `run` и `grade`, `crashed_after_work`,
  *   `artifacts_passed` (true — контроль в окне пройден, false — `failed` с причинами,
  *   null — контроля с вердиктом нет или градация до контроля), `crash` (идёт во
@@ -297,6 +304,8 @@ export function gradeRuns(events) {
 function gradeIndexed(events) {
   const runs = [];
   const windows = new Map();
+  // Модель → позиция её последнего `reset`.
+  const lastReset = new Map();
   for (const [index, event] of events.entries()) {
     if (event.type === 'run') {
       if (event.skill !== EXECUTOR_SKILL || !event.ticket) continue;
@@ -309,9 +318,13 @@ function gradeIndexed(events) {
     } else if (event.type === 'review') {
       const run = windows.get(event.ticket);
       if (run && !run.review && REVIEW_VERDICTS.has(event.status)) run.review = event;
+    } else if (event.type === 'reset' && typeof event.model === 'string' && event.model) {
+      lastReset.set(event.model, index);
     }
   }
-  return runs.map(({ event, index, verify, review }) => {
+  // Окна уже построены со всеми запусками — отсев по `reset` только после них.
+  const counted = runs.filter(({ event, index }) => !(event.model && index < (lastReset.get(event.model) ?? -1)));
+  return counted.map(({ event, index, verify, review }) => {
     const graded = gradeOf(event, verify, review);
     return {
       index,
@@ -443,7 +456,7 @@ export function describeBan(ban) {
 }
 
 // ---------------------------------------------------------------------------
-// Таблица статистики и снятие запрета — для MCP
+// Таблица статистики, снятие запрета и обнуление истории — для MCP и скриптов
 // ---------------------------------------------------------------------------
 
 /**
@@ -536,6 +549,30 @@ export function recordUnban(projectRoot, { model, ticket_type = null, reason } =
   }
   const event = { type: 'unban', ts: new Date(now).toISOString(), model, ...(ticket_type ? { ticket_type } : {}), reason: reason.trim() };
   const written = appendRunEvent(projectRoot, event);
+  if (!written.ok) return { ok: false, code: 'WRITE_FAILED', error: written.error };
+  return { ok: true, event: written.event };
+}
+
+/**
+ * Обнуление истории модели человеком (PLAN-004, решение 1): дописывает `reset`. Запуски
+ * модели до него выпадают из градаций, запретов и таблицы статистики (gradeRuns). В
+ * отличие от `unban`, запрет не нужен; нужен хотя бы один `run` с этим `model` — защита
+ * от опечатки в ключе. Нет — отказ, строка не пишется.
+ * @returns {{ok: true, event: object} | {ok: false, code: string, error: string}}
+ */
+export function recordReset(projectRoot, { model, reason } = {}, now = Date.now()) {
+  if (typeof model !== 'string' || !model) return { ok: false, code: 'BAD_INPUT', error: 'model is required' };
+  if (typeof reason !== 'string' || !reason.trim()) return { ok: false, code: 'BAD_INPUT', error: 'reason is required' };
+  let events;
+  try {
+    events = readRunEvents(projectRoot);
+  } catch (err) {
+    return { ok: false, code: 'READ_FAILED', error: err.message };
+  }
+  if (!events.some((event) => event.type === 'run' && event.model === model)) {
+    return { ok: false, code: 'NO_RUNS', error: `no runs of model "${model}" in the log` };
+  }
+  const written = appendRunEvent(projectRoot, { type: 'reset', ts: new Date(now).toISOString(), model, reason: reason.trim() });
   if (!written.ok) return { ok: false, code: 'WRITE_FAILED', error: written.error };
   return { ok: true, event: written.event };
 }

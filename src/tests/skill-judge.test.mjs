@@ -155,6 +155,17 @@ describe('skill-judge: проверка записи судьи', () => {
     assert.match(judgeAgentErrors('нет-такого', agents).join(), /not found/);
   });
 
+  // Запись пула моделей раскрывает только раннер пайплайна: судье-пулу в команду ушёл бы `{model}`.
+  it('пул моделей (models) судьёй или в escalate_to — ошибка с id пула', () => {
+    const withPool = {
+      ...agents,
+      'pool-a': { command: 'node', args: ['judge.js', '--model', '{model}'], models: { list: ['node', 'list.js'], match: ['^prov/'] } },
+      'to-pool': { command: 'node', escalate_to: 'pool-a' },
+    };
+    assert.match(judgeAgentErrors('pool-a', withPool).join(), /Judge agent 'pool-a'.*model pool/);
+    assert.match(judgeAgentErrors('to-pool', withPool).join(), /escalate_to 'pool-a'.*model pool/);
+  });
+
   it('цена: cost_per_call; с escalate_to — плюс escalation_share × его цена; без поля — в missing', () => {
     assert.deepEqual(judgeCallCost('opus-priced', agents), { cost: 0.222, worst: 0.222, missing: [] });
     assert.deepEqual(judgeCallCost('opus', agents), { cost: 0.02, worst: 0.02, missing: ['opus.cost_per_call'] });

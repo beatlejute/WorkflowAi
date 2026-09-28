@@ -25,10 +25,22 @@
  *    `| rate_limit |` в диффе тикета; в том числе stderr длиннее 64 КБ, который
  *    classify режет до начала и конца — оба слоя смотрят конец и совпадают;
  *  - при ограничении в конце и сетевой ошибке раньше побеждает ограничение;
- *  - ни одно правило агента в конфиге не перехватывает общий текст ограничения:
- *    TTL — общего правила, а не до полуночи UTC, и онлайн-скан stderr агента не
- *    снимает — роутер, который сам повторяет запросы после 429, в том случае
- *    сделал 47 шагов.
+ *  - общий текст ограничения без признака `message="stream error"` (обычный текст
+ *    429/quota, без формата kilo 7.7.9) не перехватывается правилом ни одного
+ *    агента и онлайн-сканом не снимает: TTL — общего правила, а не своё правило
+ *    агента;
+ *  - агент с правилом шага 0 (`kilo-provider-rate-limit`) на живой строке
+ *    `message="stream error"` с текстом лимита снимается этим правилом онлайн за
+ *    15 минут — роутер до шага 0 в этом случае сам повторял запросы после 429 и
+ *    сделал 47 шагов; агент без такого правила на той же строке не снимается;
+ *  - строка с дневным лимитом провайдера (`limit_rpd`/`daily limit`) даёт дневное
+ *    правило, а не правило поминутного лимита: порядок правил в конфиге;
+ *  - перегрузка провайдера (`overloaded`/`ResourceExhausted`) снимает агента
+ *    только на третьей такой строке за запуск (не обязательно подряд), не на первой;
+ *  - эхо строки в исходнике теста или в диффе (`+timestamp=…`) не в начале
+ *    строки — новые правила агента, привязанные к началу строки, не совпадают;
+ *    общее правило по тексту в конце всё равно срабатывает, как раньше;
+ *  - дамп stderr в формате до 7.7.9 не совпадает ни с одним правилом.
  *
  * Агенты перебираются из самого конфига: имён агентов в тесте нет.
  *
@@ -96,6 +108,71 @@ const NOT_THROTTLED = {
   'прочая ошибка': 'boom: something broke',
   'пустой stderr': '',
 };
+
+// Нейтральные фикстуры формата kilo 7.7.9 (`timestamp=… level=ERROR … message="stream
+// error"`) для правил шага 0: providerID/modelID — заглушки `router`/`model-a`, как
+// LIVE_STREAM_ERROR выше, реального провайдера или модели в тексте нет.
+// Дневной лимит провайдера: несёт и текст поминутного лимита («Rate limit exceeded»),
+// и текст дневного («limit_rpd», «Daily limit») — порядок правил решает, какое
+// сработает первым.
+const LIVE_DAILY_LIMIT = 'timestamp=2026-09-27T11:40:25.237Z level=ERROR run=934d5fa5 message="stream error" providerID=router modelID=router/model-a error.error="AI_APICallError: Rate limit exceeded: limit_rpd/router/model-a. Daily limit reached for router/model-a via Vendor. Credits don\'t affect this cap."';
+// Перегрузка провайдера: одна строка; правило снимает только на третьей такой строке за
+// запуск, не обязательно подряд.
+const LIVE_OVERLOADED = 'timestamp=2026-09-25T11:53:04.000Z level=ERROR run=abc123ef message="stream error" providerID=router modelID=router/model-a error.error="AI_APICallError: Upstream error from Vendor: Service temporarily overloaded" error.error.metadata.error_type=provider_overloaded';
+// Эхо той же строки в исходнике теста (после кавычки, не после начала строки) и в
+// диффе (после `+`, не после начала строки): привязка правил шага 0 к началу строки
+// не срабатывает, общее правило по тексту в конце — срабатывает.
+const SOURCE_ECHO_ENDING = `  const LIVE_STREAM_ERROR = '${LIVE_STREAM_ERROR}';`;
+const DIFF_LINE_ENDING = `+${LIVE_STREAM_ERROR}`;
+// Формат stderr до 7.7.9 (менялся, «Справочные данные» → «Строки ошибок kilo»):
+// без `timestamp=… level=ERROR … message="stream error"` и без слов правил.
+const OLD_FORMAT_ENDING = 'ERROR 2026-09-22T03:57:45 +11174ms service=llm run=abc123 error={"error":{"message":"internal server error"}}';
+
+// Правила шага 0: id общий для набора daily/rate-limit/overloaded (задача 2).
+const STEP0_RULE_IDS = ['kilo-provider-daily-limit', 'kilo-provider-rate-limit', 'kilo-provider-overloaded'];
+
+const STEP0_CASES = {
+  'живая строка 429': {
+    stderr: LIVE_STREAM_ERROR,
+    online: { rule_id: 'kilo-provider-rate-limit', ttl: '15m' },
+    classify: { rule_id: 'kilo-provider-rate-limit', ttl: '15m' },
+  },
+  'дневной лимит провайдера (limit_rpd, порядок правил)': {
+    stderr: LIVE_DAILY_LIMIT,
+    online: { rule_id: 'kilo-provider-daily-limit', ttl: 'until_utc_midnight' },
+    classify: { rule_id: 'kilo-provider-daily-limit', ttl: 'until_utc_midnight' },
+  },
+  'перегрузка провайдера, один раз (запуск восстановился)': {
+    stderr: `${WORK}\n${LIVE_OVERLOADED}\n${WORK}`,
+    online: null,
+    classify: null,
+  },
+  'перегрузка провайдера, три раза за запуск (между ними — работа)': {
+    stderr: [LIVE_OVERLOADED, WORK, LIVE_OVERLOADED, WORK, LIVE_OVERLOADED].join('\n'),
+    online: { rule_id: 'kilo-provider-overloaded', ttl: '15m' },
+    classify: { rule_id: 'kilo-provider-overloaded', ttl: '15m' },
+  },
+  'эхо исходника теста и строка диффа (не начало строки)': {
+    stderr: [SOURCE_ECHO_ENDING, DIFF_LINE_ENDING].join('\n'),
+    online: null,
+    classify: { rule_id: RULE_ID, ttl: '15m' },
+  },
+  'дамп старого формата stderr (до 7.7.9)': {
+    stderr: OLD_FORMAT_ENDING,
+    online: null,
+    classify: null,
+  },
+};
+
+function findAgentWithRules(rules, ruleIds) {
+  for (const [agentId, agentRules] of rules.agents.entries()) {
+    const ids = new Set(agentRules.map((rule) => rule.id));
+    if (ruleIds.every((id) => ids.has(id))) {
+      return agentId;
+    }
+  }
+  return null;
+}
 
 function shippedRules() {
   return loadRules(os.tmpdir(), CONFIG);
@@ -171,11 +248,10 @@ test('ограничение в конце и сетевая ошибка ран
   assert.equal(classifySync(rules, PLAIN_AGENT, { exitCode: 1, stderr: mixed })?.rule_id, RULE_ID);
 });
 
-test('ни одно правило агента не перехватывает общий текст ограничения и не снимает агента онлайн', () => {
+test('общий текст ограничения без "stream error" не перехватывается правилом ни одного агента и онлайн-сканом не снимает', () => {
   const rules = shippedRules();
   assert.ok(rules.agents.size > 0, 'в конфиге есть агенты');
   const endings = [
-    THROTTLED_ENDINGS['живой итог kilo'],
     'HTTP 429 Too Many Requests',
     'too many requests, retry later',
   ];
@@ -184,6 +260,62 @@ test('ни одно правило агента не перехватывает 
       const result = classifySync(rules, agentId, { exitCode: 1, stderr });
       assert.equal(result?.rule_id, RULE_ID, `${agentId}: ${stderr}`);
       assert.equal(scanStderrForFatalRule(rules, agentId, stderr), null, `${agentId}: ${stderr}`);
+    }
+  }
+});
+
+test('шаг 0: агент с правилом kilo-provider-rate-limit снимается на живой строке 429 онлайн за 15m, агент без него — нет', () => {
+  const rules = shippedRules();
+  const withRule = [...rules.agents.entries()]
+    .find(([, agentRules]) => agentRules.some((rule) => rule.id === 'kilo-provider-rate-limit'));
+  assert.ok(withRule, 'в конфиге есть хотя бы один агент с правилом kilo-provider-rate-limit');
+  const [agentWithRuleId] = withRule;
+  const hit = scanStderrForFatalRule(rules, agentWithRuleId, LIVE_STREAM_ERROR);
+  assert.equal(hit?.rule_id, 'kilo-provider-rate-limit');
+  assert.equal(hit?.class, 'unavailable');
+  assert.equal(hit?.ttl, '15m');
+
+  const without = [...rules.agents.entries()]
+    .find(([, agentRules]) => !agentRules.some((rule) => rule.id === 'kilo-provider-rate-limit'));
+  assert.ok(without, 'в конфиге есть агент без правила kilo-provider-rate-limit');
+  const [agentWithoutRuleId] = without;
+  assert.equal(scanStderrForFatalRule(rules, agentWithoutRuleId, LIVE_STREAM_ERROR), null);
+});
+
+// Проба ниже берёт первого агента с полным набором: без этой проверки агент, потерявший
+// `extends` или одно правило, прошёл бы незамеченным.
+test('шаг 0: каждый агент с правилом шага 0 несёт все три в порядке плана; таких агентов больше одного', () => {
+  const rules = shippedRules();
+  const carriers = [...rules.agents.entries()]
+    .filter(([, agentRules]) => agentRules.some((rule) => STEP0_RULE_IDS.includes(rule.id)));
+  assert.ok(carriers.length > 1, `правила шага 0 наследуются (extends): агентов с ними ${carriers.length}`);
+  for (const [agentId, agentRules] of carriers) {
+    assert.deepEqual(
+      agentRules.map((rule) => rule.id).filter((id) => STEP0_RULE_IDS.includes(id)),
+      STEP0_RULE_IDS,
+      `${agentId}: полный набор правил шага 0 в порядке daily → rate-limit → overloaded`,
+    );
+  }
+});
+
+test('шаг 0: нейтральные фикстуры формата 7.7.9 (проба через настоящий загрузчик)', () => {
+  const rules = shippedRules();
+  const agentId = findAgentWithRules(rules, STEP0_RULE_IDS);
+  assert.ok(agentId, 'в конфиге есть агент с полным набором правил шага 0 (иначе проба прошла бы впустую)');
+  for (const [name, { stderr, online, classify: expectedClassify }] of Object.entries(STEP0_CASES)) {
+    const scanned = scanStderrForFatalRule(rules, agentId, stderr);
+    if (online) {
+      assert.equal(scanned?.rule_id, online.rule_id, `${name}: online rule_id`);
+      assert.equal(scanned?.ttl, online.ttl, `${name}: online ttl`);
+    } else {
+      assert.equal(scanned, null, `${name}: online`);
+    }
+    const classified = classifySync(rules, agentId, { exitCode: 1, stderr });
+    if (expectedClassify) {
+      assert.equal(classified?.rule_id, expectedClassify.rule_id, `${name}: classify rule_id`);
+      assert.equal(classified?.ttl, expectedClassify.ttl, `${name}: classify ttl`);
+    } else {
+      assert.equal(classified, null, `${name}: classify`);
     }
   }
 });

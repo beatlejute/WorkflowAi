@@ -50,13 +50,51 @@ agents:
   claude-opus:
     extends: claude-sonnet
 
+  # Правила шага 0 (PLAN-004): снятие kilo-агента онлайн по строке stderr самого
+  # kilo 7.7.9 (`timestamp=… level=ERROR … message="stream error" …`), без ожидания
+  # исчерпания повторов. Раньше был снят только 429 в общем формате разных
+  # клиентов (`provider-rate-limit` выше) — роутер kilo сам повторяет запрос после
+  # 429 и не отдаёт такой текст последней строкой, поэтому общее правило не
+  # срабатывало и агент шёл в retry-цикл: 0 из 5 запусков с 429 восстановились
+  # (PulseProxy, 25–27.09.2026). Порядок правил важен: дневной лимит — первым,
+  # иначе строка с `limit_rpd` попала бы под поминутное правило `kilo-provider-
+  # rate-limit` (у неё есть и текст "Rate limit exceeded"). Привязка к началу
+  # строки (`(?:^|\n)timestamp=…`) — чтобы не сработать на эхе этих же строк в
+  # исходниках тестов и в диффах тикетов. Шаблоны — без флагов и модификаторов
+  # (?i): файл читают и раннеры прежних версий (обычный `new RegExp` Node 18).
   kilo-free:
     rules:
-      - id: "kilo-free-tier-exhausted"
+      - id: "kilo-provider-daily-limit"
         class: "unavailable"
         ttl: "until_utc_midnight"
-        pattern: "free tier.*exhaust|daily limit"
+        pattern: '(?:^|\n)timestamp=[^ \n]+ level=ERROR [^\n]*message="stream error"[^\n]*(?:limit_rpd|[Dd]aily limit|[Ff]ree tier[^\n]*exhaust)'
         exit_codes: "any"
+      - id: "kilo-provider-rate-limit"
+        class: "unavailable"
+        ttl: "15m"
+        pattern: '(?:^|\n)timestamp=[^ \n]+ level=ERROR [^\n]*message="stream error"[^\n]*(?:Rate limit exceeded|rate-limited upstream)'
+        exit_codes: "any"
+      # Перегрузка провайдера восстанавливается сама (замер 25.09 15:53 — запуск
+      # прошёл после одного overloaded), поэтому снятие — на третьей такой строке
+      # за запуск (не обязательно подряд), а не на первой.
+      - id: "kilo-provider-overloaded"
+        class: "unavailable"
+        ttl: "15m"
+        pattern: '(?:(?:^|\n)timestamp=[^ \n]+ level=ERROR [^\n]*message="stream error"[^\n]*(?:[Oo]verloaded|ResourceExhausted)[\s\S]*?){3}'
+        exit_codes: "any"
+
+  # Пулы моделей (PLAN-004): правила участника `<пул>@<id>` ищутся по id пула — состав
+  # пула известен только после раскрытия, поэтому в файле он не описывается. Пометка
+  # нездоровья — по id участника (маршрут). Участника, получившего 429, выводит из
+  # выбора `kilo-provider-rate-limit` на 15 минут. Своего правила дневного лимита
+  # аккаунта OpenRouter у free-openrouter нет: по документации тело такого 429 от
+  # общего не отличается, место пула до 00:00 UTC закрывает шлагбаум models.gate
+  # (free-quota-gate.js по счётчику GET /api/v1/key).
+  free-kilo:
+    extends: kilo-free
+
+  free-openrouter:
+    extends: kilo-free
 
   deepseek-flash:
     rules:

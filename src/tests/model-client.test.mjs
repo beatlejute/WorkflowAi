@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { chat, decide, ModelClientError } from '../lib/model-client.mjs';
+import { chat, decide, getJson, ModelClientError } from '../lib/model-client.mjs';
 import {
   TEST_KEY, startModelServer, startConnectProxy, sendJson, closedPort, decisionsResponse, chatResponse,
 } from './_model-server.mjs';
@@ -638,5 +638,77 @@ describe('model-client: уже прерванный signal и IPv6 через п
     } finally {
       await proxy.close();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getJson — GET одной попыткой (скрипты оценок и шлагбаума пулов моделей)
+// ---------------------------------------------------------------------------
+
+describe('model-client: getJson', () => {
+  let tlsOptions;
+  before(() => {
+    tlsOptions = makeSelfSignedCert('localhost');
+  });
+
+  it('200 — разобранный JSON; GET без тела и Content-Length, ключ в Authorization', async () => {
+    const server = await startModelServer((req, res) => sendJson(res, 200, { data: { remaining: 7 } }));
+    try {
+      const json = await getJson(server.url('/api/key?x=1'), { key: TEST_KEY, timeoutS: 5 });
+      assert.deepEqual(json, { data: { remaining: 7 } });
+      assert.equal(server.requests.length, 1);
+      assert.equal(server.requests[0].method, 'GET');
+      assert.equal(server.requests[0].url, '/api/key?x=1');
+      assert.equal(server.requests[0].headers.authorization, `Bearer ${TEST_KEY}`);
+      assert.equal(server.requests[0].headers['content-length'], undefined);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('HTTP 500 — server одной попыткой, без повторов', async () => {
+    const server = await startModelServer((req, res) => sendJson(res, 500, { error: { message: 'down' } }));
+    try {
+      const err = await rejectsWithClass(getJson(server.url('/api/key'), { key: TEST_KEY, timeoutS: 5 }), 'server');
+      assert.equal(err.attempts, 1);
+      assert.equal(server.requests.length, 1);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('https через прокси: CONNECT на host:port, GET внутри туннеля с доверенным ca', async () => {
+    const server = await startModelServer((req, res) => sendJson(res, 200, { ok: true }), { tls: tlsOptions });
+    const proxy = await startConnectProxy();
+    try {
+      const json = await getJson(server.url('/api/key'), {
+        key: TEST_KEY, timeoutS: 5, env: { HTTPS_PROXY: proxy.url }, ca: tlsOptions.cert,
+      });
+      assert.deepEqual(json, { ok: true });
+      assert.equal(proxy.connects.length, 1);
+      assert.equal(proxy.connects[0].url, `localhost:${server.port}`);
+      assert.equal(server.requests[0].method, 'GET');
+      assert.equal(server.requests[0].headers['content-length'], undefined);
+    } finally {
+      await proxy.close();
+      await server.close();
+    }
+  });
+
+  it('уже прерванный signal — aborted, запрос не отправляется', async () => {
+    const server = await startModelServer((req, res) => sendJson(res, 200, { ok: true }));
+    try {
+      const controller = new AbortController();
+      controller.abort();
+      await rejectsWithClass(getJson(server.url('/api/key'), { key: TEST_KEY, signal: controller.signal }), 'aborted');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(server.requests.length, 0);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('http: не на свою машину — bad_request без запроса (ключ не уходит открытым текстом)', async () => {
+    await rejectsWithClass(getJson('http://models.example.com/api/key', { key: TEST_KEY }), 'bad_request');
   });
 });

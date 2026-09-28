@@ -663,6 +663,37 @@ function loadPipelineConfig(pipelinePath = null) {
   return config.pipeline || config;
 }
 
+// Пул моделей (`models`) раскрывает только раннер пайплайна. Здесь запись агента
+// берётся напрямую (runL2Evaluation): `{model}` ушёл бы в команду, а `:` из id
+// участника — в путь `current/<агент>/`. Отказ — до судьи и исполнителей: для
+// target_agents index.yaml и --agent — в validateAgents, для своего списка файла кейса —
+// в rejectCaseModelPools до калибровки. `where` — чей список, для текста ошибки.
+function rejectModelPools(agentIds, agents, where = null) {
+  const pools = agentIds.filter(id => agents[id]?.models !== undefined);
+  if (pools.length > 0) {
+    throw new Error(`Agent(s) '${pools.join(', ')}'${where ? ` in ${where}` : ''} are model pools (models): пул моделей нельзя указывать в target_agents, назовите конкретного агента`);
+  }
+}
+
+// Свой target_agents файла кейса проверяется на пул до калибровки и прогонов: при старте
+// кейса отказ достался бы обработчику кейса — кейс failed без причины, а соседние кейсы
+// и судья уже бы работали. Прочие проверки списка кейса остаются при его старте.
+// Нечитаемый файл кейса пропускается: он падает сам при старте.
+function rejectCaseModelPools(skillName, cases, pipelineConfig) {
+  const agents = pipelineConfig.agents || {};
+  for (const caseDef of cases) {
+    let targets;
+    try {
+      targets = loadTestCase(skillName, caseDef.file).execution?.target_agents;
+    } catch {
+      continue;
+    }
+    if (Array.isArray(targets) && targets.length > 0) {
+      rejectModelPools(targets, agents, `target_agents of case ${caseDef.id}`);
+    }
+  }
+}
+
 // role: 'target' — исполнитель кейса (target_agents скила или кейса, --agent);
 // 'judge' — судья. Безынструментный агент (`kind: http`) выполнить скил не может:
 // у него нет ни инструментов, ни файлов. Исполнителем он отклоняется до первого
@@ -687,6 +718,7 @@ function validateAgents(agentIds, pipelineConfig, { role = 'target' } = {}) {
     if (toolLess.length > 0) {
       throw new Error(`Agent(s) '${toolLess.join(', ')}' are tool-less (kind: http) and cannot execute skill test cases: no tools, no files`);
     }
+    rejectModelPools(agentIds, agents);
   }
 
   if (role === 'judge') {
@@ -1784,6 +1816,8 @@ async function runTestsForSkill(skillName, opts) {
       }
     }
 
+    rejectCaseModelPools(skillName, cases, pipelineConfig);
+
     result.total = cases.length;
 
     const startTime = Date.now();
@@ -2020,6 +2054,8 @@ async function runTestsForSkill(skillName, opts) {
           await writeMetaJson(caseDef.id, skillName, 'passed', Date.now() - caseStart);
         }
       } catch (e) {
+        // Причина — в вывод: без неё кейс уходил в failed молча (агент кейса не найден и т. п.).
+        console.error(`[Runner] ${caseDef.id}: case error: ${e.message}`);
         result.current_run.failed++;
         result.status = 'failed';
         currentRunStatuses[caseDef.id] = 'error';

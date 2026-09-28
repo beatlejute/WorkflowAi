@@ -4,7 +4,7 @@
  * Один вход и один выход для обоих протоколов — судье тестов скилов и скриптам
  * стадий с обменом `model_io` не нужно знать, какой протокол у выбранной модели.
  *
- * Вход:  { data, images?, questions: [{ id, text, levels: [уровень 1, …, уровень n] }] }
+ * Вход:  { data, images?, questions: [{ id, text, levels: [уровень 1, …, уровень n], type? }] }
  * Выход: { answers: { <id>: { level, confidence, probabilities, reason } },
  *          raw, model, usage, cost_usd, duration_ms }
  *
@@ -18,12 +18,21 @@
  *     `confidence` и `probabilities` — null.
  * Нет ответа на вопрос или уровень вне 1..n — `bad_response`: молчаливого уровня
  * по умолчанию нет. Порог прохода и порог уверенности решает потребитель.
+ *
+ * `type` вопроса — `score` (по умолчанию: уровни — упорядоченная шкала) или
+ * `choice` (уровни — варианты без порядка, например кандидаты селектора пула,
+ * scripts/decisions-select.js). В decisions `choice` уходит вопросом
+ * `type: choice` с вариантами `{ "0": уровень 1, …, "n-1": уровень n }`: имена
+ * вариантов — индексы, поэтому вероятности ответа приходят по тем же индексам,
+ * что у `score`. Документация Decisions API: choice — до 255 вариантов, score —
+ * до 10 уровней; предел 2..10 здесь общий. Протокол chat тип не различает.
  */
 
 import { chat, decide, ModelClientError } from './model-client.mjs';
 
 export const MIN_LEVELS = 2;
 export const MAX_LEVELS = 10;
+export const QUESTION_TYPES = Object.freeze(['score', 'choice']);
 
 /**
  * Проверка входа: вопросы с непустыми уникальными id, текстом и уровнями.
@@ -51,6 +60,9 @@ export function validateInput(input, { minLevels = MIN_LEVELS, maxLevels = MAX_L
       throw new ModelClientError('bad_request', `Duplicate question id: ${id}`);
     }
     ids.add(id);
+    if (question.type !== undefined && !QUESTION_TYPES.includes(question.type)) {
+      throw new ModelClientError('bad_request', `Question ${id} has unknown type ${question.type} (expected ${QUESTION_TYPES.join(' or ')})`);
+    }
     if (typeof question.text !== 'string' || question.text.trim() === '') {
       throw new ModelClientError('bad_request', `Question ${id} has no text`);
     }
@@ -89,7 +101,9 @@ async function evaluateDecisions(agent, input, options) {
   }
   const questions = {};
   for (const question of input.questions) {
-    questions[question.id] = { type: 'score', instructions: question.text, criteria: question.levels };
+    questions[question.id] = question.type === 'choice'
+      ? { type: 'choice', instructions: question.text, criteria: Object.fromEntries(question.levels.map((level, i) => [String(i), level])) }
+      : { type: 'score', instructions: question.text, criteria: question.levels };
   }
   const response = await decide(agent, { state: input.data, questions }, options);
 

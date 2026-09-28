@@ -418,8 +418,10 @@ export function isDodFormat2(frontmatter) {
   return String(frontmatter?.dod_format) === '2';
 }
 
-// Заголовок секции — как у parseDoDCompletion в verify-artifacts.js.
-const DOD_HEADING = /^##\s*(?:Критерии готовности|Definition of Done)(?:\s*\([^)]*\))?\s*$/m;
+// Заголовок секции — как у parseDoDCompletion в verify-artifacts.js. Его же берёт промпт
+// селектора пула (src/lib/model-pools.mjs, selectorTicket): флаг только `m`, без `g` —
+// exec не хранит состояния между вызовами.
+export const DOD_HEADING = /^##\s*(?:Критерии готовности|Definition of Done)(?:\s*\([^)]*\))?\s*$/m;
 const DOD_ITEM = /^[-*]\s+\[([ xX])\]\s?(.*)$/;
 const NESTED_BULLET = /^\s+[-*]\s+(.*)$/;
 const CHECK_KEYS = new Set(['check', 'expect', 'regression', 'prose', 'visual']);

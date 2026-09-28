@@ -34,6 +34,26 @@ pipeline:
   #                                 `claude`). Нужен обёртке с другим именем команды: без
   #                                 хоста ответ без единого вызова инструмента на скиле с
   #                                 рельсами не отклоняется (src/rails/README.md §11).
+  #     models:       <object>   — пул моделей по маске (опционально; README, «Пулы моделей»).
+  #                                 Запись — одно место в списке стадии: раннер ставит на него
+  #                                 участника `<пул>@<полный id>` — копию записи с полным id
+  #                                 модели вместо {model}. Пул нельзя назначить одиночным
+  #                                 stage.agent, поставить на стадию с model_io и в target_agents
+  #                                 тестов скилов; kind: http пулом быть не может.
+  #       models.list:            <string[]> — команда списка моделей и её аргументы; строка
+  #                                 stdout — id или JSON {"id", "capabilities", "note"}
+  #       models.match:           <string[]> — выражения RegExp без флагов по полному id;
+  #                                 порядок участников — по первому совпавшему выражению
+  #       models.max_per_attempt: <int>      — участников пула за попытку тикета, ≥ 1
+  #                                 (по умолчанию 3)
+  #       models.selector:        <agent-id> — агент с командой (не пул), ранжирует кандидатов
+  #                                 под тикет: ответ `ranking: <id>, …` (опционально)
+  #       models.scores:          <string[]> — команда оценок кандидатов для промпта селектора
+  #                                 (опционально, только вместе с models.selector)
+  #       models.gate:            <string[]> — команда-шлагбаум места перед запуском участника:
+  #                                 `status: closed` закрывает место до 00:00 UTC (опционально)
+  #     {model}       в args     — место полного id участника: ровно одно у пула, ни одного у
+  #                                 агента без models
   #
   # Runner добавляет промпт последним аргументом автоматически.
   # Скил агенту задаёт stage.skill: первая строка промпта и WORKFLOW_RAILS_SKILL (рельсы).
@@ -94,6 +114,25 @@ pipeline:
       capabilities: [text]
       description: "Jev (TypeSafe) через OpenRouter — судья тестов скилов и модель ревью по evidence"
 
+    # Селектор участника пула (models.selector) — модель решений Jev через обёртку
+    # decisions-select.js: промпт селектора из stdin, ответ `ranking: <id>, <id>, …`.
+    # Контракт (README, «Пулы моделей»): в промпте — JSON с тикетом (тип, заголовок, DoD
+    # до 4000 символов) и кандидатами (до 10: id, способности, note, оценки Artificial
+    # Analysis); обёртка задаёт один вопрос decisions типа choice и отдаёт всех кандидатов
+    # по убыванию вероятности. Сбой, таймаут или ответ без id кандидатов — порядок маски.
+    # Раннер вызывает селектор один раз на место пула в попытке (не больше 12 вызовов на
+    # тикет при двух пулах и 6 попытках) и снимает его через 60 с: --timeout 15 даёт
+    # 3 × 15 + 6 = 51 с на все повторы клиента. Цена — живой вызов 2026-09-28 с 10
+    # кандидатами: $0.000075 (usage.cost ответа, печатается в строке SELECT).
+    jev-select:
+      command: "node"
+      args: [".workflow/src/scripts/decisions-select.js", "--model", "typesafe/jev-1.13", "--url", "https://openrouter.ai/api/alpha/decisions", "--key-file", "~/.workflow/secrets/openrouter.key", "--timeout", "15"]
+      workdir: "."
+      prompt_stdin: true
+      tool_less: true
+      capabilities: [text]
+      description: "Jev (TypeSafe) через OpenRouter — выбор участника пула под тикет"
+
     # Claude без инструментов для пунктов DoD со скриншотами (visual) в стадии ревью по
     # evidence. Решение стейкхолдера 2026-09-26: скриншоты оценивает Claude Haiku.
     # Обёртка claude-judge.js запускает claude без инструментов, MCP и пользовательских
@@ -109,32 +148,30 @@ pipeline:
       capabilities: [text, multimodal]
       description: "Claude Haiku без инструментов — оценка пунктов DoD со скриншотами в стадии ревью"
 
-    kilo-code:
-      command: "kilo"
-      args: ["-m", "kilo/kilo-auto/free", "--agent", "orchestrator", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
-      workdir: "."
-      capabilities: [text]
-      description: "Kilo мульти-режимный (architect, code, debug)"
-
+    # multimodal у gpt-агентов — по метаданным kilo: `kilo models --verbose` даёт
+    # capabilities.input.image: true у openai/gpt-5.6-luna, -terra и -sol (2026-09-28). mcp нет:
+    # kilo .mcp.json проекта не читает, в `kilo mcp list` только puppeteer (disabled).
+    # Решение стейкхолдера 2026-09-28 по ручной правке ~/.workflow/configs: перенести в
+    # канон только multimodal.
     gpt-luna:
       command: "kilo"
       args: ["-m", "openai/gpt-5.6-luna", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
       workdir: "."
-      capabilities: [text]
+      capabilities: [text, multimodal]
       description: "Kilo GPT"
 
     gpt-terra:
       command: "kilo"
       args: ["-m", "openai/gpt-5.6-terra", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
       workdir: "."
-      capabilities: [text]
+      capabilities: [text, multimodal]
       description: "Kilo GPT"
 
-    gpt-sun:
+    gpt-sol:
       command: "kilo"
-      args: ["-m", "openai/gpt-5.6-sun", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
+      args: ["-m", "openai/gpt-5.6-sol", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
       workdir: "."
-      capabilities: [text]
+      capabilities: [text, multimodal]
       description: "Kilo GPT"
 
     gemini-flash-lite:
@@ -165,6 +202,8 @@ pipeline:
       capabilities: [text]
       description: "Kilo deepseek"
 
+    # Роутер kilo — агент target_agents тестов скилов execute-task и deep-research
+    # (PLAN-004, решение 4); в списках стадий его нет: там бесплатные модели — пулы ниже.
     kilo-free:
       command: "kilo"
       args: ["-m", "kilo/kilo-auto/free", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
@@ -172,12 +211,52 @@ pipeline:
       capabilities: [text]
       description: "Kilo free"
 
-    openrouter-free:
+    # Пулы бесплатных моделей (PLAN-004, README «Пулы моделей»): место в списке стадии, на
+    # которое раннер ставит конкретную модель `<пул>@<полный id>` из вывода адаптера
+    # kilo-models-list.js. Маски и порядок — предложение плана (П10), утверждает
+    # стейкхолдер. Состав задаёт только маска: встроенного фильтра «бесплатная» нет, и
+    # платная модель, попавшая в маску, видна в строке POOL лога.
+    #  - kilo/stealth/space-bunny-alpha названа явно: суффикса `:free` у неё нет, выражение
+    #    закреплено `^…$`, платных соседей kilo/stealth/* оно не захватит;
+    #  - openrouter/nvidia/nemotron-3.5-content-safety:free исключена отрицательным
+    #    просмотром вперёд: единственная модель `:free` без вызова инструментов;
+    #  - free-openrouter тратит дневной счётчик бесплатных запросов аккаунта OpenRouter
+    #    (50/сутки): шлагбаум gate перед каждым запуском участника читает GET /api/v1/key
+    #    и при `remaining: 0` закрывает место пула до 00:00 UTC — стадия берёт следующее
+    #    место списка (П14). Маршруты kilo/* счётчик аккаунта не тратят, gate у них нет.
+    # Якоря &free_pool_args и &free_pool_scores отдают обоим пулам один и тот же массив:
+    # раннер строит запись участника копией, массив пула на месте не правит.
+    free-kilo:
       command: "kilo"
-      args: ["-m", "kilo/openrouter/free", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
+      args: &free_pool_args ["-m", "{model}", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
       workdir: "."
       capabilities: [text]
-      description: "Openrouter free"
+      description: "Бесплатные модели шлюза Kilo по маске"
+      models:
+        list: ["node", ".workflow/src/scripts/kilo-models-list.js"]
+        match:
+          - '^kilo/stealth/space-bunny-alpha$'
+          - '^kilo/nvidia/nemotron-3-ultra-550b-a55b:free$'
+          - '^kilo/[^/]+/[^/]+:free$'
+        max_per_attempt: 3
+        selector: jev-select
+        scores: &free_pool_scores ["node", ".workflow/src/scripts/model-scores.js", "--benchmarks-url", "https://openrouter.ai/api/v1/benchmarks?source=artificial-analysis", "--models-url", "https://openrouter.ai/api/v1/models", "--key-file", "~/.workflow/secrets/openrouter.key"]
+
+    free-openrouter:
+      command: "kilo"
+      args: *free_pool_args
+      workdir: "."
+      capabilities: [text]
+      description: "Бесплатные модели OpenRouter по маске (счётчик аккаунта 50/сутки)"
+      models:
+        list: ["node", ".workflow/src/scripts/kilo-models-list.js"]
+        match:
+          - '^openrouter/nvidia/nemotron-3-ultra-550b-a55b:free$'
+          - '^openrouter/(?!nvidia/nemotron-3\.5-content-safety:free$)[^/]+/[^/]+:free$'
+        max_per_attempt: 3
+        selector: jev-select
+        scores: *free_pool_scores
+        gate: ["node", ".workflow/src/scripts/free-quota-gate.js", "--url", "https://openrouter.ai/api/v1/key", "--key-file", "~/.workflow/secrets/openrouter.key", "--timeout", "10"]
 
     script-move:
       command: "node"
@@ -671,7 +750,7 @@ pipeline:
       description: "Выполнить выбранную задачу"
       skill: execute-task
       counter: task_attempts
-      agents: [kilo-free, openrouter-free, gpt-luna, gemini-flash-lite, claude-haiku, claude-sonnet, claude-opus, deepseek-flash]
+      agents: [free-kilo, free-openrouter, gpt-luna, gemini-flash-lite, claude-haiku, claude-sonnet, claude-opus, deepseek-flash]
       # instructions типа — содержание работы, а не скил. Скил стадии раннер передаёт агенту в
       # WORKFLOW_RAILS_SKILL: по нему хук ведёт состояние рельс, по его терминалу раннер
       # проверяет финальный ответ, `start` другого скила рельсы отклоняют (src/rails/README.md §5).
@@ -680,13 +759,13 @@ pipeline:
       # прогон PulseProxy 2026-09-27, QA-тикеты — старт manual-testing вместо execute-task.
       agents_by_type:
         coach:
-          agents: [claude-opus, gpt-sun, gemini-flash, deepseek-pro]
+          agents: [claude-opus, gpt-sol, gemini-flash, deepseek-pro]
           instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: правка скилов по описанию и DoD тикета."
         qa:
           agents: [claude-haiku, gpt-luna, gemini-flash-lite, claude-sonnet, claude-opus]
           instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: по описанию и DoD тикета напиши и реально запусти тесты и проверки, результаты и дефекты запиши в тикет."
         arch:
-          agents: [claude-opus, gpt-sun]
+          agents: [claude-opus, gpt-sol]
       goto:
         default:
           stage: move-to-review

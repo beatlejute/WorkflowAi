@@ -180,6 +180,7 @@ ToolSearch — в ответе имена `mcp__<сервер>__…`. `claude mc
 | `verify` | завершилась стадия контроля артефактов (`verify-artifacts.js`) с блоком RESULT: статус, процент DoD, отсутствующие файлы, `fail_reasons` |
 | `review` | завершилась стадия ревью (`review-result` с `model_io` или со скилом): статус, агент, модель |
 | `unban` | человек снял запрет |
+| `reset` | историю модели обнулили: её запуски до этого события не идут в градации, запреты и `statsTable` (раздел «Пулы моделей» → «Обнуление истории модели») |
 
 Модель запуска: у kilo-агента — модель последнего шага (не прочитана — `model: null`,
 такой запуск ни в одно правило не идёт); у стадии с `model_io` — модель из ответа; у
@@ -258,6 +259,359 @@ ToolSearch — в ответе имена `mcp__<сервер>__…`. `claude mc
 доказательствами) — `statsTable`. Модуль экспортируется пакетом:
 `workflow-ai/lib/agent-runs.mjs`. Реализация — `src/lib/agent-runs.mjs`, подсчёт
 изменённых файлов — `src/lib/agent-run-changes.mjs`.
+
+## Пулы моделей
+
+Пул — запись агента в `pipeline.agents` с полем `models`. Модели берутся из вывода
+команды списка, в пул входят те, чей полный id совпал с маской. В списке стадии пул
+занимает одно место, и на это место раннер ставит конкретную модель — участника пула.
+Каждый запуск поэтому — конкретная модель: в журнале запусков `agent` — id участника,
+`model` — ключ его модели.
+
+В поставляемом `configs/pipeline.yaml` стадия `execute-task` начинается с двух пулов
+вместо роутеров `kilo/kilo-auto/free` и `kilo/openrouter/free`:
+- `free-kilo` — `kilo/*:free` и `kilo/stealth/space-bunny-alpha`;
+- `free-openrouter` — `openrouter/*:free` без `nvidia/nemotron-3.5-content-safety:free`.
+
+Участника под тикет у обоих выбирает селектор `jev-select`:
+
+```yaml
+    free-openrouter:
+      command: "kilo"
+      args: ["-m", "{model}", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
+      workdir: "."
+      capabilities: [text]
+      models:
+        list: ["node", ".workflow/src/scripts/kilo-models-list.js"]
+        match:
+          - '^openrouter/nvidia/nemotron-3-ultra-550b-a55b:free$'
+          - '^openrouter/(?!nvidia/nemotron-3\.5-content-safety:free$)[^/]+/[^/]+:free$'
+        max_per_attempt: 3
+        selector: jev-select
+        scores: ["node", ".workflow/src/scripts/model-scores.js", "--benchmarks-url", "https://openrouter.ai/api/v1/benchmarks?source=artificial-analysis", "--models-url", "https://openrouter.ai/api/v1/models", "--key-file", "~/.workflow/secrets/openrouter.key"]
+        gate: ["node", ".workflow/src/scripts/free-quota-gate.js", "--url", "https://openrouter.ai/api/v1/key", "--key-file", "~/.workflow/secrets/openrouter.key", "--timeout", "10"]
+```
+
+`kilo-free` (роутер `kilo/kilo-auto/free`) остаётся в конфиге обычным агентом
+`target_agents` тестов скилов `execute-task` и `deep-research`; в списках стадий его нет.
+
+### Поля пула
+
+| Поле | Значение | Обязательно | Смысл |
+|------|----------|-------------|-------|
+| `models.list` | непустой массив непустых строк | да | команда списка моделей и её аргументы |
+| `models.match` | непустой массив строк — выражения `RegExp` без флагов и модификаторов (`(?i)` в JS не компилируется, `(?i:…)` — только с Node 23) | да | модель входит в пул, если её полный id совпал хотя бы с одним выражением; порядок участников — по индексу первого совпавшего выражения, при равенстве — порядок вывода команды |
+| `models.max_per_attempt` | целое ≥ 1, по умолчанию 3 | нет | сколько участников пула пробовать за одну попытку тикета |
+| `models.selector` | id агента с командой: не `kind: http` и не пул | нет | агент-селектор участника под тикет |
+| `models.scores` | непустой массив непустых строк, только вместе с `selector` | нет | команда оценок кандидатов для промпта селектора |
+| `models.gate` | непустой массив непустых строк | нет | команда-шлагбаум места пула |
+| `{model}` в `args` | ровно одно вхождение у пула, ни одного у агента без `models` | да | место полного id участника |
+
+Встроенного фильтра «бесплатная» нет: состав задаёт только маска, ею можно собрать и
+платный пул. Исключить модель — отрицательным просмотром вперёд, как `content-safety`
+выше. Свойства модели (картинки, инструменты, цена) пул не режут.
+
+**Проверка конфига при старте** (`validateConfig`) отклоняет:
+- `models` у `kind: http`, `models` не объектом, id пула с `@`, id агента вида
+  `<пул>@…` — такие id заняты участниками пула;
+- неверные `list`, `match` (в том числе выражение, которое не компилируется, и
+  модификатор `(?i:…)`), `max_per_attempt`, `selector`, `scores`, `gate`, а также
+  `scores` без `selector`;
+- `{model}` в `args` пула не ровно один раз и `{model}` у агента без `models`;
+- пул в одиночном `stage.agent` (у стадии без списка `agents`);
+- пул в списках стадии с `model_io`: `agents`, `agents_by_type.<тип>.agents` и
+  `default_agents` у стадии без своего списка.
+
+```
+Configuration validation failed:
+  - Agent "free-kilo" is a model pool: args must contain {model} exactly once, found 2
+  - Stage "ask" has model_io, but lists model pool "free-kilo" in agents: model pools are not allowed on model_io stages
+```
+
+Пул в `target_agents` тестов скилов (index.yaml, `--agent` или файл кейса)
+`run-skill-tests.js` отклоняет до первого кейса, `status: error`:
+`Agent(s) '<пул>' are model pools (models): пул моделей нельзя указывать в target_agents, назовите конкретного агента`
+(для файла кейса — с `in target_agents of case <id>`). Пул судьёй (`judge_agent`) или в
+его `escalate_to` — тоже ошибка до прогона.
+
+### Команда списка
+
+Раннер знает только интерфейс stdout команды списка, форматов kilo он не разбирает:
+- строка, начинающаяся с `{`, — JSON `{"id": "<provider/model>", "capabilities":
+  ["multimodal"], "note": "<текст>"}`; обязателен только строковый `id`, `note` идёт
+  только в строку `POOL`;
+- любая другая непустая строка — id без метаданных, поэтому командой списка может быть
+  и `["kilo", "models"]`;
+- испорченная строка (JSON не разбирается, нет строкового `id`) — WARN и пропуск; повтор
+  id — первое вхождение.
+
+Способности участника — `capabilities` пула вместе с `capabilities` строки.
+
+Адаптер `src/scripts/kilo-models-list.js` запускает `kilo models --verbose` и печатает
+все модели kilo без фильтрации, по JSON-строке на модель. `capabilities:
+["multimodal"]` — у модели с картинкой на входе. `note` — цена входа и выхода, вызов
+инструментов и признак `isFree` как есть, без единиц. Сбой `kilo` — выход 1, причина в
+stderr. Испорченный объект модели или объект без закрывающей `}` — WARN в stderr, эта
+модель пропускается, соседние остаются.
+
+```json
+{"id":"kilo/qwen/qwen3.8-27b:free","capabilities":["multimodal"],"note":"in=0 out=0 tools=true free=true"}
+```
+
+### Раскрытие пула и участники
+
+Пулы раскрываются один раз на процесс раннера, до первой стадии. Команда списка
+запускается так же, как агенты:
+- рабочий каталог — корень проекта, окружение — с `~/.workflow/agent.env`;
+- на Windows — через shell, кроме команды `node`;
+- через 60 с команда снимается, при остановке пайплайна (SIGINT/SIGTERM) — сразу;
+- одинаковая команда у нескольких пулов (равные массивы) запускается один раз;
+- хвост её stderr идёт в лог строками WARN `models.list stderr: …`.
+
+На каждый пул — строка `POOL` с составом. Она — единственная защита от платной модели,
+случайно попавшей в маску:
+
+```
+POOL agent="free-kilo" members=15 [kilo/stealth/space-bunny-alpha in=0 out=0 tools=true free=true, kilo/nvidia/nemotron-3-ultra-550b-a55b:free in=0 out=0 tools=true free=true, …]
+POOL agent="free-openrouter" members=0 (exit 1)
+```
+
+Причина пустого пула — `exit <код>`, `timeout 60s`, `aborted` (остановка пайплайна),
+`spawn error …` или `no match`. Модель, чей id участника уже занят агентом конфига,
+пропускается с WARN.
+Пул без участников стадию не роняет: его место не выбирается, а стадия получает обычные
+`no_capable_agent`, `all_unhealthy` или `all_banned`. У `no_capable_agent` в этом
+случае приписка `model pools without members: …`. Id модели не под
+`^[A-Za-z0-9][A-Za-z0-9._:/~-]*$` пропускается с WARN: на Windows аргументы агента идут
+через cmd.exe.
+
+Участник — `<пул>@<полный id>`, например `free-kilo@kilo/qwen/qwen3.8-27b:free`. Этот id
+видят журнал запусков (поле `agent`), health-реестр, строки `Agent selected:` и `START`,
+история работы тикета. Запись участника — копия записи пула: `{model}` в `args` заменён
+полным id, поля `models` нет, `pool` — id пула.
+
+Ключ модели участника — полный id без провайдера (`poolside/laguna-s-2.1:free`). Он
+общий для обоих маршрутов и совпадает с прежними ключами журнала; по нему действуют
+запреты модели. Пока механика роутеров не удалена, ключ kilo-запуска в журнале берётся
+из базы kilo (раздел «Фактическая модель kilo-агента»). Поэтому участник, снятый до
+первого шага (первый 429 приходит через 16–27 с), пишет в журнал `model: null`.
+
+### Выбор участника
+
+Место пула проходит фильтры стадии, если их проходит хотя бы один участник. Кандидаты
+места — участники в порядке маски, которые:
+1. покрывают `required_capabilities` тикета;
+2. здоровы по health-реестру — ключ id участника, то есть маршрут;
+3. не под запретом модели — на стадии со скилом `execute-task`;
+4. не пробовались в этой попытке;
+5. ещё не запускались на этом тикете: нет события `run` с тем же `ticket` и ключом
+   модели участника. Фильтр мягкий: если таких нет, кандидаты — прошедшие п. 1–4.
+
+Место уходит из попытки, когда:
+- пробовано `max_per_attempt` его участников;
+- подходящих непробованных участников не осталось;
+- шлагбаум закрыл место.
+
+Неудача участника с пустым diff — следующий участник того же места, затем следующее
+место списка. При изменённых артефактах fallback, как и раньше, не идёт. Строка выбора
+прежняя:
+
+```
+Agent selected: free-kilo@kilo/qwen/qwen3.8-27b:free (attempt 1, compatible=[free-kilo, free-openrouter, gpt-luna, …])
+```
+
+Правила health участника в `agent-health-rules.yaml` ищутся по id пула: состав пула
+известен только после раскрытия, в файле его не описать. Пометка нездоровья и проверка
+здоровья — по id участника. В поставляемом файле `free-kilo` и `free-openrouter`
+наследуют правила `kilo-free` (`extends`): участник, получивший 429 провайдера,
+снимается онлайн и выходит из выбора на 15 минут.
+
+### Шлагбаум
+
+`models.gate` — команда, которую раннер запускает перед каждым запуском участника пула,
+до селектора. Запуск — по правилам команды списка, но с таймаутом 15 с. Ответ — блок
+RESULT и выход 0:
+
+```
+---RESULT---
+status: open
+remaining: 37
+---RESULT---
+```
+
+- `open` — участник запускается.
+- `closed` — место закрыто до ближайших 00:00 UTC: участники не запускаются, селектор не
+  вызывается, стадия берёт следующее место списка. Закрытие — запись health-реестра по
+  id пула (правило `pool-gate-closed`, TTL `until_utc_midnight`, не меньше 30 минут), так
+  что оно держится во всех стадиях и после перезапуска раннера.
+- Выход ≠ 0, таймаут, нет блока RESULT или `status` — `error`: WARN, место не
+  закрывается.
+- Остановка пайплайна снимает шлагбаум сразу; после неё ни селектор, ни участники не
+  запускаются.
+
+Строка лога на каждый вызов:
+
+```
+GATE agent="free-openrouter" status=open remaining=37 until=- duration_ms=1085
+GATE agent="free-openrouter" status=closed remaining=0 until=2026-09-29T00:00:00.000Z duration_ms=1100
+```
+
+Скрипт `src/scripts/free-quota-gate.js --url <https://…/key> --key-file <путь>
+[--timeout <с>]` делает один `GET` с ключом, без повторов, с таймаутом по умолчанию
+10 с. Он читает `data.free_model_daily_requests` — дневной счётчик бесплатных запросов
+аккаунта OpenRouter: один на все модели `:free`, 50 в сутки при покупках меньше 10
+кредитов, сброс в 00:00 UTC.
+- `remaining` > 0 — `status: open`, ≤ 0 — `status: closed`; кроме `remaining` скрипт
+  печатает `used` и `limit`.
+- Поля нет, ответ не JSON, ошибка сети или HTTP не 2xx — `status: error`, `error_class`,
+  `error`, выход 1.
+
+Чтение счётчика модель не вызывает и запрос не тратит. В поставляемом конфиге шлагбаум
+только у `free-openrouter`: маршруты `kilo/*` счётчик аккаунта OpenRouter не тратят.
+
+### Селектор
+
+`models.selector` — id агента с командой, который упорядочивает кандидатов места под
+тикет. Раннер вызывает его один раз на место пула в попытке — при первом выборе
+участника этого места, если:
+- в контексте есть тикет;
+- кандидатов не меньше двух;
+- селектор здоров по health-реестру;
+- шлагбаум пула не закрыл место.
+
+Иначе вызова нет, берётся порядок маски. Следующий участник того же места в этой
+попытке — следующий по ранжиру, без нового вызова; в следующей попытке — новый вызов.
+
+Промпт идёт через stdin: инструкция и JSON-блок в ограждении ```` ```json ````,
+кандидатов — первые 10 в порядке маски. DoD — текст секции «Критерии готовности
+(Definition of Done)» тикета, не больше 4000 символов:
+
+```json
+{
+  "pool": "free-kilo",
+  "ticket": {"id": "IMPL-12", "type": "impl", "title": "…", "dod": "…"},
+  "candidates": [
+    {"id": "kilo/qwen/qwen3.8-27b:free", "capabilities": ["text", "multimodal"], "note": "in=0 out=0 tools=true free=true", "scores": {"intelligence": 33.7, "coding": 68.1, "agentic": 45.8}},
+    {"id": "kilo/stealth/space-bunny-alpha", "capabilities": ["text", "multimodal"], "note": "in=0 out=0 tools=true free=true", "scores": null}
+  ],
+  "scores_citation": "Source: Artificial Analysis (artificialanalysis.ai) via OpenRouter (openrouter.ai/rankings)."
+}
+```
+
+Ответ — id кандидатов через запятую, от самого подходящего:
+
+```
+---RESULT---
+ranking: kilo/qwen/qwen3.8-27b:free, kilo/stealth/space-bunny-alpha
+confidence: 0.6
+cost_usd: 0.00007518
+---RESULT---
+```
+
+Id не из кандидатов пропускаются, кандидаты вне ранжира идут после него в порядке маски.
+Ошибка — `status: error`, `error_class`, `error` и выход 1. Строка лога на каждый вызов:
+
+```
+SELECT agent="free-kilo" selector="jev-select" candidates=10 ranked=10 member="kilo/inclusionai/ling-3.0-flash-fin:free" fallback=none cost_usd=0.00007518 duration_ms=1286
+```
+
+| `fallback` | Когда | Участник |
+|------------|-------|----------|
+| `none` | в ранжире есть хотя бы один кандидат | первый по ранжиру |
+| `unknown_id` | поля `ranking` нет или в нём ни одного id кандидатов | порядок маски |
+| `error` | выход ≠ 0 или `status: error` | порядок маски |
+| `timeout` | селектор снят через 60 с | порядок маски |
+
+Сбой помечает селектор в health-реестре по классу ошибки: `auth` и `rate_limit` — 1 час;
+`server`, `timeout`, `network` — 5 минут; прочие классы не помечают. Селектор, снятый
+онлайн-сканом по своему правилу health, помечается на класс и TTL этого правила.
+Нездоровый селектор не вызывается, в лог идёт
+INFO `pool "…": selector "…" unhealthy in registry — mask order`. Журнал запусков и
+история тикета вызов селектора не пишут.
+
+Селектор поставляемого конфига `jev-select` — модель решений Jev через обёртку
+`src/scripts/decisions-select.js --model <id> --url <https://…/decisions> --key-file
+<путь> [--timeout <с>]`:
+- один вопрос decisions типа `choice`, варианты — кандидаты;
+- ранжир — все кандидаты по убыванию вероятности, при равенстве — меньший индекс;
+- `--timeout 15`: все повторы клиента укладываются в 3 × 15 + 6 = 51 с, меньше 60 с
+  раннера.
+
+Цена — `usage.cost` ответа: живой вызов 2026-09-28 с 10 кандидатами — $0.000075. Вызовов
+не больше одного на место пула в попытке — до 12 на тикет при двух пулах и 6 попытках.
+
+### Оценки
+
+`models.scores` — команда оценок кандидатов для промпта селектора, задаётся только
+вместе с `selector`. При раскрытии пула раннер пишет в её stdin полные id участников, по
+одному на строку, и читает из stdout один JSON:
+
+```json
+{"as_of":"2026-09-27T00:01:09.591Z","citation":"Source: Artificial Analysis (artificialanalysis.ai) via OpenRouter (openrouter.ai/rankings).","scores":{"kilo/qwen/qwen3.8-27b:free":{"intelligence":33.7,"coding":68.1,"agentic":45.8}}}
+```
+
+Оценки пул не режут и не переупорядочивают — это только вход селектора. Одинаковая
+команда у нескольких пулов запускается один раз. Сбой команды — кандидаты без оценок
+(`"scores": null`), селектор всё равно вызывается. Строка лога на пул:
+
+```
+SCORES agent="free-kilo" scored=8/15 as_of="2026-09-27T00:01:09.591Z" citation="Source: Artificial Analysis (artificialanalysis.ai) via OpenRouter (openrouter.ai/rankings)."
+SCORES agent="free-openrouter" scored=0/16 (exit 1)
+```
+
+Скрипт `src/scripts/model-scores.js --benchmarks-url <url> --models-url <url>
+--key-file <путь> [--cache <путь>] [--timeout <с>]`:
+- **Источник** — оценки Artificial Analysis (intelligence, coding, agentic) из
+  `GET https://openrouter.ai/api/v1/benchmarks?source=artificial-analysis` и каталог
+  `GET https://openrouter.ai/api/v1/models`, оба запроса с ключом. Адреса — только из
+  аргументов.
+- **Сопоставление:** полный id без первого сегмента (`kilo/qwen/qwen3.8-27b:free` →
+  `qwen/qwen3.8-27b:free`) → запись каталога с тем же `id` → её `canonical_slug` →
+  строка оценок с тем же `model_permaslug`. Участника без записи каталога или без
+  оценок в выводе нет.
+- **Кэш** — `--cache`, по умолчанию `~/.workflow/cache/model-scores.json` (или
+  `$WORKFLOW_HOME/cache/…`), общий для проектов машины. Оба GET идут заново, когда файла
+  нет, он не читается или другой версии; кэшу 24 часа или дата загрузки в будущем
+  (сбитые часы); ключа участника нет в каталоге
+  кэша и кэшу не меньше часа. Загрузка не удалась — прежний кэш и WARN в stderr, кэша
+  нет — выход 1. Запись — через временный файл и rename.
+- **`--timeout`** — на каждый GET, по умолчанию 20 с.
+
+Атрибуция данных оценок — `meta.citation` источника. Она хранится в кэше, печатается в
+строке `SCORES` и идёт в промпт селектора:
+
+> Source: Artificial Analysis (artificialanalysis.ai) via OpenRouter (openrouter.ai/rankings).
+
+### Обнуление истории модели
+
+Событие `reset` журнала запусков обнуляет историю модели:
+
+```
+{"type":"reset","ts":"2026-09-28T12:00:00.000Z","model":"poolside/laguna-s-2.1:free","reason":"<почему>"}
+```
+
+Запуски модели, записанные в журнале раньше её последнего `reset`, выпадают из градаций.
+«Раньше» — по позиции в журнале, как у `unban`. Вместе с градациями такие запуски уходят
+из постоянных и временных запретов и из `statsTable`, то есть из MCP `get_model_stats`.
+- Окна контроля и ревью строятся по-прежнему со всеми запусками: контроль исключённого
+  запуска не засчитывается соседнему.
+- Запуски с `model: null` не обнуляются.
+- Журнал только дописывается.
+- Фильтр 5 выбора участника смотрит сырые события, `reset` на него не влияет.
+
+Запись — функция `recordReset(projectRoot, {model, reason})` модуля журнала, рядом с
+`recordUnban`. Результат — `{ok: true, event}` или `{ok: false, code, error}` с кодами
+`BAD_INPUT`, `READ_FAILED`, `NO_RUNS` (в журнале нет запуска с этим ключом — защита от
+опечатки) и `WRITE_FAILED`. Скрипт запускается из корня проекта:
+
+```
+node .workflow/src/scripts/reset-model-history.js --model poolside/laguna-s-2.1:free --reason "история роутеров"
+```
+
+Успех — RESULT `status: ok`, `model: <ключ>`, выход 0. Ошибка — `status: error`, `code`,
+`error`, выход 1: коды `recordReset`, `BAD_INPUT` за неверные аргументы и `NO_PROJECT`,
+если корень проекта не найден. MCP покажет обнуление после обновления зависимости
+`workflow-ai` в workflow-mcp.
 
 ## Runner-стадии
 

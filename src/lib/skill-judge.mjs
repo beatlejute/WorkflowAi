@@ -106,6 +106,12 @@ export function judgeAgentErrors(judgeId, agents) {
   if (!isCli(agent)) {
     errors.push(`Judge agent '${judgeId}' must be an agent with a command (kind: cli), got kind: ${agent.kind}; a model with another protocol joins as a CLI wrapper (src/scripts/decisions-judge.js)`);
   }
+  // Пул моделей (`models`, PLAN-004) раскрывает только раннер пайплайна: запись судьи
+  // берётся напрямую, и `{model}` ушёл бы в команду.
+  const isPool = (a) => a.models !== undefined;
+  if (isPool(agent)) {
+    errors.push(`Judge agent '${judgeId}' is a model pool (models): name a concrete agent`);
+  }
   if (agent.cost_per_call !== undefined && !(typeof agent.cost_per_call === 'number' && Number.isFinite(agent.cost_per_call) && agent.cost_per_call >= 0)) {
     errors.push(`Judge agent '${judgeId}': cost_per_call must be a number >= 0`);
   }
@@ -125,6 +131,8 @@ export function judgeAgentErrors(judgeId, agents) {
       errors.push(`Judge agent '${judgeId}': escalate_to '${target}' not found in pipeline.yaml → agents[]`);
     } else if (!isCli(agents[target])) {
       errors.push(`Judge agent '${judgeId}': escalate_to '${target}' must be an agent with a command (kind: cli), got kind: ${agents[target].kind}`);
+    } else if (isPool(agents[target])) {
+      errors.push(`Judge agent '${judgeId}': escalate_to '${target}' is a model pool (models): name a concrete agent`);
     }
   } else if (agent.escalate_below !== undefined || agent.escalation_share !== undefined) {
     errors.push(`Judge agent '${judgeId}': escalate_below and escalation_share need escalate_to`);
