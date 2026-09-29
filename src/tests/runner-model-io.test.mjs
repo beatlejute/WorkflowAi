@@ -1081,4 +1081,21 @@ describe('runner: неуверенная оценка стадии model_io — 
     await assert.rejects(stage, (err) => err.code !== undefined && err.code !== 'apply_failed');
     assert.ok(Date.now() - started < 12000, 'apply снят остановкой, а не ожиданием');
   });
+
+  it('prepare следующего агента переписал файл запроса — вердикт по запросу неуверенного ответа, а не по чужому', async () => {
+    const root = uncertainProject();
+    // Запрос по одному пути, но зависит от агента: второму — два вопроса.
+    writeFileSync(join(root, 'scripts', 'prepare.mjs'), PREPARE_SCRIPT.replace(
+      "Array.from({ length: options.questions || 1 }",
+      "Array.from({ length: process.env.WORKFLOW_MODEL_AGENT === 'judge-b' ? 2 : 1 }"));
+    const noScore = { 'judge-a': judgeAgent('score: 2'), 'judge-b': judgeAgent('без балла') };
+
+    const { result } = await runStage(root, makeConfig(noScore, ['judge-a', 'judge-b'], options));
+
+    assert.equal(result.status, 'failed', JSON.stringify(result.result));
+    assert.equal(result.agentId, 'judge-a');
+    const copies = modelIoFiles(root).filter((name) => name.endsWith('.request.json'));
+    assert.equal(copies.length, 1, JSON.stringify(modelIoFiles(root)));
+    assert.equal(readJson(join(root, '.workflow', 'state', 'model-io', copies[0])).questions.length, 1, 'копия — запрос первого агента');
+  });
 });

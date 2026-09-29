@@ -1916,7 +1916,7 @@ class StageExecutor {
       }
       const u = uncertain;
       uncertain = null;
-      const final = await this._applyModelIoVerdict(u.result, u.prompt, stageId, u.effectiveStage, u.agentId, u.agent);
+      const final = await this._applyModelIoVerdict(u.result, u.prompt, stageId, u.effectiveStage, u.agentId, u.agent, u.request);
       final.agentId = u.agentId;
       final.runModel = u.runModel;
       if (this.logger) this.logger.stageComplete(stageId, final.status, final.exitCode);
@@ -2129,7 +2129,7 @@ class StageExecutor {
         // и выбором (health-реестр) — вердикт выносит apply по тому же ответу без переоценки.
         if (run.modelIo && result.status === 'uncertain') {
           triedInThisAttempt.push(agentId);
-          uncertain = { result, prompt, effectiveStage, agentId, agent, runModel: event.model };
+          uncertain = { result, prompt, effectiveStage, agentId, agent, runModel: event.model, request: this._readModelIoRequest(result) };
           const next = this.resolveAgent(stage, stageId, { excludeAgents: triedInThisAttempt });
           if (this.logger) {
             this.logger.info(
@@ -2542,19 +2542,49 @@ class StageExecutor {
     return { command: 'node', args: [path.resolve(this.projectRoot, modelIo[step])], workdir: '.' };
   }
 
+  /** Текст файла запроса ответа model_io на момент ответа; null — не прочитан. */
+  _readModelIoRequest(result) {
+    try {
+      return fs.readFileSync(path.resolve(this.projectRoot, result.modelIo.request_file), 'utf-8');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Путь запроса для вердикта по неуверенному ответу. prepare следующего агента мог
+   * переписать файл запроса по тому же пути (контракт model_io уникального пути не
+   * требует), и apply применил бы прежний ответ к чужому запросу — тогда запрос
+   * ответа пишется рядом с файлом ответа.
+   */
+  _verdictRequestPath(uncertain, request) {
+    const requestPath = path.resolve(this.projectRoot, uncertain.modelIo.request_file);
+    if (request === null) return requestPath;
+    let current = null;
+    try {
+      current = fs.readFileSync(requestPath, 'utf-8');
+    } catch {
+      // Файла нет — пишется копия.
+    }
+    if (current === request) return requestPath;
+    const copyPath = path.resolve(this.projectRoot, uncertain.modelIo.response_file).replace(/\.json$/, '') + '.request.json';
+    fs.writeFileSync(copyPath, request);
+    return copyPath;
+  }
+
   /**
    * Вердикт по неуверенному ответу, когда переоценивать некому: apply запускается
    * снова по тем же файлам запроса и ответа, без WORKFLOW_MODEL_IO_RETRY, — и выносит
    * вердикт сам (неуверенность — провал), со строкой ревью.
    */
-  async _applyModelIoVerdict(uncertain, prompt, stageId, stage, agentId, agent) {
+  async _applyModelIoVerdict(uncertain, prompt, stageId, stage, agentId, agent, request = null) {
     const modelIo = stage.model_io;
     const started = Date.now();
     let applied;
     try {
       applied = await this._callAgentOnce(this._modelIoScriptAgent(modelIo, 'apply'), prompt, stageId, stage.skill, null, {
         ...this._modelIoScriptEnv(agent, agentId, modelIo),
-        WORKFLOW_MODEL_REQUEST: path.resolve(this.projectRoot, uncertain.modelIo.request_file),
+        WORKFLOW_MODEL_REQUEST: this._verdictRequestPath(uncertain, request),
         WORKFLOW_MODEL_RESPONSE: path.resolve(this.projectRoot, uncertain.modelIo.response_file),
       });
     } catch (err) {

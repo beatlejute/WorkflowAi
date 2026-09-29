@@ -387,10 +387,13 @@ describe('apply-review.js: вердикт по ответу модели и за
   });
 
   it('неуверенный провал (уровень 2 при уверенности 0.6) с WORKFLOW_MODEL_IO_RETRY — тоже uncertain', () => {
-    const { result } = runApply(answersWithConfidence([5, 0.9], [2, 0.6]), RETRY);
+    const { root, result } = runApply(answersWithConfidence([5, 0.9], [2, 0.6]), RETRY);
 
     assert.equal(result.status, 'uncertain');
     assert.equal(result.uncertain_items, '2');
+    assert.equal(result.review_written, 'false');
+    assert.equal(ticketText(root), TICKET, 'строку ревью пишет агент, который вынесет вердикт');
+    assert.deepEqual(readJson(root, EVIDENCE_FILE).review, { agent: null, model: null, items: {} });
   });
 
   it('уверенный провал решает вердикт и при WORKFLOW_MODEL_IO_RETRY: failed со строкой ревью, неуверенный пункт тоже в failed_items', () => {
