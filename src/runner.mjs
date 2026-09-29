@@ -1904,6 +1904,24 @@ class StageExecutor {
     // Результат последней ошибки шага «модель» обмена model_io (callModelAgent): её не
     // бросают, а возвращают стадии как status: error с error_class.
     let lastModelFailure = null;
+    // Последний неуверенный ответ стадии model_io (apply → status: uncertain), который
+    // переоценивает следующий агент. Переоценка не дала вердикта (агентов не осталось,
+    // сбой модели или процесса) — вердикт выносит apply по этому ответу (settleUncertain).
+    let uncertain = null;
+    // Остановка пайплайна вердикта не выносит: apply без флага записал бы провал, которого
+    // не давал ни один агент (строка ревью, evidence, событие review).
+    const settleUncertain = async () => {
+      if (this.stopRequested) {
+        throw Object.assign(new Error(`Stage "${stageId}" stopped before verdict on uncertain answer`), { code: 'STOPPED' });
+      }
+      const u = uncertain;
+      uncertain = null;
+      const final = await this._applyModelIoVerdict(u.result, u.prompt, stageId, u.effectiveStage, u.agentId, u.agent);
+      final.agentId = u.agentId;
+      final.runModel = u.runModel;
+      if (this.logger) this.logger.stageComplete(stageId, final.status, final.exitCode);
+      return final;
+    };
 
     const snapshotEnabled = this.pipeline.execution?.artifact_snapshot_enabled !== false;
     const snapshotOpts = {
@@ -1948,6 +1966,8 @@ class StageExecutor {
       pending = null;
 
       if (resolved.blocked) {
+        // При остановке settleUncertain бросает STOPPED — вердикта нет.
+        if (uncertain) return settleUncertain();
         const exhausted = resolved.blocked === 'all_unhealthy' || resolved.blocked === 'all_banned';
         // all_unhealthy после исчерпания списка в текущей attempt (lastErr есть) —
         // re-throw, чтобы стадия ушла в goto.error и inc-counter. Без lastErr —
@@ -2023,8 +2043,12 @@ class StageExecutor {
 
         // Стадия с model_io — обмен с моделью для любого агента списка; агент
         // kind: http другого пути не имеет.
+        // Переоценка неуверенного ответа (apply → status: uncertain) возможна, только если
+        // после этого агента в попытке есть другой: иначе apply выносит вердикт сам.
+        const retryAvailable = Boolean(run.modelIo)
+          && !this.resolveAgent(stage, stageId, { excludeAgents: [...triedInThisAttempt, agentId] }).blocked;
         const result = run.modelIo
-          ? await this.callModelAgent(agent, prompt, stageId, effectiveStage, agentId)
+          ? await this.callModelAgent(agent, prompt, stageId, effectiveStage, agentId, { retryAvailable })
           : await this.callAgent(agent, prompt, stageId, effectiveStage.skill, agentId, { bannedCheck: run.bannedCheck });
         // Снимок «после» — до записей раннера в тикет и в .workflow/metrics/: строка
         // истории работы попала бы в подсчёт, и «пусто» не срабатывало бы никогда.
@@ -2095,6 +2119,39 @@ class StageExecutor {
           } catch (err) {
             if (this.logger) this.logger.warn(`review agent normalize threw: ${err.message}`, stageId);
           }
+        }
+
+        // Неуверенная оценка ревью: уверенность ниже min_confidence, уверенного провала нет —
+        // apply строку ревью не пишет, оценку в этой же попытке даёт следующий агент стадии.
+        // Прежде неуверенность засчитывалась провалом, и задачу переделывали заново:
+        // ListeningGlass 2026-09-29, IMPL-002 — уровень 5 из 5 при уверенности 0.79, Opus
+        // четыре раза выполнял готовую работу. Следующего агента не стало между проверкой
+        // и выбором (health-реестр) — вердикт выносит apply по тому же ответу без переоценки.
+        if (run.modelIo && result.status === 'uncertain') {
+          triedInThisAttempt.push(agentId);
+          uncertain = { result, prompt, effectiveStage, agentId, agent, runModel: event.model };
+          const next = this.resolveAgent(stage, stageId, { excludeAgents: triedInThisAttempt });
+          if (this.logger) {
+            this.logger.info(
+              `REVIEW_UNCERTAIN agent="${agentId}" items=${result.result?.uncertain_items ?? '-'} `
+                + `next="${next.blocked ? 'none' : next.agentId}"`,
+              stageId,
+            );
+          }
+          if (next.blocked) return settleUncertain();
+          pending = next;
+          lastErr = null;
+          lastModelFailure = null;
+          continue;
+        }
+        // Переоценка без вердикта (ошибка шага модели или apply у следующего агента) —
+        // вердикт по неуверенному ответу: иначе ошибка вела в increment-review-errors, и
+        // та же пара агентов крутилась до mark-blocked.
+        if (uncertain && run.modelIo && !this.stopRequested && result.status !== 'passed' && result.status !== 'failed') {
+          if (this.logger) {
+            this.logger.info(`REVIEW_UNCERTAIN re-review by "${agentId}" gave status=${result.status} — verdict by "${uncertain.agentId}"`, stageId);
+          }
+          return settleUncertain();
         }
 
         // Эскалация (решение 3): агент сам ответил `status: blocked` (у blocked раннера
@@ -2213,6 +2270,7 @@ class StageExecutor {
               stageId
             );
           }
+          if (uncertain) return settleUncertain();
           throw err;
         }
 
@@ -2452,35 +2510,77 @@ class StageExecutor {
    * Сбой скрипта prepare или apply и сбой процесса агента с командой (выход ≠ 0
    * без RESULT, таймаут) бросаются, как у CLI-агента.
    */
-  async callModelAgent(agent, prompt, stageId, stage, agentId) {
+  async callModelAgent(agent, prompt, stageId, stage, agentId, { retryAvailable = false } = {}) {
     const modelIo = stage.model_io;
     if (!modelIo) {
       throw new Error(`Stage "${stageId}": agent "${agentId}" (kind: http) runs only stages with model_io`);
     }
     const callId = crypto.randomUUID();
-    const scriptEnv = {
-      WORKFLOW_MODEL_AGENT: agentId,
-      WORKFLOW_MODEL_CAPABILITIES: JSON.stringify(Array.isArray(agent.capabilities) ? agent.capabilities : []),
-      WORKFLOW_MODEL_IO_OPTIONS: JSON.stringify(modelIo.options || {}),
-    };
-    const scriptAgent = (step) => ({
-      command: 'node',
-      args: [path.resolve(this.projectRoot, modelIo[step])],
-      workdir: '.',
-    });
+    const scriptEnv = this._modelIoScriptEnv(agent, agentId, modelIo);
+    const scriptAgent = (step) => this._modelIoScriptAgent(modelIo, step);
     const timing = { prepare_ms: null, model_ms: null, apply_ms: null };
     const abort = new AbortController();
     if (this.stopRequested) abort.abort();
     this.currentModelAbort = abort;
     try {
-      return await this._runModelIo({ agent, prompt, stageId, stage, agentId, callId, scriptEnv, scriptAgent, timing, signal: abort.signal });
+      return await this._runModelIo({ agent, prompt, stageId, stage, agentId, callId, scriptEnv, scriptAgent, timing, retryAvailable, signal: abort.signal });
     } finally {
       if (this.currentModelAbort === abort) this.currentModelAbort = null;
     }
   }
 
+  /** Окружение скриптов prepare и apply обмена model_io. */
+  _modelIoScriptEnv(agent, agentId, modelIo) {
+    return {
+      WORKFLOW_MODEL_AGENT: agentId,
+      WORKFLOW_MODEL_CAPABILITIES: JSON.stringify(Array.isArray(agent.capabilities) ? agent.capabilities : []),
+      WORKFLOW_MODEL_IO_OPTIONS: JSON.stringify(modelIo.options || {}),
+    };
+  }
+
+  _modelIoScriptAgent(modelIo, step) {
+    return { command: 'node', args: [path.resolve(this.projectRoot, modelIo[step])], workdir: '.' };
+  }
+
+  /**
+   * Вердикт по неуверенному ответу, когда переоценивать некому: apply запускается
+   * снова по тем же файлам запроса и ответа, без WORKFLOW_MODEL_IO_RETRY, — и выносит
+   * вердикт сам (неуверенность — провал), со строкой ревью.
+   */
+  async _applyModelIoVerdict(uncertain, prompt, stageId, stage, agentId, agent) {
+    const modelIo = stage.model_io;
+    const started = Date.now();
+    let applied;
+    try {
+      applied = await this._callAgentOnce(this._modelIoScriptAgent(modelIo, 'apply'), prompt, stageId, stage.skill, null, {
+        ...this._modelIoScriptEnv(agent, agentId, modelIo),
+        WORKFLOW_MODEL_REQUEST: path.resolve(this.projectRoot, uncertain.modelIo.request_file),
+        WORKFLOW_MODEL_RESPONSE: path.resolve(this.projectRoot, uncertain.modelIo.response_file),
+      });
+    } catch (err) {
+      // Запуск агента уже закрыт событием: сбой apply — ошибка стадии, а не второе
+      // событие того же запуска и пометка агента в health-реестре (он ответил).
+      if (this.stopRequested || (!err.exitCode && !err.code)) throw err;
+      if (this.logger) this.logger.error(`MODEL_IO agent="${agentId}" verdict apply failed: ${err.message}`, stageId);
+      return {
+        status: 'error',
+        output: '',
+        stderr: err.stderr || '',
+        result: { error_class: 'apply_failed', error: err.message },
+        exitCode: -1,
+        modelIo: uncertain.modelIo,
+      };
+    }
+    const applyMs = Date.now() - started;
+    if (this.logger) {
+      this.logger.info(`MODEL_IO agent="${agentId}" verdict without re-review: status=${applied.status} apply_ms=${applyMs}`, stageId);
+    }
+    applied.modelIo = { ...uncertain.modelIo, apply_ms: (uncertain.modelIo.apply_ms ?? 0) + applyMs };
+    return applied;
+  }
+
   /** Шаги prepare → модель → apply для callModelAgent; `signal` — остановка пайплайна. */
-  async _runModelIo({ agent, prompt, stageId, stage, agentId, callId, scriptEnv, scriptAgent, timing, signal }) {
+  async _runModelIo({ agent, prompt, stageId, stage, agentId, callId, scriptEnv, scriptAgent, timing, retryAvailable, signal }) {
     const stopped = (step) => this._modelIoFailure(agentId, stageId,
       new ModelClientError('aborted', `stage stopped before ${step}`), timing);
     if (signal.aborted) return stopped('prepare');
@@ -2544,6 +2644,9 @@ class StageExecutor {
       ...scriptEnv,
       WORKFLOW_MODEL_REQUEST: requestPath,
       WORKFLOW_MODEL_RESPONSE: responsePath,
+      // Неуверенный ответ apply может вернуть как status: uncertain — переоценку даст
+      // следующий агент попытки (execute, REVIEW_UNCERTAIN).
+      ...(retryAvailable ? { WORKFLOW_MODEL_IO_RETRY: '1' } : {}),
     });
     timing.apply_ms = Date.now() - started;
 
@@ -2559,6 +2662,7 @@ class StageExecutor {
       agent: agentId,
       model: evaluation.model,
       cost_usd: evaluation.cost_usd,
+      request_file: path.relative(this.projectRoot, requestPath).split(path.sep).join('/'),
       response_file: path.relative(this.projectRoot, responsePath).split(path.sep).join('/'),
       ...timing,
     };

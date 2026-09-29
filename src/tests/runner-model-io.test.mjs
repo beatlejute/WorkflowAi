@@ -826,3 +826,259 @@ describe('runner: остановка между агентами', () => {
     assert.ok(!existsSync(join(root, '.workflow', 'tmp', 'cli-agent-called')), 'второй агент не запускался');
   });
 });
+
+// Неуверенная оценка ревью: apply отвечает status: uncertain, только когда раннер
+// поставил WORKFLOW_MODEL_IO_RETRY, — и уровень ниже pass_level (здесь «неуверенно»).
+// Каждый вызов apply дописывается в .workflow/tmp/apply-calls.jsonl: агент и флаг.
+// ListeningGlass 2026-09-29: уровень 5 из 5 при уверенности 0.79 засчитывался провалом,
+// и Opus четыре раза переделывал готовую работу.
+const UNCERTAIN_APPLY_SCRIPT = `import fs from 'node:fs';
+const options = JSON.parse(process.env.WORKFLOW_MODEL_IO_OPTIONS || '{}');
+const response = JSON.parse(fs.readFileSync(process.env.WORKFLOW_MODEL_RESPONSE, 'utf8'));
+const request = JSON.parse(fs.readFileSync(process.env.WORKFLOW_MODEL_REQUEST, 'utf8'));
+const retry = process.env.WORKFLOW_MODEL_IO_RETRY ?? null;
+fs.mkdirSync('.workflow/tmp', { recursive: true });
+fs.appendFileSync('.workflow/tmp/apply-calls.jsonl', JSON.stringify({ agent: process.env.WORKFLOW_MODEL_AGENT, retry }) + '\\n');
+const levels = request.questions.map((question) => response.answers[question.id].level);
+const low = levels.some((level) => level < (options.pass_level || 2));
+const status = low ? (retry === '1' ? 'uncertain' : 'failed') : 'passed';
+console.log('---RESULT---\\nstatus: ' + status + '\\nuncertain_items: ' + (low ? '1' : '') + '\\nagent: ' + process.env.WORKFLOW_MODEL_AGENT + '\\n---RESULT---');
+`;
+
+function uncertainProject() {
+  const root = makeProject();
+  writeFileSync(join(root, 'scripts', 'apply.mjs'), UNCERTAIN_APPLY_SCRIPT);
+  return root;
+}
+
+function applyCalls(root) {
+  const file = join(root, '.workflow', 'tmp', 'apply-calls.jsonl');
+  return existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').map((line) => JSON.parse(line)) : [];
+}
+
+describe('runner: неуверенная оценка стадии model_io — переоценка следующим агентом попытки', () => {
+  const agents = { 'judge-a': judgeAgent('score: 2'), 'judge-b': judgeAgent('score: 5') };
+  const options = { options: { levels: 5, pass_level: 4 } };
+
+  it('первый агент неуверен — пункты переоценивает второй в той же попытке, вердикт его', async () => {
+    const root = uncertainProject();
+
+    const { result, logger } = await runStage(root, makeConfig(agents, ['judge-a', 'judge-b'], options));
+
+    assert.equal(result.status, 'passed');
+    assert.equal(result.agentId, 'judge-b');
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }, { agent: 'judge-b', retry: null }],
+      'флаг переоценки — только пока после агента есть другой');
+    assert.equal(judgeCalls(root).length, 2);
+    assert.ok(logger.lines.some((l) => l.includes('REVIEW_UNCERTAIN agent="judge-a" items=1 next="judge-b"')), logger.lines.join('\n'));
+  });
+
+  it('агент стадии один — флага переоценки нет, apply выносит вердикт сам', async () => {
+    const root = uncertainProject();
+
+    const { result, logger } = await runStage(root, makeConfig(agents, ['judge-a'], options));
+
+    assert.equal(result.status, 'failed');
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: null }]);
+    assert.ok(!logger.lines.some((l) => l.includes('REVIEW_UNCERTAIN')), logger.lines.join('\n'));
+  });
+
+  it('следующий агент исчез после ответа — apply повторно по тому же ответу без флага, вердикт первого агента', async () => {
+    const root = uncertainProject();
+
+    const { result, logger } = await runStage(root, makeConfig(agents, ['judge-a', 'judge-b'], options), {}, {
+      onExecutor: (executor) => {
+        const resolve = executor.resolveAgent.bind(executor);
+        // После ответа первого агента (apply уже запускался) второго не стало.
+        executor.resolveAgent = (...args) => (applyCalls(root).length > 0
+          ? { blocked: 'all_unhealthy', reason: 'test' } : resolve(...args));
+      },
+    });
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.agentId, 'judge-a');
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }, { agent: 'judge-a', retry: null }]);
+    assert.equal(judgeCalls(root).length, 1, 'модель второй раз не спрашивается');
+    assert.equal(modelIoFiles(root).length, 1, 'вердикт — по тому же файлу ответа');
+    assert.ok(logger.lines.some((l) => l.includes('REVIEW_UNCERTAIN agent="judge-a" items=1 next="none"')), logger.lines.join('\n'));
+    assert.ok(logger.lines.some((l) => l.includes('verdict without re-review: status=failed')), logger.lines.join('\n'));
+    assert.equal(result.modelIo.agent, 'judge-a', 'агент и модель события ревью — того, чей ответ дал вердикт');
+    assert.equal(result.modelIo.response_file, `.workflow/state/model-io/${modelIoFiles(root)[0]}`);
+  });
+
+  it('переоценка без вердикта — ответ второго агента без балла: вердикт по ответу первого, без increment-review-errors', async () => {
+    const root = uncertainProject();
+    const noScore = { 'judge-a': judgeAgent('score: 2'), 'judge-b': judgeAgent('без балла') };
+
+    const { result, logger } = await runStage(root, makeConfig(noScore, ['judge-a', 'judge-b'], options));
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.agentId, 'judge-a');
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }, { agent: 'judge-a', retry: null }]);
+    assert.ok(logger.lines.some((l) => l.includes('re-review by "judge-b" gave status=error — verdict by "judge-a"')), logger.lines.join('\n'));
+  });
+
+  it('переоценка без вердикта — процесс второго агента упал: вердикт по ответу первого', async () => {
+    const root = uncertainProject();
+    writeFileSync(join(root, 'scripts', 'crash-agent.mjs'), 'process.exit(1);\n');
+    const crash = { 'judge-a': judgeAgent('score: 2'), 'judge-b': { command: 'node', args: ['scripts/crash-agent.mjs'], capabilities: ['text'] } };
+
+    const { result } = await runStage(root, makeConfig(crash, ['judge-a', 'judge-b'], options));
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.agentId, 'judge-a');
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }, { agent: 'judge-a', retry: null }]);
+  });
+
+  it('переоценка без вердикта — второй агент упал без изменений файлов и агентов не осталось: вердикт по ответу первого', async () => {
+    const root = uncertainProject();
+    writeFileSync(join(root, 'scripts', 'crash-agent.mjs'), 'process.exit(1);\n');
+    const crash = { 'judge-a': judgeAgent('score: 2'), 'judge-b': { command: 'node', args: ['scripts/crash-agent.mjs'], capabilities: ['text'] } };
+    const config = makeConfig(crash, ['judge-a', 'judge-b'], options);
+    // Снимок артефактов включён: падение без изменений — переход к следующему агенту, а его нет.
+    config.pipeline.execution.artifact_snapshot_enabled = true;
+
+    const { result, logger } = await runStage(root, config);
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.agentId, 'judge-a');
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }, { agent: 'judge-a', retry: null }]);
+    assert.ok(logger.lines.some((l) => l.includes('artifact diff empty — falling back in-stage')), logger.lines.join('\n'));
+  });
+
+  it('второй агент списка не проходит по способностям (пункт visual, текстовый агент) — флага переоценки нет', async () => {
+    const root = uncertainProject();
+    const byCaps = { 'judge-text': judgeAgent('score: 5'), 'judge-vision': judgeAgent('score: 2', { capabilities: ['text', 'multimodal'] }) };
+
+    const { result } = await runStage(root, makeConfig(byCaps, ['judge-vision', 'judge-text'], options),
+      { required_capabilities: '["text","multimodal"]' });
+
+    assert.equal(result.status, 'failed');
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-vision', retry: null }]);
+  });
+
+  it('повторный apply упал — ошибка стадии apply_failed, одно событие запуска агента', async () => {
+    const root = uncertainProject();
+    // apply без флага переоценки падает.
+    writeFileSync(join(root, 'scripts', 'apply.mjs'),
+      UNCERTAIN_APPLY_SCRIPT.replace("const retry = process.env.WORKFLOW_MODEL_IO_RETRY ?? null;",
+        "const retry = process.env.WORKFLOW_MODEL_IO_RETRY ?? null;\nif (retry === null) process.exit(3);"));
+
+    const { result } = await runStage(root, makeConfig(agents, ['judge-a', 'judge-b'], options), {}, {
+      onExecutor: (executor) => {
+        const resolve = executor.resolveAgent.bind(executor);
+        executor.resolveAgent = (...args) => (applyCalls(root).length > 0
+          ? { blocked: 'all_unhealthy', reason: 'test' } : resolve(...args));
+      },
+    });
+
+    assert.equal(result.status, 'error');
+    assert.equal(result.result.error_class, 'apply_failed');
+    const journal = join(root, '.workflow', 'metrics', 'agent-runs.jsonl');
+    const runs = readFileSync(journal, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+      .filter((event) => event.type === 'run' && event.agent === 'judge-a');
+    assert.equal(runs.length, 1, JSON.stringify(runs));
+    assert.equal(runs[0].result_status, 'uncertain');
+  });
+
+  it('остановка пайплайна во время переоценки — вердикта нет: apply второй раз не запускается', async () => {
+    const root = uncertainProject();
+    const slow = { 'judge-a': judgeAgent('score: 2'), 'judge-b': judgeAgent('sleep;score: 5') };
+    let executor = null;
+
+    const stage = runStage(root, makeConfig(slow, ['judge-a', 'judge-b'], options), {}, { onExecutor: (e) => { executor = e; } });
+    for (let i = 0; i < 400 && judgeCalls(root).length < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(judgeCalls(root).length, 2, 'второй агент запущен');
+    executor.killCurrentChild();
+
+    const { result } = await stage;
+    assert.equal(result.status, 'error');
+    assert.equal(result.result.error_class, 'aborted');
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }], 'вердикта по неуверенному ответу нет');
+  });
+
+  it('переоценка без вердикта — apply второго агента вернул не passed и не failed: вердикт по ответу первого', async () => {
+    const root = uncertainProject();
+    writeFileSync(join(root, 'scripts', 'apply.mjs'), UNCERTAIN_APPLY_SCRIPT.replace(
+      "const status = low ?",
+      "const status = process.env.WORKFLOW_MODEL_AGENT === 'judge-b' ? 'skipped' : low ?"));
+
+    const { result, logger } = await runStage(root, makeConfig(agents, ['judge-a', 'judge-b'], options));
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.agentId, 'judge-a');
+    assert.ok(logger.lines.some((l) => l.includes('re-review by "judge-b" gave status=skipped')), logger.lines.join('\n'));
+  });
+
+  it('три агента: второй тоже неуверен, третий без балла — вердикт по последнему неуверенному ответу', async () => {
+    const root = uncertainProject();
+    const three = { 'judge-a': judgeAgent('score: 2'), 'judge-b': judgeAgent('score: 3'), 'judge-c': judgeAgent('без балла') };
+
+    const { result } = await runStage(root, makeConfig(three, ['judge-a', 'judge-b', 'judge-c'], options));
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.agentId, 'judge-b');
+    assert.equal(result.modelIo.agent, 'judge-b');
+    assert.deepEqual(applyCalls(root), [
+      { agent: 'judge-a', retry: '1' }, { agent: 'judge-b', retry: '1' }, { agent: 'judge-b', retry: null },
+    ]);
+  });
+
+  it('остановка пайплайна между неуверенным ответом и выбором следующего агента — STOPPED, apply второй раз не запускается', async () => {
+    const root = uncertainProject();
+    let executor = null;
+
+    const stage = runStage(root, makeConfig(agents, ['judge-a', 'judge-b'], options), {}, {
+      onExecutor: (e) => {
+        executor = e;
+        const resolve = e.resolveAgent.bind(e);
+        // Остановка пришла сразу после ответа первого агента, следующего уже нет.
+        e.resolveAgent = (...args) => {
+          if (applyCalls(root).length === 0) return resolve(...args);
+          e.stopRequested = true;
+          return { blocked: 'all_unhealthy', reason: 'test' };
+        };
+      },
+    });
+
+    await assert.rejects(stage, (err) => err.code === 'STOPPED');
+    assert.ok(executor.stopRequested);
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }], 'вердикта по неуверенному ответу нет');
+  });
+
+  it('второй агент уверенно провалил — вердикт его, ответ первого повторно не применяется', async () => {
+    const root = uncertainProject();
+    // Второму агенту переоценивать некому: без флага его низкий уровень — уверенный провал.
+    const confidentFail = { 'judge-a': judgeAgent('score: 2'), 'judge-b': judgeAgent('score: 3') };
+
+    const { result } = await runStage(root, makeConfig(confidentFail, ['judge-a', 'judge-b'], options));
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.agentId, 'judge-b');
+    assert.equal(result.modelIo.agent, 'judge-b');
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }, { agent: 'judge-b', retry: null }]);
+  });
+
+  it('остановка пайплайна во время вердикта по неуверенному ответу — стадия прерывается, а не apply_failed', async () => {
+    const root = uncertainProject();
+    // apply без флага (вердикт по ответу первого агента) долго думает — его снимает остановка.
+    writeFileSync(join(root, 'scripts', 'apply.mjs'), UNCERTAIN_APPLY_SCRIPT.replace(
+      "const levels = request.questions",
+      "if (retry === null && process.env.WORKFLOW_MODEL_AGENT === 'judge-a') await new Promise((resolve) => setTimeout(resolve, 15000));\nconst levels = request.questions"));
+    const noScore = { 'judge-a': judgeAgent('score: 2'), 'judge-b': judgeAgent('без балла') };
+    let executor = null;
+
+    const started = Date.now();
+    const stage = runStage(root, makeConfig(noScore, ['judge-a', 'judge-b'], options), {}, { onExecutor: (e) => { executor = e; } });
+    for (let i = 0; i < 400 && applyCalls(root).length < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(applyCalls(root).length, 2, 'вердикт по ответу первого агента запущен');
+    executor.killCurrentChild();
+
+    await assert.rejects(stage, (err) => err.code !== undefined && err.code !== 'apply_failed');
+    assert.ok(Date.now() - started < 12000, 'apply снят остановкой, а не ожиданием');
+  });
+});

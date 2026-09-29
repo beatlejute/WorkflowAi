@@ -313,7 +313,7 @@ function answersWithoutConfidence(first, second) {
   };
 }
 
-function runApply(response, { options } = {}) {
+function runApply(response, { options, env = {} } = {}) {
   const root = makeProject(evidenceFixture({ items: APPLY_ITEMS }));
   const dir = join(root, '.workflow', 'state', 'model-io');
   mkdirSync(dir, { recursive: true });
@@ -323,9 +323,12 @@ function runApply(response, { options } = {}) {
     WORKFLOW_MODEL_REQUEST: join(dir, 'request.json'),
     WORKFLOW_MODEL_RESPONSE: join(dir, 'response.json'),
     ...(options ? { WORKFLOW_MODEL_IO_OPTIONS: JSON.stringify(options) } : {}),
+    ...env,
   });
   return { root, result };
 }
+
+const RETRY = { env: { WORKFLOW_MODEL_IO_RETRY: '1' } };
 
 describe('apply-review.js: вердикт по ответу модели и запись ревью', () => {
   it('уровни 5 и 4 при уверенности 0.9 — passed; строка ## Ревью и evidence называют агента и модель', () => {
@@ -361,13 +364,49 @@ describe('apply-review.js: вердикт по ответу модели и за
     assert.deepEqual([items[1].passed, items[2].passed], [true, false]);
   });
 
-  it('уровень 4 при уверенности 0.6 — failed: неуверенная оценка засчитывается провалом', () => {
+  it('уровень 4 при уверенности 0.6 без WORKFLOW_MODEL_IO_RETRY — failed: переоценивать некому, неуверенность — провал', () => {
     const { root, result } = runApply(answersWithConfidence([5, 0.9], [4, 0.6]));
 
     assert.equal(result.status, 'failed');
     assert.equal(result.failed_items, '2');
     assert.equal(getLastReviewStatus(ticketText(root)), 'failed');
     assert.deepEqual(readJson(root, EVIDENCE_FILE).review.items[2], { level: 4, confidence: 0.6, passed: false, reason: null });
+  });
+
+  // ListeningGlass 2026-09-29: уровень 5 из 5 при уверенности 0.79 засчитывался провалом,
+  // и Opus четыре раза переделывал готовую работу.
+  it('уровень 5 при уверенности 0.79 с WORKFLOW_MODEL_IO_RETRY — uncertain: ни строки ревью, ни записи в evidence', () => {
+    const { root, result } = runApply(answersWithConfidence([5, 0.9], [5, 0.79]), RETRY);
+
+    assert.deepEqual(result, {
+      status: 'uncertain', uncertain_items: '2', agent: 'review-agent', model: 'test/decisions-model',
+      cost_usd: '0.0002', review_written: 'false',
+    });
+    assert.equal(ticketText(root), TICKET, 'строку ревью пишет агент, который вынесет вердикт');
+    assert.deepEqual(readJson(root, EVIDENCE_FILE).review, { agent: null, model: null, items: {} });
+  });
+
+  it('неуверенный провал (уровень 2 при уверенности 0.6) с WORKFLOW_MODEL_IO_RETRY — тоже uncertain', () => {
+    const { result } = runApply(answersWithConfidence([5, 0.9], [2, 0.6]), RETRY);
+
+    assert.equal(result.status, 'uncertain');
+    assert.equal(result.uncertain_items, '2');
+  });
+
+  it('уверенный провал решает вердикт и при WORKFLOW_MODEL_IO_RETRY: failed со строкой ревью, неуверенный пункт тоже в failed_items', () => {
+    const { root, result } = runApply(answersWithConfidence([2, 0.9], [5, 0.6]), RETRY);
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.failed_items, '1,2');
+    assert.equal(getLastReviewStatus(ticketText(root)), 'failed');
+  });
+
+  it('WORKFLOW_MODEL_IO_RETRY без неуверенных пунктов вердикта не меняет: уверенность null и ≥ порога — passed', () => {
+    const { root, result } = runApply({ ...answersWithConfidence([5, 0.8], [4, 0.9]),
+      answers: { ...answersWithConfidence([5, 0.8], [4, 0.9]).answers, 'dod-2': { level: 4, confidence: null, probabilities: null, reason: null } } }, RETRY);
+
+    assert.equal(result.status, 'passed');
+    assert.equal(getLastReviewStatus(ticketText(root)), 'passed');
   });
 
   it('уровень 4 без уверенности (null) — passed; модель и цена, которых ответ не назвал, — unknown', () => {
@@ -475,5 +514,50 @@ describe('стадия ревью через раннер: prepare-review.js →
         3: { level: 2, confidence: 0.95, passed: false, reason: 'mock judge' },
       },
     });
+  });
+
+  // ListeningGlass 2026-09-29: уровень 5 из 5 при уверенности 0.79 засчитывался провалом,
+  // и Opus четыре раза переделывал готовую работу.
+  it('первый агент неуверен в пункте prose — оба пункта переоценивает второй: passed, одна строка ревью — второго агента', async () => {
+    const root = makeProject();
+    mkdirSync(join(root, '.workflow', 'config'), { recursive: true });
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    writeFileSync(join(root, 'scripts', 'judge.mjs'), JUDGE_AGENT_SCRIPT);
+    const outcome = (status) => ({ stage: 'end', params: { review_outcome: status, review_error: '$result.reason' } });
+    // Ответ — по сквозному номеру запуска: запуски 1–2 — первый агент, 3–4 — второй.
+    const judge = (answers) => ({ command: 'node', args: ['scripts/judge.mjs', ...answers], prompt_stdin: true, capabilities: ['text', 'multimodal'] });
+    const config = {
+      pipeline: {
+        name: 'review-model-io-uncertain',
+        version: '1.0',
+        entry: 'review-result',
+        execution: { timeout_per_stage: 60, delay_between_stages: 0, artifact_snapshot_enabled: false },
+        context: CONTEXT,
+        agents: {
+          'judge-first': judge(['score: 5;confidence: 0.79;model: test/first', 'score: 5;confidence: 0.9;model: test/first']),
+          'judge-second': judge(['', '', 'score: 5;confidence: 0.9;model: test/second', 'score: 4;confidence: 0.85;model: test/second']),
+        },
+        stages: {
+          'review-result': {
+            agents: ['judge-first', 'judge-second'],
+            model_io: { prepare: PREPARE, apply: APPLY, options: { pass_level: 4, min_confidence: 0.8 } },
+            goto: { passed: outcome('passed'), failed: outcome('failed'), error: outcome('error') },
+          },
+        },
+      },
+    };
+    writeFileSync(join(root, '.workflow', 'config', 'pipeline.yaml'), JSON.stringify(config, null, 2));
+
+    const run = await runPipeline(['--project', root]);
+
+    assert.equal(run.exitCode, 0, JSON.stringify(run.details || run.error || ''));
+    assert.equal(run.result.context.review_outcome, 'passed', run.result.context.review_error);
+    const prompts = readFileSync(join(root, '.workflow', 'tmp', 'judge-prompts.jsonl'), 'utf8').trim().split('\n');
+    assert.equal(prompts.length, 4, 'по два запуска на агента — оба пункта переоценены');
+    const rows = ticketText(root).split('\n').filter((line) => /^\| \d{4}-\d{2}-\d{2} \|/.test(line));
+    assert.equal(rows.length, 1, 'неуверенный ответ строки ревью не пишет');
+    assert.equal(rows[0].replace(/^\| \d{4}-\d{2}-\d{2} /, ''),
+      `| ✅ passed | review-result: пункты DoD 2, 3 пройдены; evidence ${EVIDENCE_FILE}; модель test/second | judge-second |`);
+    assert.equal(readJson(root, EVIDENCE_FILE).review.agent, 'judge-second');
   });
 });

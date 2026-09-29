@@ -12,12 +12,16 @@
  *     cost_usd — одной формы у агента с командой и у агента kind: http;
  *   - WORKFLOW_MODEL_IO_OPTIONS — pass_level и min_confidence из model_io.options стадии;
  *   - WORKFLOW_MODEL_AGENT — id агента, который отвечал;
+ *   - WORKFLOW_MODEL_IO_RETRY=1 — после этого агента в попытке есть другой (раннер);
  *   - промпт стадии последним аргументом: ticket_id и evidence_file из блока `Context:`.
  *
  * Пункт пройден, если level ≥ pass_level, а уверенность модели null (агент её не
- * сообщает) или ≥ min_confidence. Неуверенная оценка — провал, переоценки нет
- * (решение стейкхолдера 2026-09-24): следующая попытка по счётчику берёт следующего
- * агента списка стадии.
+ * сообщает) или ≥ min_confidence. Неуверенная оценка — уверенность ниже
+ * min_confidence. Есть неуверенные пункты и нет уверенно проваленных, а раннер
+ * поставил WORKFLOW_MODEL_IO_RETRY — status: uncertain без записей: пункты
+ * переоценивает следующий агент стадии в той же попытке (решение стейкхолдера
+ * 2026-09-29; прежде, с 2026-09-24, неуверенность засчитывалась провалом, и задачу
+ * выполняли заново). Переоценивать некому — неуверенный пункт провален.
  *
  * Запись:
  *   - раздел review файла evidence: { agent, model, items: { <номер пункта>:
@@ -26,6 +30,8 @@
  *     непройденных пунктов, путь evidence, модель), агент.
  *
  * RESULT:
+ *   status: uncertain, uncertain_items — номера неуверенных пунктов, agent, model,
+ *     cost_usd, review_written: false — ни тикет, ни evidence не меняются;
  *   status: passed | failed; failed_items — номера непройденных пунктов через запятую;
  *     agent; model и cost_usd (unknown — ответ их не назвал); review_written — строка
  *     `## Ревью` записана;
@@ -107,15 +113,32 @@ function apply(prompt) {
 
   const items = {};
   const failed = [];
+  const uncertain = [];
   for (const question of request.questions) {
     const answer = response.answers[question.id];
     const confidence = answer.confidence ?? null;
-    const passed = answer.level >= passLevel && (confidence === null || confidence >= minConfidence);
+    const confident = confidence === null || confidence >= minConfidence;
+    const passed = answer.level >= passLevel && confident;
     const number = question.id.replace(/^dod-/, '');
     items[number] = { level: answer.level, confidence, passed, reason: answer.reason ?? null };
     if (!passed) failed.push(number);
+    if (!confident) uncertain.push(number);
   }
   const model = response.model ?? null;
+
+  // Уверенный провал решает вердикт сам; иначе неуверенные пункты переоценивает
+  // следующий агент стадии, если он есть. Неуверенный пункт всегда среди
+  // непройденных, поэтому уверенных провалов нет, когда неуверенны все непройденные.
+  if (process.env.WORKFLOW_MODEL_IO_RETRY === '1' && uncertain.length > 0 && failed.every((number) => uncertain.includes(number))) {
+    return {
+      status: 'uncertain',
+      uncertain_items: uncertain.join(','),
+      agent,
+      model: model ?? 'unknown',
+      cost_usd: response.cost_usd ?? 'unknown',
+      review_written: false,
+    };
+  }
 
   const evidence = readJson(evidencePath);
   evidence.review = { agent, model, items };
