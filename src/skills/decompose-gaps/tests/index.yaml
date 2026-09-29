@@ -53,3 +53,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-28"]
     tags: [scope-check, recheck, regression-guard]
     severity: high
+  - id: TC-DECOMPOSE-GAPS-009
+    file: cases/TC-DECOMPOSE-GAPS-009-unblock-and-dod-format.yaml
+    origin_chg: ["ad-hoc-2026-09-29"]
+    tags: [recheck, unblocks, dod-format, regression-guard]
+    severity: high

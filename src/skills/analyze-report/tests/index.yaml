@@ -43,3 +43,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-28"]
     tags: [gaps, output, regression-guard]
     severity: high
+  - id: TC-ANALYZE-REPORT-007
+    file: cases/TC-ANALYZE-REPORT-007-blocked-ticket-is-gap.yaml
+    origin_chg: ["ad-hoc-2026-09-29"]
+    tags: [gaps, output, blocked, regression-guard]
+    severity: high

@@ -47,3 +47,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-24-judge-pilot"]
     tags: [rubric-scale, test-authorship, anti-pattern]
     severity: high
+  - id: TC-COACH-007
+    file: cases/TC-COACH-007-new-artifact-fate-of-old.yaml
+    origin_chg: ["ad-hoc-2026-09-29"]
+    tags: [draft, anti-pattern, regression-guard]
+    severity: high
