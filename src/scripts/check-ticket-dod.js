@@ -16,7 +16,9 @@
  *   node .workflow/src/scripts/check-ticket-dod.js <ticket_id|путь к файлу> [...]
  *
  * Тикет по id ищется во всех колонках .workflow/tickets/. Тикет не в формате
- * dod_format: 2 и тикет type: human гейт не проходят — для них «ok».
+ * dod_format: 2 и тикет type: human гейт не проходят — для них «ok». Исключение —
+ * тикет без dod_format: 2 (и не human) с записями проверок в DoD: это
+ * `dod_format_missing`, проверки такого тикета не запустились бы (hasCheckRecords).
  *
  * Вывод:
  *   <ticket_id>: ok | <причина>; <причина>
@@ -32,10 +34,33 @@ import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { parseFrontmatter, printResult } from 'workflow-ai/lib/utils.mjs';
-import { dodStartProblems, isDodFormat2 } from '../lib/check-runner.mjs';
+import { dodStartProblems, isDodFormat2, parseDodChecks, DOD_HEADING } from '../lib/check-runner.mjs';
 
 const PROJECT_DIR = findProjectRoot();
 const TICKETS_DIR = path.join(PROJECT_DIR, '.workflow', 'tickets');
+
+// Строка записи проверки `  - check: …` в секции DoD. parseDodChecks видит только
+// вложенную строку под пунктом и с одной формой; запись до первого пункта или вместе
+// с prose/visual (multiple_forms) тоже значит, что автор писал проверки.
+const CHECK_LINE = /^\s+[-*]\s+check\s*:/m;
+
+/**
+ * Автор записал проверки DoD — пункт формы check или строка `- check:` в секции.
+ *
+ * Без `dod_format: 2` проверки не запускаются ни гейтом move-to-ready, ни ревью:
+ * тикет уходит модели (review-result-legacy). PulseProxy PLAN-017 2026-09-28: FIX-032
+ * и QA-163 записаны с проверками, но без поля — шаблон тикета проекта был апрельской
+ * копией без него, — и ни одна проверка не выполнилась.
+ */
+function hasCheckRecords(body) {
+  if (parseDodChecks(body).some((item) => item.kind === 'check')) return true;
+  const text = String(body ?? '');
+  const heading = DOD_HEADING.exec(text);
+  if (!heading) return false;
+  const start = heading.index + heading[0].length;
+  const nextH2 = text.indexOf('\n## ', start);
+  return CHECK_LINE.test(text.slice(start, nextH2 === -1 ? text.length : nextH2));
+}
 
 function findTicket(ref) {
   const asPath = path.resolve(PROJECT_DIR, ref);
@@ -71,6 +96,11 @@ async function main() {
     }
     const { frontmatter, body } = parseFrontmatter(fs.readFileSync(file, 'utf8'));
     const id = frontmatter.id || path.basename(file, '.md');
+    if (frontmatter.type !== 'human' && !isDodFormat2(frontmatter) && hasCheckRecords(body)) {
+      withProblems++;
+      console.log(`${id}: dod_format_missing: проверки DoD есть, а dod_format: 2 во frontmatter нет — проверки не запустятся, ревью уйдёт модели`);
+      continue;
+    }
     if (frontmatter.type === 'human' || !isDodFormat2(frontmatter)) {
       console.log(`${id}: ok (гейт не применяется: ${frontmatter.type === 'human' ? 'type human' : 'не dod_format 2'})`);
       continue;

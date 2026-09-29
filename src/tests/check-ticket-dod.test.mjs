@@ -11,7 +11,10 @@
  *  - проверка с оператором оболочки — check_denied, проверка, зелёная до работы, —
  *    check_green_before_start, код выхода 1;
  *  - красная проверка и зелёная с `regression: true` — ok, код выхода 0;
- *  - тикет не в формате dod_format: 2 — ok без запуска проверок;
+ *  - тикет не в формате dod_format: 2 с записями проверок в DoD — dod_format_missing,
+ *    код выхода 1, проверки не запускаются (PulseProxy 2026-09-28: FIX-032 и QA-163
+ *    записаны с проверками без поля, и их ревью ушло модели); без записей проверок и
+ *    тикет type: human — ok без запуска проверок;
  *  - файл тикета остаётся байт в байт прежним, тикет — в своей колонке;
  *  - тикет, которого нет на доске, — код выхода 1 с его id в выводе.
  *
@@ -108,18 +111,75 @@ test('красная проверка и зелёная с regression — ok, к
   assert.match(out, /status: ok/);
 });
 
-test('тикет не в dod_format 2 — ok без запуска проверок', () => {
+test('тикет с проверками без dod_format 2 — dod_format_missing и код 1, проверки не запускаются', () => {
   const marker = path.join(root, 'ran.txt');
-  putTicket('FIX-903', [
+  const file = putTicket('FIX-903', [
     '- [ ] Пункт',
     check(`node -e "require('fs').writeFileSync('ran.txt', '')"`),
   ], { dodFormat: null });
+  const before = fs.readFileSync(file, 'utf8');
 
   const { code, out } = run('FIX-903');
 
+  assert.equal(code, 1, out);
+  assert.match(out, /FIX-903: dod_format_missing: проверки DoD есть, а dod_format: 2 во frontmatter нет/);
+  assert.match(out, /status: problems/);
+  assert.equal(fs.existsSync(marker), false, 'проверки тикета без dod_format 2 не исполняются');
+  assert.equal(fs.readFileSync(file, 'utf8'), before, 'скрипт только читает тикет');
+});
+
+test('строка `- check:` вне пункта или рядом с prose без dod_format 2 — тоже dod_format_missing', () => {
+  // До первого пункта parseDodChecks строку не читает; check и prose в одном пункте —
+  // multiple_forms, kind null. Проверки автор всё равно писал.
+  putTicket('FIX-906', [
+    check(RED),
+    '- [ ] Пункт',
+  ], { dodFormat: null });
+  putTicket('FIX-907', [
+    '- [ ] Пункт',
+    `${check(RED)}, prose: \`руками\``,
+  ], { dodFormat: 1 });
+
+  const { code, out } = run('FIX-906', 'FIX-907');
+
+  assert.equal(code, 1, out);
+  assert.match(out, /FIX-906: dod_format_missing/);
+  assert.match(out, /FIX-907: dod_format_missing/);
+  assert.match(out, /with_problems: 2/);
+});
+
+test('тикет без проверок и не в dod_format 2 — ok, гейт не применяется', () => {
+  putTicket('FIX-904', [
+    '- [ ] Пункт без проверки',
+    '  - prose: `проверяется ревью`',
+    '  - заметка: check: не запись проверки',
+  ], { dodFormat: null });
+
+  const { code, out } = run('FIX-904');
+
   assert.equal(code, 0, out);
-  assert.match(out, /FIX-903: ok \(гейт не применяется/);
-  assert.equal(fs.existsSync(marker), false, 'проверки старого формата не исполняются');
+  assert.match(out, /FIX-904: ok \(гейт не применяется: не dod_format 2\)/);
+});
+
+test('тикет type human с проверками без dod_format 2 — ok', () => {
+  const file = path.join(backlog, 'HUMAN-905.md');
+  fs.writeFileSync(file, [
+    '---',
+    'id: "HUMAN-905"',
+    'type: human',
+    '---',
+    '',
+    '## Критерии готовности (Definition of Done)',
+    '',
+    '- [ ] Пункт',
+    check(RED),
+    '',
+  ].join('\n'), 'utf8');
+
+  const { code, out } = run('HUMAN-905');
+
+  assert.equal(code, 0, out);
+  assert.match(out, /HUMAN-905: ok \(гейт не применяется: type human\)/);
 });
 
 test('тикета нет на доске — код 1 и его id в выводе', () => {
