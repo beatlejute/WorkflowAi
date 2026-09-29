@@ -1008,11 +1008,11 @@ ${summary}
   });
 
   /** Отдельный git-репозиторий со своим .workflow/: корень проекта скрипт ищет от cwd. */
-  function makeGitRepo() {
+  function makeGitRepo(initArgs = []) {
     const repo = mkdtempSync(join(root, 'git-'));
     mkdirSync(join(repo, '.workflow', 'tickets', 'review'), { recursive: true });
     const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: 'pipe' });
-    git('init', '-q');
+    git('init', '-q', ...initArgs);
     const commit = () => git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'base');
     return { repo, git, commit };
   }
@@ -1095,18 +1095,89 @@ ${files.map((file) => `- \`${file}\``).join('\n')}
     assert.match(result.warnings, /дифф неполон: не внутри корня проекта/);
   });
 
-  test('дифф: репозиторий без коммитов — дифф пуст, причина в diff_error', () => {
-    const { repo } = makeGitRepo();
+  // ListeningGlass 2026-09-29: в репозитории без коммитов `git diff HEAD` отвечал «bad
+  // revision 'HEAD'», дифф терялся весь, и ревью проваливало пункт «по диффу» по кругу.
+  test('дифф: репозиторий без коммитов — каждый файл новый: отслеживаемый целиком с правкой после add, неотслеживаемый; diff_error нет', () => {
+    const { repo, git } = makeGitRepo();
+    writeFileSync(join(repo, 'staged.txt'), 'STAGED\n', 'utf8');
+    git('add', 'staged.txt');
+    writeFileSync(join(repo, 'staged.txt'), 'STAGED\nAFTER-ADD\n', 'utf8');
     writeFileSync(join(repo, 'new.txt'), 'NEW\n', 'utf8');
-    const ticketPath = writeGitTicket(repo, 'IMPL-812', { files: ['new.txt'] });
+    const ticketPath = writeGitTicket(repo, 'IMPL-812', { files: ['staged.txt', 'new.txt'] });
+
+    const result = runScript(ticketPath, repo);
+
+    assert.equal(result.status, 'all_green', `fail_reasons=${result.fail_reasons || ''} warnings=${result.warnings || ''}`);
+    const evidence = readEvidence('IMPL-812', repo);
+    assert.equal(evidence.diff_error, null);
+    assert.doesNotMatch(result.warnings || '', /дифф неполон/);
+    assert.match(evidence.diff, /\+\+\+ b\/staged\.txt\n@@ -0,0 \+1,2 @@\n\+STAGED\n\+AFTER-ADD$/m);
+    assert.match(evidence.diff, /\+\+\+ b\/new\.txt\n@@ -0,0 \+1 @@\n\+NEW$/m);
+  });
+
+  test('дифф: репозиторий с коммитом — база HEAD, а не пустое дерево: неизменённая строка не входит в дифф как добавленная', () => {
+    const { repo, git, commit } = makeGitRepo();
+    writeFileSync(join(repo, 'kept.txt'), 'KEPT\n', 'utf8');
+    git('add', 'kept.txt');
+    commit();
+    writeFileSync(join(repo, 'kept.txt'), 'KEPT\nADDED\n', 'utf8');
+    const ticketPath = writeGitTicket(repo, 'IMPL-819', { files: ['kept.txt'] });
 
     const result = runScript(ticketPath, repo);
 
     assert.equal(result.status, 'all_green', `fail_reasons=${result.fail_reasons || ''}`);
-    const evidence = readEvidence('IMPL-812', repo);
-    assert.deepEqual([evidence.diff, evidence.diff_truncated], ['', null]);
-    // git 2.52 отвечает «fatal: bad revision 'HEAD'»; проверяется только упоминание HEAD.
+    const evidence = readEvidence('IMPL-819', repo);
+    assert.equal(evidence.diff_error, null);
+    assert.match(evidence.diff, /^\+ADDED$/m);
+    assert.doesNotMatch(evidence.diff, /^\+KEPT$/m);
+  });
+
+  // Пустое дерево — хэш в формате объектов репозитория, а не константа SHA-1: в
+  // репозитории SHA-256 `git diff 4b825dc…` — «bad revision», и дифф терялся бы снова.
+  test('дифф: репозиторий SHA-256 без коммитов — новый файл в диффе, diff_error нет', (t) => {
+    let repo;
+    try {
+      ({ repo } = makeGitRepo(['--object-format=sha256']));
+    } catch {
+      t.skip('git без --object-format=sha256');
+      return;
+    }
+    writeFileSync(join(repo, 'new.txt'), 'NEW\n', 'utf8');
+    execFileSync('git', ['add', 'new.txt'], { cwd: repo, stdio: 'pipe' });
+    const ticketPath = writeGitTicket(repo, 'IMPL-820', { files: ['new.txt'] });
+
+    const result = runScript(ticketPath, repo);
+
+    assert.equal(result.status, 'all_green', `fail_reasons=${result.fail_reasons || ''} warnings=${result.warnings || ''}`);
+    const evidence = readEvidence('IMPL-820', repo);
+    assert.equal(evidence.diff_error, null);
+    assert.match(evidence.diff, /\+\+\+ b\/new\.txt\n@@ -0,0 \+1 @@\n\+NEW$/m);
+  });
+
+  // Испорченная ссылка ветки даёт тот же пустой `rev-parse --verify --quiet HEAD`, что и
+  // ветка без коммитов; на пустом дереве неизменённые строки стали бы добавленными.
+  test('дифф: испорченная ссылка ветки — не пустое дерево: дифф не собран, причина в diff_error', (t) => {
+    const { repo, git, commit } = makeGitRepo();
+    writeFileSync(join(repo, 'kept.txt'), 'KEPT\n', 'utf8');
+    git('add', 'kept.txt');
+    commit();
+    writeFileSync(join(repo, 'kept.txt'), 'KEPT\nADDED\n', 'utf8');
+    // Порча — запись в файл ссылки; у хранилища reftable (init.defaultRefFormat,
+    // GIT_DEFAULT_REF_FORMAT) файлов ссылок нет.
+    const refFile = join(repo, '.git', ...git('symbolic-ref', 'HEAD').trim().split('/'));
+    if (!existsSync(refFile)) {
+      t.skip('ссылки ветки не в файлах (reftable)');
+      return;
+    }
+    writeFileSync(refFile, 'garbage\n', 'utf8');
+    const ticketPath = writeGitTicket(repo, 'IMPL-821', { files: ['kept.txt'] });
+
+    const result = runScript(ticketPath, repo);
+
+    const evidence = readEvidence('IMPL-821', repo);
+    assert.doesNotMatch(evidence.diff, /^\+KEPT$/m);
     assert.match(evidence.diff_error, /HEAD/);
+    assert.match(result.warnings, /дифф неполон/);
   });
 
   test('дифф: проект не в репозитории git — дифф пуст, причина в diff_error короткой строкой', () => {

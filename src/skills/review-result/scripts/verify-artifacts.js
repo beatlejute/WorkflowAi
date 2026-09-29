@@ -617,10 +617,35 @@ function runGit(args, okStatuses = [0]) {
 }
 
 /**
+ * Ветка без коммитов: HEAD — символическая ссылка на ветку, которой ещё нет.
+ * Проверено git 2.52: без коммитов `rev-parse --verify --quiet HEAD` — код 1 и
+ * пустой вывод, `symbolic-ref -q HEAD` — код 0. У испорченной ссылки ветки (мусор
+ * или пустой файл) `rev-parse` тот же, но `symbolic-ref` — код 128.
+ */
+function unbornBranch() {
+  const head = runGit(['rev-parse', '--verify', '--quiet', 'HEAD'], [0, 1]);
+  if (!head.ok || head.stdout.trim() !== '') return false;
+  return runGit(['symbolic-ref', '-q', 'HEAD']).ok;
+}
+
+/**
+ * Хэш пустого дерева в формате объектов репозитория (SHA-1 или SHA-256); null — ошибка
+ * в problems. Вход `--stdin` пуст: spawnSync закрывает неиспользуемый канал stdin.
+ */
+function emptyTreeHash(problems) {
+  const tree = runGit(['hash-object', '-t', 'tree', '--stdin']);
+  if (tree.ok) return tree.stdout.trim();
+  problems.push(`пустое дерево: ${tree.error}`);
+  return null;
+}
+
+/**
  * Изменения отслеживаемых файлов относительно HEAD и неотслеживаемые файлы
  * целиком, как новые. Игнорируемые git файлы в дифф не попадают. Ошибка git
- * идёт в problems; ошибка `git diff HEAD` (git нет, проект не в репозитории,
- * у репозитория нет коммитов) — дифф не собран весь.
+ * идёт в problems. Дифф не собран весь, если git нет или проект не в репозитории,
+ * если не получен хэш пустого дерева или падает базовый дифф (испорченная ссылка
+ * ветки — «bad revision 'HEAD'»). У репозитория без коммитов база — пустое дерево:
+ * каждый файл в нём новый.
  */
 function gitDiff(pathspecs, problems) {
   // Вне репозитория `git diff HEAD -- <пути>` уходит в режим --no-index и вместо
@@ -631,7 +656,15 @@ function gitDiff(pathspecs, problems) {
     problems.push(/not a git repository/i.test(inside.error) ? 'проект не в репозитории git' : inside.error);
     return '';
   }
-  const tracked = runGit(['diff', 'HEAD', '--no-color', '--', ...pathspecs]);
+  // Без коммитов `git diff HEAD` отвечает «bad revision 'HEAD'», и дифф терялся весь,
+  // вместе с новыми файлами: ListeningGlass 2026-09-29 — ревью не видело ни строки
+  // изменений, пункт DoD «по диффу» проваливался, и Opus переделывал задачу по кругу.
+  // Пустое дерево — только у ветки без коммитов: HEAD указывает на ветку, а ветки
+  // ещё нет. Испорченная ссылка ветки тоже даёт пустой `rev-parse`, но на пустом
+  // дереве неизменённые строки стали бы добавленными — её ошибку показывает `git diff HEAD`.
+  const base = unbornBranch() ? emptyTreeHash(problems) : 'HEAD';
+  if (base === null) return '';
+  const tracked = runGit(['diff', base, '--no-color', '--', ...pathspecs]);
   if (!tracked.ok) {
     problems.push(tracked.error);
     return '';
