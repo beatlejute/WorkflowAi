@@ -58,3 +58,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-29"]
     tags: [recheck, unblocks, dod-format, regression-guard]
     severity: high
+  - id: TC-DECOMPOSE-GAPS-010
+    file: cases/TC-DECOMPOSE-GAPS-010-success-criterion-gap.yaml
+    origin_chg: ["ad-hoc-2026-09-29"]
+    tags: [scope-check, success-criteria, regression-guard]
+    severity: high

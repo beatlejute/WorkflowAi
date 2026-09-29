@@ -48,3 +48,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-29"]
     tags: [gaps, output, blocked, regression-guard]
     severity: high
+  - id: TC-ANALYZE-REPORT-008
+    file: cases/TC-ANALYZE-REPORT-008-success-criteria-gate.yaml
+    origin_chg: ["ad-hoc-2026-09-29"]
+    tags: [gaps, completion, success-criteria, regression-guard]
+    severity: high
