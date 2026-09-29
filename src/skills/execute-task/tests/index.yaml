@@ -82,3 +82,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-28"]
     tags: [dod-format-2, dod-checks, regression-guard]
     severity: high
+  - id: TC-EXECUTE-TASK-015
+    file: cases/TC-EXECUTE-TASK-015-module-tests-unfiltered.yaml
+    origin_chg: ["ad-hoc-2026-09-29"]
+    tags: [verification, regression, tests, regression-guard]
+    severity: high
