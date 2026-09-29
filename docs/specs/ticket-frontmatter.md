@@ -42,6 +42,13 @@ tags: []
 | `parent_task` | string | Нет | ID родительской задачи (если есть) |
 | `dependencies` | array | Нет | Список ID зависимых тикетов |
 | `conditions` | array | Нет | Условия запуска/перехода стадий |
+| `unblocks` | array | Нет | ID тикетов в `blocked/`, которые `check-conditions` вернёт в `backlog/`, когда этот тикет и все остальные тикеты, называющие ту же цель, будут в `done/` или `archive/` (пишет автор тикета исправления) |
+| `unblocks_applied` | array | Нет | ID из `unblocks`, которые `check-conditions` уже обработал: цель возвращена, была не в `blocked/` или не найдена; следующие запуски их пропускают (пишет `check-conditions`; `[]` — `unblocks` испорчен, предупреждение уже было) |
+| `unblocked_by` | array | Нет | ID всех исправлений, которые называли тикет, когда `check-conditions` вернул его из `blocked/` (пишет `check-conditions`; документирует, почему тикет вернулся) |
+| `supersedes` | array | Нет | ID тикетов в `blocked/`, которые заменяет эта повторная проверка: когда она в `done/` или `archive/`, `check-conditions` переносит их в `done/` (пишет `decompose-gaps`, когда исправление уже готово); тикет назван ещё и в чьём-то `unblocks` — закрывает, только если все такие исправления готовы и закрыты раньше этой проверки (`completed_at`) |
+| `superseded_by` | string | Нет | ID повторной проверки, заменившей тикет; с ним тикет перенесён из `blocked/` в `done/` (пишет `check-conditions`) |
+| `rechecked_at` | string | Нет | Время, когда сценарий тикета, закрытого по `supersedes`, прогнала заменившая проверка (её `rechecked_at` или `completed_at`); по нему сверяются исправления, если этот тикет сам заменяет другой (пишет `check-conditions`) |
+| `supersedes_applied` | array | Нет | ID из `supersedes`, которые `check-conditions` уже обработал (как `unblocks_applied`) |
 | `context.files` | array | Нет | Список файлов, релевантных для задачи |
 | `context.references` | array | Нет | Внешние ссылки (URL, документы) |
 | `context.notes` | string | Нет | Дополнительные заметки от создателя |

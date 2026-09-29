@@ -84,6 +84,7 @@ test('демотирование: читатель ни в одной точке
   assert.equal(frontmatter.id, id);
   assert.deepEqual(frontmatter.dependencies, ['TASK-000'], 'зависимости, из-за которых тикет вернули, на месте');
   assert.ok(frontmatter.updated_at, 'время правки обновлено');
+  assert.equal(frontmatter.status, 'backlog', 'status — колонка назначения, не ready');
   assert.ok(body.includes(BODY_TAIL.trim()), 'хвост тела на месте');
 });
 
