@@ -461,6 +461,23 @@ export function edgeGuardHit(config, from, to, { root, ticket } = {}) {
   return null;
 }
 
+// Подсказки к отказам перехода. Журнал отказов PulseProxy 2026-09-25…28: у исполнителя и
+// ревью 964 отказа переходов в 142 сессиях — пачки одновременных goto (все проверяются от
+// одного текущего узла), прыжки через узлы, текст лейбла или `next` вместо ID, цитаты,
+// набранные по памяти. Голое «нет ребра» не говорит, что именно сделано не так.
+const COPY_COMMAND_HINT = ' — возьми команду перехода целиком из «Доступно»';
+
+function noEdgeHint(graph, current, node) {
+  if (!graph?.node(node)) {
+    return ' — узел указывается ID из «Доступно» (например P0R2), а не текстом лейбла и не next';
+  }
+  if (node === current) return ' — это текущий узел';
+  if (reachableFrom(graph, current).has(node)) {
+    return ` — в ${node} ведёт путь через другие узлы: переходы по одному, следующий goto — после ответа на предыдущий; одновременные goto проверяются от одного текущего узла`;
+  }
+  return '';
+}
+
 /**
  * Переход `goto <node> --quote "<текст>"` (§5).
  *
@@ -512,7 +529,7 @@ export function applyGoto(state, graph, config, { node, quote, root, ticket } = 
   const edges = graph?.outgoing(current) || [];
   const edge = edges.find((e) => e.to === node);
   if (!edge) {
-    return deny('no-edge', `нет ребра из ${current} в ${node}`);
+    return deny('no-edge', `нет ребра из ${current} в ${node}${noEdgeHint(graph, current, node)}`);
   }
 
   const quoteMin = config?.quote_min ?? 25;
@@ -521,13 +538,13 @@ export function applyGoto(state, graph, config, { node, quote, root, ticket } = 
   // что именно агент цитировал не так (прогоны 2026-09-22, ×20 «цитата не найдена»).
   const shownQuote = String(quote || '').replace(/\s+/g, ' ').slice(0, 80);
   if (normQuote.length < quoteMin) {
-    return deny('short-quote', `цитата «${shownQuote}» короче ${quoteMin} символов`);
+    return deny('short-quote', `цитата «${shownQuote}» короче ${quoteMin} символов${COPY_COMMAND_HINT}`);
   }
 
   const targetNode = graph?.node(node);
   const targetLabel = targetNode ? normalizeLabel(targetNode.label) : '';
   if (!targetNode || !targetLabel.includes(normQuote)) {
-    return deny('quote-mismatch', `цитата «${shownQuote}» не найдена в лейбле узла ${node} — ${describeQuoteMismatch(normQuote, targetLabel, targetNode?.label)}нужна дословная подстрока лейбла`);
+    return deny('quote-mismatch', `цитата «${shownQuote}» не найдена в лейбле узла ${node} — ${describeQuoteMismatch(normQuote, targetLabel, targetNode?.label)}нужна дословная подстрока лейбла${COPY_COMMAND_HINT}`);
   }
 
   // Страж ребра: ответ на выборе или гейте агент даёт сам, рельсы его не проверяют.

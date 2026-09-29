@@ -87,3 +87,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-29"]
     tags: [verification, regression, tests, regression-guard]
     severity: high
+  - id: TC-EXECUTE-TASK-016
+    file: cases/TC-EXECUTE-TASK-016-goto-one-at-a-time.yaml
+    origin_chg: ["ad-hoc-2026-09-29"]
+    tags: [rails, navigation, regression-guard]
+    severity: medium

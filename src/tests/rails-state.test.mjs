@@ -774,6 +774,53 @@ test('applyGoto: код отказа "quote-mismatch" при цитате не �
   });
   assert.equal(r.ok, false);
   assert.equal(r.code, 'quote-mismatch');
+  assert.match(r.reason, /нужна дословная подстрока лейбла — возьми команду перехода целиком из «Доступно»$/);
+});
+
+// Подсказки к отказам перехода: журнал отказов PulseProxy 2026-09-25…28 — у исполнителя и ревью
+// 964 отказа переходов в 142 сессиях: пачки одновременных goto, прыжки через узлы, текст
+// лейбла или next вместо ID, цитаты по памяти.
+
+test('applyGoto: пачка одновременных goto — второй переход проверяется от прежнего узла, отказ объясняет «по одному»', () => {
+  const first = { node: 'P4E1', history: [], counters: {}, denials: {} };
+  const second = { node: 'P4E1', history: [], counters: {}, denials: {} }; // то же состояние: ответа на первый ещё нет
+  assert.equal(applyGoto(first, GRAPH, CONFIG, { node: 'P4R1', quote: 'писать только внутри области скила' }).ok, true);
+  const r = applyGoto(second, GRAPH, CONFIG, { node: 'P4S1', quote: 'внести правку в SKILL.md согласно плану' });
+  assert.equal(r.code, 'no-edge');
+  assert.equal(
+    r.reason,
+    'нет ребра из P4E1 в P4S1 — в P4S1 ведёт путь через другие узлы: переходы по одному, следующий goto — после ответа на предыдущий; одновременные goto проверяются от одного текущего узла',
+  );
+});
+
+test('applyGoto: текст лейбла или next вместо ID -> отказ называет, что узел — ID из «Доступно»', () => {
+  for (const node of ['П4 ПРАВИЛО: писать только внутри области скила', 'next']) {
+    const state = { node: 'P4E1', history: [], counters: {}, denials: {} };
+    const r = applyGoto(state, GRAPH, CONFIG, { node, quote: 'писать только внутри области скила' });
+    assert.equal(r.code, 'no-edge');
+    assert.equal(r.reason, `нет ребра из P4E1 в ${node} — узел указывается ID из «Доступно» (например P0R2), а не текстом лейбла и не next`);
+  }
+});
+
+test('applyGoto: переход в текущий узел без петли -> «это текущий узел», не «путь через другие узлы»', () => {
+  const state = { node: 'P4R1', history: [], counters: {}, denials: {} };
+  const r = applyGoto(state, GRAPH, CONFIG, { node: 'P4R1', quote: 'писать только внутри области скила' });
+  assert.equal(r.code, 'no-edge');
+  assert.equal(r.reason, 'нет ребра из P4R1 в P4R1 — это текущий узел');
+});
+
+test('applyGoto: узел недостижим из текущего -> отказ без подсказки «по одному»', () => {
+  const state = { node: 'P1E1', history: [], counters: {}, denials: {} };
+  const r = applyGoto(state, makeGraph(GUARD_NODES, GUARD_EDGES), GUARD_CONFIG, { node: 'P7E1', quote: 'вывести структурированный результат' });
+  assert.equal(r.code, 'no-edge');
+  assert.equal(r.reason, 'нет ребра из P1E1 в P7E1');
+});
+
+test('applyGoto: короткая цитата -> отказ отсылает к готовой команде в «Доступно»', () => {
+  const state = { node: 'P4E1', history: [], counters: {}, denials: {} };
+  const r = applyGoto(state, GRAPH, CONFIG, { node: 'P4R1', quote: 'писать только' });
+  assert.equal(r.code, 'short-quote');
+  assert.equal(r.reason, 'цитата «писать только» короче 25 символов — возьми команду перехода целиком из «Доступно»');
 });
 
 // Отказ показывает точку расхождения цитаты с лейблом (журналы прогонов 2026-09-22:

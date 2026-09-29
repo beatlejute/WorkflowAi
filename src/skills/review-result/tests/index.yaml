@@ -73,3 +73,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-27-review-capabilities"]
     tags: [verify-artifacts, capabilities, evidence-review]
     severity: high
+  - id: TC-REVIEW-RESULT-013
+    file: cases/TC-REVIEW-RESULT-013-goto-one-at-a-time.yaml
+    origin_chg: ["ad-hoc-2026-09-29"]
+    tags: [rails, navigation, regression-guard]
+    severity: medium
