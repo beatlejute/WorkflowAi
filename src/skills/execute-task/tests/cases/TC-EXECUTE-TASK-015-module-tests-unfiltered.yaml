@@ -31,7 +31,7 @@ assertions:
       reason: "Новое падение не списывается в посторонние: зелёный прогон или blocked, в пределах файлов тикета."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: "P3E1 --> P3R1 --> P3R2 --> P3R3 --> P3R4 --> P3R5 --> P3R6 --> P3R7 --> P3S1 --> P3S2 --> P3G1"
+      pattern: "--> P3S1 --> P3S2 --> P3G1"
       reason: "База (P3S1) снимается до проверки после правки (P3S2)."
     - kind: skill_contains
       file: "workflows/execute.md"

@@ -92,3 +92,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-29"]
     tags: [rails, navigation, regression-guard]
     severity: medium
+  - id: TC-EXECUTE-TASK-017
+    file: cases/TC-EXECUTE-TASK-017-no-placeholder-result.yaml
+    origin_chg: ["ad-hoc-2026-09-30"]
+    tags: [placeholder, deliverable, regression-guard]
+    severity: high
