@@ -32,6 +32,8 @@ export function withCoachProject(fn) {
   const skillsDir = join(root, '.workflow', 'src', 'skills');
   mkdirSync(skillsDir, { recursive: true });
   mkdirSync(join(root, '.workflow', 'tickets', 'backlog'), { recursive: true });
+  // Как после init/update: .workflow/shared/ есть всегда (migrateProjectSharedDir).
+  mkdirSync(join(root, '.workflow', 'shared'), { recursive: true });
   mkdirSync(join(root, '.workflow', 'src', 'rails'), { recursive: true });
   writeFileSync(join(root, '.workflow', 'coach-backlog.yaml'), 'version: 1\nanalyzed_tickets: []\naudited_skills: []\n', 'utf8');
   const link = join(skillsDir, 'coach');

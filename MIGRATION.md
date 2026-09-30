@@ -1,5 +1,12 @@
 # Руководство по миграции
 
+## Shared knowledge: `.workflow/src/skills/shared/` → `.workflow/shared/`
+
+Скилы читают shared knowledge проекта из `.workflow/shared/`. `workflow update` (и `workflow init`) переносит старый каталог сам и пишет в вывод `✅ Shared knowledge moved`. Вручную нужно только:
+
+- если update предупредил `.workflow/shared/ already has …` — сравнить файлы, оставшиеся в `.workflow/src/skills/shared/`, с одноимёнными в `.workflow/shared/`, перенести нужное и удалить старый каталог;
+- поправить старый путь в открытых тикетах и планах проекта (описание, `context.files`, записи проверки) и в коде проекта, который читает shared (например, тестах).
+
 ## Upgrade to 1.3.0
 
 Версия workflow-ai@1.3.0 вводит новые типы стейджев и статусов для расширенной маршрутизации и управления задачами. Данное руководство описывает шаги миграции для проектов с кастомными (eject'нутыми) pipeline.yaml.

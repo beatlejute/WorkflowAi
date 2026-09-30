@@ -19,6 +19,17 @@ test('H3: Edit файла скила на этапе evidence (П1) — отка
   });
 });
 
+test('H3: Write в shared knowledge проекта на этапе evidence (П1) — отказ, на правке (П4S2) — молчание', () => {
+  withCoachProject(({ root }) => {
+    const file = join(root, '.workflow', 'shared', 'README.md');
+    const deny = decide({ action: claude('Write', { file_path: file }), ctx: ctx(root, atNode(root, 'P1S1')) });
+    assert.equal(deny.decision, 'deny');
+    assert.match(deny.reason, /этап/);
+    const allow = decide({ action: claude('Write', { file_path: file }), ctx: ctx(root, atNode(root, 'P4S2')) });
+    assert.equal(allow.decision, 'allow');
+  });
+});
+
 test('H3: E-узел этапа прозрачен — Edit скила в P4E1 отказ, пока агент не прошёл в S-узел', () => {
   withCoachProject(({ root, link }) => {
     const r = decide({ action: claude('Edit', { file_path: join(link, 'README.md') }), ctx: ctx(root, atNode(root, 'P4E1')) });

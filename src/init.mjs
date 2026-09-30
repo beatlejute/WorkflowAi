@@ -3,7 +3,7 @@ import { join, resolve, dirname, basename, relative, isAbsolute } from 'node:pat
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { getGlobalDir, ensureGlobalDir } from './global-dir.mjs';
-import { createSkillJunctions, createScriptJunction, createConfigJunction, createRailsJunction } from './junction-manager.mjs';
+import { createSkillJunctions, createScriptJunction, createConfigJunction, createRailsJunction, migrateProjectSharedDir } from './junction-manager.mjs';
 
 /**
  * Возвращает абсолютный путь к корню npm-пакета через import.meta.url.
@@ -592,6 +592,15 @@ export function initProject(targetPath = process.cwd(), options = {}) {
   const srcSkillsDest = join(workflowRoot, 'src', 'skills');
   createSkillJunctions(globalDir, srcSkillsDest);
   result.steps.push('Created skill junctions from global dir → .workflow/src/skills/');
+
+  const shared = migrateProjectSharedDir(workflowRoot);
+  if (shared.status === 'moved' || shared.status === 'merged') {
+    result.steps.push('Moved shared knowledge: .workflow/src/skills/shared/ → .workflow/shared/');
+  } else if (shared.status === 'partial') {
+    result.warnings.push(`.workflow/shared/ already has ${shared.kept.join(', ')}; the copies in .workflow/src/skills/shared/ are left in place`);
+  } else if (shared.status === 'skipped') {
+    result.warnings.push(`Shared knowledge not moved: ${shared.reason}`);
+  }
 
   // Step 3: Create script junction
   const srcScriptsDest = join(workflowRoot, 'src', 'scripts');

@@ -6,7 +6,7 @@ import { packageVersion } from './lib/package-version.mjs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { getGlobalDir, refreshGlobalDir, ensureGlobalDir } from './global-dir.mjs';
-import { createSkillJunctions, createScriptJunction, createConfigJunction, ejectSkill, ejectScripts, ejectConfigs, listSkillsWithStatus } from './junction-manager.mjs';
+import { createSkillJunctions, createScriptJunction, createConfigJunction, ejectSkill, ejectScripts, ejectConfigs, listSkillsWithStatus, migrateProjectSharedDir } from './junction-manager.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -115,6 +115,8 @@ function runUpdate(args) {
   createSkillJunctions(globalDir, skillsDir);
   console.log('✅ Skill junctions recreated');
 
+  reportSharedMigration(migrateProjectSharedDir(workflowRoot));
+
   const scriptsDir = join(workflowRoot, 'src', 'scripts');
   createScriptJunction(globalDir, scriptsDir);
   console.log('✅ Script junction recreated');
@@ -124,6 +126,16 @@ function runUpdate(args) {
   console.log('✅ Config junction recreated');
 
   syncKiloSkills(projectRoot, globalDir);
+}
+
+function reportSharedMigration(r) {
+  if (r.status === 'moved' || r.status === 'merged') {
+    console.log(`✅ Shared knowledge moved: .workflow/src/skills/shared/ → .workflow/shared/ (${r.moved.join(', ') || 'empty'})`);
+  } else if (r.status === 'partial') {
+    console.warn(`⚠️  .workflow/shared/ already has ${r.kept.join(', ')}; the copies in .workflow/src/skills/shared/ are left in place — compare and move them by hand`);
+  } else if (r.status === 'skipped') {
+    console.warn(`⚠️  Shared knowledge not moved: ${r.reason}`);
+  }
 }
 
 // Скилы для kilo: канон — ссылкой из каталога настроек kilo, в

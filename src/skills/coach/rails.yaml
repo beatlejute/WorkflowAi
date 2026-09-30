@@ -10,11 +10,14 @@ fragments: ["workflows/*.md"]
 quote_min: 25
 canary: "echo RAILS_CANARY"
 
-# H1 — запись только в область скилов и бэклог коуча.
+# H1 — запись только в область скилов, shared knowledge проекта и бэклог коуча.
 # Инциденты 2026-09-21: пробный запуск коуча в песочнице теста правил канонический файл
 # чужого скила; фикстура декомпозиции создала реальные тикеты в проекте.
+# .workflow/shared/ — с 2026-09-30: shared проекта вынесен из каталога скилов
+# (PulseProxy DOCS-014), коуч по-прежнему переносит в него проектную специфику (P3S1).
 write_scope:
   - ".workflow/src/skills/**"
+  - ".workflow/shared/**"
   - ".workflow/coach-backlog.yaml"
 allow_temp: true
 write_deny:
@@ -47,6 +50,10 @@ stage_actions:
   edit_skill:
     kind: [edit, write]
     match: ".workflow/src/skills/**"
+    stages: [4, 5, 10, 70]
+  edit_shared:
+    kind: [edit, write]
+    match: ".workflow/shared/**"
     stages: [4, 5, 10, 70]
   edit_backlog:
     kind: [edit, write]

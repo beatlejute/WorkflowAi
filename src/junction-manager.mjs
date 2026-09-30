@@ -10,7 +10,9 @@ import {
   cpSync,
   readFileSync,
   writeFileSync,
-  unlinkSync
+  unlinkSync,
+  renameSync,
+  rmdirSync
 } from 'node:fs';
 import { join, basename } from 'node:path';
 
@@ -107,6 +109,52 @@ export function createSkillJunctions(globalDir, projectSkillsDir) {
       createJunction(targetPath, linkPath);
     }
   }
+}
+
+// Shared knowledge проекта живёт в .workflow/shared/, вне каталога скилов:
+// каталог скилов — ссылки на общую копию канона, и исполнителям запись в него
+// закрыта гардами, а shared обновляют задачи продукта. До 1.23.0 shared лежал в
+// .workflow/src/skills/shared/ — update и init переносят его. Файлы нового
+// места не перезаписываются: при совпадении имён старая копия остаётся на
+// месте, её имя попадает в `kept`, и каталог старого места не удаляется.
+// Без старого каталога создаётся пустой .workflow/shared/: гарды rails
+// раскрывают паттерн write_scope по существующим каталогам, и без него
+// коуч не смог бы записать в проект первый модуль shared.
+export function migrateProjectSharedDir(workflowRoot) {
+  const oldDir = join(workflowRoot, 'src', 'skills', 'shared');
+  const newDir = join(workflowRoot, 'shared');
+  let oldStats;
+  try {
+    oldStats = lstatSync(oldDir);
+  } catch {
+    mkdirSync(newDir, { recursive: true });
+    return { status: 'none', moved: [], kept: [] };
+  }
+  if (oldStats.isSymbolicLink() || !oldStats.isDirectory()) {
+    return { status: 'skipped', reason: `${oldDir} is not a plain directory`, moved: [], kept: [] };
+  }
+  if (!existsSync(newDir)) {
+    renameSync(oldDir, newDir);
+    return { status: 'moved', moved: readdirSync(newDir), kept: [] };
+  }
+  if (!lstatSync(newDir).isDirectory()) {
+    return { status: 'skipped', reason: `${newDir} exists and is not a directory`, moved: [], kept: [] };
+  }
+  const moved = [];
+  const kept = [];
+  for (const name of readdirSync(oldDir)) {
+    if (existsSync(join(newDir, name))) {
+      kept.push(name);
+      continue;
+    }
+    renameSync(join(oldDir, name), join(newDir, name));
+    moved.push(name);
+  }
+  if (kept.length === 0) {
+    rmdirSync(oldDir);
+    return { status: 'merged', moved, kept };
+  }
+  return { status: 'partial', moved, kept };
 }
 
 export function createScriptJunction(globalDir, projectScriptsDir) {

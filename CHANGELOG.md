@@ -1,3 +1,16 @@
+## [Unreleased]
+
+### Changed
+- **Shared knowledge проекта — `.workflow/shared/`, вне каталога скилов.** Все скилы и шаблон нового скила читают индекс `.workflow/shared/README.md` вместо `.workflow/src/skills/shared/README.md`; правило «Shared — вне каталога скилов» — в `coach/knowledge/skill-anatomy.md`. Каталог скилов — ссылки на общую копию канона, запись в него исполнителю закрыта гардом (write_deny `.workflow/src/skills/**`, 1.21.x), а shared обновляют задачи продукта (`create-plan` P0R8). PulseProxy DOCS-014 2026-09-30: задача плана «обновить карту QA пула в shared knowledge» шесть раз упёрлась в этот запрет и ушла в `blocked/`.
+- **`workflow update` и `workflow init` переносят shared** (`migrateProjectSharedDir`, junction-manager.mjs): каталог `.workflow/src/skills/shared/` становится `.workflow/shared/`; при совпадении имён файл нового места не перезаписывается, старая копия остаётся на месте с предупреждением; каталог-ссылка не трогается. Без старого каталога создаётся пустой `.workflow/shared/`: гарды rails раскрывают паттерн `write_scope` по существующим каталогам.
+- **`coach` rails.yaml:** `write_scope` и действие этапа `edit_shared` (этапы 4, 5, 10, 70) — на `.workflow/shared/**`; P0R1 и P0R5 называют shared проекта областью работы коуча.
+
+### Fixed
+- **`execute-task` GATE-3 (P6S3): утверждение Result о другом тикете — только после чтения его файла** в текущей папке статуса. DOCS-014 записал, что тем же запретом заблокированы DOCS-013 и DOCS-015, — они правили другие файлы и были закрыты.
+
+### Tests
+- `shared-dir-migration.test.mjs` — перенос, слияние, конфликт имён без перезаписи, повторный запуск, каталог-ссылка. Гарды коуча: запись в `.workflow/shared/` на этапе П4 — молчание, на П1 — отказ. L0: TC-EXECUTE-TASK-018 (новый), TC-MANUAL-TESTING-008 (старое место запрещено), TC-COACH-003 и якоря кейсов изоляции на новый путь.
+
 ## [1.21.3] — 2026-09-30
 
 ### Fixed

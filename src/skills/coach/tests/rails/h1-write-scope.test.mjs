@@ -1,4 +1,4 @@
-// H1: коуч пишет только в .workflow/src/skills/** и coach-backlog.yaml; свой rails.yaml,
+// H1: коуч пишет только в .workflow/src/skills/**, .workflow/shared/** и coach-backlog.yaml; свой rails.yaml,
 // tests/rails и ядро rails — write_deny. Инциденты 2026-09-21 (rails.yaml коуча).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -27,6 +27,14 @@ test('H1: Edit коуча по каноническому пути (через j
   withCoachProject(({ root }) => {
     const s = atNode(root, 'P4S2');
     const r = decide({ action: claude('Edit', { file_path: join(CANON, 'SKILL.md') }), ctx: ctx(root, s) });
+    assert.equal(r.decision, 'allow');
+  });
+});
+
+test('H1: Write в shared knowledge проекта (.workflow/shared) на этапе П4 — молчание (DOCS-014, 2026-09-30)', () => {
+  withCoachProject(({ root }) => {
+    const s = atNode(root, 'P4S2');
+    const r = decide({ action: claude('Write', { file_path: join(root, '.workflow', 'shared', 'module.md') }), ctx: ctx(root, s) });
     assert.equal(r.decision, 'allow');
   });
 });
