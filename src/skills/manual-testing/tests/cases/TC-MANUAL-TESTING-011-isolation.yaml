@@ -52,5 +52,5 @@ assertions:
       reason: "Модуль тестирования расширений не должен называть другие скилы, проектные префиксы ролей или проектные ID тикетов по имени."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      pattern: "\\.workflow/shared/\\*[^\\n]{0,200}\\.workflow/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
       reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."

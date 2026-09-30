@@ -33,5 +33,5 @@ assertions:
       reason: "workflows/retrospective.md не должен называть воркфлоу-источник отчётов по имени скила."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      pattern: "\\.workflow/shared/\\*[^\\n]{0,200}\\.workflow/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
       reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."

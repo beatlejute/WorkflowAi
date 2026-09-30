@@ -44,5 +44,9 @@ assertions:
       reason: "Шаблон инициализации бэклога не должен содержать имена других скилов/ролей проекта или non-project-relative путь."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      pattern: "\\.workflow/shared/\\*[^\\n]{0,200}\\.workflow/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
       reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."
+    - kind: skill_contains
+      file: "knowledge/skill-anatomy.md"
+      pattern: "\\*\\*Shared — вне каталога скилов\\*\\* \\| `\\.workflow/shared/`, не внутри `\\.workflow/src/skills/`: каталог скилов — ссылки на общую копию канона, запись в него исполнителям закрыта гардами"
+      reason: "Коуч создаёт и переносит shared проекта в `.workflow/shared/`, а не в каталог скилов: туда исполнитель писать не может, и задача продукта «обновить shared» блокируется (PulseProxy DOCS-014, 2026-09-30)."

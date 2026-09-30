@@ -12,7 +12,7 @@
 └─────────────────────┘         └──────────────────────────┘
 ```
 
-Имя MCP-сервера и инструменты — из `.mcp.json` проекта (`mcp__<имя-сервера>__*`: screenshot, click, type, snapshot и т.д.). Подключение — `.mcp.json` → `"url": "http://<sandbox-ip>:8000/mcp"`. Пути и конфигурация .wsb — из `.workflow/src/skills/shared/` (см. индекс), если проект их там определяет; иначе из тикета/`context.notes`; иначе из `.wsb`-файла в sandbox-директории. Если ни один источник не дал путей — BLOCKED с причиной «Sandbox не сконфигурирован» (второй, независимый критерий BLOCKED для той же причины — отсутствие Sandbox-сервера в `.mcp.json`, см. `knowledge/desktop-tools.md` → «Выбор MCP-сервера»). Расширенная настройка .wsb → `knowledge/sandbox-advanced.md`.
+Имя MCP-сервера и инструменты — из `.mcp.json` проекта (`mcp__<имя-сервера>__*`: screenshot, click, type, snapshot и т.д.). Подключение — `.mcp.json` → `"url": "http://<sandbox-ip>:8000/mcp"`. Пути и конфигурация .wsb — из `.workflow/shared/` (см. индекс), если проект их там определяет; иначе из тикета/`context.notes`; иначе из `.wsb`-файла в sandbox-директории. Если ни один источник не дал путей — BLOCKED с причиной «Sandbox не сконфигурирован» (второй, независимый критерий BLOCKED для той же причины — отсутствие Sandbox-сервера в `.mcp.json`, см. `knowledge/desktop-tools.md` → «Выбор MCP-сервера»). Расширенная настройка .wsb → `knowledge/sandbox-advanced.md`.
 
 ## Quick-start checklist
 

@@ -36,5 +36,5 @@ assertions:
       reason: "В workflows/decompose.md нет имён других скилов, чужих ticket-префиксов/ID, имён ролей проекта и проектных токенов."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      pattern: "\\.workflow/shared/\\*[^\\n]{0,200}\\.workflow/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
       reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."

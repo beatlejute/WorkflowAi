@@ -4,7 +4,7 @@ origin:
   chg: ["ad-hoc-2026-09-21-audit"]
   incidents:
     - "Аудит изоляции 2026-09-21: SKILL.md хардкодил конкретные инструменты агента (Playwright MCP-browser) и проектный пример ТЗ; knowledge/plan-lifecycle.md называл чужой скил `decompose-plan` и его путь к скрипту, а также VS Code-команду `workflow.archivePlan`; algorithms/risk-assessment.md ссылался на инциденты с ID `QA-*` — ticket_prefix чужого скила (manual-testing)."
-  principle: "Изоляция скилов (coach/SKILL.md, принцип 8) и универсальность правок (принцип 9): скил не хардкодит имена других скилов, project-wide префиксы/ID и проектно-специфичные инструменты/конфиги; инструменты и проектные знания — через `.workflow/src/skills/shared/` (см. индекс)."
+  principle: "Изоляция скилов (coach/SKILL.md, принцип 8) и универсальность правок (принцип 9): скил не хардкодит имена других скилов, project-wide префиксы/ID и проектно-специфичные инструменты/конфиги; инструменты и проектные знания — через `.workflow/shared/` (см. индекс)."
   backlog_sources: []
 tags: [isolation, regression-guard]
 severity: high
@@ -32,5 +32,5 @@ assertions:
       reason: "algorithms/risk-assessment.md использует generic ID инцидентов (XXX-NNN), не ID чужого скила."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "\\.workflow/src/skills/shared/\\*[^\\n]{0,200}\\.workflow/src/skills/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
+      pattern: "\\.workflow/shared/\\*[^\\n]{0,200}\\.workflow/shared/README\\.md`, прочитай этот индекс и загрузи модули, релевантные текущей задаче; отсутствие `shared/` — не блокер"
       reason: "Строка загрузки shared — каноническая: glob + индекс README.md + релевантные модули (coach/knowledge/skill-anatomy.md)."

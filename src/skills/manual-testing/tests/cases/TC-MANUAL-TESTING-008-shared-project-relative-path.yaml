@@ -1,12 +1,14 @@
 id: TC-MANUAL-TESTING-008
-title: "SKILL.md ссылается на shared через project-relative путь, не через `..`-relative"
+title: "SKILL.md ссылается на shared через project-relative путь к каталогу проекта `.workflow/shared/`, не через `..`-relative и не внутри каталога скилов"
 origin:
-  chg: ["ad-hoc-2026-05-03-shared-path"]
+  chg: ["ad-hoc-2026-05-03-shared-path", "ad-hoc-2026-09-30-shared-location"]
   incidents:
     - "workflowAiVsCode QA-54: skills в проекте подключены как POSIX symlinks → Windows junctions → canonical-каталог скилов. SKILL.md ссылался на shared через `../shared/`. Когда LLM/runtime вычисляет `..` от skill location, на Windows symlinks резолвится через realpath в canonical-каталог, где shared/ отсутствует (shared живёт в проекте). Эмпирически проверено через node fs.readFileSync: project-relative путь `<project>/.workflow/src/skills/shared/...` работает; `realpath(skill)/../shared/...` — ENOENT."
-  principle: "Project-relative путь к shared не зависит от типа deployment (junction/symlink/copy) и резолвится одинаково везде. `..`-relative ломается под symlink-deployment, что незаметно при редактировании canonical-каталога, но проявляется при выполнении в проекте."
+    - "PulseProxy PLAN-020 задача 33 → DOCS-014 (2026-09-30): shared лежал в `.workflow/src/skills/shared/`; запрет исполнителю на запись в каталог скилов (введён 2026-09-28 после правки чужого скила через ссылку) шесть раз отклонил правку shared/public-pool-qa.md, тикет ушёл в blocked/."
+  principle: "Project-relative путь к shared не зависит от типа deployment (junction/symlink/copy) и резолвится одинаково везде. `..`-relative ломается под symlink-deployment, что незаметно при редактировании canonical-каталога, но проявляется при выполнении в проекте. Shared — каталог проекта `.workflow/shared/`, вне каталога скилов: каталог скилов закрыт исполнителям гардами, а shared обновляют задачи продукта (coach/knowledge/skill-anatomy.md, «Shared — вне каталога скилов»)."
   backlog_sources:
     - "d:/Dev/workflowAi/.workflow/coach-backlog.yaml"
+    - "D:/Dev/PulseProxy/.workflow/tickets/blocked/DOCS-014.md"
 tags: [shared-path, project-relative, symlink-resolution, regression-guard]
 severity: medium
 
@@ -20,5 +22,5 @@ assertions:
   static:
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "\\.workflow/src/skills/shared/"
-      reason: "SKILL.md должен ссылаться на shared через project-relative путь, гарантирующий корректный резолвинг под symlink-deployment."
+      pattern: "^(?![\\s\\S]*\\.workflow/src/skills/shared)[\\s\\S]*\\.workflow/shared/"
+      reason: "SKILL.md ссылается на shared через project-relative путь к каталогу проекта `.workflow/shared/` и нигде — на старое место внутри каталога скилов."

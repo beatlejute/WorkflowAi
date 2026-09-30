@@ -97,3 +97,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-30"]
     tags: [placeholder, deliverable, regression-guard]
     severity: high
+  - id: TC-EXECUTE-TASK-018
+    file: cases/TC-EXECUTE-TASK-018-claims-about-other-tickets.yaml
+    origin_chg: ["ad-hoc-2026-09-30-shared-location"]
+    tags: [evidence, other-tickets, regression-guard]
+    severity: medium
