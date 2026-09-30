@@ -1574,7 +1574,189 @@ function nestedShellWrites(name, args, world, ctx, cmd) {
     if (k === -1) return;
     const rest = args.slice(k + 1);
     if (rest.some((a) => a.value === null) || CMD_WRITE_RE.test(rest.map((a) => a.text).join(' '))) ctx.marker = true;
+    return;
   }
+  const lang = interpreterLanguage(name);
+  if (lang) interpreterWrites(lang, name, args, world, ctx, cmd);
+}
+
+// Интерпретаторы скриптов: код аргументом (`node -e`, `python -c`, `perl -e`, `ruby -e`,
+// `php -r`, `deno eval`, `bun -e`), из heredoc/stdin или файлом во временном каталоге. Путь
+// записи из кода не вычислить: вызов API записи файла или запуска процесса в коде — '?'.
+// Инцидент 2026-09-30: коуч на рельсах переписал 17 файлов канона одной командой `node -e`
+// с `fs.writeFileSync` по списку путей, и гард write_scope промолчал. Файл скрипта вне
+// временного каталога не разбирается — это инструменты проекта (`node .workflow/src/scripts/…`,
+// `node build.js`), как и файл скрипта bash; во временном каталоге — разовый скрипт агента,
+// его текст читается. Разбор кода — поиск имён API, не исполнение: обход переименованием
+// (`const w = fs['write' + 'FileSync']`) он не ловит, его цель — случайная запись мимо гарда.
+const INTERPRETERS = [
+  [/^(?:node|nodejs|deno|bun)$/, 'js'],
+  [/^(?:python|python[23](?:\.\d+)?|py|pypy3?)$/, 'py'],
+  [/^perl$/, 'perl'],
+  [/^ruby$/, 'rb'],
+  [/^php(?:\d+(?:\.\d+)?)?$/, 'php'],
+];
+const SCRIPT_WRITE_RE = {
+  js: /\b(?:writeFile|appendFile|createWriteStream|rename|unlink|rmdir|rm|mkdir|mkdtemp|copyFile|cp|truncate|symlink|link|chmod|chown|lchown|utimes|lutimes|open)(?:Sync)?\s*\(|\b(?:exec|execSync|execFile|execFileSync|spawn|spawnSync|fork)\s*\(|\bBun\.(?:write|spawn\w*|\$)|\bDeno\.(?:write\w*|remove|rename|mkdir|create|copyFile|truncate|symlink|link|chmod|chown|makeTemp\w*|Command|run)\b/,
+  py: /\bopen\s*\([^()]*?(?:,\s*|mode\s*=\s*)['"][rbtU]*[wax+]|\.(?:write_text|write_bytes|touch|unlink|rmdir|mkdir|rename|replace|symlink_to|hardlink_to|chmod)\s*\(|\bos\.(?:remove|unlink|rename|renames|replace|makedirs|mkdir|rmdir|removedirs|symlink|link|truncate|chmod|chown|utime|system|popen|exec\w*|spawn\w*)\s*\(|\bshutil\.\w+\s*\(|\bsubprocess\b|\bPopen\s*\(/,
+  perl: /\bopen\b[^;]*['"]\s*(?:\+?>|\|)|\b(?:unlink|rename|mkdir|rmdir|symlink|link|chmod|chown|utime|truncate|system|exec)\b|`|\bqx\b/,
+  rb: /\bFile\.(?:write|binwrite|open|new|delete|unlink|rename|symlink|link|chmod|chown|truncate|utime)\b|\bFileUtils\b|\bDir\.(?:mkdir|rmdir|delete|unlink)\b|\bIO\.(?:write|binwrite|popen)\b|\b(?:system|exec|spawn)\b|`|%x/,
+  php: /\b(?:file_put_contents|fopen|fwrite|unlink|rename|mkdir|rmdir|copy|touch|symlink|link|chmod|chown|tempnam|tmpfile|exec|shell_exec|system|passthru|proc_open|popen)\s*\(|`/,
+};
+const SCRIPT_FILE_MAX_BYTES = 512 * 1024;
+
+function interpreterLanguage(name) {
+  for (const [re, lang] of INTERPRETERS) if (re.test(name)) return lang;
+  return null;
+}
+
+// Флаги perl/ruby со значением: next — значение в остатке кластера или следующим словом,
+// glued — только в остатке кластера (`-i.bak`, `-l`, `-0777`, `-W0`).
+const CLUSTER_VALUE_FLAGS = {
+  py: { next: 'WXQ', glued: '' },
+  perl: { next: 'IMm', glued: 'ixdDC' },
+  rb: { next: 'rICE', glued: 'ixKWTF' },
+};
+
+// Что исполнит интерпретатор: { codes } — код аргументами (null — не литерал), { file } —
+// слово файла скрипта, { stdin: true } — скрипт из stdin, {} — ничего (версия, справка,
+// модуль `python -m`, неизвестная подкоманда). perl/ruby: inplace — флаг `-i` (правка файлов
+// на месте), operands — слова после кода или файла скрипта (файлы, которые он правит).
+function interpreterScript(lang, name, args) {
+  const s = interpreterScriptRaw(lang, name, args);
+  if (lang !== 'perl' && lang !== 'rb') return s;
+  return { ...s, inplace: Boolean(s.inplace), operands: s.operands ?? [] };
+}
+
+function interpreterScriptRaw(lang, name, args) {
+  const next = (i) => (i + 1 < args.length ? args[i + 1].value : null);
+  if (lang === 'js' && name === 'deno') {
+    const sub = args.findIndex((a) => a.value === null || !a.value.startsWith('-'));
+    if (sub === -1 || args[sub].value === null) return sub === -1 ? {} : { codes: [null] };
+    const pos = args.slice(sub + 1).find((a) => a.value === null || !a.value.startsWith('-'));
+    if (args[sub].value === 'eval') return { codes: [pos ? pos.value : null] };
+    if (args[sub].value === 'run') return pos ? { file: pos } : {};
+    return {};
+  }
+  const codes = [];
+  let inplace = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const v = args[i].value;
+    if (v === null) return mayBeFlag(args[i]) ? { codes: [null], inplace } : { file: args[i], inplace, operands: args.slice(i + 1) };
+    if (v === '-') return { stdin: true, inplace, operands: args.slice(i + 1) };
+    if (['-v', '-V', '--version', '-h', '--help'].includes(v)) return {};
+    if (!v.startsWith('-') || v === '--') {
+      const at = v === '--' ? i + 1 : i;
+      if (codes.length > 0) return { codes, inplace, operands: args.slice(at) };
+      return at < args.length ? { file: args[at], inplace, operands: args.slice(at + 1) } : { stdin: true, inplace };
+    }
+    if (lang === 'js') {
+      const eq = /^--(?:eval|print)=(.*)$/s.exec(v);
+      if (eq) return { codes: [eq[1]] };
+      if (/^-(?:e|p|pe|ep)$|^--(?:eval|print)$/.test(v)) return { codes: [next(i)] };
+      if (/^(?:-r|--require|--import|--loader|--experimental-loader|-C|--conditions|--env-file|--input-type|--title)$/.test(v)) i += 1;
+      continue;
+    }
+    if (lang === 'php') {
+      if (/^-[rBRE]$/.test(v)) codes.push(next(i)), (i += 1);
+      else if (/^-[rBRE]./.test(v)) codes.push(v.slice(2));
+      else if (v === '-f' || v === '-F') return i + 1 < args.length ? { file: args[i + 1] } : { codes: [null] };
+      else if (/^-[cdz]$/.test(v)) i += 1;
+      continue;
+    }
+    // py/perl/rb — кластер коротких флагов: код — остаток кластера после буквы кода или
+    // следующее слово; флаги со значением забирают остаток кластера или следующее слово.
+    if (v.startsWith('--')) {
+      if (lang === 'py' && v === '--check-hash-based-pycs') i += 1;
+      continue;
+    }
+    const codeFlag = lang === 'py' ? 'c' : lang === 'perl' ? 'eE' : 'e';
+    const flags = CLUSTER_VALUE_FLAGS[lang];
+    const cluster = v.slice(1);
+    for (let k = 0; k < cluster.length; k += 1) {
+      const ch = cluster[k];
+      if (lang === 'py' && ch === 'm') return {};
+      if (codeFlag.includes(ch)) {
+        const rest = cluster.slice(k + 1);
+        if (rest) codes.push(rest);
+        else {
+          codes.push(next(i));
+          i += 1;
+        }
+        break;
+      }
+      if (ch === 'i' && lang !== 'py') inplace = true;
+      // `-l`/`-0` берут только восьмеричные цифры, дальше кластер продолжается (`-lne`, `-0777pe`)
+      if ((ch === 'l' && lang === 'perl') || (ch === '0' && lang !== 'py')) {
+        while (k + 1 < cluster.length && /[0-7]/.test(cluster[k + 1])) k += 1;
+        continue;
+      }
+      if (flags.glued.includes(ch)) break;
+      if (flags.next.includes(ch)) {
+        if (!cluster.slice(k + 1)) i += 1;
+        break;
+      }
+    }
+    // python: всё после кода — аргументы sys.argv
+    if (lang === 'py' && codes.length > 0) return { codes };
+  }
+  return codes.length > 0 ? { codes, inplace } : { stdin: true, inplace };
+}
+
+function interpreterWrites(lang, name, args, world, ctx, cmd) {
+  const re = SCRIPT_WRITE_RE[lang];
+  const script = interpreterScript(lang, name, args);
+  const scan = (code) => {
+    if (code === null || re.test(code)) ctx.marker = true;
+  };
+  if (script.codes) {
+    for (const c of script.codes) scan(c);
+    return;
+  }
+  if (script.stdin) {
+    // скрипт из stdin: тело heredoc разбирается; пайп, `< файл` — неизвестно что
+    const docs = cmd?.heredocs ?? [];
+    if (docs.length === 0) ctx.marker = true;
+    for (const d of docs) scan(d.value);
+    return;
+  }
+  if (!script.file) return;
+  const r = expandWord(script.file, ctx.dialect, lookupFor(world, ctx));
+  const paths = r && !r.glob && !r.brace ? resolveTarget(world.dir, r.value, ctx) : null;
+  if (!paths) {
+    ctx.marker = true;
+    return;
+  }
+  const temp = normalizeForTemp(safeRealpathDeep(tmpdir()));
+  const session = ctx.shared?.sessionDir ? normalizeForTemp(safeRealpathDeep(ctx.shared.sessionDir)) : null;
+  for (const p of paths) {
+    if (!isFullAbs(p)) continue; // каталог вызывающего не передан — относительный путь не проверить
+    const real = normalizeForTemp(safeRealpathDeep(p));
+    if (!temp || !real || !real.startsWith(`${temp}/`)) continue;
+    // скрипт проекта (песочница теста скила живёт во временном каталоге) — не разовый
+    if (session && (real === session || real.startsWith(`${session}/`))) continue;
+    let text = null;
+    try {
+      text = readFileSync(safeRealpathDeep(p), 'utf8');
+    } catch {
+      text = null;
+    }
+    scan(text !== null && text.length <= SCRIPT_FILE_MAX_BYTES ? text : null);
+  }
+}
+
+function safeRealpathDeep(p) {
+  try {
+    return realpathDeep(p);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeForTemp(p) {
+  if (!p) return null;
+  const s = p.replace(/\\/g, '/').replace(/\/+$/, '');
+  return IS_WIN32 ? s.toLowerCase() : s;
 }
 
 // PowerShell/.NET: запись в обход командлетов (`[IO.File]::WriteAllText`, `(Get-Item x).Delete()`,
@@ -1617,6 +1799,13 @@ function commandTargets(name, args, world, ctx) {
     // mv удаляет источник — это тоже запись (`mv /outside/f <scope>/f` уносит файл извне)
     if (name === 'mv') items.push(...sources.map((w) => ({ word: w, del: true })));
     return items;
+  }
+  // `perl -pi -e … f`, `ruby -i -pe … f` — правка файлов на месте, как `sed -i`
+  const lang = interpreterLanguage(name);
+  if (lang === 'perl' || lang === 'rb') {
+    const s = interpreterScript(lang, name, args);
+    if (!s.inplace) return null;
+    return s.operands.length > 0 ? s.operands.map((w) => ({ word: w })) : [MARKER_ITEM];
   }
   if (name === 'sed') {
     const files = sedFiles(args);
@@ -1788,6 +1977,9 @@ function detectAt(command, opts, level, cdSearch = false, shared = { runs: 0 }) 
     const ctx = makeContext(dialect, env);
     ctx.level = level;
     ctx.cdSearch = cdSearch;
+    // каталог сессии (корень проекта) — скрипты в нём не разовые, даже если проект во
+    // временном каталоге (песочницы тестов скилов)
+    if (level === 0) shared.sessionDir = cwd;
     ctx.shared = shared;
     walk(text, ctx, [newWorld(cwd)], 0);
     for (const name of ctx.readonlyNames) {

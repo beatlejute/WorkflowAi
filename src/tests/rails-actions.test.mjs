@@ -750,6 +750,64 @@ test('detectShellWrites (C2 r2, LOW): вложенный интерпретат�
   }
 });
 
+test('detectShellWrites (2026-09-30): интерпретатор скриптов — код аргументом, из stdin и файлом во временном каталоге', () => {
+  // инцидент: коуч записал 17 файлов канона одной `node -e` с fs.writeFileSync — гард молчал
+  for (const command of [
+    `node -e "const fs=require('fs'); for (const f of ['${S}/a.md']) fs.writeFileSync(f, 'x')"`,
+    `node --input-type=module -e "import fs from 'fs'; fs.rmSync('${O}/d', {recursive: true})"`,
+    `node -pe "require('child_process').execSync('touch f')"`,
+    `node --eval="require('fs').renameSync('a', 'b')"`,
+    `node <<'EOF'\nrequire('fs').appendFileSync('${O}/log', 'x')\nEOF`,
+    'cat script.js | node',
+    'node -e "$CODE"',
+    `python -c "open('${O}/f', 'w').write('x')"`,
+    `python3 -Bc "import shutil; shutil.rmtree('${O}/d')"`,
+    `python - <<'EOF'\nimport os\nos.remove('${O}/f')\nEOF`,
+    `perl -e 'unlink "${O}/f"'`,
+    `ruby -e 'File.write("${O}/f", "x")'`,
+    `php -r 'file_put_contents("${O}/f", "x");'`,
+    `deno eval "Deno.writeTextFileSync('${O}/f', 'x')"`,
+    `bun -e "Bun.write('${O}/f', 'x')"`,
+  ]) {
+    assert.deepEqual(writes(command), ['?'], command);
+  }
+  assert.deepEqual(psWrites(`node -e "require('fs').writeFileSync('${O}/p', 'x')"`), ['?'], 'PowerShell');
+  // perl/ruby -i правят файлы-операнды на месте, как sed -i; `-pie` — расширение копии «e», скрипт — файл
+  assert.deepEqual(writes(`perl -pi -e 's/a/b/' ${O}/f.txt`), [`${O}/f.txt`]);
+  assert.deepEqual(writes(`perl -pie 's/a/b/' ${O}/g.txt`), [`${O}/g.txt`]);
+  assert.deepEqual(writes(`ruby -i.bak -pe 'sub(/a/, "b")' ${O}/r.txt`), [`${O}/r.txt`]);
+  // контроль: чтение, печать, справка, модуль, файл скрипта проекта — не запись
+  for (const command of [
+    `node -e "console.log(JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version)"`,
+    'node -p "1 + 1"',
+    'node --version',
+    'node .workflow/src/scripts/run-skill-tests.js --skill coach --case TC-COACH-003 --yes',
+    'node build.js',
+    `node <<'EOF'\nconsole.log(process.version)\nEOF`,
+    `python -c "print(open('data.txt').read())"`,
+    'python -m pip --version',
+    "perl -lne 'print if /x/' f.txt",
+    "ruby -e 'puts 1'",
+  ]) {
+    assert.deepEqual(writes(command), [], command);
+  }
+});
+
+test('detectShellWrites (2026-09-30): файл скрипта во временном каталоге разбирается, чтение — не запись', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rails-interp-'));
+  try {
+    writeFileSync(join(dir, 'w.mjs'), "import fs from 'node:fs'; fs.writeFileSync('x', 'y');\n");
+    writeFileSync(join(dir, 'r.mjs'), "import fs from 'node:fs'; console.log(fs.readFileSync('x', 'utf8'));\n");
+    writeFileSync(join(dir, 'w.py'), "open('x', 'a').write('y')\n");
+    assert.deepEqual(writes(`node "${fwd(join(dir, 'w.mjs'))}"`), ['?']);
+    assert.deepEqual(writes(`python "${fwd(join(dir, 'w.py'))}"`), ['?']);
+    assert.deepEqual(writes(`node "${fwd(join(dir, 'r.mjs'))}"`), []);
+    assert.deepEqual(writes(`node "${fwd(join(dir, 'missing.mjs'))}"`), ['?'], 'файл во временном каталоге не прочитать — неизвестно');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('detectShellWrites (C2 r2, LOW): косвенные писатели — .NET в PowerShell, dd of=, truncate, ln, install', () => {
   assert.deepEqual(psWrites(`[IO.File]::WriteAllText('${O}/w.txt', 'x')`), ['?']);
   assert.deepEqual(psWrites(`(Get-Item ${O}/x).Delete()`), ['?']);

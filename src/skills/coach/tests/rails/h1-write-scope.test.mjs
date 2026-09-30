@@ -39,6 +39,17 @@ test('H1: Write в shared knowledge проекта (.workflow/shared) на эт�
   });
 });
 
+test('H1: запись файлов кодом `node -e` — отказ, путь не определить (инцидент 2026-09-30)', () => {
+  withCoachProject(({ root }) => {
+    const s = atNode(root, 'P4S2');
+    // коуч переписал 17 файлов канона такой командой в обход write_scope
+    const command = `node -e "const fs=require('fs'); for (const f of ['src/skills/a/SKILL.md']) fs.writeFileSync(f, 'x')"`;
+    const r = decide({ action: claude('Bash', { command }), ctx: ctx(root, s) });
+    assert.equal(r.decision, 'deny');
+    assert.match(r.reason, /путь не удалось определить/);
+  });
+});
+
 test('H1b: Edit собственного rails.yaml коуча — отказ (принцип 17)', () => {
   withCoachProject(({ root, link }) => {
     const s = atNode(root, 'P4S2');
