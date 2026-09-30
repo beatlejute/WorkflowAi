@@ -1,3 +1,11 @@
+## [1.21.2] — 2026-09-30
+
+### Fixed
+- **`createTicket` (operations/tickets.mjs): `dod_format: 2` по записям проверки в DoD и план — путём.** Тело, у пунктов DoD которого есть записи check, prose или visual, получает `dod_format: 2`, если вызывающий поле не задал; тело формата 2 с пунктом без полной записи (нет записи, две формы, check без expect) или без пунктов — ошибка `INVALID_DOD` до выделения ID: такой тикет ревью проваливало бы на каждой попытке (`dod_record_invalid`). ID плана с файлом в `plans/current/` или `plans/archive/` пишется в `parent_plan` путём с настоящим именем файла, путь — косыми прямыми и от каталога `.workflow/`. ListeningGlass 2026-09-30: тикет из MCP `create_ticket` с двумя записями check вышел без `dod_format` и с `parent_plan: PLAN-001`, оба поля дописали руками.
+
+### Tests
+- `operations-tickets.test.mjs` — ID плана становится путём (current, archive, настоящее имя, current первым, обратные косые и префикс `.workflow/`), записи check и одни prose дают `dod_format: 2`, DoD без записей и пустой шаблон — без поля, явный `dod_format` решает, тело формата 2 с пунктом без полной записи и явный 2 без пунктов — `INVALID_DOD` без файла.
+
 ## [1.21.1] — 2026-09-30
 
 ### Fixed
