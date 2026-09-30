@@ -2,8 +2,8 @@ import { test, beforeEach, afterEach } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, statSync, readdirSync, rmSync, readFileSync, mkdirSync, writeFileSync, lstatSync, realpathSync, symlinkSync } from 'node:fs';
-import { initProject, ensureKiloGlobalSkillsLink, getKiloConfigDir, createKilocodeSymlinks } from '../init.mjs';
+import { existsSync, statSync, readdirSync, rmSync, readFileSync, mkdirSync, writeFileSync, lstatSync, realpathSync, symlinkSync, utimesSync } from 'node:fs';
+import { initProject, ensureKiloGlobalSkillsLink, getKiloConfigDir, createKilocodeSymlinks, syncTemplates } from '../init.mjs';
 import { getGlobalDir } from '../global-dir.mjs';
 import { isJunction } from '../junction-manager.mjs';
 
@@ -139,6 +139,51 @@ test('initProject copies templates', () => {
       const templatePath = join(templatesDir, template);
       assert.ok(existsSync(templatePath), `${template} should exist`);
     }
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('syncTemplates: пишет только отличающийся файл, отсутствующий в пакете — в missing', () => {
+  const tmpDir = join(tmpdir(), `workflow-sync-templates-test-${Date.now()}`);
+  try {
+    const pkg = join(tmpDir, 'pkg');
+    mkdirSync(join(pkg, 'templates'), { recursive: true });
+    writeFileSync(join(pkg, 'templates', 'ticket-template.md'), 'канон\r\nстрока\n');
+    const workflowRoot = join(tmpDir, 'project', '.workflow');
+
+    const first = syncTemplates(pkg, workflowRoot);
+    assert.deepEqual(first, { updated: ['ticket-template.md'], unchanged: [], missing: ['plan-template.md', 'report-template.md'], failed: [] });
+    const dest = join(workflowRoot, 'templates', 'ticket-template.md');
+    assert.equal(readFileSync(dest, 'utf8'), 'канон\r\nстрока\n', 'байт в байт');
+
+    // Совпадающий файл не переписывается: время изменения остаётся прежним
+    const old = new Date('2020-01-01T00:00:00Z');
+    utimesSync(dest, old, old);
+    const second = syncTemplates(pkg, workflowRoot);
+    assert.deepEqual(second.updated, []);
+    assert.deepEqual(second.unchanged, ['ticket-template.md']);
+    assert.equal(statSync(dest).mtimeMs, old.getTime(), 'совпадающий шаблон не переписан');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('syncTemplates: сбой одного файла уходит в failed, остальные пишутся', () => {
+  const tmpDir = join(tmpdir(), `workflow-sync-templates-fail-test-${Date.now()}`);
+  try {
+    const pkg = join(tmpDir, 'pkg');
+    mkdirSync(join(pkg, 'templates'), { recursive: true });
+    for (const name of ['ticket-template.md', 'plan-template.md', 'report-template.md']) writeFileSync(join(pkg, 'templates', name), `канон ${name}\n`);
+    const workflowRoot = join(tmpDir, 'project', '.workflow');
+    // На месте шаблона плана — каталог: ни прочитать, ни заменить его файлом нельзя
+    mkdirSync(join(workflowRoot, 'templates', 'plan-template.md'), { recursive: true });
+
+    const r = syncTemplates(pkg, workflowRoot);
+    assert.deepEqual(r.updated, ['ticket-template.md', 'report-template.md']);
+    assert.deepEqual(r.failed.map(f => f.name), ['plan-template.md']);
+    assert.ok(r.failed[0].error, 'текст ошибки записан');
+    assert.equal(readFileSync(join(workflowRoot, 'templates', 'report-template.md'), 'utf8'), 'канон report-template.md\n');
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }

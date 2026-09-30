@@ -17,8 +17,14 @@
  * - Файлы: количество файлов в context.files (>3 → WARNING, отсутствует → SKIP)
  *
  * Использование:
- *   node verify-atomicity.js "<prompt>"
+ *   node verify-atomicity.js [--activate] "<prompt>"
  *   Парсит ticket_id из Context-блока в промпте, извлекает plan_file.
+ *   План переводится в active при passed только с флагом `--activate` отдельным
+ *   аргументом — его передаёт стадия пайплайна (args агента script-verify-atomicity).
+ *   Без флага скрипт только проверяет: агент декомпозиции, которому статус плана трогать
+ *   нельзя, запускает его для самопроверки (PulseProxy PLAN-020, 2026-09-29: такой запуск
+ *   перевёл план в active внутри стадии декомпозиции). Без флага при passed —
+ *   `plan_status_unchanged: true`, `plan_status_reason: activation_not_requested`.
  *
  * Вывод:
  *   ---RESULT---
@@ -359,11 +365,15 @@ function checkTicket(ticket) {
   };
 }
 
+const ACTIVATE_FLAG = '--activate';
+
 function main() {
-  const args = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  const activate = argv.includes(ACTIVATE_FLAG);
+  const args = argv.filter(arg => arg !== ACTIVATE_FLAG);
 
   if (args.length === 0) {
-    console.error('Usage: node verify-atomicity.js "<prompt>"');
+    console.error('Usage: node verify-atomicity.js [--activate] "<prompt>"');
     process.exit(1);
   }
 
@@ -434,7 +444,9 @@ function main() {
   let activation = null;
   if (status === 'passed') {
     const planAbsPath = resolvePlanAbsolutePath(planFile, PROJECT_DIR);
-    activation = activatePlan(planAbsPath);
+    activation = activate
+      ? activatePlan(planAbsPath)
+      : { activated: false, reason: 'activation_not_requested' };
   }
 
   console.log('---RESULT---');

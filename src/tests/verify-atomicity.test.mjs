@@ -14,7 +14,11 @@
  *  - запись check, которую исполнитель проверок отклонит (флаг скрипта до `--`) или без
  *    исполняемого файла на машине, — FAIL `check_denied` / `check_tool_missing`;
  *  - вложенные строки проверок не считаются пунктами при пороге DoD: 7 пунктов и
- *    7 строк проверки — предупреждение порога 5, не FAIL порога 7.
+ *    7 строк проверки — предупреждение порога 5, не FAIL порога 7;
+ *  - план переходит в active только с флагом --activate (его передаёт args агента стадии
+ *    в поставляемом конфиге): без флага, при failed и при уже активном плане статус не
+ *    меняется, флаг внутри текста промпта флагом не считается, один флаг без промпта —
+ *    код 1 и Usage.
  *
  * Скрипт берёт plan_file из промпта раннера, а тикеты плана — из .workflow/tickets/backlog/
  * корня проекта, найденного от cwd, поэтому запускается дочерним процессом с cwd во
@@ -52,8 +56,8 @@ after(() => {
  * План planId и его тикет id в backlog/. dod — строки секции DoD как есть (пункты и
  * вложенные проверки), null — тикет без секции; dodFormat null — тикет без поля.
  */
-function putPlanWithTicket(planId, id, { dodFormat = 2, dod, type = null }) {
-  const plan = ['---', `id: "${planId}"`, 'status: approved', '---', '', `# ${planId}`, ''].join('\n');
+function putPlanWithTicket(planId, id, { dodFormat = 2, dod, type = null, planStatus = 'approved' }) {
+  const plan = ['---', `id: "${planId}"`, `status: ${planStatus}`, '---', '', `# ${planId}`, ''].join('\n');
   fs.writeFileSync(path.join(root, '.workflow', 'plans', 'current', `${planId}.md`), plan, 'utf8');
 
   const ticket = [
@@ -75,9 +79,9 @@ function putPlanWithTicket(planId, id, { dodFormat = 2, dod, type = null }) {
 }
 
 /** Стадия verify-atomicity по плану planId; блок ---RESULT--- — объектом. */
-function verify(planId) {
+function verify(planId, flags = []) {
   const prompt = `verify-atomicity\n\nContext:\n  plan_file: plans/current/${planId}.md`;
-  const run = spawnSync(process.execPath, [SCRIPT, prompt], { cwd: root, encoding: 'utf8' });
+  const run = spawnSync(process.execPath, [SCRIPT, ...flags, prompt], { cwd: root, encoding: 'utf8' });
   assert.equal(run.status, 0, run.stderr);
   const block = run.stdout.split('---RESULT---')[1];
   assert.ok(block, run.stdout);
@@ -223,4 +227,60 @@ test('dod_format: 2 — 7 пунктов и 7 строк проверки про
   assert.deepEqual(result.warnings, [
     { ticket: 'IMPL-105', check: 'dod_items', detail: 'DoD содержит 7 пунктов (порог: 5)' }
   ]);
+});
+
+// PulseProxy PLAN-020, 2026-09-29: агент декомпозиции запустил скрипт для самопроверки,
+// и тот перевёл план в active внутри стадии декомпозиции. План активирует только стадия
+// пайплайна — флагом --activate в args своего агента.
+const planFile = planId => path.join(root, '.workflow', 'plans', 'current', `${planId}.md`);
+// Запись полной формы: скрипт проверяет форму и наличие исполняемого файла, команду не
+// запускает — код выхода самой команды здесь не важен
+const WELL_FORMED_DOD = ['- [ ] Отчёт создан', '  - check: `node -e "process.exit(1)"`, expect: `exit 0`'];
+
+test('без --activate скрипт только проверяет: passed, план не тронут', () => {
+  putPlanWithTicket('PLAN-111', 'IMPL-111', { dod: WELL_FORMED_DOD });
+  const before = fs.readFileSync(planFile('PLAN-111'), 'utf8');
+  const result = verify('PLAN-111');
+  assert.equal(result.status, 'passed');
+  assert.equal(result.plan_status_unchanged, true);
+  assert.equal(result.plan_status_reason, 'activation_not_requested');
+  assert.equal(fs.readFileSync(planFile('PLAN-111'), 'utf8'), before);
+});
+
+test('args агента стадии из поставляемого конфига активируют план при passed', () => {
+  const CONFIG = fileURLToPath(new URL('../../configs/pipeline.yaml', import.meta.url));
+  const { agents } = YAML.load(fs.readFileSync(CONFIG, 'utf8')).pipeline;
+  const flags = agents['script-verify-atomicity'].args.slice(1);
+  assert.deepEqual(flags, ['--activate'], 'стадия передаёт флаг');
+
+  putPlanWithTicket('PLAN-112', 'IMPL-112', { dod: WELL_FORMED_DOD });
+  const result = verify('PLAN-112', flags);
+  assert.equal(result.status, 'passed');
+  assert.equal(result.plan_status, 'active');
+  assert.equal(result.plan_previous_status, 'approved');
+  assert.match(fs.readFileSync(planFile('PLAN-112'), 'utf8'), /^status: active$/m);
+});
+
+test('--activate при failed и при уже активном плане статус не меняет; флаг внутри промпта не считается', () => {
+  putPlanWithTicket('PLAN-113', 'IMPL-113', { dod: ['- [ ] Без записи', '  - check: `npm test`'] });
+  const failed = verify('PLAN-113', ['--activate']);
+  assert.equal(failed.status, 'failed');
+  assert.match(fs.readFileSync(planFile('PLAN-113'), 'utf8'), /^status: approved$/m);
+
+  putPlanWithTicket('PLAN-114', 'IMPL-114', { dod: WELL_FORMED_DOD, planStatus: 'active' });
+  const already = verify('PLAN-114', ['--activate']);
+  assert.equal(already.plan_status_reason, 'already_terminal_status');
+
+  putPlanWithTicket('PLAN-115', 'IMPL-115', { dod: WELL_FORMED_DOD });
+  const prompt = `verify-atomicity --activate\n\nContext:\n  plan_file: plans/current/PLAN-115.md`;
+  const run = spawnSync(process.execPath, [SCRIPT, prompt], { cwd: root, encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /plan_status_reason: activation_not_requested/);
+  assert.match(fs.readFileSync(planFile('PLAN-115'), 'utf8'), /^status: approved$/m);
+});
+
+test('только флаг без промпта — код 1 и строка Usage', () => {
+  const run = spawnSync(process.execPath, [SCRIPT, '--activate'], { cwd: root, encoding: 'utf8' });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /Usage: node verify-atomicity\.js \[--activate\]/);
 });

@@ -10,6 +10,10 @@
  * готовы (unblocked_tickets, unblockFixedTickets). Все три поля есть в результате всегда,
  * пустые — без значения.
  *
+ * Незакрытая повторная проверка с `supersedes` держит свою цель в blocked/: ни готовое
+ * исправление по `unblocks`, ни другая готовая проверка не возвращают её в backlog/ с
+ * прежней записью — цель закроет эта замена.
+ *
  * Использование:
  *   node check-conditions.js
  *
@@ -194,6 +198,24 @@ function unblocksNamers(board) {
   return namers;
 }
 
+// id цели → незакрытые тикеты (вне done/ и archive/) с корректным `supersedes`, которые
+// её называют. Такую цель заменит проверка, которая ещё не готова: возврат по `unblocks`
+// перезапустил бы тикет с той же записью, а готовая раньше него замена ушла бы без
+// переноса («тикета нет в blocked/»), и тикет остался бы в blocked/ навсегда.
+function openSupersedesNamers(board) {
+  const namers = new Map();
+  for (const t of board) {
+    if (FINISHED_COLUMNS.has(t.column)) continue;
+    const list = idList(t.frontmatter.supersedes);
+    if (!list) continue;
+    for (const id of new Set(list)) {
+      if (!namers.has(id)) namers.set(id, []);
+      namers.get(id).push(t);
+    }
+  }
+  return namers;
+}
+
 function readBoard() {
   const board = [];
   for (const column of ALL_COLUMNS) {
@@ -302,6 +324,11 @@ function moveOutOfBlocked(targetId, column, edit) {
  * все исправления, которые её называют (почему тикет вернулся), и отмечаются все они.
  * Исправление, чья цель ждёт других, не отмечается: вернёт её, когда готовы все.
  *
+ * Цель, которую называет незакрытая повторная проверка с `supersedes`, по `unblocks` не
+ * возвращается (`[INFO] <id>: ждёт замены <ids>`), и исправление не отмечается: тикет
+ * держит его собственная запись проверки, вернувшись с ней, он снова ушёл бы в blocked/,
+ * а закроет его готовая замена (PulseProxy QA-180, 2026-09-30).
+ *
  * `unblocks` не списком строк — WARN один раз (затем `unblocks_applied: []`); файл с тем
  * же id уже в backlog/ — WARN, без переноса и без отметки.
  */
@@ -310,6 +337,7 @@ export function unblockFixedTickets(board = readBoard()) {
   const applied = createMarks('unblocks_applied');
 
   const namers = unblocksNamers(board);
+  const replacing = openSupersedesNamers(board);
 
   const fixes = board.filter(t => FINISHED_COLUMNS.has(t.column)
     && t.frontmatter.unblocks !== undefined && t.frontmatter.unblocks !== null);
@@ -342,6 +370,15 @@ export function unblockFixedTickets(board = readBoard()) {
         if (!waitingLogged.has(targetId)) {
           waitingLogged.add(targetId);
           console.log(`[INFO] ${targetId}: ждёт исправлений ${open.map(t => t.id).join(', ')}`);
+        }
+        continue;
+      }
+
+      const replacers = replacing.get(targetId) || [];
+      if (replacers.length > 0) {
+        if (!waitingLogged.has(targetId)) {
+          waitingLogged.add(targetId);
+          console.log(`[INFO] ${targetId}: ждёт замены ${replacers.map(t => t.id).join(', ')} — по unblocks не возвращается`);
         }
         continue;
       }
@@ -429,6 +466,7 @@ function closeSupersededOnce(board, waitingLogged) {
   const applied = createMarks('supersedes_applied');
   const fixesApplied = createMarks('unblocks_applied');
   const namers = unblocksNamers(board);
+  const replacing = openSupersedesNamers(board);
 
   const rechecks = board.filter(t => FINISHED_COLUMNS.has(t.column)
     && t.frontmatter.supersedes !== undefined && t.frontmatter.supersedes !== null);
@@ -467,6 +505,15 @@ function closeSupersededOnce(board, waitingLogged) {
       if (later.length > 0) {
         const laterIds = later.map(t => t.id).join(', ');
         const pending = later.filter(t => !writtenList(t.frontmatter.unblocks_applied).includes(targetId));
+        // Цель закроет другая незакрытая замена: с прежней записью тикет не возвращаем — ни
+        // здесь, ни по unblocks (unblockFixedTickets её тоже держит), иначе его прогонят заново
+        // с той же сломанной записью (2026-09-30, PulseProxy QA-180)
+        const replacers = replacing.get(targetId) || [];
+        if (replacers.length > 0) {
+          applied.add(recheck, [targetId]);
+          console.log(`[INFO] ${targetId}: supersedes ${recheck.id} не применяется — тикет заменит незакрытая ${replacers.map(t => t.id).join(', ')}`);
+          continue;
+        }
         if (pending.length > 0) {
           console.log(`[INFO] ${recheck.id}: supersedes ${targetId} не применяется — исправление ${laterIds} закрыто позже проверки или без completed_at, ${targetId} вернётся по unblocks`);
           applied.add(recheck, [targetId]);
@@ -494,6 +541,9 @@ function closeSupersededOnce(board, waitingLogged) {
       if (!moved) continue;
 
       applied.add(recheck, [targetId]);
+      // Исправления этой цели своё сделали: без отметки каждое писало бы WARN «тикета нет
+      // в blocked/» на следующем запуске
+      for (const t of fixes) fixesApplied.add(t, [targetId]);
       console.log(`[INFO] ${targetId}: blocked/ → done/ (заменён ${recheck.id})`);
       superseded.push(targetId);
     }

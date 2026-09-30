@@ -53,3 +53,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-29"]
     tags: [gaps, completion, success-criteria, regression-guard]
     severity: high
+  - id: TC-ANALYZE-REPORT-009
+    file: cases/TC-ANALYZE-REPORT-009-blocked-by-own-record.yaml
+    origin_chg: ["ad-hoc-2026-09-30"]
+    tags: [gaps, blocked, check-record, regression-guard]
+    severity: high

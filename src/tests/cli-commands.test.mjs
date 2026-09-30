@@ -112,6 +112,32 @@ test('update: общая установка скопирована, в прое�
   assert.ok(fs.existsSync(path.join(SKILLS, 'coach', 'SKILL.md')), 'через ссылку скил читается');
 });
 
+// 2026-09-30: копии шаблонов в проектах писал только init — у четырёх проектов из шести
+// они отстали на 4–7 версий, тикеты писались без dod_format: 2 и без правил записей.
+test('update: устаревший шаблон проекта заменён шаблоном пакета, актуальные не тронуты', () => {
+  const templatesDir = path.join(PROJECT, '.workflow', 'templates');
+  fs.mkdirSync(templatesDir, { recursive: true });
+  fs.writeFileSync(path.join(templatesDir, 'ticket-template.md'), '---\nid: OLD\n---\n\nстарая копия\n');
+  for (const name of ['plan-template.md', 'report-template.md']) {
+    fs.copyFileSync(path.join(REPO, 'templates', name), path.join(templatesDir, name));
+  }
+
+  const r = run(['update', PROJECT]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /Templates updated: ticket-template\.md$/m);
+  for (const name of ['ticket-template.md', 'plan-template.md', 'report-template.md']) {
+    assert.ok(
+      fs.readFileSync(path.join(templatesDir, name)).equals(fs.readFileSync(path.join(REPO, 'templates', name))),
+      `${name} совпадает с шаблоном пакета`
+    );
+  }
+  assert.deepEqual(fs.readdirSync(templatesDir).sort(), ['plan-template.md', 'report-template.md', 'ticket-template.md'], 'временных файлов нет');
+
+  const again = run(['update', PROJECT]);
+  assert.equal(again.code, 0, again.err);
+  assert.match(again.out, /Templates up to date/);
+});
+
 test('list: таблица со статусом каждого скила', () => {
   const r = run(['list', PROJECT]);
   assert.equal(r.code, 0, r.err);

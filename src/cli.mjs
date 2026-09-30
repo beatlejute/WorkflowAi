@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { initProject, ensureKiloGlobalSkillsLink, createKilocodeSymlinks } from './init.mjs';
+import { initProject, ensureKiloGlobalSkillsLink, createKilocodeSymlinks, syncTemplates } from './init.mjs';
 import { runPipeline } from './runner.mjs';
 import { packageVersion } from './lib/package-version.mjs';
 import { join, dirname, resolve } from 'node:path';
@@ -16,7 +16,7 @@ const HELP_FLAGS = new Set(['--help', '-h']);
 const USAGE_TEXT = `Usage:
   workflow init [path] [--force]     Initialize .workflow/ in target directory
   workflow run [options]             Run the AI pipeline
-  workflow update [path]             Update global dir and recreate junctions
+  workflow update [path]             Update global dir, junctions and project templates
   workflow eject <skill> [path]      Eject a skill (copy from global to project)
   workflow eject-scripts [path]      Eject scripts (copy from global to project)
   workflow eject-configs [path]      Eject configs (copy from global to project)
@@ -124,6 +124,13 @@ function runUpdate(args) {
   const configDir = join(workflowRoot, 'config');
   createConfigJunction(globalDir, configDir);
   console.log('✅ Config junction recreated');
+
+  // Копии шаблонов в проекте читают скилы; раньше их писал только init (init.mjs, syncTemplates)
+  const templates = syncTemplates(packageRoot, workflowRoot);
+  if (templates.updated.length) console.log(`✅ Templates updated: ${templates.updated.join(', ')}`);
+  else if (!templates.missing.length && !templates.failed.length) console.log('✅ Templates up to date');
+  if (templates.missing.length) console.warn(`⚠️  Templates missing in package: ${templates.missing.join(', ')}`);
+  for (const f of templates.failed) console.warn(`⚠️  Template not written: ${f.name}: ${f.error}`);
 
   syncKiloSkills(projectRoot, globalDir);
 }

@@ -74,6 +74,16 @@ assertions:
       file: "scripts/verify-atomicity.js"
       pattern: 'check_denied \(\$\{problem\.reason\}\)'
       reason: "Машинная защита: запись, которую исполнитель проверок отклонит, — FAIL до работы."
+    # 2026-09-30: агент декомпозиции запустил скрипт для самопроверки, и тот перевёл план
+    # в active внутри стадии декомпозиции — статус плана декомпозиции трогать нельзя.
+    - kind: skill_contains
+      file: "scripts/verify-atomicity.js"
+      pattern: "const activate = argv\\.includes\\(ACTIVATE_FLAG\\)"
+      reason: "План активирует только запуск с флагом --activate — его передаёт стадия пайплайна."
+    - kind: skill_contains
+      file: "scripts/verify-atomicity.js"
+      pattern: "reason: 'activation_not_requested'"
+      reason: "Без флага скрипт только проверяет и сообщает, что активация не запрошена."
 
 execution:
   timeout_s: 60

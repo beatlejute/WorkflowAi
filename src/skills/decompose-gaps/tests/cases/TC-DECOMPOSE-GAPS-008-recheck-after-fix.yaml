@@ -27,7 +27,7 @@ assertions:
       reason: "Исправление дефекта из тестирования не заводится без повторной проверки, которая ждёт исправления (для закрытого тикета тестирования — новым тикетом)."
     - kind: skill_contains
       file: "workflows/decompose.md"
-      pattern: "P10E1 --> P10R1 --> P10R2 --> P10R3 --> P10S1"
+      pattern: "P10E1 --> P10R1 --> P10R2 --> P10R3 --> P10R4 --> P10R5 --> P10S1"
       reason: "Правила стоят в начале этапа — до проверки scope и создания тикетов."
     - kind: skill_contains
       file: "algorithms/scope-check.md"

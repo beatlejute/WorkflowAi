@@ -63,3 +63,8 @@ cases:
     origin_chg: ["ad-hoc-2026-09-29"]
     tags: [scope-check, success-criteria, regression-guard]
     severity: high
+  - id: TC-DECOMPOSE-GAPS-011
+    file: cases/TC-DECOMPOSE-GAPS-011-broken-record-replacement.yaml
+    origin_chg: ["ad-hoc-2026-09-30"]
+    tags: [scope-check, recheck, supersedes, check-record, regression-guard]
+    severity: high

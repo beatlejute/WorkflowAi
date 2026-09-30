@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { getGlobalDir, ensureGlobalDir } from './global-dir.mjs';
 import { createSkillJunctions, createScriptJunction, createConfigJunction, createRailsJunction, migrateProjectSharedDir } from './junction-manager.mjs';
+import { replaceFileAtomicSync } from './lib/utils.mjs';
 
 /**
  * Возвращает абсолютный путь к корню npm-пакета через import.meta.url.
@@ -28,16 +29,49 @@ function ensureDir(dirPath) {
   }
 }
 
+export const TEMPLATE_FILES = ['ticket-template.md', 'plan-template.md', 'report-template.md'];
+
 /**
- * Копирует файл из источника в назначение.
+ * Приводит .workflow/templates/ проекта к шаблонам пакета — при `workflow init` и при
+ * `workflow update`. Скилы читают копию проекта (шаблон тикета, плана, отчёта), а правила
+ * записей проверки DoD живут в комментарии шаблона тикета. Раньше копию писал только
+ * init: 2026-09-30 в четырёх проектах из шести шаблоны отстали на 4–7 версий, тикеты
+ * PulseProxy писались по апрельской копии без `dod_format: 2` и без правил записей.
+ * Ни одна из 18 копий не отличалась от какой-либо прошлой версии пакета — ручных правок
+ * не было, поэтому канон побеждает, как у init. Пишется только отличающийся файл
+ * (replaceFileAtomicSync: rename поверх, при исчерпании повторов — прямая запись с
+ * предупреждением). Сбой одного файла не останавливает остальные: он уходит в failed.
  *
- * @param {string} src - Исходный путь
- * @param {string} dest - Путь назначения
+ * @param {string} packageRoot - корень пакета workflow-ai
+ * @param {string} workflowRoot - каталог .workflow/ проекта
+ * @returns {{updated: string[], unchanged: string[], missing: string[], failed: {name: string, error: string}[]}}
+ *   имена файлов; failed — файл и текст ошибки
  */
-function copyFile(src, dest) {
-  const destDir = dirname(dest);
+export function syncTemplates(packageRoot, workflowRoot) {
+  const srcDir = join(packageRoot, 'templates');
+  const destDir = join(workflowRoot, 'templates');
   ensureDir(destDir);
-  copyFileSync(src, dest);
+  const result = { updated: [], unchanged: [], missing: [], failed: [] };
+  for (const name of TEMPLATE_FILES) {
+    const srcPath = join(srcDir, name);
+    if (!existsSync(srcPath)) {
+      result.missing.push(name);
+      continue;
+    }
+    try {
+      const canon = readFileSync(srcPath);
+      const destPath = join(destDir, name);
+      if (existsSync(destPath) && readFileSync(destPath).equals(canon)) {
+        result.unchanged.push(name);
+        continue;
+      }
+      replaceFileAtomicSync(destPath, canon);
+      result.updated.push(name);
+    } catch (e) {
+      result.failed.push({ name, error: e.message });
+    }
+  }
+  return result;
 }
 
 /**
@@ -640,20 +674,11 @@ export function initProject(targetPath = process.cwd(), options = {}) {
     result.steps.push('Skipped rails hooks: ядро rails недоступно в .workflow/src/rails/ (нет в глобальной установке ~/.workflow/rails — обновите пакет/глобальную установку и повторите workflow init)');
   }
 
-  // Step 5: Copy templates (3 templates)
-  const templatesSrc = join(packageRoot, 'templates');
-  const templatesDest = join(workflowRoot, 'templates');
-  ensureDir(templatesDest);
-  
-  const templateFiles = ['ticket-template.md', 'plan-template.md', 'report-template.md'];
-  for (const template of templateFiles) {
-    const srcPath = join(templatesSrc, template);
-    const destPath = join(templatesDest, template);
-    if (existsSync(srcPath)) {
-      copyFile(srcPath, destPath);
-    }
-  }
-  result.steps.push('Copied 3 templates → .workflow/templates/');
+  // Step 5: templates (та же сверка, что у `workflow update`)
+  const templates = syncTemplates(packageRoot, workflowRoot);
+  result.steps.push(`Synced templates → .workflow/templates/ (updated: ${templates.updated.join(', ') || 'none'})`);
+  if (templates.missing.length) result.warnings.push(`Templates missing in package: ${templates.missing.join(', ')}`);
+  for (const f of templates.failed) result.errors.push(`Template not written: ${f.name}: ${f.error}`);
   
   // Step 6: Create config junction
   const configDest = join(workflowRoot, 'config');

@@ -1,5 +1,23 @@
 # Руководство по миграции
 
+## Upgrade to 1.23.0
+
+Скрипт `verify-atomicity.js` переводит план в `active` только с флагом `--activate`. Без флага он лишь проверяет тикеты: агент декомпозиции запускает его для самопроверки и статус плана трогать не должен.
+
+Поставляемый `configs/pipeline.yaml` уже передаёт флаг. Проектам с собственной копией конфигов (`workflow eject-configs`) нужно добавить его в args агента `script-verify-atomicity` — **без флага план не станет `active` никогда**: каждый цикл пайплайна снова запускает `verify-atomicity`, а закрытие плана (`complete-plan.js`) ищет только план в `active` — план не закроется, даже когда все его тикеты выполнены:
+
+```yaml
+    script-verify-atomicity:
+      command: "node"
+      args: [".workflow/src/skills/decompose-plan/scripts/verify-atomicity.js", "--activate"]
+```
+
+Признак, что флага нет: после декомпозиции план остаётся `approved`, в логе стадии `verify-atomicity` — `plan_status_reason: activation_not_requested`. Обратный случай безопасен: старая копия скрипта с новым конфигом активирует план, как раньше.
+
+Пайплайн, запущенный до `workflow update`, держит в памяти прежний конфиг: после обновления его нужно перезапустить.
+
+`workflow update` теперь приводит `.workflow/templates/` проекта к шаблонам пакета: отличающийся шаблон перезаписывается. Правки шаблонов в проекте держать нельзя — их затрёт следующий `update`.
+
 ## Shared knowledge: `.workflow/src/skills/shared/` → `.workflow/shared/`
 
 Скилы читают shared knowledge проекта из `.workflow/shared/`. `workflow update` (и `workflow init`) переносит старый каталог сам и пишет в вывод `✅ Shared knowledge moved`. Вручную нужно только:

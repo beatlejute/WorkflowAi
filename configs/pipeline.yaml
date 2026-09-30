@@ -360,7 +360,9 @@ pipeline:
 
     script-verify-atomicity:
       command: "node"
-      args: [".workflow/src/skills/decompose-plan/scripts/verify-atomicity.js"]
+      # --activate: план переводит в active только стадия пайплайна; агент декомпозиции,
+      # запуская скрипт для самопроверки, план не трогает (PulseProxy PLAN-020, 2026-09-29)
+      args: [".workflow/src/skills/decompose-plan/scripts/verify-atomicity.js", "--activate"]
       workdir: "."
       description: "Машинная проверка атомарности тикетов после декомпозиции"
 
@@ -590,7 +592,7 @@ pipeline:
     # -------------------------------------------------------------------------
     # 0f. verify-atomicity
     # Машинная проверка атомарности тикетов после декомпозиции.
-    # При passed → plan.status: approved → active (через activatePlan в скрипте) → check-conditions.
+    # При passed → plan.status: approved → active (activatePlan в скрипте, только с --activate в args агента) → check-conditions.
     # При failed → increment-atomicity-counter → decompose-plan (feedback loop с atomicity_failures).
     # plan_file берётся из $context (передан через decompose-plan.params или через
     # check-plan-decomposition → check-atomicity-limit при awaiting_atomicity-сценарии).

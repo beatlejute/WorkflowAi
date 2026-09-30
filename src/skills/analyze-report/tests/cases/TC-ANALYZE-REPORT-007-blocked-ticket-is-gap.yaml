@@ -23,7 +23,7 @@ assertions:
       reason: "Заблокированный тикет с уже устранённым дефектом не превращается в completed и рекомендацию стейкхолдеру."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "P6R3 --> P6R4 --> P6Q1"
+      pattern: "P6R3 --> P6R4 --> P6R5 --> P6Q1"
       reason: "Правило стоит в выходном слое до выбора статуса."
     - kind: skill_contains
       file: "knowledge/report-structure.md"
