@@ -1,4 +1,4 @@
-## [Unreleased]
+## [1.22.0] — 2026-09-30
 
 ### Changed
 - **Shared knowledge проекта — `.workflow/shared/`, вне каталога скилов.** Все скилы и шаблон нового скила читают индекс `.workflow/shared/README.md` вместо `.workflow/src/skills/shared/README.md`; правило «Shared — вне каталога скилов» — в `coach/knowledge/skill-anatomy.md`. Каталог скилов — ссылки на общую копию канона, запись в него исполнителю закрыта гардом (write_deny `.workflow/src/skills/**`, 1.21.x), а shared обновляют задачи продукта (`create-plan` P0R8). PulseProxy DOCS-014 2026-09-30: задача плана «обновить карту QA пула в shared knowledge» шесть раз упёрлась в этот запрет и ушла в `blocked/`.
