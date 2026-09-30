@@ -1,5 +1,6 @@
 import { findProjectRoot } from '../find-root.mjs';
-import { parseFrontmatter, serializeFrontmatter, getLastReviewStatus, replaceFileAtomic, approvalTempPath } from '../utils.mjs';
+import { parseFrontmatter, serializeFrontmatter, getLastReviewStatus, replaceFileAtomic, approvalTempPath, normalizePlanId } from '../utils.mjs';
+import { parseDodChecks } from '../check-runner.mjs';
 import { existsSync, readdirSync, promises as fs } from 'node:fs';
 import { resolve, join } from 'node:path';
 
@@ -346,13 +347,53 @@ function checkDependencies(projectRoot, dependencies) {
 }
 
 /**
+ * Ссылка на план-родитель в той форме, в какой её пишет декомпозиция: путь
+ * `plans/<current|archive>/PLAN-NNN.md`. ID плана (`PLAN-001`, `7`) превращается в путь,
+ * если файл плана есть; путь и ID без файла остаются как пришли. Часть скриптов сверяет
+ * `parent_plan` с путём дословно (check-plan-templates.js: тикеты плана из шаблона).
+ * ListeningGlass 2026-09-30: тикет, заведённый через MCP с `plan_id: PLAN-001`, получил
+ * `parent_plan: PLAN-001`, соседние тикеты плана — `plans/current/PLAN-001.md`.
+ */
+function planReference(root, ref) {
+  const text = String(ref ?? '').trim();
+  if (!text) return text;
+  // Путь — в форме декомпозиции: косые прямые, от каталога .workflow/.
+  if (/[\\/]/.test(text)) return text.replace(/\\/g, '/').replace(/^(?:\.\/)?\.workflow\//, '');
+  const id = normalizePlanId(text);
+  if (!id) return text;
+  for (const dir of ['current', 'archive']) {
+    const plansDir = join(root, '.workflow', 'plans', dir);
+    if (!existsSync(plansDir)) continue;
+    // Настоящее имя файла, а не собранное из ID: сверка путём дословная, а файловая
+    // система Windows нашла бы `plan-010.md` и по имени `PLAN-010.md`.
+    const file = readdirSync(plansDir).find((f) => f.endsWith('.md') && normalizePlanId(f) === id);
+    if (file) return `plans/${dir}/${file}`;
+  }
+  return text;
+}
+
+/**
+ * Проверка DoD тела для `dod_format: 2`: у каждого пункта ровно одна запись полной формы.
+ * Пункт без записи или с неполной записью ревью проваливает на каждой попытке
+ * (verify-artifacts: `dod_record_invalid`), а гейт перед ready/ смотрит только пункты check.
+ */
+function dodFormatProblem(items) {
+  if (items.length === 0) return 'в DoD нет пунктов';
+  const bad = items.filter((item) => item.error).map((item) => `пункт ${item.index} (${item.error})`);
+  return bad.length > 0 ? bad.join('; ') : null;
+}
+
+/**
  * Создаёт новый тикет в tickets/backlog/ с автоинкрементированным ID
  * @param {string} projectRoot - Корень проекта
  * @param {object} data - Данные для frontmatter (title, type, priority, tags, context, etc.)
  * @param {string} [data.type] - Тип в любом регистре: во frontmatter — строчными,
  *   префикс ID — прописными (`qa` и `QA` дают `type: qa` и `QA-NNN`)
  * @param {string} [data.body] - Тело тикета; без него берётся пустой шаблон
- * @param {string} [data.plan_id] - План-родитель; синоним `parent_plan`
+ * @param {string} [data.plan_id] - План-родитель; синоним `parent_plan`. ID плана с файлом
+ *   в plans/current/ или plans/archive/ пишется путём (planReference)
+ * @param {number} [data.dod_format] - Формат DoD; без него — 2, если под пунктами DoD
+ *   тела есть записи проверки
  * @returns {Promise<{id: string, path: string}>} Созданный ID и абсолютный путь
  */
 export async function createTicket(projectRoot, data) {
@@ -366,6 +407,30 @@ export async function createTicket(projectRoot, data) {
   // `agents_by_type[type]` с ключами строчными: тип `COACH` во frontmatter уводил
   // тикет мимо своей роли, а тип `coach` без нормализации давал ID `coach-001`.
   const type = String(data.type ?? 'impl').toLowerCase();
+
+  // Пустой шаблон — запасной вариант, а не единственный: переданное тело
+  // раньше отбрасывалось, и тикет из MCP всегда выходил с пустым описанием.
+  const template = '\n## Описание\n\n\n## Критерии готовности (Definition of Done)\n\n- [ ] \n';
+  const body = typeof data.body === 'string' && data.body.trim().length > 0
+    ? '\n' + data.body.replace(/\s+$/, '') + '\n'
+    : template;
+
+  // Записи проверки под пунктами DoD (check, prose, visual) пайплайн исполняет только
+  // у тикета с `dod_format: 2`: без поля их не исполняют ни гейт move-to-ready, ни ревью
+  // (ревью уходит модели), check-ticket-dod.js сообщает `dod_format_missing`. Поле
+  // ставится по телу, если вызывающий его не задал; тело формата 2 с пунктом без полной
+  // записи — ошибка до записи файла. ListeningGlass 2026-09-30: тикет с двумя записями
+  // check, заведённый через MCP, вышел без поля — его дописали руками.
+  const dodItems = parseDodChecks(body);
+  const dodFormat = data.dod_format
+    ?? (dodItems.some((item) => item.error !== 'no_form') ? 2 : undefined);
+  const problem = String(dodFormat) === '2' ? dodFormatProblem(dodItems) : null;
+  if (problem) {
+    const err = new Error(`dod_record_invalid: ${problem} — у пункта DoD формата 2 ровно одна запись check с expect, prose с причиной или visual с путём`);
+    err.code = 'INVALID_DOD';
+    throw err;
+  }
+
   const id = await getNextId(root, type.toUpperCase());
 
   // 2. Сформировать frontmatter
@@ -375,13 +440,14 @@ export async function createTicket(projectRoot, data) {
     priority: data.priority ?? 3,
     type,
     required_capabilities: data.required_capabilities ?? [],
+    ...(dodFormat === undefined ? {} : { dod_format: dodFormat }),
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     completed_at: '',
     // `plan_id` — имя того же поля у вызывающих: так его называет MCP-tool
     // `create_ticket` и так о нём говорят планы. Без синонима связь тикета с
     // планом молча терялась: параметр принимали, в файл он не попадал.
-    parent_plan: data.parent_plan ?? data.plan_id ?? '',
+    parent_plan: planReference(root, data.parent_plan ?? data.plan_id ?? ''),
     parent_task: data.parent_task ?? '',
     dependencies: data.dependencies ?? [],
     conditions: data.conditions ?? [],
@@ -401,12 +467,6 @@ export async function createTicket(projectRoot, data) {
   }
 
   const path = join(backlogDir, `${id}.md`);
-  // Пустой шаблон — запасной вариант, а не единственный: переданное тело
-  // раньше отбрасывалось, и тикет из MCP всегда выходил с пустым описанием.
-  const template = '\n## Описание\n\n\n## Критерии готовности (Definition of Done)\n\n- [ ] \n';
-  const body = typeof data.body === 'string' && data.body.trim().length > 0
-    ? '\n' + data.body.replace(/\s+$/, '') + '\n'
-    : template;
   const content = serializeFrontmatter(frontmatter) + body;
 
   try {

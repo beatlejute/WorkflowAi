@@ -428,6 +428,89 @@ blocked_reason: "Waiting for dependency"
       assert.match(content, /parent_plan: PLAN-007/, 'plan_id must land in parent_plan');
     });
 
+    // ListeningGlass 2026-09-30: тикет, заведённый через MCP с `plan_id: PLAN-001`,
+    // получил `parent_plan: PLAN-001`, соседние — `plans/current/PLAN-001.md`, а тело с
+    // записями check вышло без `dod_format: 2`, и проверки DoD не запустились бы.
+    test('TC18a: plan_id of an existing plan becomes its path, current and archive', async () => {
+      mkdirSync(join(projectRoot, '.workflow', 'plans', 'current'), { recursive: true });
+      mkdirSync(join(projectRoot, '.workflow', 'plans', 'archive'), { recursive: true });
+      writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'PLAN-007.md'), '---\nid: PLAN-007\n---\n');
+      writeFileSync(join(projectRoot, '.workflow', 'plans', 'archive', 'PLAN-002.md'), '---\nid: PLAN-002\n---\n');
+
+      const current = await createTicket(projectRoot, { type: 'IMPL', title: 'Current', plan_id: 'PLAN-007' });
+      const archived = await createTicket(projectRoot, { type: 'IMPL', title: 'Archived', plan_id: 'plan-2' });
+      const given = await createTicket(projectRoot, { type: 'IMPL', title: 'Path', parent_plan: 'plans/current/PLAN-009.md' });
+
+      assert.equal(parseFrontmatter(readFileSync(current.path, 'utf8')).frontmatter.parent_plan, 'plans/current/PLAN-007.md');
+      assert.equal(parseFrontmatter(readFileSync(archived.path, 'utf8')).frontmatter.parent_plan, 'plans/archive/PLAN-002.md');
+      assert.equal(parseFrontmatter(readFileSync(given.path, 'utf8')).frontmatter.parent_plan, 'plans/current/PLAN-009.md', 'a given path is kept as is');
+    });
+
+    test('TC18e: plan path forms — real file name, current before archive, backslashes and .workflow/ prefix', async () => {
+      mkdirSync(join(projectRoot, '.workflow', 'plans', 'current'), { recursive: true });
+      mkdirSync(join(projectRoot, '.workflow', 'plans', 'archive'), { recursive: true });
+      writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'plan-010.md'), '---\nid: PLAN-010\n---\n');
+      writeFileSync(join(projectRoot, '.workflow', 'plans', 'current', 'PLAN-003.md'), '---\nid: PLAN-003\n---\n');
+      writeFileSync(join(projectRoot, '.workflow', 'plans', 'archive', 'PLAN-003.md'), '---\nid: PLAN-003\n---\n');
+
+      const planOf = async (ref) => {
+        const { path: file } = await createTicket(projectRoot, { type: 'IMPL', title: String(ref), plan_id: ref });
+        return parseFrontmatter(readFileSync(file, 'utf8')).frontmatter.parent_plan;
+      };
+
+      assert.equal(await planOf('PLAN-010'), 'plans/current/plan-010.md', 'the real file name, not one built from the ID');
+      assert.equal(await planOf('PLAN-003'), 'plans/current/PLAN-003.md', 'current wins over archive');
+      assert.equal(await planOf('plans\\current\\PLAN-003.md'), 'plans/current/PLAN-003.md');
+      assert.equal(await planOf('.workflow/plans/current/PLAN-003.md'), 'plans/current/PLAN-003.md');
+    });
+
+    test('TC18b: body with DoD check records gets dod_format: 2', async () => {
+      const body = '## Описание\n\nТекст.\n\n## Критерии готовности (Definition of Done)\n\n'
+        + '- [ ] Скрипт запускает тесты\n  - check: `npm test`, expect: `exit 0`\n'
+        + '- [ ] Текст понятен\n  - prose: `понятность командой не проверить`\n';
+      const result = await createTicket(projectRoot, { type: 'FIX', title: 'Checks', body });
+
+      assert.equal(parseFrontmatter(readFileSync(result.path, 'utf8')).frontmatter.dod_format, 2);
+    });
+
+    test('TC18c: prose-only DoD records also get dod_format: 2', async () => {
+      const body = '## Критерии готовности (Definition of Done)\n\n- [ ] Текст понятен\n  - prose: `понятность командой не проверить`\n';
+      const result = await createTicket(projectRoot, { type: 'DOCS', title: 'Prose', body });
+
+      assert.equal(parseFrontmatter(readFileSync(result.path, 'utf8')).frontmatter.dod_format, 2);
+    });
+
+    test('TC18d: DoD without records, empty template and explicit dod_format', async () => {
+      const plain = await createTicket(projectRoot, {
+        type: 'IMPL', title: 'Plain', body: '## Критерии готовности (Definition of Done)\n\n- [ ] Сделано\n'
+      });
+      const empty = await createTicket(projectRoot, { type: 'IMPL', title: 'Empty' });
+      const explicit = await createTicket(projectRoot, {
+        type: 'IMPL', title: 'Explicit', dod_format: 1,
+        body: '## Критерии готовности (Definition of Done)\n\n- [ ] Сделано\n  - check: `npm test`, expect: `exit 0`\n'
+      });
+
+      assert.equal('dod_format' in parseFrontmatter(readFileSync(plain.path, 'utf8')).frontmatter, false);
+      assert.equal('dod_format' in parseFrontmatter(readFileSync(empty.path, 'utf8')).frontmatter, false);
+      assert.equal(parseFrontmatter(readFileSync(explicit.path, 'utf8')).frontmatter.dod_format, 1, 'the caller decides');
+    });
+
+    // Формат 2 требует запись у каждого пункта: пункт без записи или с неполной
+    // ревью проваливает на каждой попытке (verify-artifacts, dod_record_invalid).
+    test('TC18f: dod_format 2 body with an item without a full record is rejected, no file written', async () => {
+      const dod = '## Критерии готовности (Definition of Done)\n\n';
+      const bodies = {
+        mixed: dod + '- [ ] Скрипт\n  - check: `npm test`, expect: `exit 0`\n- [ ] Без записи\n',
+        multiple: dod + '- [ ] Две формы\n  - check: `npm test`, expect: `exit 0`\n  - prose: `причина`\n',
+        noExpect: dod + '- [ ] Без ожидания\n  - check: `npm test`\n'
+      };
+      for (const [name, body] of Object.entries(bodies)) {
+        await assert.rejects(createTicket(projectRoot, { type: 'FIX', title: name, body }), { code: 'INVALID_DOD' }, name);
+      }
+      await assert.rejects(createTicket(projectRoot, { type: 'FIX', title: 'explicit, no items', dod_format: 2, body: '## Описание\n\nТекст.\n' }), { code: 'INVALID_DOD' });
+      assert.equal(existsSync(join(projectRoot, '.workflow', 'tickets', 'backlog', 'FIX-001.md')), false, 'nothing written, the ID is not taken');
+    });
+
     // Тип во frontmatter — строчными, как ключи `agents_by_type` раннера и
     // `task_types` конфига; префикс ID — прописными. До 2026-09-27 тип писался
     // как пришёл: `COACH` уводил тикет коуча мимо роли coach, `coach` давал
