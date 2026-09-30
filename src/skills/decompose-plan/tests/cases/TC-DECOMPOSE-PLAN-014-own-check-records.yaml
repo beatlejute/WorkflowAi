@@ -1,0 +1,79 @@
+id: TC-DECOMPOSE-PLAN-014
+title: "Запись проверки, которую декомпозиция пишет сама, проходит правильная работа; тикет с записями несёт dod_format: 2 и проходит гейт после записи"
+origin:
+  chg: ["ad-hoc-2026-09-30"]
+  incidents:
+    - "PulseProxy PLAN-020 → QA-180 (2026-09-29): условие В узла P10S4 дало сводный тикет regression sweep — не задачу плана. Декомпозитор сам написал ему две записи и ни одну не запустил: `node node_modules/@playwright/test/cli.js test tests/e2e/ --reporter=line` с ожиданием `stdout matches /0 failed/` (построчный отчёт при нуле провалов такой строки не печатает) и `npm test --json` (npm забирает флаг до `--`, исполнитель проверок такую запись отклоняет); полный прогон e2e шёл 14 минут при таймауте исполнителя проверок 120 с. dod_format: 2 не поставлен: по букве P10S18 поле требовалось только тикету с перенесёнными записями, поэтому гейт перед ready/ тикет пропустил. Три исполнения правильной работы (sonnet, opus ×2) трижды ушли в blocked/. При переводе скила на рельсы у условия В пропал «проход по полному реестру observable-инвариантов»."
+  principle: "Запись проверки, которой нет в плане, декомпозиция пишет по правилам: её проходит правильная работа, тикет проверки читает артефакт с итогом, ожидание — код возврата или сверенный запуском текст, команда в таймауте исполнителя проверок, аргументы скрипту — после `--`; тикет с любой записью — dod_format: 2; после записи тикетов — гейт check-ticket-dod.js с правкой записей; verify-atomicity отклоняет записи без dod_format: 2 и записи, которые не запустит исполнитель проверок (workflows/decompose.md узлы P10S4, P10S18, P10S19, P10G6, P10S20, P10S15; SKILL.md P0R8; scripts/verify-atomicity.js)."
+  backlog_sources:
+    - "D:/Dev/PulseProxy/.workflow/tickets/ready/QA-180.md"
+tags: [dod-transfer, check-record, regression-sweep, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S4\["[^"]*сводный тикет regression sweep с проходом по полному реестру observable-инвариантов[^"]*по узлу P10S19'
+      reason: "Сводный тикет проходит по реестру observable-инвариантов, а не только прогоняет набор тестов; его записи — по P10S19."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S19\["П10 ШАГ: Запись проверки, которой нет в плане, декомпозиция пишет сама'
+      reason: "У записей, которые пишет сама декомпозиция, есть свои правила."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S19\["[^"]*проходит правильно сделанная работа тикета[^"]*запись читает этот артефакт, а не требует, чтобы продукт прошёл'
+      reason: "Тикет проверки подтверждается артефактом с итогом, найденный дефект — выполненный пункт."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S19\["[^"]*[Оо]жидание — код возврата, совпадение со строкой вывода — только по тексту, сверенному запуском того же инструмента'
+      reason: "Текст вывода в ожидании — только проверенный запуском: отчёт при нуле провалов строки с нулём не печатает."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S19\["[^"]*укладывается в таймаут исполнителя проверок[^"]*итог долгого прогона пишется в артефакт'
+      reason: "Запись дольше таймаута исполнителя проверок красная при любой работе."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S19\["[^"]*[Аа]ргументы скрипту менеджера пакетов — после `--`'
+      reason: "Флаг до `--` менеджер пакетов забирает себе, исполнитель проверок такую запись отклоняет."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S18\["[^"]*[Тт]икет, у которого под пунктами DoD есть хотя бы одна запись — перенесённая из плана или написанная по узлу P10S19, — несёт во frontmatter dod_format: 2'
+      reason: "Поле нужно любому тикету с записями, а не только тикету с перенесёнными."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10G6\{"[^"]*check-ticket-dod\.js[^"]*кроме провала записи, перенесённой из плана'
+      reason: "После записи тикетов — тот же гейт, что перед ready/; запись плана декомпозитор не меняет."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S15 --> P10G6'
+      reason: "Гейт стоит сразу после сохранения тикетов."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10G6 -->\|"нет"\| P10S20'
+      reason: "Провал гейта ведёт к правке сохранённого тикета."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S20 --> P10G6'
+      reason: "После правки — снова гейт."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P0R8\["[^"]*[Зз]аписи проверок под пунктами DoD — не инструменты исполнителя'
+      reason: "Правило «без инструментов» не запрещает записи проверок."
+    - kind: skill_contains
+      file: "scripts/verify-atomicity.js"
+      pattern: 'dod_format_missing — под пунктами DoD есть записи проверки, а dod_format: 2 во frontmatter нет'
+      reason: "Машинная защита: тикет с записями без поля возвращается на повторную декомпозицию."
+    - kind: skill_contains
+      file: "scripts/verify-atomicity.js"
+      pattern: 'check_denied \(\$\{problem\.reason\}\)'
+      reason: "Машинная защита: запись, которую исполнитель проверок отклонит, — FAIL до работы."
+
+execution:
+  timeout_s: 60

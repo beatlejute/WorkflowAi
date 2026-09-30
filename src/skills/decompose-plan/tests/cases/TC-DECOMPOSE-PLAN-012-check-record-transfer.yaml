@@ -70,7 +70,7 @@ assertions:
       reason: "Тикет с перенесёнными проверками несёт dod_format: 2 — по полю пайплайн исполняет проверки и собирает evidence."
     - kind: skill_contains
       file: "workflows/decompose.md"
-      pattern: '--> P10S18 --> P10G3'
+      pattern: '--> P10S18 --> P10S19 --> P10G3'
       reason: "Узел переноса проверки стоит в цепочке рёбер сразу перед гейтом нумерации P10G3 — гейтом до любых Write и Edit, то есть до записи тикета."
 
   # Файлы созданных тикетов в промпт судьи не попадают, а verify-atomicity.js

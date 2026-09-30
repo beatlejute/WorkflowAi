@@ -78,3 +78,8 @@ cases:
     origin_chg: [ad-hoc-2026-09-30-listeningglass-qa-001]
     tags: [dod-transfer, check-record, verbatim, review-coverage]
     severity: high
+  - id: TC-DECOMPOSE-PLAN-014
+    file: cases/TC-DECOMPOSE-PLAN-014-own-check-records.yaml
+    origin_chg: [ad-hoc-2026-09-30-pulseproxy-qa-180]
+    tags: [dod-transfer, check-record, regression-sweep, regression-guard]
+    severity: high

@@ -8,7 +8,11 @@
  *  - тикет `dod_format: 2` из одних регрессионных проверок — FAIL `only_regression_checks`;
  *    с проверкой результата рядом — проходит;
  *  - тикет `dod_format: 2` с пустой секцией DoD или без неё — FAIL `no_dod_items`;
- *  - тикет без `dod_format` с тем же DoD — прежний результат, без FAIL;
+ *  - тикет без `dod_format` с записями проверки под пунктами DoD — FAIL
+ *    `dod_format_missing` (PulseProxy QA-180, 2026-09-29: пайплайн таких записей не
+ *    исполняет); тикет без поля и без записей и тикет human — без FAIL;
+ *  - запись check, которую исполнитель проверок отклонит (флаг скрипта до `--`) или без
+ *    исполняемого файла на машине, — FAIL `check_denied` / `check_tool_missing`;
  *  - вложенные строки проверок не считаются пунктами при пороге DoD: 7 пунктов и
  *    7 строк проверки — предупреждение порога 5, не FAIL порога 7.
  *
@@ -48,7 +52,7 @@ after(() => {
  * План planId и его тикет id в backlog/. dod — строки секции DoD как есть (пункты и
  * вложенные проверки), null — тикет без секции; dodFormat null — тикет без поля.
  */
-function putPlanWithTicket(planId, id, { dodFormat = 2, dod }) {
+function putPlanWithTicket(planId, id, { dodFormat = 2, dod, type = null }) {
   const plan = ['---', `id: "${planId}"`, 'status: approved', '---', '', `# ${planId}`, ''].join('\n');
   fs.writeFileSync(path.join(root, '.workflow', 'plans', 'current', `${planId}.md`), plan, 'utf8');
 
@@ -57,6 +61,7 @@ function putPlanWithTicket(planId, id, { dodFormat = 2, dod }) {
     `id: "${id}"`,
     'title: "Задача"',
     `parent_plan: "${planId}"`,
+    ...(type === null ? [] : [`type: ${type}`]),
     ...(dodFormat === null ? [] : [`dod_format: ${dodFormat}`]),
     '---',
     '',
@@ -155,18 +160,62 @@ test('dod_format: 2 — пустая секция DoD или её отсутст
   ]);
 });
 
-test('тикет без dod_format с тем же DoD — прежний результат, без FAIL', () => {
+// PulseProxy QA-180, 2026-09-29: декомпозиция написала сводному тикету записи проверки
+// и не поставила dod_format: 2 — пайплайн их не исполнил, гейт перед ready/ тикет пропустил.
+test('тикет без dod_format с записями проверки под пунктами DoD — FAIL dod_format_missing', () => {
   putPlanWithTicket('PLAN-104', 'IMPL-104', { dodFormat: null, dod: MIXED_DOD });
   const result = verify('PLAN-104');
-  assert.equal(result.status, 'passed');
+  assert.equal(result.status, 'failed');
   assert.equal(result.tickets_checked, 1);
-  assert.deepEqual(failedChecks(result), []);
+  assert.deepEqual(failedChecks(result), [{
+    ticket: 'IMPL-104',
+    check: 'dod_format',
+    result: 'FAIL',
+    detail: 'IMPL-104: dod_format_missing — под пунктами DoD есть записи проверки, а dod_format: 2 во frontmatter нет'
+  }]);
+});
+
+test('тикет без dod_format и без записей и тикет human с записями — без FAIL', () => {
+  putPlanWithTicket('PLAN-108', 'IMPL-108', { dodFormat: null, dod: ['- [ ] Сделано', '- [ ] Проверено'] });
+  const plain = verify('PLAN-108');
+  assert.equal(plain.status, 'passed');
+  assert.deepEqual(failedChecks(plain), []);
+
+  putPlanWithTicket('PLAN-109', 'HUMAN-109', {
+    dodFormat: null,
+    type: 'human',
+    dod: ['- [ ] Проверено на телефоне', '  - prose: `вручную`']
+  });
+  const human = verify('PLAN-109');
+  assert.equal(human.status, 'passed');
+  assert.deepEqual(failedChecks(human), []);
+});
+
+// PulseProxy QA-180: `npm test --json` — флаг до `--` забирает npm, исполнитель проверок
+// такую запись отклоняет, пункт красный при любой работе.
+test('dod_format: 2 — запись, которую исполнитель проверок отклонит или без программы на машине, — FAIL', () => {
+  putPlanWithTicket('PLAN-110', 'IMPL-110', {
+    dod: [
+      '- [ ] Unit-тесты зелёные',
+      '  - check: `npm test --json`, expect: `stdout matches /"numFailedTests":0/`',
+      '- [ ] Запуск без программы',
+      '  - check: `no-such-tool-xyz --version`, expect: `exit 0`',
+      '- [ ] Аргументы после --',
+      '  - check: `npm test -- --json`, expect: `stdout matches /"numFailedTests":0/`'
+    ]
+  });
+  const result = verify('PLAN-110');
+  assert.equal(result.status, 'failed');
+  const details = failedChecks(result).map(check => check.detail);
+  assert.equal(details.length, 2, JSON.stringify(details));
+  assert.match(details[0], /^IMPL-110: пункт DoD 1 — check_denied \(/);
+  assert.match(details[1], /^IMPL-110: пункт DoD 2 — check_(denied|tool_missing) \(/);
 });
 
 test('dod_format: 2 — 7 пунктов и 7 строк проверки проходят порог DoD', () => {
   const dod = Array.from({ length: 7 }, (_, i) => [
     `- [ ] Пункт ${i + 1}`,
-    `  - check: \`rg -c "пункт-${i + 1}" docs/x.md\`, expect: \`stdout matches /^[1-9]/\``
+    `  - check: \`git grep -q --untracked -F "пункт-${i + 1}" -- docs/x.md\`, expect: \`exit 0\``
   ]).flat();
   putPlanWithTicket('PLAN-105', 'IMPL-105', { dod });
   const result = verify('PLAN-105');

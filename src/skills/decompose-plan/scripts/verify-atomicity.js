@@ -8,8 +8,11 @@
  * - DoD: количество пунктов (>7 → FAIL, >5 → WARNING); вложенные строки проверок
  *   пунктами не считаются
  * - DoD тикета с `dod_format: 2`: есть хотя бы один пункт, у каждого пункта ровно
- *   одна полная форма проверки (check + expect, prose, visual), и не все пункты —
- *   регрессионные проверки (`regression: true`); иначе FAIL
+ *   одна полная форма проверки (check + expect, prose, visual), не все пункты —
+ *   регрессионные проверки (`regression: true`), и запись check не отклонит исполнитель
+ *   проверок и у неё есть исполняемый файл (checkStartProblem, без запуска); иначе FAIL
+ * - Записи проверки под пунктами DoD у тикета без `dod_format: 2` (не human) — FAIL
+ *   `dod_format_missing`: без поля пайплайн их не исполняет
  * - Шаги: количество шагов в "Детали задачи" (>5 → FAIL, отсутствует → SKIP)
  * - Файлы: количество файлов в context.files (>3 → WARNING, отсутствует → SKIP)
  *
@@ -31,7 +34,7 @@ import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { parseFrontmatter } from 'workflow-ai/lib/utils.mjs';
-import { parseDodChecks, isDodFormat2 } from 'workflow-ai/lib/check-runner.mjs';
+import { parseDodChecks, isDodFormat2, checkStartProblem } from 'workflow-ai/lib/check-runner.mjs';
 
 function resolvePlanAbsolutePath(planFile, projectDir) {
   if (path.isAbsolute(planFile)) return planFile;
@@ -232,7 +235,36 @@ function checkDodForms(id, body) {
   if (items.every(item => item.kind === 'check' && item.regression && !item.error)) {
     checks.push({ check: 'dod_check_form', result: 'FAIL', detail: 'only_regression_checks' });
   }
+
+  // Запись, которую исполнитель проверок отклонит (флаг скрипта до `--`, оператор
+  // оболочки) или без исполняемого файла на машине, красная при любой работе. PulseProxy
+  // QA-180 2026-09-29: `npm test --json` исполнитель отклоняет (option_not_allowed).
+  for (const item of items) {
+    if (item.kind !== 'check' || item.error) continue;
+    const problem = checkStartProblem({ check: item.command, expect: item.expect });
+    if (problem?.status === 'denied') {
+      checks.push({ check: 'dod_check_form', result: 'FAIL', detail: `${id}: пункт DoD ${item.index} — check_denied (${problem.reason})` });
+    } else if (problem?.status === 'tool_missing') {
+      checks.push({ check: 'dod_check_form', result: 'FAIL', detail: `${id}: пункт DoD ${item.index} — check_tool_missing (${problem.tool})` });
+    }
+  }
   return checks;
+}
+
+/**
+ * Записи проверки под пунктами DoD у тикета без `dod_format: 2`: пайплайн их не
+ * исполняет ни перед стартом, ни на ревью. PulseProxy QA-180 2026-09-29: декомпозиция
+ * написала сводному тикету две записи и не поставила поле — тикет ушёл в работу без
+ * гейта, а правильную работу три исполнения не закрыли. Тикет human гейт не проходит.
+ */
+function dodFormatMissing(id, frontmatter, body) {
+  if (frontmatter.type === 'human' || isDodFormat2(frontmatter)) return [];
+  if (!parseDodChecks(body).some(item => item.error !== 'no_form')) return [];
+  return [{
+    check: 'dod_format',
+    result: 'FAIL',
+    detail: `${id}: dod_format_missing — под пунктами DoD есть записи проверки, а dod_format: 2 во frontmatter нет`
+  }];
 }
 
 function countContextFiles(frontmatter) {
@@ -281,6 +313,7 @@ function checkTicket(ticket) {
   if (isDodFormat2(frontmatter)) {
     checks.push(...checkDodForms(id, body));
   }
+  checks.push(...dodFormatMissing(id, frontmatter, body));
 
   const steps = extractDetailsTasks(body);
   if (steps.length > STEPS_THRESHOLD_FAIL) {
