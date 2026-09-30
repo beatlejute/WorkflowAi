@@ -73,3 +73,8 @@ cases:
     origin_chg: [plan-002-2026-09-26]
     tags: [dod-transfer, check-record, verbatim]
     severity: high
+  - id: TC-DECOMPOSE-PLAN-013
+    file: cases/TC-DECOMPOSE-PLAN-013-criterion-several-records.yaml
+    origin_chg: [ad-hoc-2026-09-30-listeningglass-qa-001]
+    tags: [dod-transfer, check-record, verbatim, review-coverage]
+    severity: high

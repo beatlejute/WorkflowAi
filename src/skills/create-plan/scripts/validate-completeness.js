@@ -164,9 +164,13 @@ const LIST_ITEM = /^\s*[-*]\s+(.*)$/;
  * Задача — подзаголовок `### N.` секции до следующего подзаголовка `###` или конца
  * секции. Записи проверки — остаток строки `**Проверка:**` или, если он пуст, пункты
  * списка сразу под ней; пустые строки между пунктами (свободный список markdown)
- * список не закрывают. Запись в строке и список под ней вместе — ошибка: шаблон плана
- * разрешает одну из двух форм. При декомпозиции каждая запись становится проверкой
- * одного пункта DoD тикета, поэтому разбирается тем же разбором, что пункт тикета
+ * список не закрывают. Запись в строке и список под той же строкой вместе — ошибка:
+ * шаблон плана разрешает одну из двух форм. Форма и пустота считаются по каждой строке
+ * `**Проверка:**`: у задачи может быть несколько строк критерия приёмки, у каждой своя
+ * строка проверки, и одна запись в строке рядом со списком под другой строкой — не
+ * ошибка (2026-09-30: правило плана «утверждения, которые доказывают разные записи, —
+ * своими строками», а признаки на всю задачу отклоняли такой план). При декомпозиции
+ * каждая запись становится проверкой одного пункта DoD тикета, поэтому разбирается тем же разбором, что пункт тикета
  * (parseCheckRecord, check-runner.mjs): ровно одна форма — check с expect (regression
  * только со значением `true`), prose с причиной или visual с путём. Задача из одних
  * регрессионных проверок — ошибка: о результате они не говорят, а декомпозитор
@@ -187,6 +191,7 @@ function checkTaskVerifications(content) {
   let inSection = false;
   let inFence = false;
   let task = null;
+  let check = null;
   let collecting = false;
 
   const lines = content.replace(/\r\n/g, '\n').replace(/<!--[\s\S]*?-->/g, '').split('\n');
@@ -208,7 +213,7 @@ function checkTaskVerifications(content) {
 
     if (/^###\s/.test(line)) {
       const heading = TASK_HEADING.exec(line);
-      task = heading ? { number: Number(heading[1]), hasLine: false, inline: false, listed: false, records: [] } : null;
+      task = heading ? { number: Number(heading[1]), checks: [], records: [] } : null;
       if (task) tasks.push(task);
       collecting = false;
       continue;
@@ -217,11 +222,13 @@ function checkTaskVerifications(content) {
 
     const verification = VERIFICATION_LINE.exec(line);
     if (verification) {
-      task.hasLine = true;
+      check = { inline: false, listed: false, count: 0 };
+      task.checks.push(check);
       const record = verification[1].trim();
       if (record) {
         task.records.push(record);
-        task.inline = true;
+        check.inline = true;
+        check.count += 1;
       }
       collecting = true;
       continue;
@@ -230,7 +237,8 @@ function checkTaskVerifications(content) {
     const item = LIST_ITEM.exec(line);
     if (item) {
       task.records.push(item[1]);
-      task.listed = true;
+      check.listed = true;
+      check.count += 1;
     } else if (line.trim()) {
       // Пустые строки до списка и между его пунктами пропускаются, первая строка не
       // из списка его закрывает.
@@ -239,13 +247,13 @@ function checkTaskVerifications(content) {
   }
 
   const errors = [];
-  for (const { number, hasLine, inline, listed, records } of tasks) {
-    if (!hasLine) {
+  for (const { number, checks, records } of tasks) {
+    if (checks.length === 0) {
       errors.push({ task: number, message: `Задача ${number}: нет строки **Проверка:**` });
-    } else if (records.length === 0) {
+    } else if (checks.some(({ count }) => count === 0)) {
       errors.push({ task: number, message: `Задача ${number}: строка **Проверка:** без записи проверки` });
     }
-    if (inline && listed) {
+    if (checks.some(({ inline, listed }) => inline && listed)) {
       errors.push({ task: number, message: `Задача ${number}: запись и в строке **Проверка:**, и списком под ней` });
     }
     const parsed = records.map((record) => parseCheckRecord(record));
