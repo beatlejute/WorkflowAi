@@ -22,7 +22,7 @@ decompose-gaps/
 2. Загружает knowledge/scope-validation.md и algorithms/scope-check.md
 3. Запускает workflows/decompose.md
 4. Для каждого gap выполняет 5 проверок scope (источник → принадлежность → статус плана → workflow-управление → запрет организационных/процессных gaps)
-5. Gaps в scope → тикеты в `.workflow/tickets/backlog/`
+5. Gaps в scope → тикеты в `.workflow/tickets/backlog/`, стартовый номер каждого префикса — от `get-next-id.js`; ни одного gap в scope — узлы создания тикета не проходятся, а правка своего тикета по чеклисту идёт тем же файлом
 6. Gaps вне scope → секция «Новые требования (вне scope)»
 
 ## Как расширять

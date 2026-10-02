@@ -102,3 +102,63 @@ cases:
     origin_chg: ["ad-hoc-2026-09-30-shared-location"]
     tags: [evidence, other-tickets, regression-guard]
     severity: medium
+  - id: TC-EXECUTE-TASK-019
+    file: cases/TC-EXECUTE-TASK-019-defects-section.yaml
+    origin_chg: ["ad-hoc-2026-10-01-defects-section"]
+    tags: [defects, result-template, regression-guard]
+    severity: high
+  - id: TC-EXECUTE-TASK-020
+    file: cases/TC-EXECUTE-TASK-020-review-evidence.yaml
+    origin_chg: ["ad-hoc-2026-10-01-review-evidence"]
+    tags: [review-evidence, dod-format-2, result-template, regression-guard]
+    severity: high
+  - id: TC-EXECUTE-TASK-021
+    file: cases/TC-EXECUTE-TASK-021-product-under-test.yaml
+    origin_chg: ["ad-hoc-2026-10-01-product-under-test"]
+    tags: [verification, qa, placeholder, regression-guard]
+    severity: critical
+  - id: TC-EXECUTE-TASK-022
+    file: cases/TC-EXECUTE-TASK-022-primary-source.yaml
+    origin_chg: ["ad-hoc-2026-10-01-primary-source"]
+    tags: [evidence, claims, regression-guard]
+    severity: high
+  - id: TC-EXECUTE-TASK-023
+    file: cases/TC-EXECUTE-TASK-023-worktree-reconcile.yaml
+    origin_chg: ["ad-hoc-2026-10-01-worktree-reconcile"]
+    tags: [worktree, continuation, cleanup, regression-guard]
+    severity: high
+  - id: TC-EXECUTE-TASK-024
+    file: cases/TC-EXECUTE-TASK-024-skill-file-paths.yaml
+    origin_chg: ["ad-hoc-2026-10-01-skill-file-paths"]
+    tags: [paths, lazy-loading, shared, regression-guard]
+    severity: medium
+  - id: TC-EXECUTE-TASK-025
+    file: cases/TC-EXECUTE-TASK-025-result-current-state.yaml
+    origin_chg: ["ad-hoc-2026-10-01-result-current-state"]
+    tags: [result, continuation, regression-guard]
+    severity: medium
+  - id: TC-EXECUTE-TASK-026
+    file: cases/TC-EXECUTE-TASK-026-template-skeleton.yaml
+    origin_chg: ["ad-hoc-2026-10-01-template-skeleton"]
+    tags: [result-template, self-report, regression-guard]
+    severity: medium
+  - id: TC-EXECUTE-TASK-027
+    file: cases/TC-EXECUTE-TASK-027-scope-boundary.yaml
+    origin_chg: ["ad-hoc-2026-10-01-scope-boundary"]
+    tags: [scope, regression, regression-guard]
+    severity: medium
+  - id: TC-EXECUTE-TASK-028
+    file: cases/TC-EXECUTE-TASK-028-final-answer-terminal.yaml
+    origin_chg: ["ad-hoc-2026-10-01-final-answer-terminal"]
+    tags: [rails, output, regression-guard]
+    severity: medium
+  - id: TC-EXECUTE-TASK-029
+    file: cases/TC-EXECUTE-TASK-029-project-modules.yaml
+    origin_chg: ["ad-hoc-2026-10-01-project-modules"]
+    tags: [conventions, shared, regression-guard]
+    severity: medium
+  - id: TC-EXECUTE-TASK-030
+    file: cases/TC-EXECUTE-TASK-030-check-stages-read-only.yaml
+    origin_chg: ["ad-hoc-2026-10-01-check-stages-read-only"]
+    tags: [rails, stage-actions, dod-fill, regression-guard]
+    severity: high

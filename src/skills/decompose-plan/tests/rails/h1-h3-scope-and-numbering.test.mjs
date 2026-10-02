@@ -79,3 +79,38 @@ test('канарейка и роль исполнителя', () => {
     assert.equal(executor.decision, 'allow');
   });
 });
+
+// H3: план активирует только стадия пайплайна (узел P0R9). Самопроверка узла P10G7 — тот же
+// скрипт verify-atomicity.js без флага; с --activate он переводит план в active. Инцидент
+// PulseProxy PLAN-020 (2026-09-29): самопроверка внутри стадии перевела план в active, и стадия
+// пайплайна застала его уже активным (plan_status_reason: already_terminal_status).
+const VERIFY = 'node .workflow/src/skills/decompose-plan/scripts/verify-atomicity.js';
+
+test('H3: verify-atomicity.js с --activate — отказ; самопроверка P10G7 без флага и делегат — молчание', () => {
+  withProject(({ root }) => {
+    const s = atNode(root, 'P10G7');
+    for (const command of [
+      `${VERIFY} --activate "plan_file: plans/current/PLAN-001.md"`,
+      `${VERIFY} "plan_file: plans/current/PLAN-001.md" --activate`,
+      `cd .workflow && node src/skills/decompose-plan/scripts/verify-atomicity --activate plan_file: plans/current/PLAN-001.md`,
+    ]) {
+      const r = decide({ action: claude('Bash', { command }), ctx: ctx(root, s) });
+      assert.equal(r.decision, 'deny', command);
+      assert.match(r.reason, /План активирует только стадия пайплайна \(узел P0R9\)/, command);
+    }
+    const selfCheck = `${VERIFY} plan_file: plans/current/PLAN-001.md`;
+    const own = decide({ action: claude('Bash', { command: selfCheck }), ctx: ctx(root, s) });
+    assert.equal(own.decision, 'allow', JSON.stringify(own));
+    const executor = decide({ action: claude('Bash', { command: `${VERIFY} --activate plan_file: plans/current/PLAN-001.md` }), ctx: ctx(root, s, { role: 'executor' }) });
+    assert.equal(executor.decision, 'allow');
+  });
+});
+
+test('H3: переход в P10G7 с цитатой «… без флага --activate» — команда рельс, гард её не трогает', () => {
+  withProject(({ root }) => {
+    const s = atNode(root, 'P10S16');
+    const command = "node .workflow/src/rails/cli.mjs goto P10G7 --quote 'verify-atomicity.js plan_file: {plan_path} без флага --activate печатает status: passed'";
+    const r = decide({ action: claude('Bash', { command }), ctx: ctx(root, s) });
+    assert.equal(r.decision, 'allow', JSON.stringify(r));
+  });
+});

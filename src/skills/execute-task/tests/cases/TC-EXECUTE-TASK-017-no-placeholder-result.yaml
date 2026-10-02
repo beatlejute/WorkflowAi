@@ -36,7 +36,7 @@ assertions:
       reason: "Несделанный результат называется несделанным: Result не выдаёт заглушку за готовую работу."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: "P3R7 --> P3R8 --> P3S1"
+      pattern: "P3R7 --> P3R8 --> P3R9 --> P3S1"
       reason: "Правило читается на этапе выполнения до первой правки."
     - kind: skill_contains
       file: "workflows/execute.md"

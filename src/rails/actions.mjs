@@ -223,6 +223,25 @@ export function fromKilo(input, output) {
 const IS_WIN32 = process.platform === 'win32';
 const MARK = '?';
 const MARKER_ITEM = Object.freeze({ marker: true });
+// Причина маркера '?' — для текста отказа. Инцидент 2026-09-30 (журналы отказов PulseProxy и
+// ListeningGlass за 29–30.09): из 18 отказов «команда похожа на запись» ни один не называл, что
+// именно принято за запись, и агент не узнавал настоящую ошибку — `2>$null` в bash (редирект в
+// пустую переменную), `\"` в конце пути (строка не закрыта), незаданная `$SCRATCH`.
+const MAX_WHY = 3;
+
+function mark(ctx, why) {
+  ctx.marker = true;
+  if (why && ctx.why.length < MAX_WHY && !ctx.why.includes(why)) ctx.why.push(why);
+}
+
+function markerItem(why) {
+  return { marker: true, why };
+}
+
+function shown(text) {
+  const t = String(text ?? '').replace(/\s+/g, ' ');
+  return `«${t.length > 60 ? `${t.slice(0, 60)}…` : t}»`;
+}
 const EMPTY_WORD = Object.freeze({ kind: 'word', parts: [], value: '', text: '', quote: 'none', hasSubstitution: false, hasExpansion: false });
 // Синтетические слова `sh -c <строка>`: строку-скрипт обёртки (`flock f -c '…'`) разбирает
 // тот же путь, что и настоящий `sh -c` (nestedShellWrites).
@@ -295,7 +314,10 @@ const POSIX_TESTS = new Set(['[', '[[', 'test']);
 // Ключевые слова, после которых идёт команда (`then rm …`, `do rm …`), — тоже обёртки
 // (ревью ЗАДАЧИ C: `for …; do rm /outside; done` HEAD не видел — `rm` не в позиции команды).
 const WRAPPERS = {
-  sudo: { value: ['-u', '-g', '-p', '-C', '-D', '-r', '-t', '-U', '-T', '-h'], chdir: ['-D', '--chdir'] },
+  // sudo(8): `sudo [-u user] [VAR=value] [command]` (синопсис `sudo -h` в WSL). Ревью 2026-10-01:
+  // `sudo X=1 rm -rf <вне области>` давал имя команды «x=1» и пустой список записей (и в HEAD).
+  // `-R DIR` (chroot) и `-e` (sudoedit правит файлы-аргументы) — цели не вычислить: opaque.
+  sudo: { value: ['-u', '-g', '-p', '-C', '-D', '-r', '-t', '-U', '-T', '-h', '-R'], chdir: ['-D', '--chdir'], assigns: true, opaque: ['-R', '--chroot', '-e', '--edit'] },
   doas: { value: ['-u', '-C'] },
   command: {},
   builtin: {},
@@ -393,10 +415,12 @@ function makeContext(dialect, env) {
     env,
     out: new Set(),
     marker: false,
+    why: [],
     taint: new Set(),
     taintAll: false,
     shopt: false, // в команде есть `shopt`/`set` — cdable_vars и т.п. могли включиться
     tracked: new Map(),
+    loopVars: new Set(), // переменные цикла по литеральному списку (forLiteral)
     readonlyNames: new Set(),
     taintPass: true,
     budget: WALK_BUDGET,
@@ -691,17 +715,18 @@ function globOk(value, del) {
 // Цель записи: слово (раскрывается в мире) или литерал значения флага (`-tDIR`, `-Path:X`).
 function addTarget(ctx, world, item) {
   if (!item || item.marker) {
-    ctx.marker = true;
+    mark(ctx, item?.why ?? 'цель записи не определить');
     return;
   }
   const w = item.world ?? world;
+  const text = item.literal !== undefined ? item.literal : item.word.text;
   let value;
   let glob = false;
   let brace = false;
   if (item.literal !== undefined) {
     value = item.literal;
     if (/[~$`]/.test(value)) {
-      ctx.marker = true;
+      mark(ctx, `значение ${shown(value)} с раскрытием — не вычислить`);
       return;
     }
     glob = /[*?[]/.test(value);
@@ -709,43 +734,211 @@ function addTarget(ctx, world, item) {
   } else {
     const r = expandWord(item.word, ctx.dialect, lookupFor(w, ctx));
     if (!r) {
-      ctx.marker = true;
+      mark(ctx, describeWord(item.word, w, ctx));
       return;
     }
     ({ value, glob, brace } = r);
   }
-  if (!value || brace || (glob && !globOk(value, item.del))) {
-    ctx.marker = true;
+  if (!value) {
+    mark(ctx, `пустая цель записи ${shown(text)}`);
+    return;
+  }
+  if (brace || (glob && !globOk(value, item.del))) {
+    mark(ctx, `шаблон ${brace ? '{…}' : '*?['} в цели ${shown(text)}`);
     return;
   }
   const paths = resolveTarget(w.dir, value, ctx);
   if (!paths) {
-    ctx.marker = true;
+    mark(ctx, describeUnresolved(value, text, w, ctx));
     return;
   }
   for (const p of paths) ctx.out.add(p);
 }
 
+// Почему значение цели не стало путём (resolveTarget вернул null).
+function describeUnresolved(value, text, w, ctx) {
+  const v = psPosixPath(value, ctx);
+  if (w.dir === null && absoluteForm(v, w.dir, ctx) === undefined) {
+    return `каталог для ${shown(text)} неизвестен (cd в цикле, подоболочке, после heredoc или cd по подстановке) — пиши путь от корня`;
+  }
+  if (IS_WIN32 && !ctx.ps && /^\/nul{1,2}$/i.test(v)) return `${shown(text)} в Git Bash — файл в каталоге Git, а не устройство: ${nullAdvice(ctx)}`;
+  if (IS_WIN32 && !ctx.ps && /^\/[^/]{2,}/.test(v)) return `${shown(value)} в Git Bash ведёт в каталог самого Git — пиши /c/… или C:/…`;
+  return `путь ${shown(value)} не вычисляется`;
+}
+
+// Почему слово не раскрылось (expandWord вернул null): подстановка команды, переменная, которой
+// нет или которая меняется в этой же команде, спецпараметр — называется токен и что сделать.
+const POSIX_REF_RE = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*)|([0-9@*#?$!-]))/g;
+const PS_REF_RE = /\$(?:\{(?:(env):)?([A-Za-z_][A-Za-z0-9_]*)\}|(env):([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*)(\.|\[)?)/gi;
+
+function describeWord(word, w, ctx) {
+  const text = word?.text ?? '';
+  const parts = word?.parts ?? [];
+  if (!ctx.ps && /^\$(?:null|\{null\})$/i.test(text)) {
+    return `${shown(text)} — в bash это пустая переменная, а не устройство: ${nullAdvice(ctx)}`;
+  }
+  if (w?.lost) return `слишком много вариантов каталога и переменных, чтобы вычислить ${shown(text)}`;
+  const lookup = lookupFor(w, ctx);
+  for (const p of parts) {
+    if (p.kind === 'single' || p.kind === 'ansi') continue;
+    const raw = String(p.raw ?? '');
+    if (p.kind === 'subst' && !/^\$\{(?:env:)?[A-Za-z_][A-Za-z0-9_]*\}$/i.test(raw)) {
+      return `${shown(text)}: подстановка ${shown(raw)} — значение не вычислить`;
+    }
+    if (/\$\(|`/.test(raw) && !ctx.ps) return `${shown(text)}: подстановка команды — значение не вычислить`;
+    for (const m of raw.matchAll(ctx.ps ? PS_REF_RE : POSIX_REF_RE)) {
+      if (!ctx.ps && m[3]) return `${shown(text)}: спецпараметр $${m[3]} — значение не вычислить`;
+      const env = ctx.ps && Boolean(m[1] || m[3]);
+      const name = ctx.ps ? (m[2] ?? m[4] ?? m[5]) : (m[1] ?? m[2]);
+      if (ctx.ps && m[6] && p.kind === 'bare') return `${shown(text)}: доступ к члену $${name}${m[6]}… — значение не вычислить`;
+      const v = lookup({ name, env, quoted: p.kind === 'double' });
+      if (typeof v === 'string') {
+        if (!ctx.ps && p.kind === 'bare' && /[\s*?[\]]/.test(v)) return `$${name} без кавычек делится на слова или раскрывается как шаблон — возьми в "…"`;
+        continue;
+      }
+      return describeVar(name, env, ctx);
+    }
+  }
+  return `${shown(text)} не вычисляется`;
+}
+
+// Совет вместо редиректа в пустоту. ctx.mixed — shell исполнителя неизвестен (Kilo на Windows:
+// команду выполнит bash или PowerShell): там `/dev/null` в PowerShell — путь от корня диска
+// (`C:\dev\null`), а `$null` в bash — пустая переменная, и совет «/dev/null» вёл в следующий
+// отказ (ревью 2026-10-01, проверено через decide). Без записи в обоих — только `2>&1` или
+// без редиректа.
+function nullAdvice(ctx) {
+  return ctx.mixed ? 'команду выполнит bash или PowerShell, и ни $null, ни /dev/null не годятся в обоих — перенаправь в 2>&1 или убери редирект' : 'используй /dev/null';
+}
+
+function describeVar(name, env, ctx) {
+  const ref = ctx.ps ? (env ? `$env:${name}` : `$${name}`) : `$${name}`;
+  if (ctx.taintAll) return `${ref}: в команде есть присваивание, которое не отследить (eval, source, команда через подстановку, -OutVariable/-PipelineVariable и их префиксы вроде -p) — переменные не вычислить`;
+  const key = ctx.ps ? (env ? `env:${name.toLowerCase()}` : name.toLowerCase()) : name;
+  if (ctx.taint.has(key)) return `${ref} присваивается в этой же команде там, где значение не отследить (цикл, условие, фон, read, подстановка) — присвой её в начале команды литералом или подставь путь`;
+  // ctx.mixed: переменные bash и PowerShell пишутся по-разному ($env:X в bash — `$env` и
+  // «:X», `X=…` в PowerShell — команда), и совет для одного shell'а ведёт в отказ другого
+  if (ctx.ps && !env) {
+    return ctx.mixed
+      ? `${ref} в PowerShell — переменная сессии, а не окружения; команду выполнит bash или PowerShell, переменные у них пишутся по-разному — пиши путь литералом`
+      : `${ref} в PowerShell — переменная сессии, а не окружения: присвой её в этой же команде или используй $env:${name}`;
+  }
+  if (!ctx.ps && name === 'TMPDIR') {
+    return ctx.mixed ? '$TMPDIR нет в окружении хука — пиши абсолютный путь временного каталога' : '$TMPDIR нет в окружении хука — используй $TMP или абсолютный путь временного каталога';
+  }
+  return `${ref} не задана ни в этой команде, ни в окружении`;
+}
+
 // --- классификация сегментов --------------------------------------------------------------
 
-// «Плоская» команда: без подоболочек, фона, групп, условий, циклов, функций и алиасов — только
-// в ней cd и присваивание трекаются (внутри `(…)`, `{…}`, if/for/while они условны или
+// «Плоский» сегмент: без подоболочки, фона, группы, условия, цикла, функции и алиаса — только
+// в таком cd и присваивание трекаются (внутри `(…)`, `{…}`, if/for/while они условны или
 // повторяются; ревью ЗАДАЧИ C: `(cd X && touch y)`, `for …; do cd …`).
-function isFlat(scan, ctx) {
-  if (STRUCTURAL_SEPS.has(scan.trailingSep)) return false;
-  for (const seg of scan.segments) {
-    if (STRUCTURAL_SEPS.has(seg.sepBefore)) return false;
-    for (const cmd of seg.commands) {
-      const v = cmd.tokens[0]?.value;
-      if (ctx.ps) {
-        if (v != null && PS_KEYWORDS.has(v.toLowerCase())) return false;
-        if (cmd.tokens.some((t) => t.parts.some((p) => p.kind === 'subst' && /^@?\{/.test(p.raw)))) return false;
-      } else if (v != null && POSIX_KEYWORDS.has(v)) {
-        return false;
-      }
+function segIsPlain(seg, ctx) {
+  if (STRUCTURAL_SEPS.has(seg.sepBefore)) return false;
+  for (const cmd of seg.commands) {
+    const v = cmd.tokens[0]?.value;
+    if (ctx.ps) {
+      if (v != null && PS_KEYWORDS.has(v.toLowerCase())) return false;
+      if (cmd.tokens.some((t) => t.parts.some((p) => p.kind === 'subst' && /^@?\{/.test(p.raw)))) return false;
+    } else if (v != null && POSIX_KEYWORDS.has(v)) {
+      return false;
     }
   }
   return true;
+}
+
+// Плоское начало команды: сегменты до первой составной команды или структурного разделителя.
+// Они выполняются по одному разу и по порядку, как плоская команда, и cd/присваивание в них
+// трекаются. Инцидент 2026-09-30 (ListeningGlass, P3S1): `SCRATCH="…"` перед циклом очистки
+// scratchpad не трекался, потому что ниже по тексту стоял `for`, и `rm -rf "$SCRATCH/$d"`
+// давал «?». plain — число плоских сегментов с начала, prefix — сколько из них трекается.
+//
+// Последний and-or список начала трекается, только если он кончается в этом же shell'е:
+// `S=x && for …; done &` и `S=x & …` уходят в фон целиком, и присваивание до этого shell'а
+// не доходит. Рядом со скобкой сканер разделитель не хранит (`a; (b)` и `a && (b)` дают
+// одинаковые сегменты), поэтому в сомнительном случае последний список не трекается.
+function flatPrefix(scan, ctx) {
+  const segs = scan.segments;
+  let plain = 0;
+  while (plain < segs.length && segIsPlain(segs[plain], ctx)) plain += 1;
+  if (listEndsInShell(scan, plain, ctx)) return { plain, prefix: plain };
+  let start = plain - 1;
+  while (start > 0 && segs[start].sepBefore !== ';' && segs[start].sepBefore !== '\n') start -= 1;
+  return { plain, prefix: Math.max(start, 0) };
+}
+
+const POSIX_OPENERS = new Set(['if', 'for', 'while', 'until', 'select', 'case', '{']);
+const POSIX_CLOSERS = new Set(['fi', 'done', 'esac', '}']);
+
+function listEndsInShell(scan, plain, ctx) {
+  const segs = scan.segments;
+  if (plain === segs.length) return !STRUCTURAL_SEPS.has(scan.trailingSep);
+  const boundary = segs[plain].sepBefore;
+  if (boundary === ';' || boundary === '\n') return true;
+  if (ctx.ps || (boundary !== '&&' && boundary !== '||')) return false;
+  // `a && <составная команда> …`: список идёт через составную команду до `;`/перевода строки
+  // на верхнем уровне; `&` или скобка там — фон или подоболочка.
+  let depth = 0;
+  for (let k = plain; k < segs.length; k += 1) {
+    const sep = segs[k].sepBefore;
+    if (k > plain) {
+      if (STRUCTURAL_SEPS.has(sep)) return false;
+      if (depth === 0 && (sep === ';' || sep === '\n')) return true;
+    }
+    for (const cmd of segs[k].commands) {
+      const v = keywordAt(cmd);
+      if (v === 'function') return false;
+      if (POSIX_OPENERS.has(v)) depth += 1;
+      else if (POSIX_CLOSERS.has(v)) depth -= 1;
+    }
+  }
+  return !STRUCTURAL_SEPS.has(scan.trailingSep);
+}
+
+// Первое слово простой команды после ключевых слов-префиксов (`do while …`, `then for …`).
+const POSIX_LEAD_KEYWORDS = new Set(['do', 'then', 'else', 'elif', '!', 'time']);
+function keywordAt(cmd) {
+  let j = 0;
+  while (j < cmd.tokens.length && POSIX_LEAD_KEYWORDS.has(cmd.tokens[j].value)) j += 1;
+  return cmd.tokens[j]?.value ?? null;
+}
+
+// `for NAME in <литеральные слова>; do … done` сразу после плоского начала на верхнем уровне:
+// у переменной цикла конечный набор значений — по миру на значение (предел MAX_WORLDS).
+// Инцидент 2026-09-30 (ListeningGlass, узел P3S1): очистка scratchpad `for d in qa-profile …;
+// do rm -rf "$SCRATCH/$d"; done` отклонялась маркером «?», хотя пути однозначны.
+// Переменная не трекается, если ей уже присвоено в начале команды (значение до цикла нужно
+// после него) или она не имя. После `done` к мирам тела добавляются миры до цикла: цикл в
+// конвейере или в фоне идёт в подоболочке, и переменная в этом shell'е остаётся прежней.
+function forLiteral(scan, idx, ctx) {
+  if (ctx.ps) return null;
+  const segs = scan.segments;
+  const seg = segs[idx];
+  if (STRUCTURAL_SEPS.has(seg.sepBefore) || seg.commands.length !== 1) return null;
+  const cmd = seg.commands[0];
+  if (cmd.heredocs.length > 0) return null;
+  const nextSep = idx + 1 < segs.length ? segs[idx + 1].sepBefore : scan.trailingSep;
+  if (nextSep !== ';' && nextSep !== '\n') return null;
+  const { words, redirects } = ctx.split(cmd);
+  if (redirects.length > 0 || words.length < 4 || words[0].value !== 'for' || words[2].value !== 'in') return null;
+  const name = words[1].value;
+  if (name === null || !NAME_RE.test(name) || POSIX_NEVER_TRACK.has(name) || ctx.tracked.has(name)) return null;
+  const values = [];
+  for (const w of words.slice(3)) {
+    const r = w.value === null ? null : expandWord(w, 'posix', () => null);
+    if (!r || r.glob || r.brace) return null;
+    values.push(r.value);
+  }
+  let depth = 0;
+  for (let k = idx; k < segs.length; k += 1) {
+    for (const c of segs[k].commands) {
+      const v = keywordAt(c);
+      if (v === 'for' || v === 'while' || v === 'until' || v === 'select') depth += 1;
+      else if (v === 'done' && --depth === 0) return { kind: 'for', name, values, doneIdx: k };
+    }
+  }
+  return null;
 }
 
 function startsLoop(seg, ctx) {
@@ -848,52 +1041,84 @@ function classify(seg, ctx, { flat, afterHeredoc, nextSep, top }) {
 
 // --- обход --------------------------------------------------------------------------------
 
-function unknownResult(ctx, worlds) {
-  ctx.marker = true;
+function unknownResult(ctx, worlds, why) {
+  mark(ctx, why);
   return { worlds: worlds.map((w) => ({ ...w, dir: null })), dirChanged: true };
+}
+
+// Почему сканер не разобрал текст. `\"` в конце пути Windows (`ls "D:\…\"`) в bash экранирует
+// кавычку, и строка не закрыта — «unexpected EOF» (журнал PulseProxy 2026-09-30, P0E1/P0S3).
+function describeScanFailure(text, ctx) {
+  if (!ctx.ps && /[^\\]\\"/.test(text)) {
+    return 'в «…\\"» обратная косая перед кавычкой экранирует её, и строка не закрыта — пиши путь через / или без \\ перед кавычкой';
+  }
+  return 'команда не разобрана: незакрытая кавычка, скобка подстановки или heredoc без конца';
 }
 
 function walk(text, ctx, worlds, depth) {
   ctx.budget -= 1;
-  if (depth > MAX_NESTED || ctx.budget < 0) return unknownResult(ctx, worlds);
+  if (depth > MAX_NESTED || ctx.budget < 0) return unknownResult(ctx, worlds, 'команда слишком сложная для разбора (вложенность или объём)');
   const scan = ctx.scan(text);
   // Сканер не разобрал (незакрытые кавычки/подстановки/heredoc) — shell мог выполнить что угодно.
-  if (!scan.ok) return unknownResult(ctx, worlds);
+  if (!scan.ok) return unknownResult(ctx, worlds, describeScanFailure(text, ctx));
   const info = ctx.info(text);
-  const flat = isFlat(scan, ctx);
   const segs = scan.segments;
+  const { plain, prefix } = flatPrefix(scan, ctx);
+  const flat = prefix === segs.length;
+  // Индекс `done` цикла по литеральному списку → миры до цикла (forLiteral).
+  const loopEnds = new Map();
   let afterHeredoc = false;
   let dirChanged = false;
+  // Смена каталога после плоского начала — для сброса каталога в циклах (info.dirChange): cd в
+  // начале выполняется один раз до любого цикла и уже учтён в мирах (`cd sub && for …`).
+  let laterDirChanged = false;
   for (let idx = 0; idx < segs.length; idx += 1) {
     const seg = segs[idx];
+    const segFlat = idx < prefix;
     const nextSep = idx + 1 < segs.length ? segs[idx + 1].sepBefore : scan.trailingSep;
+    // после heredoc разбор чаще всего расходится с shell'ом — цикл там не трекается (как и cd)
+    const loop = idx === plain && depth === 0 && !afterHeredoc ? forLiteral(scan, idx, ctx) : null;
+    if (loop) loopEnds.set(loop.doneIdx, worlds);
     // Цикл/функция/scriptblock: тело выполняется повторно или позже — смена каталога в нём
     // действует и на записи, стоящие в тексте раньше неё.
     if (!flat && info.dirChange && startsLoop(seg, ctx)) worlds = worlds.map((w) => ({ ...w, dir: null }));
-    const cls = classify(seg, ctx, { flat, afterHeredoc, nextSep, top: depth === 0 });
+    const cls = loop ?? classify(seg, ctx, { flat: segFlat, afterHeredoc, nextSep, top: depth === 0 });
     let running = worlds;
     let skipped = [];
-    if (flat && seg.sepBefore === '&&') {
+    if (segFlat && seg.sepBefore === '&&') {
       running = worlds.filter((w) => w.st !== 'F');
       skipped = worlds.filter((w) => w.st !== 'S').map((w) => ({ ...w, st: 'F' }));
-    } else if (flat && seg.sepBefore === '||') {
+    } else if (segFlat && seg.sepBefore === '||') {
       running = worlds.filter((w) => w.st !== 'S');
       skipped = worlds.filter((w) => w.st !== 'F').map((w) => ({ ...w, st: 'S' }));
     }
     const outcomes = [];
     for (const w of running) {
       const r = runSegment(seg, cls, w, ctx, depth);
-      if (r.dirChanged) dirChanged = true;
+      if (r.dirChanged) {
+        dirChanged = true;
+        if (!segFlat) laterDirChanged = true;
+      }
       outcomes.push(...r.worlds);
     }
     worlds = mergeWorlds([...outcomes, ...skipped]);
+    if (loopEnds.has(idx)) worlds = mergeWorlds([...worlds, ...loopEnds.get(idx).map((w) => ({ ...w, st: '?' }))]);
     if (seg.commands.some((c) => c.heredocs.length > 0)) afterHeredoc = true;
   }
-  if (ctx.taintPass && dirChanged) info.dirChange = true;
+  if (ctx.taintPass && laterDirChanged) info.dirChange = true;
   return { worlds, dirChanged };
 }
 
 function runSegment(seg, cls, w, ctx, depth) {
+  if (cls.kind === 'for') {
+    // первый проход переменную цикла не помечает: её значения — литералы списка. Но в
+    // окружение вложенного интерпретатора она не идёт значением хука (nestedShellWrites, drop).
+    if (ctx.taintPass) {
+      ctx.loopVars.add(cls.name);
+      return { worlds: [{ ...w, st: '?' }], dirChanged: false };
+    }
+    return { worlds: cls.values.map((v) => ({ ...w, vars: new Map(w.vars).set(cls.name, v), st: '?' })), dirChanged: false };
+  }
   if (cls.kind === 'cd') {
     const io = commandIO(cls.cmd, w, ctx, depth);
     if (ctx.taintPass) return { worlds: [{ ...io.world, st: '?' }], dirChanged: true };
@@ -941,7 +1166,7 @@ function commandIO(cmd, w, ctx, depth, arith = false) {
   const sources = [...words, ...redirects.map((r) => r.target).filter(Boolean), ...cmd.heredocs];
   for (const src of sources) {
     const nested = nestedScripts(src, ctx.dialect);
-    if (nested.opaque) ctx.marker = true;
+    if (nested.opaque) mark(ctx, `${shown(src.text ?? src.value ?? '')}: подстановка не разбирается`);
     if (ctx.taintPass) {
       for (const b of nested.braces) for (const m of b.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) taintName(ctx, m[0]);
     }
@@ -964,7 +1189,7 @@ function redirectWrite(r, world, ctx) {
   // `<<<` — here-string: ввод из слова, не запись (раунд 3 ревью C2, 2026-09-22)
   if (op === '<' || op === '<&' || op === '<<' || op === '<<-' || op === '<<<') return;
   if (!r.target) {
-    ctx.marker = true;
+    mark(ctx, `редирект ${op} без цели`);
     return;
   }
   if (op === '>&') {
@@ -1021,18 +1246,50 @@ function isAssignWord(w) {
   return Boolean(p0 && p0.kind === 'bare' && (ASSIGN_WORD_RE.test(p0.raw) || ARRAY_ASSIGN_RE.test(w.text)));
 }
 
+// Ключевые слова, после которых bash принимает префикс-присваивание (`do n=$(…)`, `then X=1 cmd`).
+// Инцидент 2026-09-30 (PulseProxy, узел P2S1): `for l in …; do tot=$(grep -c …); …; done` давал
+// «?» — после `do` присваивание считалось именем команды через подстановку, а `do X=1 rm <вне
+// области>` — командой «x=1», и rm запись не показывал.
+const KEYWORD_WRAPPERS = new Set(['if', 'then', 'elif', 'else', 'while', 'until', 'do', '{', '!', 'time']);
+// Команда через переменную (`R=…; "$R" --help`) вычисляется вторым проходом и только на месте
+// команды (первое слово или после ключевого слова; после обёртки — «?», см. commandInfo); первый
+// проход не знает значений, поэтому имя, которое меняет переменные или каталог shell'а (или
+// обёртка — команда за ней не прошла первый проход), остаётся «?».
+const DEFERRED = Symbol('deferred');
+const VAR_COMMAND_UNSAFE = new Set([...POSIX_ASSIGNING, ...OPAQUE_POSIX, ...EVAL_NAMES, ...DIR_CHANGERS_POSIX, ...Object.keys(WRAPPERS), 'shopt', 'set', 'cd', 'exec', 'function', 'coproc']);
+
 // Имя команды и её аргументы. kind: 'cmd' | 'none' (только присваивания/редиректы/выражение) |
-// 'unknown' (имя — не литерал: `$CMD x`, `"$(which rm)" x`, `& $script`) | 'ps-assign'.
-function commandInfo(words, cmd, seg, ctx) {
+// 'unknown' (имя — не литерал: `$CMD x`, `"$(which rm)" x`, `& $script`) | 'deferred' (первый
+// проход: имя через переменную) | 'ps-assign'. resolveName(word) — значение слова-имени через
+// переменную: строка, DEFERRED или undefined (не вычислить).
+function commandInfo(words, cmd, seg, ctx, resolveName = null) {
   if (ctx.ps) return psCommandInfo(words, cmd, seg, ctx);
   let i = 0;
   while (i < words.length && isAssignWord(words[i])) i += 1;
   let chdir = false;
   let appends = false;
+  // Слово стоит на месте команды: первое после присваиваний или после ключевого слова
+  // (`do "$R" …`). После обёртки невычисленное слово может быть её аргументом, и имя через
+  // переменную там не вычисляется. Ревью 2026-10-01: `T=5; timeout "$T" rm …`, `F=-p; command
+  // "$F" rm …`, `F=--; nohup "$F" rm …`, `A=X=1; env "$A" rm …` выполняют rm (проверено запуском
+  // Git Bash: файлы удалены), а разбор брал значение переменной (5, -p, --, X=1) за имя команды,
+  // rm уходил в её аргументы, и записи не было видно; то же `flock "$L" rm`, `sudo "$F" rm`
+  // (F=-E) — flock и рабочего sudo на машине нет, их форма взята из документации.
+  let commandSlot = true;
+  let wrapper = null;
   while (i < words.length) {
-    const v = words[i].value;
-    if (v === null) return { kind: 'unknown' };
+    let v = words[i].value;
+    let viaVar = false;
+    if (v === null) {
+      if (!commandSlot) return { kind: 'unknown', word: words[i], wrapper };
+      const r = resolveName ? resolveName(words[i]) : undefined;
+      if (r === DEFERRED) return { kind: 'deferred', word: words[i] };
+      if (typeof r !== 'string') return { kind: 'unknown', word: words[i] };
+      v = r;
+      viaVar = true;
+    }
     const name = commandName(v, ctx);
+    if (viaVar && VAR_COMMAND_UNSAFE.has(name)) return { kind: 'unknown', word: words[i], resolved: name };
     const wr = Object.hasOwn(WRAPPERS, name) ? WRAPPERS[name] : null;
     if (!wr) return { kind: 'cmd', name, args: words.slice(i + 1), chdir, appends };
     if (wr.appends) appends = true;
@@ -1057,6 +1314,10 @@ function commandInfo(words, cmd, seg, ctx) {
         const flag = eq === -1 ? a : a.slice(0, eq);
         const short = !a.startsWith('--') && a.length > 2 ? a.slice(0, 2) : null;
         if (wr.chdir && (wr.chdir.includes(flag) || (short && wr.chdir.includes(short)))) chdir = true;
+        // флаг в группе коротких (`-nR /x`, `-ne f`) тоже считается
+        if (wr.opaque && (wr.opaque.includes(flag) || (!a.startsWith('--') && [...a.slice(1)].some((c) => wr.opaque.includes(`-${c}`))))) {
+          return { kind: 'unknown', word: words[i], why: `${name} ${shown(a)}: цели обёрнутой команды не вычислить (chroot или правка файлов-аргументов)` };
+        }
         if (name === 'env' && (flag === '-S' || flag === '--split-string' || short === '-S')) return { kind: 'unknown' };
         // `flock файл -c '<скрипт>'` — строку выполняет шелл: разбираем как `sh -c` (раунд 5).
         // Ревью раунда 5 (2026-09-22, LOW): короткие флаги склеиваются в группу, и `-c` в ней
@@ -1095,8 +1356,21 @@ function commandInfo(words, cmd, seg, ctx) {
       }
       break;
     }
+    commandSlot = KEYWORD_WRAPPERS.has(name);
+    wrapper = name;
+    if (commandSlot) while (i < words.length && isAssignWord(words[i])) i += 1;
   }
   return { kind: 'none' };
+}
+
+// Имя команды через переменную, присвоенную литералом или взятую из окружения. Инцидент
+// 2026-09-29 (PulseProxy, create-plan P6S2): `R="C:/…/rtk.exe"; "$R" --help` давал «?», а в
+// первом проходе — «переменные неизвестны все». Подстановка команды (`$(which rm)`) — не вычислить.
+function resolveCommandWord(word, world, ctx) {
+  if (ctx.ps || word.hasSubstitution) return undefined;
+  if (ctx.taintPass) return DEFERRED;
+  const r = expandWord(word, 'posix', lookupFor(world, ctx));
+  return r && !r.glob && !r.brace && r.value ? r.value : undefined;
 }
 
 function psCommandInfo(words, cmd, seg, ctx) {
@@ -1200,17 +1474,25 @@ function analyzeCommand(cmd, w, ctx, depth, seg) {
   const io = commandIO(cmd, w, ctx, depth, seg?.arith === true);
   let world = io.world;
   let changed = io.changed;
-  const ci = commandInfo(io.words, cmd, seg, ctx);
+  const ci = commandInfo(io.words, cmd, seg, ctx, (word) => resolveCommandWord(word, world, ctx));
   if (ctx.taintPass) {
     // `((…))`/`$((…))` сканер отдаёт сегментом после `(` — арифметика или подоболочка
     const arith = (seg?.sepBefore === '(' && seg.commands[0] === cmd) || ci.name === 'let';
     taintWords(ctx, io.words, ci.kind === 'cmd' ? ci.name : null, ci.args ?? [], arith ? cmd.text : null);
   }
-  if (!ctx.taintPass && ctx.ps && PS_DOTNET_WRITE_RE.test(cmd.text)) ctx.marker = true;
+  if (!ctx.taintPass && ctx.ps) {
+    const dotnet = PS_DOTNET_WRITE_RE.exec(cmd.text);
+    if (dotnet) mark(ctx, `запись через .NET (${shown(dotnet[0])}) — путь не вычислить`);
+  }
   if (ci.kind === 'none') return { world, dirChanged: changed };
+  // первый проход: имя через переменную вычислит второй (resolveCommandWord)
+  if (ci.kind === 'deferred') return { world: { ...world, dir: null }, dirChanged: true };
   if (ci.kind === 'unknown') {
     if (ctx.taintPass) ctx.taintAll = true;
-    else ctx.marker = true;
+    else if (ci.resolved) mark(ctx, `команда через переменную ${shown(ci.word.text)} — это ${ci.resolved}, она меняет переменные или каталог: вызови её по имени`);
+    else if (ci.why) mark(ctx, ci.why);
+    else if (ci.wrapper) mark(ctx, `слово ${shown(ci.word.text)} после ${ci.wrapper} не вычисляется: это может быть её флаг, аргумент или сама команда — подставь значение литералом`);
+    else mark(ctx, `имя команды ${shown(ci.word?.text ?? cmd.text)} не вычисляется`);
     return { world: { ...world, dir: null }, dirChanged: true };
   }
   if (ci.kind === 'ps-assign') {
@@ -1228,7 +1510,7 @@ function analyzeCommand(cmd, w, ctx, depth, seg) {
     // eval/iex строки-литерала — та же команда, разбираем её; иначе — неизвестно что
     const args = ctx.ps && /^-c/i.test(ci.args[0]?.value ?? '') ? ci.args.slice(1) : ci.args;
     if (args.length > 0 && args.every((a) => a.value !== null)) walk(args.map((a) => a.value).join(' '), ctx, [world], depth + 1);
-    else if (!ctx.taintPass) ctx.marker = true;
+    else if (!ctx.taintPass) mark(ctx, `${name} нелитеральной строки — что выполнится, не вычислить`);
   }
   // `trap '<скрипт>' SIG` — скрипт выполнится позже (EXIT — в конце, DEBUG — перед каждой
   // командой), в неизвестном каталоге и с неизвестными значениями переменных. Раунд 3 ревью C2
@@ -1238,7 +1520,7 @@ function analyzeCommand(cmd, w, ctx, depth, seg) {
     const later = { ...world, dir: null, lost: true };
     for (const a of ci.args) {
       if (a.value === null) {
-        if (!ctx.taintPass) ctx.marker = true;
+        if (!ctx.taintPass) mark(ctx, `trap с нелитеральным скриптом ${shown(a.text)}`);
         continue;
       }
       walk(a.value, ctx, [later], depth + 1);
@@ -1380,6 +1662,10 @@ function sedFiles(args) {
 // Тесты find со значением: следующее слово — их аргумент, не действие (`-name -delete` не удаляет).
 const FIND_VALUE_TESTS = new Set(['-name', '-iname', '-path', '-ipath', '-wholename', '-iwholename', '-regex', '-iregex', '-lname', '-ilname', '-type', '-xtype', '-user', '-group', '-uid', '-gid', '-perm', '-size', '-links', '-inum', '-samefile', '-newer', '-anewer', '-cnewer', '-used', '-mtime', '-mmin', '-atime', '-amin', '-ctime', '-cmin', '-maxdepth', '-mindepth', '-fstype', '-context', '-printf', '-regextype', '-files0-from']);
 
+function findFlagMarker(w) {
+  return markerItem(`аргумент ${shown(w.text)} у find не вычислен и может оказаться действием -delete — возьми значение литералом`);
+}
+
 // find: `-delete` удаляет под стартовыми точками; `-fprint* FILE` пишет FILE; `-exec[dir]/-ok[dir]
 // CMD … ;|+` — команда, `{}` — найденный путь (лежит под стартовой точкой). Невычисленное слово,
 // которое может быть флагом (`find "$X"` при X=-delete), — '?' (раунд 2 ревью C2).
@@ -1396,7 +1682,7 @@ function findTargets(args, world, ctx) {
   while (i < args.length) {
     const v = args[i].value;
     if (v !== null && (v.startsWith('-') || v === '(' || v === '!' || v === ')' || v === ',')) break;
-    if (v === null && mayBeFlag(args[i])) items.push(MARKER_ITEM);
+    if (v === null && mayBeFlag(args[i])) items.push(findFlagMarker(args[i]));
     starts.push(args[i]);
     i += 1;
   }
@@ -1404,7 +1690,7 @@ function findTargets(args, world, ctx) {
   for (; i < args.length; i += 1) {
     const v = args[i].value;
     if (v === null) {
-      if (mayBeFlag(args[i])) items.push(MARKER_ITEM);
+      if (mayBeFlag(args[i])) items.push(findFlagMarker(args[i]));
     } else if (FIND_VALUE_TESTS.has(v)) i += 1;
     else if (v === '-delete') items.push(...startItems);
     else if (v === '-fprint' || v === '-fprint0' || v === '-fls' || v === '-fprintf') {
@@ -1468,17 +1754,24 @@ function nestedShellWrites(name, args, world, ctx, cmd) {
   const run = (script, dialect) => {
     const dir = world.dir;
     // окружение дочернего процесса — окружение хука без имён, которые команда присваивает
-    // (экспортированы ли они — неизвестно); cdSearch — CDPATH/cdable_vars могли измениться
-    const drop = (k) => [k, k.toLowerCase(), `env:${k.toLowerCase()}`].some((n) => ctx.tracked.has(n) || ctx.taint.has(n));
+    // (экспортированы ли они — неизвестно); cdSearch — CDPATH/cdable_vars могли измениться.
+    // Переменная цикла `for NAME in …` — тоже присваивание: у экспортированной bash отдаёт
+    // дочернему процессу значение из цикла (ревью 2026-10-01, проверено запуском: `Z=old bash
+    // -c 'for Z in new; do bash -c "echo \$Z"; done'` печатает new), а разбор брал значение из
+    // окружения хука, и `for TMPDIR in <вне>; do bash -c 'rm -rf "$TMPDIR/x"'; done` у Bash
+    // Claude давал цель во временном каталоге.
+    const drop = (k) => [k, k.toLowerCase(), `env:${k.toLowerCase()}`].some((n) => ctx.tracked.has(n) || ctx.taint.has(n) || ctx.loopVars.has(n));
     const env = ctx.taintAll ? {} : Object.fromEntries(Object.entries(ctx.env).filter(([k]) => !drop(k)));
     ctx.shared.runs += 1;
     if (ctx.shared.runs > MAX_NESTED_RUNS) {
-      ctx.marker = true;
+      mark(ctx, `больше ${MAX_NESTED_RUNS} вложенных интерпретаторов в команде`);
       return;
     }
-    const res = detectAt(script, { cwd: dir ?? '', env, dialect }, ctx.level + 1, cdSearchMayApply(ctx), ctx.shared);
-    for (const r of res) {
-      if (r === MARK || (dir === null && !isFullAbs(r))) ctx.marker = true;
+    const res = detectCore(script, { cwd: dir ?? '', env, dialect }, ctx.level + 1, cdSearchMayApply(ctx), ctx.shared);
+    for (const why of res.why) mark(ctx, `${name}: ${why}`);
+    for (const r of res.writes) {
+      if (r === MARK) mark(ctx, `${name}: цель записи во вложенном скрипте не определить`);
+      else if (dir === null && !isFullAbs(r)) mark(ctx, `${name}: каталог вложенного скрипта неизвестен — пиши путь от корня`);
       else ctx.out.add(r);
     }
   };
@@ -1489,7 +1782,7 @@ function nestedShellWrites(name, args, world, ctx, cmd) {
     for (let i = 0; i < args.length; i += 1) {
       const v = args[i].value;
       if (v === null) {
-        if (c || (!end && mayBeFlag(args[i]))) ctx.marker = true;
+        if (c || (!end && mayBeFlag(args[i]))) mark(ctx, `аргумент ${shown(args[i].text)} у ${name} не вычисляется`);
         return;
       }
       if (!end && (v === '--' || v === '-')) {
@@ -1517,9 +1810,9 @@ function nestedShellWrites(name, args, world, ctx, cmd) {
     if (c) return; // -c без скрипта — ошибка bash
     // Скрипт из stdin: тело heredoc разбирается; пайп, `< файл` — неизвестно что
     const docs = cmd?.heredocs ?? [];
-    if (docs.length === 0) ctx.marker = true;
+    if (docs.length === 0) mark(ctx, `скрипт ${name} из stdin (конвейер или < файл) не виден`);
     for (const d of docs) {
-      if (d.value === null) ctx.marker = true;
+      if (d.value === null) mark(ctx, `тело heredoc для ${name} не литерал`);
       else run(d.value, 'posix');
     }
     return;
@@ -1528,7 +1821,7 @@ function nestedShellWrites(name, args, world, ctx, cmd) {
     for (let i = 0; i < args.length; i += 1) {
       const v = args[i].value;
       if (v === null) {
-        ctx.marker = true;
+        mark(ctx, `аргумент ${shown(args[i].text)} у ${name} не вычисляется`);
         return;
       }
       const m = /^[-/\u2013\u2014\u2015]([A-Za-z]+)(?::(.*))?$/.exec(v);
@@ -1541,7 +1834,7 @@ function nestedShellWrites(name, args, world, ctx, cmd) {
       if ('command'.startsWith(p)) {
         const rest = args.slice(i + 1);
         // `-Command -` и `-Command` без текста — команды из stdin
-        if (rest.length === 0 || rest[0].value === '-' || rest.some((a) => a.value === null)) ctx.marker = true;
+        if (rest.length === 0 || rest[0].value === '-' || rest.some((a) => a.value === null)) mark(ctx, `${name} -Command без литерального текста`);
         else run(rest.map((a) => a.value).join(' '), 'powershell');
         return;
       }
@@ -1553,7 +1846,7 @@ function nestedShellWrites(name, args, world, ctx, cmd) {
         } catch {
           script = null;
         }
-        if (script === null) ctx.marker = true;
+        if (script === null) mark(ctx, `${name} -EncodedCommand не декодируется`);
         else run(script, 'powershell');
         return;
       }
@@ -1563,17 +1856,17 @@ function nestedShellWrites(name, args, world, ctx, cmd) {
         i += 1;
         continue;
       }
-      ctx.marker = true; // неизвестный параметр хоста (-WorkingDirectory меняет каталог …)
+      mark(ctx, `неизвестный параметр ${name} ${shown(v)}`); // -WorkingDirectory меняет каталог …
       return;
     }
-    ctx.marker = true; // ни -Command, ни -File — команды из stdin
+    mark(ctx, `${name} без -Command и -File читает команды из stdin`);
     return;
   }
   if (name === 'cmd') {
     const k = args.findIndex((a) => /^\/{1,2}[ckr]$/i.test(a.value ?? ''));
     if (k === -1) return;
     const rest = args.slice(k + 1);
-    if (rest.some((a) => a.value === null) || CMD_WRITE_RE.test(rest.map((a) => a.text).join(' '))) ctx.marker = true;
+    if (rest.some((a) => a.value === null) || CMD_WRITE_RE.test(rest.map((a) => a.text).join(' '))) mark(ctx, 'cmd /c с записью или нелитеральным текстом');
     return;
   }
   const lang = interpreterLanguage(name);
@@ -1707,7 +2000,12 @@ function interpreterWrites(lang, name, args, world, ctx, cmd) {
   const re = SCRIPT_WRITE_RE[lang];
   const script = interpreterScript(lang, name, args);
   const scan = (code) => {
-    if (code === null || re.test(code)) ctx.marker = true;
+    if (code === null) {
+      mark(ctx, `код ${name} не литерал — что он запишет, не вычислить`);
+      return;
+    }
+    const hit = re.exec(code);
+    if (hit) mark(ctx, `код ${name} вызывает запись или запуск процесса (${shown(hit[0])}) — путь не вычислить, пиши через Edit/Write`);
   };
   if (script.codes) {
     for (const c of script.codes) scan(c);
@@ -1716,7 +2014,7 @@ function interpreterWrites(lang, name, args, world, ctx, cmd) {
   if (script.stdin) {
     // скрипт из stdin: тело heredoc разбирается; пайп, `< файл` — неизвестно что
     const docs = cmd?.heredocs ?? [];
-    if (docs.length === 0) ctx.marker = true;
+    if (docs.length === 0) mark(ctx, `скрипт ${name} из stdin (конвейер или < файл) не виден`);
     for (const d of docs) scan(d.value);
     return;
   }
@@ -1724,7 +2022,7 @@ function interpreterWrites(lang, name, args, world, ctx, cmd) {
   const r = expandWord(script.file, ctx.dialect, lookupFor(world, ctx));
   const paths = r && !r.glob && !r.brace ? resolveTarget(world.dir, r.value, ctx) : null;
   if (!paths) {
-    ctx.marker = true;
+    mark(ctx, `путь скрипта ${name} ${shown(script.file.text)} не вычисляется`);
     return;
   }
   const temp = normalizeForTemp(safeRealpathDeep(tmpdir()));
@@ -1795,7 +2093,8 @@ function commandTargets(name, args, world, ctx) {
       sources = pos.slice(0, -1);
     }
     // невычисленный источник может оказаться `-t DIR`/`--target-directory=DIR`
-    if (sources.some((w) => w.value === null && !afterEnd.has(w) && mayBeFlag(w))) items.push(MARKER_ITEM);
+    const flagLike = sources.find((w) => w.value === null && !afterEnd.has(w) && mayBeFlag(w));
+    if (flagLike) items.push(markerItem(`аргумент ${shown(flagLike.text)} у ${name} не вычислен и может оказаться флагом -t — возьми значение литералом`));
     // mv удаляет источник — это тоже запись (`mv /outside/f <scope>/f` уносит файл извне)
     if (name === 'mv') items.push(...sources.map((w) => ({ word: w, del: true })));
     return items;
@@ -1810,7 +2109,13 @@ function commandTargets(name, args, world, ctx) {
   if (name === 'sed') {
     const files = sedFiles(args);
     if (files === null) return null;
-    return files.length > 0 ? files.map((w) => ({ word: w })) : [MARKER_ITEM];
+    if (files.length > 0) return files.map((w) => ({ word: w }));
+    // Инцидент 2026-09-30 (PulseProxy, P1S1): `f=$(ls … | head -1); sed -n … "$f"` — отказ
+    // верный (значение может оказаться -i), но причина не называла слово.
+    const flagLike = args.find((w) => w.value === null && mayBeFlag(w));
+    return [markerItem(flagLike
+      ? `аргумент ${shown(flagLike.text)} у sed не вычислен и может оказаться флагом -i — подставь путь литералом или читай через Read`
+      : 'sed -i без файла')];
   }
   if (name === 'find' && !ctx.ps) {
     const items = findTargets(args, world, ctx);
@@ -1930,8 +2235,8 @@ function commandWrites(name, ci, world, ctx) {
   if (ctx.ps && !PS_CMDLETS[name.toLowerCase()]) args = args.map((a) => a.orig ?? a);
   const items = commandTargets(name, resolveArgs(args, world, ctx), world, ctx);
   if (!items) return;
-  if (ci.appends) ctx.marker = true; // xargs допишет аргументы из stdin
-  for (const it of items) addTarget(ctx, world, it);
+  if (ci.appends) mark(ctx, `xargs допишет цели ${name} из stdin`);
+  for (const it of items) addTarget(ctx, world, it.marker && !it.why ? markerItem(`${name}: цель записи не определить (нет пути, массив или параметр без значения)`) : it);
 }
 
 /**
@@ -1963,19 +2268,38 @@ function commandWrites(name, ci, world, ctx) {
  * @returns {string[]}
  */
 export function detectShellWrites(command, opts) {
-  return detectAt(command, opts, 0);
+  return detectCore(command, opts, 0).writes;
 }
 
-function detectAt(command, opts, level, cdSearch = false, shared = { runs: 0 }) {
-  if (level > MAX_NESTED) return [MARK];
+/**
+ * То же, что `detectShellWrites`, и причины маркера `"?"`: `why` — до трёх коротких фраз с
+ * токеном, из-за которого путь записи не вычислить, и тем, что сделать (для текста отказа
+ * ядра). Без маркера `why` пуст.
+ *
+ * `mixed: true` — команду выполнит bash или PowerShell (Kilo на Windows): советы в `why`
+ * годятся для обоих.
+ *
+ * @param {string} command
+ * @param {{cwd?: string, env?: object, dialect?: 'posix'|'powershell', mixed?: boolean}} [opts]
+ * @returns {{writes: string[], why: string[]}}
+ */
+export function explainShellWrites(command, opts) {
+  return detectCore(command, opts, 0);
+}
+
+function detectCore(command, opts, level, cdSearch = false, shared = { runs: 0 }) {
+  if (level > MAX_NESTED) return { writes: [MARK], why: [`вложенность интерпретаторов глубже ${MAX_NESTED}`] };
   const text = String(command ?? '');
-  if (!text.trim()) return [];
+  if (!text.trim()) return { writes: [], why: [] };
   const dialect = opts?.dialect === 'powershell' ? 'powershell' : 'posix';
   const env = opts?.env && typeof opts.env === 'object' ? opts.env : process.env;
   const cwd = typeof opts?.cwd === 'string' && opts.cwd ? resolvePath(opts.cwd) : '';
   try {
     const ctx = makeContext(dialect, env);
     ctx.level = level;
+    // Советы для исполнителя с неизвестным shell'ом (nullAdvice, describeVar); вложенный
+    // интерпретатор (`bash -c`) — уже известный shell, nestedShellWrites mixed не передаёт
+    ctx.mixed = opts?.mixed === true;
     ctx.cdSearch = cdSearch;
     // каталог сессии (корень проекта) — скрипты в нём не разовые, даже если проект во
     // временном каталоге (песочницы тестов скилов)
@@ -1990,8 +2314,8 @@ function detectAt(command, opts, level, cdSearch = false, shared = { runs: 0 }) 
     walk(text, ctx, [newWorld(cwd)], 0);
     const result = [...ctx.out];
     if (ctx.marker) result.push(MARK);
-    return result;
+    return { writes: result, why: ctx.marker ? ctx.why : [] };
   } catch {
-    return [MARK];
+    return { writes: [MARK], why: ['ошибка разбора команды'] };
   }
 }

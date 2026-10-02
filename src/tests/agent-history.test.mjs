@@ -9,6 +9,11 @@
  *  - строка встаёт в таблицу, а не после неё; таблица создаётся, если её нет;
  *  - старая трёхстолбцовая таблица мигрирует на четыре столбца без потери строк;
  *  - вертикальная черта в значении экранируется и переживает разбор;
+ *  - изменённые файлы запуска со сбоем (`files`) — пятая колонка «Изменённые файлы»:
+ *    заголовок в пять колонок появляется с первой такой строкой, прежние строки и строки
+ *    без файлов остаются в четыре ячейки, статус — в своей ячейке; разбор этого файла и
+ *    calc-metrics.js скила create-report (статус и время по имени колонки) читают обе
+ *    формы, время со смещением зоны calc-metrics читает как абсолютное;
  *  - классификатор отличает таймаут, прерывание, блокировку, лимит, сеть, авторизацию
  *    и пустой ответ ИИ-агента — от этого зависит, что человек увидит в истории;
  *  - запись переживает открытого читателя. Дефект, закрытый тем же изменением
@@ -27,6 +32,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 import { appendAgentRun, parseAgentHistory, classifyAgentResult, hasExecuteTaskRun } from '../lib/agent-history.mjs';
+import { parseHistoryRows, parseHistoryTime } from '../skills/create-report/scripts/calc-metrics.js';
 
 const ENTRY = { timestamp: '2026-09-24 10:00', skill: 'execute-task', agent: 'claude-sonnet', status: 'ok' };
 
@@ -170,6 +176,83 @@ test('разбор: строка неверной ширины пропуска�
   }
   assert.equal(warned.length, 1);
   assert.match(warned[0], /Invalid row/);
+});
+
+// ---------- изменённые файлы запуска со сбоем ----------
+
+const FAILED = { timestamp: '2026-10-01T03:12:45+05:00', skill: 'execute-task', agent: 'kilo-free(m)', status: 'timeout' };
+const tableLines = (content) => content.split('\n').filter((l) => l.startsWith('|'));
+
+test('файлы: секции нет — таблица в пять колонок, пути в обратных кавычках через запятую', () => {
+  withTicket('# Тикет\n', (file) => {
+    assert.deepEqual(appendAgentRun(file, { ...FAILED, files: ['src/a.js', 'src/b|c.js'] }), { ok: true });
+    const content = read(file);
+    assert.deepEqual(tableLines(content), [
+      '| Дата/время | Скил | Агент | Статус | Изменённые файлы |',
+      '|------------|------|-------|--------|------------------|',
+      '| 2026-10-01T03:12:45+05:00 | execute-task | kilo-free(m) | timeout | `src/a.js`, `src/b\\|c.js` |',
+    ]);
+    assert.deepEqual(parseAgentHistory(content), [{ ...FAILED, files: '`src/a.js`, `src/b|c.js`' }]);
+  });
+});
+
+test('файлы: таблица в четыре колонки — заголовок расширяется, прежние строки и строки без файлов — четыре ячейки', () => {
+  const before = [
+    '# Тикет', '', '## История работы', '',
+    '| Дата/время | Скил | Агент | Статус |',
+    '|------------|------|-------|--------|',
+    '| 2026-09-30 10:00:00 | execute-task | a | error |',
+    '', '## Ревью', '',
+  ].join('\n');
+  withTicket(before, (file) => {
+    assert.deepEqual(appendAgentRun(file, { ...FAILED, files: ['src/x.js'], files_total: 33 }), { ok: true });
+    assert.deepEqual(appendAgentRun(file, { ...ENTRY, timestamp: '2026-10-01T04:00:00+05:00' }), { ok: true });
+    const content = read(file);
+    assert.deepEqual(tableLines(content), [
+      '| Дата/время | Скил | Агент | Статус | Изменённые файлы |',
+      '|------------|------|-------|--------|------------------|',
+      '| 2026-09-30 10:00:00 | execute-task | a | error |',
+      '| 2026-10-01T03:12:45+05:00 | execute-task | kilo-free(m) | timeout | `src/x.js`, … ещё 32 |',
+      '| 2026-10-01T04:00:00+05:00 | execute-task | claude-sonnet | ok |',
+    ]);
+    assert.match(content, /\n## Ревью\n/, 'следующая секция на месте');
+    assert.deepEqual(parseAgentHistory(content).map((r) => [r.status, r.files]), [
+      ['error', undefined], ['timeout', '`src/x.js`, … ещё 32'], ['ok', undefined],
+    ]);
+
+    // Читатель истории скила create-report: статус и время — по имени колонки.
+    const rows = parseHistoryRows(content);
+    assert.deepEqual(rows.map((r) => r.status), ['error', 'timeout', 'ok']);
+    assert.equal(parseHistoryTime(rows[1].at), Date.parse('2026-09-30T22:12:45Z'), 'время со смещением — абсолютное');
+    assert.equal(parseHistoryTime(rows[0].at), new Date(2026, 8, 30, 10, 0, 0).getTime(), 'время без зоны — местное');
+    assert.equal(hasExecuteTaskRun(content), true);
+  });
+});
+
+test('файлы: пустой список или не массив — строка в четыре ячейки, заголовок прежний', () => {
+  withTicket('# Тикет\n', (file) => {
+    appendAgentRun(file, { ...FAILED, files: [] });
+    appendAgentRun(file, { ...FAILED, files: 'src/a.js' });
+    const table = tableLines(read(file));
+    assert.equal(table[0], '| Дата/время | Скил | Агент | Статус |');
+    assert.deepEqual(table.slice(2), [
+      '| 2026-10-01T03:12:45+05:00 | execute-task | kilo-free(m) | timeout |',
+      '| 2026-10-01T03:12:45+05:00 | execute-task | kilo-free(m) | timeout |',
+    ]);
+  });
+});
+
+test('файлы: трёхстолбцовая таблица — миграция на четыре и сразу пятая колонка', () => {
+  const before = ['## История работы', '', '| Дата | Скил | Агент |', '|---|---|---|', '| 2026-09-20 08:00 | decompose-plan | claude-opus |', ''].join('\n');
+  withTicket(before, (file) => {
+    appendAgentRun(file, { ...FAILED, status: 'error', files: ['a.md'] });
+    assert.deepEqual(tableLines(read(file)), [
+      '| Дата/время | Скил | Агент | Статус | Изменённые файлы |',
+      '|------------|------|-------|--------|------------------|',
+      '| 2026-09-20 08:00 | decompose-plan | claude-opus | unknown |',
+      '| 2026-10-01T03:12:45+05:00 | execute-task | kilo-free(m) | error | `a.md` |',
+    ]);
+  });
 });
 
 // ---------- hasExecuteTaskRun ----------

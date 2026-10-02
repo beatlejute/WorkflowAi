@@ -34,8 +34,8 @@ assertions:
     # complete-plan (complete-plan.js); analyze-report только возвращает status в ---RESULT---.
     - kind: skill_contains
       file: "workflows/progress.md"
-      pattern: "complete-plan`\\s*\\(`complete-plan\\.js`\\)[\\s\\S]{0,40}analyze-report frontmatter плана не редактирует"
-      reason: "progress.md фиксирует, что frontmatter плана обновляет стадия complete-plan (complete-plan.js), а не analyze-report."
+      pattern: "status: completed`? во frontmatter плана[^\"]{0,60}выполняет стадия пайплайна, закрывающая план, — frontmatter плана здесь не редактируется"
+      reason: "progress.md фиксирует, что frontmatter плана обновляет стадия пайплайна, закрывающая план, а не разбор (формулировка без имени стадии — с 24ef1c0; прежний якорь на «complete-plan (complete-plan.js)» с тех пор был красным)."
     - kind: skill_contains
       file: "workflows/retrospective.md"
       pattern: "устанавливает только стадия `complete-plan`\\s*\\(`complete-plan\\.js`\\)"
@@ -73,16 +73,17 @@ assertions:
     - kind: skill_contains
       file: "workflows/progress.md"
       pattern: "100% тикетов плана — в `done/` или `archive/`"
-      reason: "Критерий завершённости плана (шаг 6.5) считает archive эквивалентом done, как calc-plan-metrics.js:128 (calcCompletionPct) и calc-plan-metrics.js:30 (TICKET_DIRS) — регрессия к отвергнутой формулировке «100% тикетов плана находятся в директории `done/`» не проходит."
+      reason: "Критерий завершённости плана (шаг 6.5) считает archive эквивалентом done, как calcCompletionPct и TICKET_DIRS в calc-plan-metrics.js — регрессия к отвергнутой формулировке «100% тикетов плана находятся в директории `done/`» не проходит."
 
-    # A-8: скрипт calc-plan-metrics.js не считает Weighted Completion и First-Pass Rate —
-    # progress.md явно требует досчитать их вручную по алгоритму.
+    # A-8: скрипт calc-plan-metrics.js не считает Weighted Completion — progress.md явно
+    # требует досчитать его вручную по алгоритму. First-Pass Rate с правки 2026-10-01 скрипт
+    # считает по таблице «## Ревью», агент его не пересчитывает (кейс TC-ANALYZE-REPORT-011).
     - kind: skill_contains
       file: "workflows/progress.md"
-      pattern: "Weighted Completion и First-Pass Rate[\\s\\S]{0,30}вручную[\\s\\S]{0,30}algorithms/progress-assessment\\.md"
-      reason: "progress.md явно требует вручную досчитать Weighted Completion и First-Pass Rate, которые calc-plan-metrics.js не возвращает."
+      pattern: "Weighted Completion[\\s\\S]{0,30}вручную[\\s\\S]{0,40}algorithms/progress-assessment\\.md"
+      reason: "progress.md явно требует вручную досчитать Weighted Completion, которую calc-plan-metrics.js не возвращает."
 
-    # B-8: алгоритм считает archive как done (как calc-plan-metrics.js:128).
+    # B-8: алгоритм считает archive как done (как calcCompletionPct в calc-plan-metrics.js).
     - kind: skill_contains
       file: "algorithms/progress-assessment.md"
       pattern: "status == done[^\n]{0,40}archive"

@@ -18,7 +18,7 @@
 |---------|---------|----------|
 | Velocity (задач/день) | `done_count / days_elapsed` | Средняя скорость закрытия задач |
 | Velocity (задач/неделю) | `done_count / weeks_elapsed` | Недельная velocity |
-| Cycle time | `avg(completed_at - created_at)` | Среднее время от создания до завершения |
+| Cycle time | `avg(completed_at - first_run_at)` | Среднее время от первой записи «## История работы» до завершения: first_run_at — поле массива tickets скрипта, created_at тикета бывает заглушкой и для времени не годится |
 
 ### Прогресс по плану
 

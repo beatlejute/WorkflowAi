@@ -1,0 +1,60 @@
+id: TC-DECOMPOSE-GAPS-013
+title: "Узел выбора после проверки scope: создание тикета, правка своего тикета тем же файлом или сразу чеклист завершения"
+origin:
+  chg: ["ad-hoc-2026-10-01-analysis"]
+  incidents:
+    - "PulseProxy 2026-09-30, запуск 2 decompose-gaps (pipeline_2026-09-30_13-15-04, REPORT-031, claude-sonnet): единственный gap (DOCS-014) отклонён по scope. Ребро P10S4 --> P10S5 было безусловным, и рельсы провели агента через P10S5, P10S6, P10S7, P10S8, P10G2 (ответ «да» без тикета), P10S9 («Сохрани тикет» без файла), P10G4 и P10G3 — 7 холостых переходов, около 62 с из 5 мин 49 с стадии. Неверных артефактов нет, но гейты записи подтверждались формально."
+    - "Ревью правки 2026-10-01: возврат чеклиста P10G3 «нет» → P10S5 вёл правку уже созданного тикета через узел выдачи номера — скрипт выдал бы новый ID, и вместо Edit появился бы дубль, а гейт P10G2 с требованием нуля совпадений правку своего файла не пропустил бы."
+  principle: "После проверки scope узел выбора решает, что осталось: «создание» — gap в scope без тикета или новый тикет по чеклисту, «правка» — Edit тикета, созданного этим запуском, тем же файлом и ID без скрипта выдачи номера, «чеклист» — мимо узлов создания. Узел выбора лежит на всех путях к чеклисту, поэтому возврат чеклиста в него считается потолком цикла (workflows/decompose.md узлы P10Q1, P10S11)."
+  backlog_sources: []
+tags: [rails, graph, scope-check, regression-guard]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила. Негативный anchor выражен
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10Q1\{"П10 ВЫБОР: Что осталось до чеклиста завершения\? «создание» — gap в scope, по которому этот запуск ещё не создал тикет'
+      reason: "Выбор «есть ли работа по созданию тикета» — узел графа."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10Q1\{"[^"]*«правка» — тикет, созданный этим запуском, который чеклист завершения велит исправить\. «чеклист» — ни того, ни другого'
+      reason: "Правка своего тикета — отдельная ветка, а не повторное создание."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10Q1\{"[^"]*gap, которому по узлам P10R2 и P10R4 новый тикет не нужен'
+      reason: "Gap, закрытый существующей связкой unblocks или supersedes, не считается остатком."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S11\["П10 ШАГ: Правка тикета, созданного этим запуском, по чеклисту завершения — Edit того же файла в \.workflow/tickets/backlog/: ID, имя файла и parent_plan не меняются, скрипт выдачи ID не вызывается'
+      reason: "Правка по чеклисту не выдаёт новый номер и не пишет дубль."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10G1 -->\|"в scope"\| P10Q1'
+      reason: "Gap в scope идёт через узел выбора."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S4 --> P10Q1\s+P10Q1 -->\|"создание"\| P10S5\s+P10Q1 -->\|"правка"\| P10S11\s+P10Q1 -->\|"чеклист"\| P10G3'
+      reason: "После записи gap вне scope — выбор: создание тикета, правка своего тикета или сразу чеклист."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S11 --> P10G4'
+      reason: "Правленый тикет снова проходит гейт проверок DoD."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10G3 -->\|"нет"\| P10Q1'
+      reason: "Возврат чеклиста — в узел выбора, который доминирует над чеклистом: возврат считается потолком cycles."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: '^(?![\s\S]*(P10S4 --> P10S5|P10G3 -->\|"нет"\| P10S5))'
+      reason: "Безусловное ребро в создание тикета и возврат чеклиста мимо выбора не вернулись."
+
+execution:
+  timeout_s: 60

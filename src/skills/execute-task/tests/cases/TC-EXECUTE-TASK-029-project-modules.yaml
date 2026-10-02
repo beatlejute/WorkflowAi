@@ -1,0 +1,48 @@
+id: TC-EXECUTE-TASK-029
+title: "Работа, которую проект делает своим модулем, идёт через этот модуль; прямой вызов API платформы — только с записью выбора в Result"
+origin:
+  chg: ["ad-hoc-2026-10-01-project-modules"]
+  incidents:
+    - "PulseProxy PLAN-020, IMPL-122 (2026-09-30): подсказка вкладки поставлена прямым chrome.i18n.getMessage, хотя тексты интерфейса проект получает через свой модуль I18n (язык из настроек расширения); вторая попытка код не проверяла. Дефект («подсказка не на языке из настроек») записал QA-175, план закрыт с ним."
+  principle: "Перед первым прямым вызовом API платформы, среды или библиотеки исполнитель ищет, как существующий код делает ту же работу, и идёт через модуль проекта; модуль не готов в контексте — готовит его в файлах тикета; выбранный прямой вызов записывается в Result (workflows/execute.md P3R4, P6S3; SKILL.md P2S3)."
+  backlog_sources:
+    - "D:/Dev/PulseProxy/.workflow/tickets/archive/IMPL-122.md"
+    - "D:/Dev/PulseProxy/.workflow/tickets/archive/QA-175.md"
+tags: [conventions, shared, regression-guard]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R4\["[^"]*Работу, которую проект уже делает своим модулем[^"]*делай через него'
+      reason: "Правило о модулях проекта — в узле о вставке кода."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R4\["[^"]*перед первым прямым вызовом API платформы, среды или библиотеки найди в исходниках проекта, как ту же работу делает существующий код'
+      reason: "Поиск существующего пути — до прямого вызова."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R4\["[^"]*Модуль не готов в этом контексте[^"]*подготовь его в файлах тикета'
+      reason: "Неготовый модуль готовится, а не обходится."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R4\["[^"]*выбираешь прямой вызов — запиши в Result выбор и что меняется для пользователя'
+      reason: "Прямой вызов — осознанный и записанный выбор."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P2S3\["[^"]*каким модулем проекта делается работа'
+      reason: "План работы называет модуль проекта."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P6S3\["[^"]*прямой вызов API вместо модуля проекта — с записью выбора в Result \(P3R4\)'
+      reason: "GATE-3 проверяет правило."
+
+execution:
+  timeout_s: 60

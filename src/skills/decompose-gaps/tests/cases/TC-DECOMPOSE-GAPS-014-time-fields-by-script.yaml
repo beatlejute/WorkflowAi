@@ -1,0 +1,31 @@
+id: TC-DECOMPOSE-GAPS-014
+title: "Декомпозитор пробелов не заполняет поля времени тикета — их ставит скрипт пайплайна"
+origin:
+  chg: ["ad-hoc-2026-10-01-analysis"]
+  incidents:
+    - "PulseProxy FIX-033 (decompose-gaps claude-sonnet 2026-09-30 09:55Z): created_at «2026-09-30T00:00:00Z» — выдуманная полночь даты вместо времени создания, как у 36 тикетов декомпозиции PLAN-020, где такая метка дала 7 ложных отказов гейта file_unchanged. Узел P10S8 велел «Заполни шаблон», в шаблоне пример `2026-02-28T12:00:00Z`, источника времени у агента нет."
+  principle: "Поля времени тикета (created_at, updated_at, completed_at) модель не заполняет и не выдумывает — их ставит скрипт пайплайна (workflows/decompose.md узел P10S8). Машинная часть — штамп времени скриптом после стадии и база гейта без отката на updated_at — вне скила."
+  backlog_sources:
+    - "D:/Dev/PulseProxy/.workflow/tickets/archive/FIX-033.md"
+tags: [ticket-fields, time-fields, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S8\["[^"]*Поля времени \(created_at, updated_at, completed_at\) не заполняй и значения не выдумывай'
+      reason: "Узел заполнения шаблона запрещает модели писать поля времени."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S8\["[^"]*их ставит скрипт пайплайна по часам машины, а метка модели становится точкой отсчёта проверки изменённых файлов'
+      reason: "Причина правила названа: метка модели — база гейта file_unchanged и метрик."
+
+execution:
+  timeout_s: 60

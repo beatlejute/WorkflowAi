@@ -211,9 +211,9 @@ test('QA-67-002: Структура "История работы" при SIGTERM
     assert.strictEqual(lastEntry.agent, 'aborted-agent', 'Агент должен сохраниться');
     assert.ok(lastEntry.timestamp, 'Timestamp должен существовать');
 
-    // Проверяем формат timestamp (YYYY-MM-DD HH:MM:SS)
-    const tsRegex = /^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}$/;
-    assert.match(lastEntry.timestamp, tsRegex, 'Timestamp должен быть в формате YYYY-MM-DD HH:MM:SS');
+    // Формат timestamp — местное время ISO 8601 со смещением зоны (YYYY-MM-DDTHH:MM:SS+HH:MM)
+    const tsRegex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/;
+    assert.match(lastEntry.timestamp, tsRegex, 'Timestamp должен быть в формате YYYY-MM-DDTHH:MM:SS+HH:MM');
   } finally {
     cleanupDir(projectRoot);
   }

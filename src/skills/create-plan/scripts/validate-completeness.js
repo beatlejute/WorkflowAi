@@ -12,6 +12,9 @@
  * - Строку **Проверка:** у каждой задачи «Высокоуровневых задач» и формат её записей;
  *   команда записи check исполнима на этой машине: исполнитель проверок её не отклонит,
  *   исполняемый файл установлен
+ * - Записи, которые не доказывают своё утверждение: причина prose, которая отдаёт проверку
+ *   другой задаче плана, ожидание с альтернативой по упавшим тестам, снимающей порог числа
+ *   тестов, критерий о наборе, который доказывают поиски, которым хватает одного элемента
  * - Красные флаги (отсылки вместо содержания, пустые секции)
  *
  * Вывод: JSON {errors, warnings, valid} через ---RESULT---
@@ -157,6 +160,141 @@ const TASKS_HEADING = /^##\s+Высокоуровневые задачи/i;
 const TASK_HEADING = /^###\s+(\d+)\./;
 const VERIFICATION_LINE = /^\*\*Проверка:\*\*(.*)$/;
 const LIST_ITEM = /^\s*[-*]\s+(.*)$/;
+const CRITERION_LINE = /^\*\*Критерий приёмки:\*\*(.*)$/;
+
+/**
+ * Причина prose, которая отдаёт проверку другой задаче плана: «проверяет задача 3»,
+ * «проверяют автотесты задачи 12», «выполняется задачей 17», «вид оценивается по
+ * скриншотам ручной проверки задачи 34». Причина prose объясняет, почему утверждение не
+ * проверить командой. Отсылка к другой задаче — перенос проверки: модель ревью получает
+ * вопросом только текст пункта, и в тикете этой задачи пункт недоказуем; утверждение,
+ * которое доказывает другая задача, — её критерий (узлы P10S7, P10S8). 2026-09-30:
+ * тринадцать таких причин в одном плане, восемь из девяти отказов модели ревью по плану
+ * пришлись на эти пункты, а валидатор план пропустил.
+ *
+ * Ошибка — глагол проверки в третьем лице и номер задачи в одном предложении, в любом
+ * порядке, не дальше 60 знаков друг от друга. Номер задачи без такого глагола — момент
+ * времени, а не перенос: «красноту до задачи 2 одной командой не проверить», «до
+ * автотестов задачи 4 видно только в диффе». Это причина, правило её не трогает: на
+ * планах проектов 2026-10-01 номер задачи без глагола проверки стоял в 46 причинах.
+ * `\b` здесь не годится: в JS он видит границу слова только у латиницы.
+ */
+const TASK_NUMBER = String.raw`(?<!\p{L})задач(?:а|и|у|е|ей|ами|ам|ах)?\s+(?:№\s*)?\d+`;
+const CHECK_VERB = String.raw`(?<!\p{L})(?:провер(?:яет|яют|яется|яются|ит|ят)|доказыва(?:ет|ют|ется|ются)|докаж(?:ет|ут)|покрыва(?:ет|ют|ется|ются)|покро(?:ет|ют)|закрыва(?:ет|ют|ется|ются)|закро(?:ет|ют)|выполня(?:ет|ют|ется|ются)|выполн(?:ит|ят)|оценива(?:ет|ют|ется|ются)|оцен(?:ит|ят))(?!\p{L})`;
+const TASK_REFERENCE = new RegExp(
+  `${CHECK_VERB}[^.;:—]{0,60}?${TASK_NUMBER}|${TASK_NUMBER}[^.;:—]{0,60}?${CHECK_VERB}`,
+  'iu'
+);
+
+/**
+ * Критерий о наборе — утверждение со словом «каждый», «все», «оба» и т. п. (узел
+ * P10S11). Его не доказывает поиск, которому хватает одного элемента: запись поиска с
+ * ожиданием `exit 0` зелёная, как только нашлась строка любого её шаблона (несколько
+ * `-e` без `--all-match` — это «или»), а несколько таких записей под одной строкой
+ * критерия — части набора без своих строк критерия (узел P10S7), и пункт DoD с полным
+ * текстом критерия закрывает каждая из них. Ошибка — только при однозначной картине:
+ * под строкой «Проверка:» нет prose и visual, и каждая запись, кроме регрессионных, —
+ * такой поиск. Поиск с `--all-match`, `--and` или файлом шаблонов (`-f`), ожидание
+ * отсутствия (`exit 1`), разбор вывода (`stdout …`) и скрипт набор доказывать могут —
+ * их правило не трогает. 2026-09-29: критерии «по каждому сайту» доказывали поиски
+ * отдельных адресов, тикеты с непроверенными сайтами закрылись без модели ревью, и
+ * следующий план повторил это на каноне с правилом.
+ */
+const SET_QUANTIFIER = /(?<!\p{L})(кажд\p{L}*|все|всех|всем|оба|обоих|обе|обеих)(?!\p{L})/iu;
+const SEARCH_TOOLS = new Set(['rg', 'grep']);
+const ALL_PATTERNS_OPTIONS = new Set(['--all-match', '--and', '-f']);
+
+// Слова команды записи check: пробелы вне кавычек разделяют, кавычки снимаются.
+function commandWords(command) {
+  const words = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(command))) words.push(m[1] ?? m[2] ?? m[3]);
+  return words;
+}
+
+// Запись — поиск с ожиданием `exit 0`, которому хватает строки любого своего шаблона.
+function anyMatchSearch(command, expect) {
+  if (!/^exit\s+0$/.test(String(expect ?? '').trim())) return false;
+  const words = commandWords(String(command ?? ''));
+  let options;
+  if (words[0] === 'git' && words[1] === 'grep') options = words.slice(2);
+  else if (SEARCH_TOOLS.has(words[0])) options = words.slice(1);
+  else return false;
+  const end = options.indexOf('--');
+  const head = end === -1 ? options : options.slice(0, end);
+  return !head.some((w) => ALL_PATTERNS_OPTIONS.has(w) || w.startsWith('--file'));
+}
+
+// Слово-квантор критерия о наборе, который доказывают только такие поиски, иначе null.
+function setCriterionProblem({ criterion, records }) {
+  const word = SET_QUANTIFIER.exec(criterion ?? '');
+  if (!word) return null;
+  const parsed = records.map((record) => parseCheckRecord(record));
+  if (parsed.some(({ kind, error }) => error || kind !== 'check')) return null;
+  const proving = parsed.filter(({ regression }) => !regression);
+  if (proving.length === 0) return null;
+  return proving.every(({ command, expect }) => anyMatchSearch(command, expect)) ? word[1] : null;
+}
+
+/**
+ * Альтернатива в ожидании `stdout matches /…/`, которая снимает порог числа тестов:
+ * одна ветвь требует счётчик прошедших или всех тестов с порогом, другая — счётчик
+ * упавших. Такая запись зелёная при одном упавшем тесте, сколько бы тестов ни было;
+ * число тестов доказывает счётчик всех исполненных тестов с порогом, независимо от
+ * исхода (узлы P10R1, P10S12). 2026-09-30: ожидание «прошло не меньше N или упал хотя
+ * бы один» у задачи тестов закрыло бы критерий «не меньше N тестов» одним упавшим
+ * тестом. Ветви ищутся на каждом уровне: верхнем и в каждой группе `( … )`; содержимое
+ * вложенной группы входит в ветвь, где она стоит.
+ */
+const PASS_COUNTER = /pass|total/i;
+const FAIL_COUNTER = /fail/i;
+
+function alternations(source) {
+  const frames = [{ branches: [''] }];
+  const groups = [];
+  let inClass = false;
+  const append = (text) => {
+    for (const frame of frames) frame.branches[frame.branches.length - 1] += text;
+  };
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === '\\') {
+      append(source.slice(i, i + 2));
+      i += 1;
+    } else if (inClass) {
+      if (ch === ']') inClass = false;
+      append(ch);
+    } else if (ch === '[') {
+      inClass = true;
+      append(ch);
+    } else if (ch === '(') {
+      append(ch);
+      frames.push({ branches: [''] });
+    } else if (ch === ')' && frames.length > 1) {
+      groups.push(frames.pop().branches);
+      append(ch);
+    } else if (ch === '|') {
+      frames[frames.length - 1].branches.push('');
+    } else {
+      append(ch);
+    }
+  }
+  while (frames.length > 0) groups.push(frames.pop().branches);
+  return groups;
+}
+
+// Порог — цифра 1–9 вне класса «любая цифра»: `[3-9]`, `16`, `[1-9]`; `[0-9]+` и `\d+` — не порог.
+const hasThreshold = (branch) => /[1-9]/.test(branch.replace(/\[0-9\]|\\d/g, ''));
+
+function thresholdBypass(expect) {
+  const match = /^stdout\s+matches\s+\/(.+)\/$/.exec(String(expect ?? '').trim());
+  if (!match) return false;
+  return alternations(match[1]).some((branches) =>
+    branches.length > 1 &&
+    branches.some((b) => PASS_COUNTER.test(b) && !FAIL_COUNTER.test(b) && hasThreshold(b)) &&
+    branches.some((b) => FAIL_COUNTER.test(b) && !PASS_COUNTER.test(b)));
+}
 
 /**
  * Строка `**Проверка:**` у каждой задачи «Высокоуровневых задач».
@@ -185,6 +323,13 @@ const LIST_ITEM = /^\s*[-*]\s+(.*)$/;
  * Подсказки `<!-- … -->` и блоки кода пропускаются: пример записи в них — не проверка
  * задачи (в шаблоне плана подсказка секции перечисляет все формы). Секции нет — ошибок
  * здесь нет: её отсутствие называет checkSections.
+ *
+ * Запись, которая по форме верна, но своего утверждения не доказывает, — тоже ошибка:
+ * причина prose, которая отдаёт проверку другой задаче плана (TASK_REFERENCE), ожидание
+ * с альтернативой, снимающей порог числа тестов (thresholdBypass), и критерий о наборе,
+ * который доказывают поиски, которым хватает одного элемента (setCriterionProblem). Для
+ * последнего строка `**Проверка:**` получает текст строки `**Критерий приёмки:**`,
+ * стоящей перед ней в той же задаче.
  */
 function checkTaskVerifications(content) {
   const tasks = [];
@@ -193,6 +338,7 @@ function checkTaskVerifications(content) {
   let task = null;
   let check = null;
   let collecting = false;
+  let criterion = null;
 
   const lines = content.replace(/\r\n/g, '\n').replace(/<!--[\s\S]*?-->/g, '').split('\n');
   for (const line of lines) {
@@ -207,6 +353,7 @@ function checkTaskVerifications(content) {
       inSection = TASKS_HEADING.test(line);
       task = null;
       collecting = false;
+      criterion = null;
       continue;
     }
     if (!inSection) continue;
@@ -216,17 +363,26 @@ function checkTaskVerifications(content) {
       task = heading ? { number: Number(heading[1]), checks: [], records: [] } : null;
       if (task) tasks.push(task);
       collecting = false;
+      criterion = null;
       continue;
     }
     if (!task) continue;
 
+    const criterionLine = CRITERION_LINE.exec(line);
+    if (criterionLine) {
+      criterion = criterionLine[1].trim();
+      collecting = false;
+      continue;
+    }
     const verification = VERIFICATION_LINE.exec(line);
     if (verification) {
-      check = { inline: false, listed: false, count: 0 };
+      check = { inline: false, listed: false, count: 0, criterion, records: [] };
+      criterion = null;
       task.checks.push(check);
       const record = verification[1].trim();
       if (record) {
         task.records.push(record);
+        check.records.push(record);
         check.inline = true;
         check.count += 1;
       }
@@ -237,6 +393,7 @@ function checkTaskVerifications(content) {
     const item = LIST_ITEM.exec(line);
     if (item) {
       task.records.push(item[1]);
+      check.records.push(item[1]);
       check.listed = true;
       check.count += 1;
     } else if (line.trim()) {
@@ -257,9 +414,16 @@ function checkTaskVerifications(content) {
       errors.push({ task: number, message: `Задача ${number}: запись и в строке **Проверка:**, и списком под ней` });
     }
     const parsed = records.map((record) => parseCheckRecord(record));
-    parsed.forEach(({ kind, command, expect, error }, i) => {
+    parsed.forEach(({ kind, command, expect, reason, error }, i) => {
       if (error) {
         errors.push({ task: number, message: `Задача ${number}: запись проверки ${i + 1} не по формату (${error})` });
+        return;
+      }
+      if (kind === 'prose') {
+        const reference = TASK_REFERENCE.exec(reason ?? '');
+        if (reference) {
+          errors.push({ task: number, message: `Задача ${number}: запись проверки ${i + 1} — причина prose отдаёт проверку другой задаче плана («${reference[0]}»): утверждение, которое доказывает другая задача, записывается критерием той задачи` });
+        }
         return;
       }
       if (kind !== 'check') return;
@@ -270,9 +434,18 @@ function checkTaskVerifications(content) {
         const available = availableCheckTools().join(', ') || 'ни одного';
         errors.push({ task: number, message: `Задача ${number}: запись проверки ${i + 1} — на машине нет «${problem.tool}» (установлены: ${available})` });
       }
+      if (thresholdBypass(expect)) {
+        errors.push({ task: number, message: `Задача ${number}: запись проверки ${i + 1} — альтернатива по упавшим тестам снимает порог числа тестов: число доказывает счётчик всех исполненных тестов` });
+      }
     });
     if (parsed.length > 0 && parsed.every(({ kind, regression, error }) => kind === 'check' && regression && !error)) {
       errors.push({ task: number, message: `Задача ${number}: только регрессионные проверки, нужна и запись другой формы` });
+    }
+    for (const check of checks) {
+      const word = setCriterionProblem(check);
+      if (word) {
+        errors.push({ task: number, message: `Задача ${number}: критерий о наборе («${word}») доказывают поиски, которым хватает одного элемента, — перечисли элементы в утверждении и найди все одной записью (--all-match и -e на каждый) или скриптом, либо дай каждому элементу свою строку критерия` });
+      }
     }
   }
   return errors;

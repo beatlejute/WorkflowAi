@@ -16,7 +16,14 @@
  *    записаны с проверками без поля, и их ревью ушло модели); без записей проверок и
  *    тикет type: human — ok без запуска проверок;
  *  - файл тикета остаётся байт в байт прежним, тикет — в своей колонке;
- *  - тикет, которого нет на доске, — код выхода 1 с его id в выводе.
+ *  - тикет, которого нет на доске, — код выхода 1 с его id в выводе;
+ *  - ошибка записи пункта DoD тикета dod_format: 2, которую гейт move-to-ready не называет
+ *    (он смотрит только пункты check): пункт с двумя записями, без записи, prose без
+ *    причины — `dod_record_invalid: пункт N (<ошибка>)` и код 1, в том числе у тикета
+ *    type: human; ошибка записи check — по-прежнему check_malformed (ListeningGlass
+ *    PLAN-001 2026-09-29: пункт с 2–3 записями скрипт пропускал, verify-atomicity провалил
+ *    17 тикетов из 25); гейт move-to-ready на тех же тикетах — как раньше;
+ *  - путь поиска `git grep` под .gitignore — строка [WARN], код выхода 0.
  *
  * Временный корень проекта — в каталоге ОС, удаляется в after.
  *
@@ -28,7 +35,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPT = fileURLToPath(new URL('../scripts/check-ticket-dod.js', import.meta.url));
@@ -50,12 +57,12 @@ after(() => {
 const GREEN = 'node -e "process.exit(0)"';
 const RED = 'node -e "process.exit(1)"';
 
-function putTicket(id, dod, { dodFormat = 2 } = {}) {
+function putTicket(id, dod, { dodFormat = 2, type = 'fix' } = {}) {
   const text = [
     '---',
     `id: "${id}"`,
     'title: "Задача"',
-    'type: fix',
+    `type: ${type}`,
     ...(dodFormat === null ? [] : [`dod_format: ${dodFormat}`]),
     '---',
     '',
@@ -187,4 +194,104 @@ test('тикета нет на доске — код 1 и его id в выво�
 
   assert.equal(code, 1, out);
   assert.match(out, /FIX-999: тикет не найден/);
+});
+
+// ---------------------------------------------------------------------------
+// Запись пункта DoD, которую гейт перед ready/ не разбирает
+// ---------------------------------------------------------------------------
+
+const MOVE_TO_READY = fileURLToPath(new URL('../scripts/move-to-ready.js', import.meta.url));
+// Проверка, оставляющая след: файл в корне появится, только если её запускали.
+const trace = (name) => `node -e "require('fs').writeFileSync('${name}', '')"`;
+
+test('пункт с двумя записями, без записи, prose без причины, visual без пути, expect без check — dod_record_invalid и код 1; ошибка записи check — check_malformed', () => {
+  putTicket('FIX-911', [
+    '- [ ] Две записи',
+    `${check(RED)}, prose: \`руками\``,
+    '- [ ] Без записи',
+    '- [ ] Причины нет',
+    '  - prose: ``',
+    '- [ ] Без expect',
+    `  - check: \`${RED}\``,
+    '- [ ] Пути нет',
+    '  - visual: ``',
+    '- [ ] expect у prose',
+    '  - prose: `руками`, expect: `exit 0`',
+    '- [ ] Правильная запись',
+    check(RED),
+  ]);
+
+  const { code, out } = run('FIX-911');
+
+  assert.equal(code, 1, out);
+  assert.match(out, new RegExp([
+    'FIX-911: dod_record_invalid: пункт 1 \\(multiple_forms\\)',
+    'dod_record_invalid: пункт 2 \\(no_form\\)',
+    'dod_record_invalid: пункт 3 \\(prose_without_reason\\)',
+    'check_malformed: пункт 4 \\(check_without_expect\\)',
+    'dod_record_invalid: пункт 5 \\(visual_without_path\\)',
+    'dod_record_invalid: пункт 6 \\(keys_without_check\\)$',
+  ].join('; '), 'm'));
+  assert.match(out, /with_problems: 1/);
+});
+
+test('тикет type human с dod_format 2: ошибки записи — dod_record_invalid и check_malformed, проверки не запускаются', () => {
+  putTicket('HUMAN-912', [
+    '- [ ] Две записи',
+    `${check(RED)}, prose: \`руками\``,
+    '- [ ] Без expect',
+    `  - check: \`${RED}\``,
+    '- [ ] Зелёная проверка человека',
+    check(trace('human-912-ran')),
+  ], { type: 'human' });
+  putTicket('HUMAN-913', ['- [ ] Результат записан', check(trace('human-913-ran'))], { type: 'human' });
+
+  const { code, out } = run('HUMAN-912', 'HUMAN-913');
+
+  assert.equal(code, 1, out);
+  assert.match(out, /HUMAN-912: dod_record_invalid: пункт 1 \(multiple_forms\); check_malformed: пункт 2 \(check_without_expect\)$/m);
+  assert.match(out, /HUMAN-913: ok \(type human: записи разобраны, проверки не запускаются\)/);
+  assert.match(out, /with_problems: 1/);
+  assert.equal(fs.existsSync(path.join(root, 'human-912-ran')), false, 'проверка тикета человека запускалась');
+  assert.equal(fs.existsSync(path.join(root, 'human-913-ran')), false, 'проверка тикета человека запускалась');
+});
+
+test('гейт move-to-ready на тех же тикетах — как раньше: только check_malformed, пункты без формы check его не останавливают', () => {
+  putTicket('FIX-914', [
+    '- [ ] Две записи',
+    `${check(RED)}, prose: \`руками\``,
+    '- [ ] Без expect',
+    `  - check: \`${RED}\``,
+  ]);
+  putTicket('FIX-915', ['- [ ] Две записи', `${check(RED)}, prose: \`руками\``, '- [ ] Без записи']);
+  assert.match(run('FIX-914', 'FIX-915').out, /FIX-915: dod_record_invalid: пункт 1 \(multiple_forms\); dod_record_invalid: пункт 2 \(no_form\)/);
+
+  const prompt = 'move-to-ready\n\nContext:\n  ready_tickets: FIX-914, FIX-915\n';
+  const moved = spawnSync(process.execPath, [MOVE_TO_READY, prompt], { cwd: root, encoding: 'utf8' });
+
+  assert.equal(moved.status, 0, moved.stderr);
+  const blocked = fs.readFileSync(path.join(root, '.workflow', 'tickets', 'blocked', 'FIX-914.md'), 'utf8');
+  assert.match(blocked, /^blocked_reason: "?check_malformed: пункт 2 \(check_without_expect\)"?$/m);
+  assert.ok(fs.existsSync(path.join(root, '.workflow', 'tickets', 'ready', 'FIX-915.md')), moved.stdout);
+});
+
+test('путь git grep под .gitignore — строка [WARN] с номером пункта, код 0', () => {
+  execFileSync('git', ['init', '-q', root]);
+  fs.writeFileSync(path.join(root, '.gitignore'), 'research/\n', 'utf8');
+  fs.mkdirSync(path.join(root, 'research'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'research', 'notes.md'), 'needle\n', 'utf8');
+  putTicket('FIX-916', [
+    '- [ ] Заметка записана',
+    check('git grep -q --untracked "needle" -- research/notes.md'),
+    '- [ ] Та же заметка, поиск видит игнорируемые файлы',
+    check('git grep -q --untracked --no-exclude-standard "absent" -- research/notes.md'),
+  ]);
+
+  const { code, out } = run('FIX-916');
+
+  assert.equal(code, 0, out);
+  assert.match(out, /^FIX-916: ok$/m);
+  assert.match(out, /^\[WARN\] FIX-916: check_path_ignored: пункт 1 \(research\/notes\.md — под \.gitignore/m);
+  assert.doesNotMatch(out, /пункт 2/);
+  assert.match(out, /status: ok/);
 });

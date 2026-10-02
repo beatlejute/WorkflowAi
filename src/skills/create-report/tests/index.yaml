@@ -40,3 +40,13 @@ cases:
     origin_chg: ["improve-2026-09-24"]
     tags: [scope, consistency, regression-guard]
     severity: high
+  - id: TC-CREATE-REPORT-006
+    file: cases/TC-CREATE-REPORT-006-problems-from-ticket-data.yaml
+    origin_chg: ["ad-hoc-2026-10-01"]
+    tags: [problems, metrics, plan-health, completeness, regression-guard]
+    severity: high
+  - id: TC-CREATE-REPORT-007
+    file: cases/TC-CREATE-REPORT-007-final-answer-in-terminal.yaml
+    origin_chg: ["ad-hoc-2026-10-01"]
+    tags: [output, rails, result-format, regression-guard]
+    severity: medium

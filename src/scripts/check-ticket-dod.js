@@ -16,12 +16,21 @@
  *   node .workflow/src/scripts/check-ticket-dod.js <ticket_id|путь к файлу> [...]
  *
  * Тикет по id ищется во всех колонках .workflow/tickets/. Тикет не в формате
- * dod_format: 2 и тикет type: human гейт не проходят — для них «ok». Исключение —
- * тикет без dod_format: 2 (и не human) с записями проверок в DoD: это
- * `dod_format_missing`, проверки такого тикета не запустились бы (hasCheckRecords).
+ * dod_format: 2 гейт не проходит — для него «ok». Исключение — тикет без dod_format: 2
+ * (и не human) с записями проверок в DoD: это `dod_format_missing`, проверки такого
+ * тикета не запустились бы (hasCheckRecords).
+ *
+ * У тикета dod_format: 2 разбирается запись каждого пункта (recordProblems): пункт без
+ * записи, с несколькими формами, prose без причины, visual без пути, expect или regression
+ * без check — `dod_record_invalid: пункт N (<ошибка>)`. Гейт dodStartProblems смотрит
+ * только пункты формы check, а такой пункт ревью проваливает на каждой попытке
+ * (verify-artifacts: dod_record_invalid). Тикет type: human с dod_format: 2 проходит только
+ * этот разбор, и ошибка его записи check — `check_malformed`: проверки человека гейт не
+ * запускает (move-to-ready.js), а ревью их исполняет.
  *
  * Вывод:
  *   <ticket_id>: ok | <причина>; <причина>
+ *   [WARN] <ticket_id>: <предупреждение>   (на код выхода не влияет)
  *   ---RESULT---
  *   status: ok | problems
  *   checked: N
@@ -62,6 +71,25 @@ function hasCheckRecords(body) {
   return CHECK_LINE.test(text.slice(start, nextH2 === -1 ? text.length : nextH2));
 }
 
+/**
+ * Ошибки записи пунктов DoD тикета dod_format: 2, которых не называет гейт dodStartProblems:
+ * пункты не формы check (у check он даёт `check_malformed`). С withCheck — и ошибки записи
+ * check, как их называет гейт: для тикета, к которому гейт не применяется. Образец —
+ * dodFormatProblem в lib/operations/tickets.mjs (create_ticket).
+ *
+ * ListeningGlass PLAN-001 2026-09-29: первый проход декомпозиции положил под пункт DoD 1
+ * все 2–3 записи строки «Проверка:» — verify-atomicity провалил 17 тикетов из 25
+ * (multiple_forms), второй проход занял 8 мин 39 с; этот скрипт такой пункт пропускал.
+ */
+function recordProblems(body, { withCheck }) {
+  return parseDodChecks(body)
+    .filter((item) => item.error && (withCheck || item.kind !== 'check'))
+    .map((item) => `${item.kind === 'check' ? 'check_malformed' : 'dod_record_invalid'}: пункт ${item.index} (${item.error})`);
+}
+
+// Номер пункта причины: причины гейта и разбора записи выводятся по порядку пунктов.
+const itemIndex = (problem) => Number(/пункт (\d+)/.exec(problem)?.[1] ?? 0);
+
 function findTicket(ref) {
   const asPath = path.resolve(PROJECT_DIR, ref);
   if (ref.endsWith('.md') && fs.existsSync(asPath)) return asPath;
@@ -101,13 +129,20 @@ async function main() {
       console.log(`${id}: dod_format_missing: проверки DoD есть, а dod_format: 2 во frontmatter нет — проверки не запустятся, ревью уйдёт модели`);
       continue;
     }
-    if (frontmatter.type === 'human' || !isDodFormat2(frontmatter)) {
+    if (!isDodFormat2(frontmatter)) {
       console.log(`${id}: ok (гейт не применяется: ${frontmatter.type === 'human' ? 'type human' : 'не dod_format 2'})`);
       continue;
     }
-    const problems = await dodStartProblems({ body, projectRoot: PROJECT_DIR });
+    const human = frontmatter.type === 'human';
+    const warnings = [];
+    const problems = [
+      ...recordProblems(body, { withCheck: human }),
+      ...(human ? [] : await dodStartProblems({ body, projectRoot: PROJECT_DIR, warnings })),
+    ].sort((a, b) => itemIndex(a) - itemIndex(b));
     if (problems.length > 0) withProblems++;
-    console.log(`${id}: ${problems.length > 0 ? problems.join('; ') : 'ok'}`);
+    const verdict = human && problems.length === 0 ? 'ok (type human: записи разобраны, проверки не запускаются)' : 'ok';
+    console.log(`${id}: ${problems.length > 0 ? problems.join('; ') : verdict}`);
+    for (const warning of warnings) console.log(`[WARN] ${id}: ${warning}`);
   }
 
   printResult({ status: withProblems > 0 ? 'problems' : 'ok', checked: refs.length, with_problems: withProblems });

@@ -25,6 +25,7 @@
 | Completion Rate | {X}% | {🟢/🟡/🟠/🔴} |
 | Weighted Completion | {X}% | {🟢/🟡/🟠/🔴} |
 | First-Pass Rate | {X}% | {🟢/🟡/🟠/🔴} |
+| Rework Rate | {X}% ({N} тикетов, {M} строк ❌) | — |
 | Block Rate | {X}% | {🟢/🟡/🟠/🔴} |
 | Тренд | {📈/➡️/📉} | — |
 
@@ -34,6 +35,7 @@
 |--------|-----------|---|
 | Done | {N} | {X}% |
 | Archive | {N} | {X}% |
+| Review | {N} | {X}% |
 | In Progress | {N} | {X}% |
 | Ready | {N} | {X}% |
 | Blocked | {N} | {X}% |

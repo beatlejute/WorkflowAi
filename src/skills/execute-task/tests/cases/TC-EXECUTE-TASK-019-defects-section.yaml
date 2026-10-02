@@ -1,0 +1,65 @@
+id: TC-EXECUTE-TASK-019
+title: "Найденный дефект пишется в постоянный подраздел «Найденные дефекты» Result — «нет» или список расхождений, рекомендация следующей задачи — в «Заметках»"
+origin:
+  chg: ["ad-hoc-2026-10-01-defects-section"]
+  incidents:
+    - "PulseProxy PLAN-020, QA-175 (2026-09-30 06:44Z): тикет тестирования записал «Найденный дефект (расхождение с ожиданием)» в свободном тексте Result и закрылся в done/. Три разбора плана (09:49, 13:53, 17:43 UTC) дефект не выписали, план закрыт, исправления нет. Узел P0R3 отсылал к секции «Рекомендации для следующего плана», которой нет ни в шаблоне Result, ни в шаблоне тикета."
+    - "ListeningGlass PLAN-001 (2026-09-29/30): QA-002, QA-003, QA-005, QA-007, QA-009 записали дефекты в Result и «Заметки», REPORT-001 вывел «Проблемы» только из статусов, в PLAN-002 этих дефектов нет."
+  principle: "Дефект фиксируется в постоянном подразделе «Найденные дефекты» раздела «Результат выполнения» — по строке на расхождение с ожиданием или «нет»; по этому заголовку стадия разбора плана находит дефекты выполненных тикетов, поэтому рекомендация следующей задачи туда не пишется — она в «Заметках» (SKILL.md P0R3, P5S1; workflows/execute.md P6S2; templates/result-template.md)."
+  backlog_sources:
+    - "D:/Dev/PulseProxy/.workflow/tickets/archive/QA-175.md"
+    - "D:/Dev/ListeningGlass/.workflow/reports/REPORT-001.md"
+tags: [defects, result-template, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P0R3\["[^"]*в постоянном подразделе «Найденные дефекты» раздела «Результат выполнения»'
+      reason: "Место записи дефекта — постоянный подраздел, а не свободный текст Result."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P0R3\["[^"]*без расхождений — строка «нет»'
+      reason: "Подраздел есть всегда: пустой список пишется словом «нет»."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P0R3\["[^"]*Туда пишутся только расхождения[^"]*рекомендацией для следующего плана в «Заметках»'
+      reason: "Рекомендация следующей задачи не попадает в подраздел, по которому стадия разбора заводит пробелы."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: '^(?![\s\S]*«Рекомендации для следующего плана»)'
+      reason: "Ссылки на несуществующую секцию нет."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5S1\["[^"]*подсекции «Что сделано», «Изменённые файлы», «Найденные дефекты», «Заметки»'
+      reason: "Шаг записи результата называет подраздел дефектов."
+    - kind: skill_contains
+      file: "templates/result-template.md"
+      pattern: '\n### Найденные дефекты\r?\n- \{нет'
+      reason: "Блок шаблона Result содержит подраздел дефектов со строкой «нет»."
+    - kind: skill_contains
+      file: "templates/result-template.md"
+      pattern: '\| `### Найденные дефекты` \| \*\*Да\*\* \|'
+      reason: "Подраздел обязателен в правилах заполнения."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P6S2\["[^"]*подраздел «Найденные дефекты» есть'
+      reason: "GATE-2 не пропускает Result без подраздела дефектов."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'Создание тикета при обнаружении дефекта — дефект фиксируется в подразделе «Найденные дефекты»'
+      reason: "Антипаттерн согласован с P0R3."
+    - kind: skill_contains
+      file: "knowledge/ticket-structure.md"
+      pattern: '\| `### Найденные дефекты` \|'
+      reason: "Справочник полей тикета согласован с шаблоном."
+
+execution:
+  timeout_s: 60

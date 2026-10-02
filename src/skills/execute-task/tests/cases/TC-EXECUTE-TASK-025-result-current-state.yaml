@@ -1,0 +1,51 @@
+id: TC-EXECUTE-TASK-025
+title: "Опровергнутое утверждение Result о текущем состоянии исправляется на месте или помечается «устарело (итерация N)»; «Изменённые файлы» — только существующие"
+origin:
+  chg: ["ad-hoc-2026-10-01-result-current-state"]
+  incidents:
+    - "ListeningGlass IMPL-002 (2026-09-29/30, четыре итерации): в Result осталось «manifest.json не содержит content_scripts» при блоке content_scripts в манифесте, пометка «Две записи выше устарели» ссылалась на записи относительно, «Agent used» и время — первой итерации; итерация 2 переписала строку переименованного файла вопреки буквальному П5R1, иначе ревью провалило бы тикет по missing_files."
+  principle: "Записи о проверках и evidence прошлых итераций не удаляются, а утверждение о текущем состоянии, которое опровергла эта итерация, исправляется на месте или помечается в той же строке; «Изменённые файлы» перечисляют существующие файлы; «не переписывай» в правилах продолжения относится к работе (SKILL.md P5R1, P1R1; workflows/execute.md P6S3; algorithms/execution-strategy.md)."
+  backlog_sources:
+    - "D:/Dev/ListeningGlass/.workflow/tickets/done/IMPL-002.md"
+tags: [result, continuation, regression-guard]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5R1\["П5 ПРАВИЛО: НЕ удалять и не переписывать уже записанные результаты проверок, прогонов, вывод команд и evidence прошлых итераций'
+      reason: "Запрет удаления сохранён для записей о проверках."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5R1\["[^"]*Утверждение Result о текущем состоянии[^"]*опровергнутое этой итерацией, исправь на месте или пометь в той же строке «устарело \(итерация N\): актуальное»'
+      reason: "Опровергнутое утверждение не остаётся без пометки."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5R1\["[^"]*без ссылок вида «записи выше»'
+      reason: "Пометка указывает на свою строку, а не «выше»."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5R1\["[^"]*«Изменённые файлы» — только существующие файлы: переименованный — новым путём'
+      reason: "Устаревший путь не валит проверку артефактов."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P1R1\["[^"]*«Не переписывай» и «не трогай» — о сделанной работе и записях проверок'
+      reason: "Правила продолжения не мешают исправлять опровергнутое."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P6S3\["[^"]*опровергнутые утверждения исправлены или помечены по P5R1'
+      reason: "GATE-3 сверяет утверждения с финальным состоянием."
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: 'опровергнутые утверждения исправлены или помечены «устарело \(итерация N\)» \(узел P5R1\)'
+      reason: "Чеклист стратегии согласован с P5R1."
+
+execution:
+  timeout_s: 60

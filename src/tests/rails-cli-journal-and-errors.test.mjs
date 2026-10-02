@@ -172,6 +172,34 @@ test('report --journal <каталог>: глубже шести уровней 
   });
 });
 
+// Канарейка — проверка живости, а не отказ (journal.summarize: canaries). Анализ журналов
+// 2026-09-30: канарейка давала четверть–треть записей «отказов» и выводила P0S1/P0E1 в лидеры
+// отказов по узлу; число канареек в отчёте нигде не печаталось.
+test('report --journal: канарейка — отдельной строкой с числом и узлами, не в отказах и не в повторах', () => {
+  withProject({}, ({ base, root }) => {
+    const trial = join(base, 'trial', 'rails-trial-1.jsonl');
+    const legacy = (node) => ({ ...denial(node), reason: `Отклонено: Bash: echo RAILS_CANARY\nПочему: RAILS_CANARY: рельсы активны, узел ${node}\nДоступно: …` });
+    const canary = (node) => ({ type: 'canary', session: 'внешняя-сессия', skill: 'clifall', node, command: 'echo RAILS_CANARY' });
+    writeJournalFile(trial, [canary('P0S1'), canary('P0S1'), legacy('P0S1'), legacy('P0E1'), denial('P4S1')]);
+
+    const r = run(['report', '--journal', trial], { cwd: root, env: {} });
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /\nКанарейка \(проверка живости, не отказ\): 4 \(\{"P0S1":3,"P0E1":1\}\)\n/);
+    const byNode = r.stdout.slice(r.stdout.indexOf('Отказы по узлу:'), r.stdout.indexOf('Узлы с ≥3 повторами'));
+    assert.match(byNode, /P4S1: 1/);
+    assert.doesNotMatch(byNode, /P0S1|P0E1/, 'канарейка — не отказ по узлу');
+    const repeated = r.stdout.slice(r.stdout.indexOf('Узлы с ≥3 повторами'), r.stdout.indexOf('Срабатывания потолков циклов'));
+    assert.match(repeated, /\n {2}нет\n/, 'три канарейки P0S1 в одной сессии — не повтор');
+  });
+});
+
+test('report: журнал без канареек — строка канарейки с нулём', () => {
+  withProject({}, ({ root }) => {
+    const r = run(['report'], { cwd: root, env: {} });
+    assert.match(r.stdout, /\nКанарейка \(проверка живости, не отказ\): 0 \(\{\}\)\n/);
+  });
+});
+
 test('report --journal <несуществующий путь>: пустой отчёт, а не журнал проекта', () => {
   withProject({}, ({ base, root }) => {
     appendDenial(root, { session: 'сессия-проекта', skill: 'clifall', node: 'P4S1', reason: 'тест' });
@@ -290,6 +318,7 @@ test('status при битом графе: code 0, узел назван, лей
     assert.equal(r.code, 0, 'status — единственный способ узнать, где сессия; при битом графе он нужен особенно');
     assert.match(r.stdout, /Узел: P4S1 «» \(этап 4, тип S\)/);
     assert.match(r.stdout, /Скил: clifall/);
+    assert.match(r.stdout, /\nПереходы: граф скила не загружен \(см\. cli check --skill\)\n$/, 'перечня нет — это сказано, а не пропущено молча');
   });
 });
 

@@ -1,0 +1,123 @@
+id: TC-CREATE-REPORT-006
+title: "«Проблемы» отчёта — из данных тикетов (возвраты с ревью, записанные дефекты) по problem_tickets скрипта, а не из статусов; строки тикетов читаются постранично целиком; plan health без срока плана — n/a"
+origin:
+  chg: ["ad-hoc-2026-10-01"]
+  incidents:
+    - "ListeningGlass PLAN-001, 2026-09-30 (REPORT-001): узел P10S4 занял 10 с (13:57:42→13:57:52, .workflow/state/rails/ses_f0d67d3ecffeXWHgz88AkoGp78.json), из 26 тикетов прочитаны HUMAN-003 и FIX-001; отчёт: «Проблемы по тикетам со статусами blocked или in-progress не выявлены» при дефекте TikTok и сбое service worker в HUMAN-002 и возвратах IMPL-002 ×3, IMPL-010 ×3."
+    - "PulseProxy PLAN-020, 2026-09-29…30 (REPORT-030/031/032): «аномалий нет» при 23 строках ❌ у 12 из 36 тикетов — в algorithms/metric-calculation.md §4 не было критерия переделок, P10S6 ссылался на поле problems, которого в шаблоне тикета нет."
+    - "Оба проекта: calc-metrics.js подставлял горизонт 14 дней (LG expected 7,43% = 1,04/14, PP 12,81% = 1,79/14) — ни у одного плана нет end_date или duration_days; velocity от created_at черновика плана (PP 18,41 задачи/день при фактических около 55)."
+    - "Ревью черновика 2026-10-01: массив tickets одним блоком на PulseProxy PLAN-016 (57 тикетов) занимал около 35 500 символов, PLAN-017 (70 тикетов) — около 55 900 при окне вывода команды 30 000; гейт полноты сверялся бы с урезанным массивом, а дочитывание тикетов из файлов повторяло инцидент; «Дефектов не обнаружено.» (QA-004, QA-031) закрытый перечень принимал за дефект."
+  principle: "Отчёт — снимок фактов из данных тикетов: скрипт отдаёт компактный problem_tickets и строку на тикет (время по «Истории работы», возвраты «## Ревью», записанные дефекты, заметки) страницами в пределах окна вывода, «Проблемы» включают каждый тикет problem_tickets независимо от статуса, гейт полноты сверяет это до атрибуции; запись только об отсутствии дефектов — не проблема; горизонт plan health — только срок плана, без срока n/a (узлы P0R5, P10S4, P10S5, P10S6, P10G2, P10S7, P10S11; scripts/calc-metrics.js; algorithms/metric-calculation.md §1, §2, §4)."
+  backlog_sources:
+    - "D:/Dev/ListeningGlass/.workflow/reports/REPORT-001.md"
+    - "D:/Dev/PulseProxy/.workflow/reports/REPORT-030.md"
+tags: [problems, metrics, plan-health, completeness, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: 'P10S4\["П10 ШАГ: Данные по тикетам плана\. Известен ID плана — запусти node \.workflow/src/skills/create-report/scripts/calc-metrics\.js'
+      reason: "Скрипт запускается до разбора задач и даёт данные по тикетам."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: 'P10S4\["[^"]*problem_tickets — каждый тикет плана с возвратами с ревью \(review_failed\), записанным дефектом \(defects\) или попытками со статусом error \(error_attempts\)'
+      reason: "Узел называет компактный список тикетов с признаками проблемы — вход гейта полноты."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: 'P10S4\["[^"]*tickets_next_from не null — запусти ту же команду с --from <tickets_next_from> и повторяй, пока не прочитаешь все total_tickets строк'
+      reason: "Строки тикетов читаются постранично целиком, а не дочитываются из файлов (2 тикета из 26)."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: 'P10S4\["[^"]*строку массива tickets[^"]*first_run_at → completed_at[^"]*review_failed[^"]*defects'
+      reason: "Узел называет поля строки тикета: время, возвраты, записанные дефекты."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: 'P10S4\["[^"]*Проблемы задачи берутся из этих полей, а не из её статуса: тикет в done/ с возвратами или записанным дефектом — тоже проблема'
+      reason: "Проблемы не выводятся из статусов blocked/in-progress."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: 'P10S6\["(?![^"]*по задачам с problems)'
+      reason: "Ссылка на несуществующее поле problems удалена."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: 'P10S6\["[^"]*по каждому тикету problem_tickets — с review_failed больше 0 число возвратов и причины строк ❌, с defects записанный дефект цитатой с ID тикета, с error_attempts больше 0 тикет и число таких попыток'
+      reason: "Источники проблем названы явно и привязаны к problem_tickets."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: 'P10G2\{"П10 ГЕЙТ: Полнота «Проблем» — каждый тикет problem_tickets из вывода скрипта и каждый тикет, в notes которого записан дефект, блокер или расхождение с ожидаемым, назван в секции проблем отчёта'
+      reason: "Гейт проверяет полноту списка проблем по problem_tickets, а не только атрибуцию найденных."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: 'P10S6 --> P10G2[\s\S]*P10G2 -->\|"да"\| P10G1[\s\S]*P10G2 -->\|"нет"\| P10S6'
+      reason: "Гейт полноты стоит до гейта атрибуции, «нет» возвращает к выделению проблем."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: 'P10S5\["[^"]*plan_health\.health_status n/a значит, что у плана нет срока[^"]*горизонт не подставляй'
+      reason: "Без срока плана ожидаемое выполнение не выдумывается."
+    - kind: skill_contains
+      file: "workflows/standard.md"
+      pattern: 'P10S11\["[^"]*plan_health\.horizon_source\), при none — строка «plan health не рассчитан: у плана нет срока»'
+      reason: "Отчёт называет горизонт и его источник (P0R3 — воспроизводимость)."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P0R5\["[^"]*У дефекта, записанного тикетом, причина — цитата дефекта из тикета, а стейдж, завершивший тикет с этой записью, — по логу'
+      reason: "Исключение из «атрибуция только по логу» вписано в само правило (коуч P3S3)."
+    - kind: skill_contains
+      file: "scripts/calc-metrics.js"
+      pattern: '^(?![\s\S]*let totalDays = 14)'
+      reason: "Горизонт 14 дней по умолчанию удалён."
+    - kind: skill_contains
+      file: "scripts/calc-metrics.js"
+      pattern: 'health_status: ''n/a'', horizon_source: ''none'''
+      reason: "Без срока плана — n/a с источником горизонта none."
+    - kind: skill_contains
+      file: "scripts/calc-metrics.js"
+      pattern: 'problem_tickets: buildProblemTickets\(ticketRows\)'
+      reason: "Первый вызов выдаёт список тикетов с признаками проблемы целиком."
+    - kind: skill_contains
+      file: "scripts/calc-metrics.js"
+      pattern: 'tickets_next_from: next, tickets: page'
+      reason: "Строки тикетов выдаются страницами в пределах бюджета вывода с номером следующей строки."
+    - kind: skill_contains
+      file: "scripts/calc-metrics.js"
+      pattern: 'review_failed: failed\.length[\s\S]{0,200}defects: defects\.text'
+      reason: "Строка тикета несёт возвраты с ревью и записанные дефекты."
+    - kind: skill_contains
+      file: "scripts/calc-metrics.js"
+      pattern: 'text: isAbsenceRecord\(text\) \? null'
+      reason: "Запись только об отсутствии дефектов отсеивается критерием, а не перечнем."
+    - kind: skill_contains
+      file: "scripts/calc-metrics.js"
+      pattern: '^(?![\s\S]*const NO_DEFECTS)'
+      reason: "Закрытый перечень «нет»-фраз не возвращается (коуч P3R3)."
+    - kind: skill_contains
+      file: "scripts/calc-metrics.js"
+      pattern: 'type: ''review_rework'''
+      reason: "Аномалия доли возвратов с ревью реализована в скрипте."
+    - kind: skill_contains
+      file: "scripts/calc-metrics.js"
+      pattern: 'source: ''first_run'''
+      reason: "Начало velocity — первая запись «Истории работы», а не черновик плана."
+    - kind: skill_contains
+      file: "algorithms/metric-calculation.md"
+      pattern: '\| Review rework \| тикетов плана хотя бы с одной строкой ❌ в «## Ревью» ≥ 25% от всех тикетов плана \| MEDIUM \|'
+      reason: "Критерий переделок — в разделе 4 алгоритма."
+    - kind: skill_contains
+      file: "algorithms/metric-calculation.md"
+      pattern: '`total_planned_days` — срок плана[\s\S]{0,200}Срока нет — `expected` и `delta` не считаются, статус `n/a`, горизонт по умолчанию не подставляется'
+      reason: "Алгоритм plan health не подставляет горизонт."
+    - kind: skill_contains
+      file: "algorithms/metric-calculation.md"
+      pattern: '`days_elapsed` — от начала работы по плану[\s\S]{0,200}самая ранняя запись «## История работы» среди тикетов плана'
+      reason: "Алгоритм velocity называет начало периода."
+
+execution:
+  timeout_s: 60

@@ -11,7 +11,8 @@
  * работ) должны использовать один и тот же словарь `type` при записи через
  * `appendEvent`, иначе `summarize()` не сможет их сгруппировать. Здесь
  * зафиксирован минимальный набор: `"denial"` (пишет `appendDenial`),
- * `"reset"`, `"error"`, `"stop_block"`, `"cycle_limit"`, `"action_limit"`.
+ * `"reset"`, `"error"`, `"stop_block"`, `"cycle_limit"`, `"action_limit"`,
+ * `"canary"` (срабатывание канарейки живости — не отказ, с 2026-10-01).
  */
 
 import fs from 'node:fs';
@@ -117,14 +118,29 @@ export function readJournalFile(file, { days, skill } = {}) {
   return out;
 }
 
+// Канарейка, записанная до 2026-10-01 отказом: `type: "denial"` с причиной «RAILS_CANARY:
+// рельсы активны». Сверка по строке «Почему:» причины, а не по тексту команды: команда с
+// этими словами, отклонённая другим правилом, канарейкой не считается.
+const LEGACY_CANARY_RE = /(?:^|\n)Почему: RAILS_CANARY: рельсы активны/;
+
+function isCanary(e) {
+  return e.type === 'canary' || (e.type === 'denial' && LEGACY_CANARY_RE.test(String(e.reason ?? '')));
+}
+
 /**
  * Сводка по записям журнала для отчёта (§10: `rails report`).
+ *
+ * Канарейка живости (событие `canary` и старые записи-отказы с причиной «RAILS_CANARY:
+ * рельсы активны») — не отказ: она считается в `canaries` и не попадает в `denialsByNode`
+ * и `repeatedNodes`. Анализ журналов 2026-09-30: канарейка давала четверть–треть записей
+ * «отказов» и выводила P0S1/P0E1 в лидеры, а проверка B1 коуча читала это как дефект узла.
  *
  * @param {object[]} entries результат `readJournal`
  * @returns {{
  *   total: number,
  *   denialsByNode: Record<string, number>,
  *   repeatedNodes: Array<{node: string, session: string, count: number}>,
+ *   canaries: {total: number, byNode: Record<string, number>},
  *   cycleLimitHits: Record<string, number>,
  *   actionLimitHits: Record<string, number>,
  *   resets: number,
@@ -144,6 +160,8 @@ export function summarize(entries) {
   const cycleLimitHits = {};
   const actionLimitHits = {};
   const stopBlocksByNode = {};
+  const canariesByNode = {};
+  let canariesTotal = 0;
   let resets = 0;
   let errors = 0;
   let stopBlocksTotal = 0;
@@ -157,6 +175,11 @@ export function summarize(entries) {
     // записей, которые дальше фактически не обработаны).
     if (!e || typeof e !== 'object') continue;
     total++;
+    if (isCanary(e)) {
+      canariesTotal++;
+      if (e.node) canariesByNode[e.node] = (canariesByNode[e.node] || 0) + 1;
+      continue;
+    }
     switch (e.type) {
       case 'denial': {
         if (e.node) {
@@ -201,6 +224,7 @@ export function summarize(entries) {
     total,
     denialsByNode,
     repeatedNodes,
+    canaries: { total: canariesTotal, byNode: canariesByNode },
     cycleLimitHits,
     actionLimitHits,
     resets,

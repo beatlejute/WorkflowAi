@@ -1,0 +1,84 @@
+id: TC-EXECUTE-TASK-030
+title: "Этапы 4 и 6 только проверяют: пробел — ответ «нет» и исправление на этапе 3, отметка пунктов — правило этапа 3, неотмеченное по исключению с исходом blocked — не пробел"
+origin:
+  chg: ["ad-hoc-2026-10-01-check-stages-read-only"]
+  incidents:
+    - "PulseProxy и ListeningGlass (2026-09-29/30): 12 отказов H4 edit_ticket на этапах 4 и 6 в 10 сессиях — P4S1 и P4R3 велели отмечать пункт на этапе 4, где гард правку отклоняет. После отказа в шести сессиях гейт получил «да»: IMPL-116 отложил правку на этап 5, IMPL-113, IMPL-114, IMPL-115, DOCS-002 бросили начатое исправление на этапе 6; возврат 6→3 прошли только IMPL-002, IMPL-005, IMPL-120."
+    - "Ревью правки 2026-10-01: пункт, который правило велит оставить неотмеченным с исходом blocked (visual без снимка, красный check, недоказуемый prose), гейты P4Q1, P6S2 и P6G1 считали пробелом — тикет крутился бы до потолка cycles или гейт получал «да» вопреки лейблу."
+  principle: "Гард H4 и тест h4-stage-actions закрепляют «на этапах 4 и 6 проверяют, а не пишут»: узлы этих этапов не велят править тикет, пробел — ответ «нет» с возвратом на этап 3, пометка невыполнимого пункта — правило этапа 3 P3R2, а пункт, неотмеченный по исключению P3R2 с причиной в Result и исходом blocked, гейты пробелом не считают (SKILL.md P4E1, P4R2, P4R3, P4R4, P4S1, P4Q1; workflows/execute.md P3R2, P6E1, P6S2, P6G1)."
+  backlog_sources:
+    - "D:/Dev/PulseProxy/.workflow/logs/pipeline_2026-09-29_18-55-50.log"
+tags: [rails, stage-actions, dod-fill, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4E1\["[^"]*Этап 4 только проверяет — правку тикета и проекта здесь рельсы отклоняют'
+      reason: "Вход этапа 4 согласован с гардом H4."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4S1\["П4 ШАГ: Пройди по каждому критерию DoD и сверь его с файлом тикета, ничего не правя'
+      reason: "Шаг этапа 4 — проверка без правки."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: '^(?![\s\S]*P4S1\["[^"]*отметь его выполненным)'
+      reason: "Шаг этапа 4 не велит отмечать пункт."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: '^(?![\s\S]*P4R3\["[^"]*отметь пункт выполненным)'
+      reason: "Правило тикетов тестирования не велит отмечать пункт на этапе 4."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4R4\["[^"]*чини свою работу[^"]*на этапе 3, ответ «нет» на P4Q1'
+      reason: "Починка по красной проверке — на этапе 3."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4R2\["[^"]*доводи до зелёного на этапе 3 \(ответ «нет» на P4Q1\)'
+      reason: "Доведение до зелёного — на этапе 3."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4Q1\{"[^"]*Пункт, неотмеченный по исключениям P3R2, с причиной в Result и исходом status: blocked — закрыт'
+      reason: "Выбор этапа 4 не гоняет по кругу тикет, который правило ведёт в blocked."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4Q1\{"[^"]*Пробел в файле — ответ «нет»: исправление на этапе 3'
+      reason: "Выбор этапа 4 называет путь к исправлению."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R2\["[^"]*Отметка и пометка пунктов — только на этом этапе: на этапах 4 и 6 правку тикета рельсы отклоняют'
+      reason: "Отметка пунктов — правило этапа 3."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R2\["[^"]*Невыполнимый пункт DoD отметь выполненным с причиной в самой строке в форме «не применимо: причина»'
+      reason: "Модель невыполнимого пункта сохранена и переехала на этап 3."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P6E1\["[^"]*Этап 6 только читает[^"]*ответ «нет» на P6G1, возврат в P3E1'
+      reason: "Вход этапа 6 называет ребро возврата."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: '^(?![\s\S]*вернись к этапу выполнения и исправь)'
+      reason: "Расплывчатый маршрут не возвращается."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P6S2\["[^"]*кроме неотмеченных по исключениям P3R2 с причиной в Result и исходом status: blocked — это не пробел'
+      reason: "GATE-2 не требует отметить пункт, который правило оставляет неотмеченным."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P6G1\{"[^"]*исходом status: blocked — не пробел'
+      reason: "Гейт этапа 6 согласован с исходом blocked."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P6G1\{"[^"]*«да» при нём — ложный ответ гейта'
+      reason: "Гейт не закрывается «да» при брошенном исправлении."
+
+execution:
+  timeout_s: 60

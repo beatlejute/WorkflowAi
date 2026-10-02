@@ -1,0 +1,36 @@
+id: TC-DECOMPOSE-PLAN-017
+title: "DoD HUMAN-тикета — критерии плана с записями проверки, без обязательного пункта «Результаты внесены в файл тикета»"
+origin:
+  chg: ["ad-hoc-2026-10-01-analysis"]
+  incidents:
+    - "ListeningGlass PLAN-001 (2026-09-29): HUMAN-001/002/003 получили DoD дословно из плана, пункта «Результаты внесены непосредственно в файл тикета» из таблицы обязательных полей knowledge/human-task-rules.md у них нет. Строка живёт с c0e9aee (март 2026) и не пересмотрена при переходе на dod_format: 2: узлы переноса DoD (P10S18, P10S19) такой пункт не предусматривают, заполнение секции результата гейтит verify-artifacts (result_filled), а пункт без записи проверки перевёл бы тикет из all_green в платное ревью моделью. Потерь 0, риск скрытый."
+  principle: "У HUMAN-тикета DoD — критерии задачи плана с их записями, как у любого тикета; заполнение секции результата проверяет пайплайн, отдельного пункта DoD о нём нет (knowledge/human-task-rules.md, таблица «Обязательные поля HUMAN-тикета»)."
+  backlog_sources:
+    - "D:/Dev/ListeningGlass/.workflow/tickets/done/HUMAN-001.md"
+tags: [human-ticket, dod-transfer, regression-guard]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила. Негативный anchor выражен
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "knowledge/human-task-rules.md"
+      pattern: '^(?![\s\S]*Результаты внесены непосредственно в файл тикета)'
+      reason: "Требование пункта, дублирующего гейт заполненного результата, не вернулось."
+    - kind: skill_contains
+      file: "knowledge/human-task-rules.md"
+      pattern: '\| DoD \| Критерии задачи плана с их записями проверки[^\n]*отдельного пункта DoD об этом нет'
+      reason: "Правило DoD HUMAN-тикета совпадает с узлами переноса DoD и не добавляет текста вне плана."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: '\| `knowledge/human-task-rules\.md` \| узел P10S6 — определение executor_type \|'
+      reason: "Триггер справочника — узел определения исполнителя, который на него ссылается."
+
+execution:
+  timeout_s: 60

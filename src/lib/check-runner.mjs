@@ -545,6 +545,86 @@ export function parseCheckRecord(text) {
   return describeForm(line ? [line] : []);
 }
 
+// Опции git grep со значением отдельным словом (`git grep -h`, git 2.52): короткие — если
+// буква последняя в связке, длинные — без `=`.
+const GREP_VALUE_SHORT = new Set(['A', 'B', 'C', 'e', 'f', 'm']);
+const GREP_VALUE_LONG = new Set(['--after-context', '--before-context', '--context', '--max-count', '--max-depth', '--threads']);
+
+/**
+ * Пути поиска `git grep`, для которых git читает .gitignore: без --untracked
+ * --no-exclude-standard файл из .gitignore поиск не видит (проверено запуском на git 2.52:
+ * `git grep --untracked` — exit 1, с `--no-exclude-standard` — exit 0; `--no-exclude-standard`
+ * без `--untracked` — fatal). `--no-index` .gitignore не читает, если нет `--exclude-standard`.
+ *
+ * Пути — слова после `--`; без `--` — слова после шаблона (ревизию среди них check-ignore
+ * проверит как путь). Слова между шаблоном и `--` — ревизии: поиск по дереву коммита,
+ * .gitignore к нему не относится — пустой список.
+ *
+ * @param {string[]} args - аргументы после `git grep`
+ * @returns {string[]}
+ */
+function gitGrepPathspecs(args) {
+  const positional = [];
+  let pathspecs = null;
+  let patternOption = false;
+  let noIndex = false;
+  let excludeStandard = null;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--') {
+      pathspecs = args.slice(i + 1);
+      break;
+    }
+    if (arg === '(' || arg === ')') continue;
+    if (arg.startsWith('--')) {
+      const name = arg.split('=')[0];
+      if (name === '--no-index') noIndex = true;
+      else if (name === '--index') noIndex = false;
+      else if (name === '--exclude-standard') excludeStandard = true;
+      else if (name === '--no-exclude-standard') excludeStandard = false;
+      else if (GREP_VALUE_LONG.has(name) && !arg.includes('=')) i++;
+      continue;
+    }
+    if (arg.startsWith('-') && arg.length > 1) {
+      for (let j = 1; j < arg.length; j++) {
+        if (!GREP_VALUE_SHORT.has(arg[j])) continue;
+        if (arg[j] === 'e' || arg[j] === 'f') patternOption = true;
+        if (j === arg.length - 1) i++;
+        break;
+      }
+      continue;
+    }
+    positional.push(arg);
+  }
+  if (!(excludeStandard ?? !noIndex)) return [];
+  const afterPattern = patternOption ? positional : positional.slice(1);
+  if (pathspecs === null) return afterPattern;
+  return afterPattern.length > 0 ? [] : pathspecs;
+}
+
+/**
+ * Пути поиска записи `git grep`, которые под .gitignore (`git check-ignore -q` — exit 0).
+ * Отслеживаемый файл check-ignore не называет: его git grep видит. Путь с магией
+ * (`:(glob)…`) check-ignore не принимает — он пропускается. Репозитория или git нет —
+ * пустой список.
+ *
+ * @param {string[]} argv - команда записи check
+ * @param {string} projectRoot - корень проекта, рабочий каталог записи
+ * @returns {string[]}
+ */
+function gitGrepIgnoredPaths(argv, projectRoot) {
+  if (argv[0] !== 'git' || argv[1] !== 'grep') return [];
+  return gitGrepPathspecs(argv.slice(2)).filter((pathspec) => {
+    if (!pathspec || pathspec.startsWith(':')) return false;
+    try {
+      execFileSync('git', ['check-ignore', '-q', '--', pathspec], { cwd: projectRoot, stdio: 'ignore', windowsHide: true, timeout: 10_000 });
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 /**
  * Проверки DoD тикета, которые не дают начать работу, — гейт dod_format: 2 перед ready/.
  *
@@ -565,10 +645,19 @@ export function parseCheckRecord(text) {
  * прогонах, тикету добавили зависимости, check-conditions вернул его в backlog/, и при
  * повторном входе гейт отправил его в blocked/ за шесть зелёных проверок.
  *
- * @param {{body: string, projectRoot: string}} args - тело тикета и корень проекта
+ * Предупреждения — в массив `warnings`, если вызывающий его передал; тикет они не
+ * блокируют и в список причин не входят. Сейчас это путь поиска `git grep` под .gitignore
+ * (gitGrepIgnoredPaths): такой поиск файла не видит, и запись не закроется, пока путь под
+ * .gitignore. ListeningGlass 2026-09-30: после добавления research/, spikes/, prototype/ и
+ * qa/ в .gitignore записи `git grep -q --untracked` по этим каталогам дают exit 1. Узел
+ * P10S7 create-plan велит проверять путь `git check-ignore -q` при записи, но .gitignore
+ * меняют и после — тогда защита только здесь.
+ *
+ * @param {{body: string, projectRoot: string, warnings?: string[]}} args - тело тикета,
+ *   корень проекта и, по желанию, массив для предупреждений
  * @returns {Promise<string[]>} причины блокировки; пустой список — тикет можно брать в работу
  */
-export async function dodStartProblems({ body, projectRoot }) {
+export async function dodStartProblems({ body, projectRoot, warnings = null }) {
   const problems = [];
   const executedBefore = hasExecuteTaskRun(body);
   for (const item of parseDodChecks(body)) {
@@ -585,6 +674,13 @@ export async function dodStartProblems({ body, projectRoot }) {
     if (startProblem?.status === 'tool_missing') {
       problems.push(`check_tool_missing: пункт ${item.index} (${startProblem.tool})`);
       continue;
+    }
+    // Регрессионной и уже выполнявшейся записи — тоже: такой поиск не закроется никогда.
+    if (warnings) {
+      const ignored = gitGrepIgnoredPaths(splitCommand(String(item.command).trim()).argv, projectRoot);
+      if (ignored.length > 0) {
+        warnings.push(`check_path_ignored: пункт ${item.index} (${ignored.join(', ')} — под .gitignore, git grep без --untracked --no-exclude-standard этот путь не читает)`);
+      }
     }
     if (item.regression || executedBefore) continue;
     const result = await runCheck({ check: item.command, expect: item.expect, projectRoot });

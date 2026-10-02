@@ -28,7 +28,7 @@ test('H4: Edit своего тикета на этапах 3 и 5 — молча
 
 test('H4: Edit своего тикета на этапах 4, 6 и 7 — отказ: там проверяют, а не пишут', () => {
   withProject(({ root }) => {
-    for (const node of ['P4S1', 'P6S2', 'P7S1']) {
+    for (const node of ['P4S1', 'P6S2', 'P7S2']) {
       const s = atNode(root, node);
       const r = decide({ action: claude('Edit', { file_path: ticket(root, 'in-progress') }), ctx: ctx(root, s) });
       assert.equal(r.decision, 'deny', node);
@@ -65,7 +65,7 @@ test('H4 edit_project: Edit файла проекта на этапах 3 и 5 �
 
 test('H4 edit_project: Edit файла проекта на этапах 4, 6 и 7 — отказ: там проверяют, а не пишут', () => {
   withProject(({ root }) => {
-    for (const node of ['P4S1', 'P6S2', 'P7S1']) {
+    for (const node of ['P4S1', 'P6S2', 'P7S2']) {
       const s = atNode(root, node);
       const r = decide({ action: claude('Edit', { file_path: projectFile(root) }), ctx: ctx(root, s) });
       assert.equal(r.decision, 'deny', node);

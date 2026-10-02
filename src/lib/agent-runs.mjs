@@ -24,7 +24,8 @@
  * (gradeRuns). Неудача модели — `empty` и `artifacts_failed`; успех — пройденный
  * контроль артефактов (`artifacts_passed: true`), даже если потом не пройдено ревью.
  * `stopped` и `throttled` (агент упал на ограничении провайдера, статус `rate_limit`)
- * модели не засчитываются: ни неудачи, ни успеха, ни временного запрета.
+ * модели не засчитываются: ни неудачи, ни успеха, ни временного запрета за сбой, ни
+ * серии «модель недоступна».
  *
  * Запреты:
  *   - постоянный, модель + тип тикета, с последнего снятия (`unban` с этим типом):
@@ -32,7 +33,16 @@
  *     запусков и среди последних 10 успехов < 3 (permanentBans);
  *   - временный, модель целиком: последний запуск модели, кроме `stopped` и
  *     `throttled`, после последнего снятия (`unban` без типа) — сбой, и его TTL ещё
- *     не истёк (crashBans).
+ *     не истёк (crashBans);
+ *   - временный «модель недоступна», модель целиком: последние запуски модели после
+ *     последнего снятия (`unban` без типа) — не меньше 3 сбоев процесса `error` и
+ *     `timeout` подряд без пройденного после них контроля артефактов; `stopped`,
+ *     `throttled` и сбои `network_error`, `auth_error`, `aborted` без пройденного
+ *     контроля серию не продолжают и не прерывают, любой другой запуск — в том числе
+ *     пройденный контроль после любого сбоя — её обнуляет (UNAVAILABLE_STATUSES);
+ *     TTL — час на первой серии и вдвое больше на каждой следующей, не больше суток
+ *     (unavailableBans). Оба временных запрета — в списке `crash` (activeBans), второй —
+ *     с `rule: 'unavailable'`.
  * Запуски с `model: null` (модель kilo не прочитана) ни в одно правило не идут.
  *
  * Запись открытого запуска `.workflow/state/agent-run-open.json` — файл состояния
@@ -62,6 +72,24 @@ export const RULE1_MIN_FAILURES = 3;
 export const RULE2_WINDOW = 10;
 export const RULE2_MIN_SUCCESS = 3;
 export const CRASH_TTL_DEFAULT_MS = 60 * 60 * 1000;
+// Запрет «модель недоступна» (unavailableBans) — 2026-10-01, разбор прогонов PulseProxy
+// PLAN-020 и ListeningGlass PLAN-001 29–30.09: модели без единого успеха снова и снова
+// шли в пул — в журнале PulseProxy у nemotron-3-super 5 сбоев подряд. Временный запрет
+// за сбой смотрит только на последний запуск, его TTL — TTL сработавшего правила health,
+// без правила — час (CRASH_TTL_DEFAULT_MS), и сбои между собой не складывались. Серия —
+// только сбои процесса `error` и `timeout` (UNAVAILABLE_STATUSES; PLAN-004 «rate_limit
+// запрета модели не даёт»). Модель, которая упирается в ограничение провайдера, правило
+// не покрывает: у gemini-3.5-flash-lite там же 11 запусков `rate_limit` подряд, и запрета
+// нет. Такую модель выводят из выбора только health-реестр (общее правило
+// `provider-rate-limit`, 15 мин) и шлагбаум места-пула `models.gate`, если он настроен.
+export const UNAVAILABLE_MIN_FAILURES = 3;
+export const UNAVAILABLE_TTL_BASE_MS = 60 * 60 * 1000;
+export const UNAVAILABLE_TTL_MAX_MS = 24 * 60 * 60 * 1000;
+// Доказательства запрета «модель недоступна» — последние запуски серии, не вся серия:
+// у модели, которая не отвечает сутками, серия — десятки запусков, а запрет
+// get_model_stats повторяет в каждой строке модели (по строке на тип тикета). Полная
+// длина серии — в `failures` (ревью 2026-10-01).
+export const UNAVAILABLE_EVIDENCE_MAX = 10;
 // Наибольшее время, которое представимо в Date (ECMAScript: ±8.64e15 мс).
 const MAX_DATE_MS = 8.64e15;
 
@@ -73,11 +101,32 @@ const MAX_DATE_MS = 8.64e15;
 const CRASH_STATUSES = new Set(['error', 'timeout', 'network_error', 'auth_error', 'aborted']);
 
 /**
+ * Сбои процесса, которые идут в серию «модель недоступна» (unavailableBans): `error`
+ * (агент вышел с ошибкой, в том числе снят раннером досрочно по правилу health) и
+ * `timeout` (не уложился в лимит стадии — и тогда, когда модель отвечала и правила
+ * файлы). Остальные сбои процесса — `network_error`, `auth_error` и `aborted` без
+ * остановки (агента сняли сигналом извне) — серию не продолжают и не прерывают;
+ * временный запрет за сбой (crashBans) они по-прежнему дают.
+ *
+ * Замысел — не запрещать модели за сбой сети, прокси или ключа, но эти классы неточны:
+ * classifyAgentResult (src/lib/agent-history.mjs) ставит `network_error` и `auth_error`
+ * по совпадению во всём stderr, а у kilo там телеметрия («PostHogFetchNetworkError»),
+ * синхронизация сессии («error=network … share sync failed») и вывод тестов проекта.
+ * В PulseProxy 29–30.09 все 3 запуска исполнителя с `network_error` — досрочные снятия
+ * kilo по перегрузке провайдера (правило health `kilo-provider-overloaded`), как и
+ * 5 запусков с `error` (у одного `model: null`): одна причина в серию то идёт, то нет.
+ * Точный признак — правило досрочного снятия в событии `run` или сетевые признаки
+ * только в конце stderr — вне этого модуля.
+ */
+const UNAVAILABLE_STATUSES = new Set(['error', 'timeout']);
+
+/**
  * Статус запуска, упавшего на ограничении провайдера (HTTP 429, rate limit, quota
  * exceeded в конце stderr — класс classifyAgentResult, PROVIDER_RATE_LIMIT_PATTERN;
  * 429 из середины, после которых агент продолжил работу, не в счёт). Это не дефект
- * модели: градация `throttled`, без временного запрета и вне правил 1 и 2. Случай
- * 2026-09-27, PulseProxy: kilo-роутер
+ * модели: градация `throttled`, без временного запрета за сбой, вне правил 1 и 2 и вне
+ * серии «модель недоступна» (unavailableBans: не продолжает и не прерывает её; PLAN-004
+ * «rate_limit запрета модели не даёт»). Случай 2026-09-27, PulseProxy: kilo-роутер
  * 15 минут работал на модели, провайдер которой отвечал «Rate limit exceeded»; запуск
  * записан сбоем, и часовой временный запрет модели снимал второй роутер всякий раз,
  * когда тот выбирал ту же модель. Агента на это время выводит из выбора health-реестр:
@@ -91,7 +140,8 @@ export const GRADES = Object.freeze([
 ]);
 
 // Градации, которые модели не засчитываются: ни в правила 1 и 2, ни во временный запрет
-// (и не закрывают его — последним запуском модели не считаются).
+// за сбой, ни в серию «модель недоступна» (и не закрывают их — последним запуском модели
+// не считаются, серию не прерывают).
 const UNCOUNTED_GRADES = new Set(['stopped', 'throttled']);
 const FAILURE_GRADES = new Set(['empty', 'artifacts_failed']);
 const ARTIFACTS_PASSED = new Set(['all_green', 'passed', 'legacy']);
@@ -435,20 +485,112 @@ export function crashBans(events, now = Date.now()) {
   return bans;
 }
 
-/** Действующие запреты: постоянные и временные. */
+// Место запуска в серии «модель недоступна»:
+//   - 'skip' — серию не продолжает и не прерывает: `stopped`, `throttled`
+//     (UNCOUNTED_GRADES) и сбой процесса вне UNAVAILABLE_STATUSES без пройденного после
+//     него контроля артефактов;
+//   - 'reset' — модель ответила: не сбой или пройденный контроль после любого сбоя;
+//   - 'fail' — признак недоступности: сбой из UNAVAILABLE_STATUSES без пройденного
+//     контроля (`crashed`, `crashed_after_work`).
+function unavailableRole(run) {
+  if (UNCOUNTED_GRADES.has(run.grade)) return 'skip';
+  if (!run.crash || run.artifacts_passed === true) return 'reset';
+  return UNAVAILABLE_STATUSES.has(run.status) ? 'fail' : 'skip';
+}
+
+/**
+ * TTL запрета «модель недоступна» серии с номером `series` (1 — первая):
+ * UNAVAILABLE_TTL_BASE_MS, вдвое больше на каждой следующей, не больше
+ * UNAVAILABLE_TTL_MAX_MS.
+ */
+export function unavailableTtlMs(series) {
+  return Math.min(UNAVAILABLE_TTL_BASE_MS * 2 ** Math.max(0, series - 1), UNAVAILABLE_TTL_MAX_MS);
+}
+
+/**
+ * Временные запреты «модель недоступна» — по серии неудачных запусков подряд, на модель
+ * целиком (тип тикета не учитывается).
+ *
+ * Серия — хвост запусков исполнителя модели после последнего `unban` этой модели без
+ * типа тикета, в котором каждый запуск — сбой процесса `error` или `timeout` без
+ * пройденного после него контроля артефактов (unavailableRole). Пропускаются — серию не
+ * продолжают и не прерывают — `stopped` (остановка пайплайна, `model_banned`),
+ * `throttled` (ограничение провайдера) и сбои `network_error`, `auth_error`, `aborted`
+ * без пройденного контроля (UNAVAILABLE_STATUSES: почему они вне серии и чем неточен их
+ * класс). Любой другой запуск серию обнуляет: модель ответила — значит, доступна.
+ * `reset` обнуляет серию тем, что его запуски выпадают из градаций (gradeRuns).
+ *
+ * Запрет — при серии из не меньше UNAVAILABLE_MIN_FAILURES запусков: первые
+ * UNAVAILABLE_MIN_FAILURES — серия 1, каждый следующий неудачный запуск без успеха —
+ * следующая серия, TTL которой вдвое больше (unavailableTtlMs). Отсчёт — от `ts`
+ * последнего запуска серии. Так модель, которая после конца запрета снова не ответила,
+ * уходит из выбора сразу, а не через ещё UNAVAILABLE_MIN_FAILURES запусков.
+ *
+ * @returns {Array<{model, rule: 'unavailable', until: string, crash_ttl_ms: number,
+ *   failures: number, series: number, evidence}>} `failures` — длина серии, `evidence` —
+ *   её последние UNAVAILABLE_EVIDENCE_MAX запусков в порядке журнала.
+ */
+export function unavailableBans(events, now = Date.now()) {
+  const streaks = new Map();
+  for (const { run, index } of gradeIndexed(events)) {
+    if (!run.model) continue;
+    const role = unavailableRole(run);
+    if (role === 'skip') continue;
+    if (role === 'reset') {
+      streaks.set(run.model, []);
+      continue;
+    }
+    if (!streaks.has(run.model)) streaks.set(run.model, []);
+    streaks.get(run.model).push({ run, index });
+  }
+  const bans = [];
+  for (const [model, tail] of streaks) {
+    if (tail.length < UNAVAILABLE_MIN_FAILURES) continue;
+    const unbanAt = lastUnbanIndex(events, (e) => e.model === model && !e.ticket_type);
+    const streak = tail.filter(({ index }) => index > unbanAt);
+    if (streak.length < UNAVAILABLE_MIN_FAILURES) continue;
+    const series = streak.length - UNAVAILABLE_MIN_FAILURES + 1;
+    const ttl = unavailableTtlMs(series);
+    const last = streak[streak.length - 1].run;
+    const until = Date.parse(last.ts) + ttl;
+    if (!(until > now)) continue;
+    bans.push({
+      model,
+      rule: 'unavailable',
+      until: new Date(until).toISOString(),
+      crash_ttl_ms: ttl,
+      failures: streak.length,
+      series,
+      evidence: streak.slice(-UNAVAILABLE_EVIDENCE_MAX).map(({ run }) => evidenceOf(run)),
+    });
+  }
+  return bans;
+}
+
+/**
+ * Действующие запреты: постоянные и временные. Временные (`crash`) — за сбой последнего
+ * запуска (crashBans) и «модель недоступна» (unavailableBans, `rule: 'unavailable'`):
+ * у модели их может быть два. Один список — чтобы снятие без типа тикета (recordUnban,
+ * unban_model workflow-mcp), выдача get_model_stats и проверка истечения в раннере
+ * (`kind: 'crash'`, `until`) работали с обоими одинаково.
+ */
 export function activeBans(events, now = Date.now()) {
-  return { permanent: permanentBans(events), crash: crashBans(events, now) };
+  return { permanent: permanentBans(events), crash: [...crashBans(events, now), ...unavailableBans(events, now)] };
 }
 
 /**
  * Запрет модели для типа тикета или null. Постоянный — по паре, временный — на модель
- * целиком.
+ * целиком; из двух временных — с более поздним концом: раннер сверяет `until` с часами
+ * во время запуска, и истёкший ранний запрет не должен снимать действующий поздний.
  */
 export function findBan(bans, model, ticketType) {
   if (!bans || !model) return null;
   const permanent = bans.permanent.find((b) => b.model === model && (b.ticket_type ?? null) === (ticketType ?? null));
   if (permanent) return { kind: 'permanent', ...permanent };
-  const crash = bans.crash.find((b) => b.model === model);
+  let crash = null;
+  for (const b of bans.crash) {
+    if (b.model === model && (!crash || Date.parse(b.until) > Date.parse(crash.until))) crash = b;
+  }
   if (crash) return { kind: 'crash', ...crash };
   return null;
 }
@@ -456,6 +598,9 @@ export function findBan(bans, model, ticketType) {
 /** Причина запрета одной строкой — для лога. */
 export function describeBan(ban) {
   if (!ban) return '';
+  if (ban.kind === 'crash' && ban.rule === 'unavailable') {
+    return `temporary ban until ${ban.until} (unavailable: ${ban.failures} failed runs in a row, series ${ban.series}, last at ${ban.evidence[ban.evidence.length - 1]?.ts})`;
+  }
   if (ban.kind === 'crash') return `temporary ban until ${ban.until} (crash at ${ban.evidence[0]?.ts})`;
   return ban.rule === 1
     ? `permanent ban for type "${ban.ticket_type}" by rule 1 (${ban.failures} failures, 0 successes since last unban)`
@@ -511,8 +656,9 @@ export function statsTable(events, now = Date.now()) {
     if (row.model) {
       const permanent = bans.permanent.find((b) => b.model === row.model && (b.ticket_type ?? null) === row.ticket_type);
       if (permanent) rowBans.push({ kind: 'permanent', ...permanent });
-      const crash = bans.crash.find((b) => b.model === row.model);
-      if (crash) rowBans.push({ kind: 'crash', ...crash });
+      for (const crash of bans.crash) {
+        if (crash.model === row.model) rowBans.push({ kind: 'crash', ...crash });
+      }
     }
     return {
       model: row.model,
@@ -528,8 +674,8 @@ export function statsTable(events, now = Date.now()) {
 
 /**
  * Снятие запрета человеком: дописывает `unban`. С `ticket_type` — снятие постоянного
- * запрета пары, без него — временного запрета модели. Запрета нет — отказ, строка не
- * пишется.
+ * запрета пары, без него — временных запретов модели (за сбой и «модель недоступна»:
+ * серия считается заново с этого `unban`). Запрета нет — отказ, строка не пишется.
  * @returns {{ok: true, event: object} | {ok: false, code: string, error: string}}
  */
 export function recordUnban(projectRoot, { model, ticket_type = null, reason } = {}, now = Date.now()) {

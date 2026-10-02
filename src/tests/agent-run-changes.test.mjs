@@ -10,7 +10,10 @@
  *  - запись в `.workflow/metrics/` и `.workflow/state/` не считается изменением, даже
  *    если сам git их не игнорирует (правило — в модуле, не в `.gitignore` проекта);
  *  - коммит, сделанный во время запуска (файл правится и коммитится агентом), тоже
- *    засчитывается — через diff между `HEAD` снимков `до` и `после`.
+ *    засчитывается — через diff между `HEAD` снимков `до` и `после`;
+ *  - listRunChanges отдаёт те же файлы путями от корня проекта, по алфавиту;
+ *    failedRunChanges — только у error, timeout и network_error с изменениями, не больше
+ *    FAILED_RUN_PATHS_MAX путей и их полное число.
  *
  * Временный git-репозиторий — каталог ОС, `git init` с локальными (не глобальными)
  * user.name/user.email, чтобы коммит не зависел от настроек машины. Корень — новый
@@ -26,7 +29,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-import { captureRunChanges, countRunChanges } from '../lib/agent-run-changes.mjs';
+import {
+  captureRunChanges, countRunChanges, listRunChanges, failedRunChanges, FAILED_RUN_STATUSES, FAILED_RUN_PATHS_MAX,
+} from '../lib/agent-run-changes.mjs';
 
 let root;
 
@@ -191,4 +196,57 @@ test('измерение длительности capture+count на дерев�
 
   assert.equal(count, 1);
   t.diagnostic(`agent-run-changes: capture=${t1 - t0}ms count=${t3 - t2}ms файлов=${FILE_COUNT}`);
+});
+
+// ---------------------------------------------------------------------------
+// Список путей (listRunChanges) и пути запуска со сбоем (failedRunChanges): их раннер
+// пишет в событие run (`changed_paths`) и в колонку «Изменённые файлы» строки «Истории
+// работы» — шаг P1S2 скила execute-task следующей попытки берёт из них правки оборванного
+// запуска, а не выводит их из общего незакоммиченного дерева.
+// ---------------------------------------------------------------------------
+
+test('listRunChanges: пути от корня проекта через «/», по алфавиту — тот же набор, что считает countRunChanges', () => {
+  initGitRepo(root);
+  writeFile(root, 'src/app.js', 'v1\n');
+  commitAll(root, 'init');
+  const ticket = ticketFile(root);
+  writeFile(root, path.relative(root, ticket), '---\nid: IMPL-1\n---\n# v1\n');
+
+  const before = captureRunChanges(root, ticket);
+  writeFile(root, 'src/app.js', 'v2\n');
+  writeFile(root, 'tests/new.test.js', 'новый\n');
+  writeFile(root, '.workflow/metrics/agent-runs.jsonl', '{"type":"run"}\n');
+  fs.writeFileSync(ticket, '---\nid: IMPL-1\n---\n# v2\n', 'utf8');
+
+  const paths = listRunChanges(root, before, ticket);
+  assert.deepEqual(paths, ['.workflow/tickets/in-progress/IMPL-1.md', 'src/app.js', 'tests/new.test.js']);
+  assert.equal(countRunChanges(root, before, ticket), paths.length);
+});
+
+test('listRunChanges: без git — обход каталога; без снимка — null', () => {
+  writeFile(root, 'notes.txt', 'v1\n');
+  const before = captureRunChanges(root, null);
+  writeFile(root, 'docs/a.md', 'новый\n');
+  writeFile(root, 'notes.txt', 'v2\n');
+  assert.deepEqual(listRunChanges(root, before, null), ['docs/a.md', 'notes.txt']);
+  assert.equal(listRunChanges(root, null, null), null);
+  assert.equal(countRunChanges(root, null, null), null);
+});
+
+test('failedRunChanges: только error, timeout, network_error с непустым списком; больше FAILED_RUN_PATHS_MAX — начало и полное число', () => {
+  const paths = ['a.js', 'b.js'];
+  for (const status of ['error', 'timeout', 'network_error']) {
+    assert.deepEqual(failedRunChanges(status, paths), { paths, total: 2 }, status);
+  }
+  for (const status of ['ok', 'rate_limit', 'aborted', 'model_banned', 'auth_error', 'blocked', 'empty_response']) {
+    assert.equal(failedRunChanges(status, paths), null, status);
+  }
+  assert.deepEqual([...FAILED_RUN_STATUSES].sort(), ['error', 'network_error', 'timeout']);
+  assert.equal(failedRunChanges('error', []), null);
+  assert.equal(failedRunChanges('error', null), null);
+
+  const many = Array.from({ length: FAILED_RUN_PATHS_MAX + 5 }, (_, i) => `f${String(i).padStart(3, '0')}.js`);
+  const capped = failedRunChanges('timeout', many);
+  assert.equal(capped.total, FAILED_RUN_PATHS_MAX + 5);
+  assert.deepEqual(capped.paths, many.slice(0, FAILED_RUN_PATHS_MAX));
 });

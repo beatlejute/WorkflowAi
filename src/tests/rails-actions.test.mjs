@@ -4,7 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join, resolve as resolvePathAbs } from 'node:path';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { fromClaude, fromKilo, detectShellWrites } from '../rails/actions.mjs';
+import { fromClaude, fromKilo, detectShellWrites, explainShellWrites } from '../rails/actions.mjs';
 
 // --- fromClaude (таблица §6) ------------------------------------------------
 
@@ -1256,4 +1256,179 @@ test('detectShellWrites (C2 r5): поведение bash, на которое о
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+// --- 2026-09-30: ложные отказы «похожа на запись» из журналов отказов -------------------
+// Журналы rails-denials.jsonl PulseProxy и ListeningGlass за 29–30.09: из 18 отказов «похожа на
+// запись» 7 ложные (команда верна и ничего не пишет вне разрешённого), ещё в 5 команда сломана
+// в исполнявшем её bash, но причина называла её записью. Ниже — сами команды из журналов.
+
+test('detectShellWrites (2026-09-30): читающие команды из журналов отказов — без «?»', () => {
+  // PulseProxy bc5c713e, IMPL-113, P2S1: for-цикл с $(grep -c …) и wc -l <
+  assert.deepEqual(writes(String.raw`for f in src/types/index.ts src/shared/storage.ts src/shared/constants.ts; do crlf=$(grep -c $'\r' "$f"); total=$(wc -l < "$f"); echo "$f CRLF=$crlf lines=$total"; done; echo "=== git attributes:"; cat .gitattributes 2>/dev/null; echo "(no gitattributes ok)"; git config core.autocrlf`), []);
+  // PulseProxy 1d5dd7b4, IMPL-120, P2S1
+  assert.deepEqual(writes(`for l in de es fr ja pt zh ru; do tot=$(grep -c '"description"' _locales/$l/messages.json); todo=$(grep -c '"description": "TODO: needs native translation"' _locales/$l/messages.json); echo "$l descriptions=$tot todo=$todo"; done`), []);
+  // PulseProxy afcd4883, create-plan P6S2: программа через переменную с литералом
+  assert.deepEqual(writes('R="C:/Users/Denis/.claude/plugins/data/rtk-plugin-enix/rtk/rtk.exe"; "$R" --help 2>&1 | head -80; echo ----; "$R" init --help 2>&1 | head -60'), []);
+  // ListeningGlass 331fbe3f, QA-007, P3S1: очистка scratchpad по литеральному списку
+  assert.deepEqual(
+    writes(`SCRATCH="${S}/scratchpad"\nfor d in qa-profile qa-profile-diag qa-profile-diag2; do\n  rm -rf "$SCRATCH/$d"\ndone\nls "$SCRATCH" 2>&1`),
+    [`${S}/scratchpad/qa-profile`, `${S}/scratchpad/qa-profile-diag`, `${S}/scratchpad/qa-profile-diag2`]
+  );
+  // PulseProxy bc5c713e и 58d74f48, P3S1: база тестов в $TMPDIR (TMPDIR в окружении задан)
+  assert.deepEqual(writes('npm test -- tests/a.test.ts > "$TMPDIR/base.txt" 2>&1; echo "exit=$?"; tail -12 "$TMPDIR/base.txt"', { env: { TMPDIR: O } }), [`${O}/base.txt`]);
+  // другие частые формы: условие и цикл while с подстановкой в присваивании
+  assert.deepEqual(writes('if [ -f x ]; then n=$(wc -l < x); echo "$n"; fi'), []);
+  assert.deepEqual(writes('while read -r l; do n=$(echo "$l" | wc -c); done < list.txt'), []);
+  // cd в начале команды перед циклом — каталог известен в теле (после `&&` цикл считается и
+  // в прежнем каталоге: вне плоского начала статус cd не отслеживается)
+  const r = writes(`cd ${S}/sub && for f in a b; do sed -i s/x/y/ "$f"; done`);
+  assert.equal(r.includes('?'), false, JSON.stringify(r));
+  assert.ok(r.includes(at(SCOPE, 'sub', 'a')) && r.includes(at(SCOPE, 'sub', 'b')), JSON.stringify(r));
+});
+
+test('detectShellWrites (2026-09-30): Windows-путь scratchpad из журнала ListeningGlass — запись в него видна', { skip: process.platform !== 'win32' ? 'путь C:\\… — только Windows' : false }, () => {
+  const scratch = 'C:\\Users\\Denis\\AppData\\Local\\Temp\\claude\\D--Dev-ListeningGlass\\331fbe3f-acd5-4e5e-8557-ea92aa29234c\\scratchpad';
+  const r = writes(`SCRATCH="${scratch}"\nfor d in qa-profile qa-profile-diag; do\n  rm -rf "$SCRATCH/$d"\ndone`);
+  assert.deepEqual(r, [`${scratch}/qa-profile`, `${scratch}/qa-profile-diag`]);
+});
+
+test('detectShellWrites (2026-09-30): настоящая запись в тех же формах по-прежнему видна или даёт «?»', () => {
+  assert.deepEqual(writes(`for d in a b; do rm -rf "${O}/$d"; done`), [`${O}/a`, `${O}/b`], 'переменная цикла по литеральному списку — каждое значение');
+  assert.deepEqual(writes(`for f in a b; do n=$(touch ${O}/$f); done`), [`${O}/a`, `${O}/b`], 'подстановка в теле цикла разбирается');
+  assert.deepEqual(writes(`for i in 1; do X=1 rm -rf ${O}/q; done`), [`${O}/q`], 'префикс-присваивание после do не прячет команду');
+  assert.deepEqual(writes(`R=rm; "$R" -rf ${O}/z`), [`${O}/z`], 'команда через переменную — по её значению');
+  assert.deepEqual(writes('R=read; "$R" S; touch "$S/x"'), ['?'], 'через переменную — встроенная, меняющая переменные');
+  assert.deepEqual(writes(`R=sudo; "$R" rm ${O}/z`), ['?'], 'через переменную — обёртка');
+  assert.deepEqual(writes(`R=$(which rm); "$R" ${O}/z`), ['?'], 'значение из подстановки');
+  // в фоне и в конвейере цикл идёт в подоболочке — переменная в этом shell'е прежняя
+  assert.deepEqual(writes(`d=${O}; for d in a; do :; done & rm -rf "$d"`), ['?']);
+  assert.ok(writes('for d in a; do :; done | cat; rm -rf "$d"').includes('?'), 'после цикла в конвейере $d — прежняя');
+  assert.deepEqual(writes(`S=${S} && for i in a; do :; done & touch "$S/q"`), ['?'], 'список с присваиванием ушёл в фон');
+  // присваивание или read в теле делает переменную неизвестной
+  assert.deepEqual(writes(`S=${S}; for i in a; do S=${O}; done; touch "$S/q"`), ['?']);
+  assert.deepEqual(writes(`for d in a b; do read d; rm -rf "${S}/$d"; done`), ['?']);
+  // cd в теле цикла — каталог неизвестен и для записи выше по тексту
+  assert.deepEqual(writes(`cd ${S}; for f in a b; do touch "$f"; cd ${O}; done`), ['?']);
+  // PulseProxy dcf15ca8, P1S1: $f из подстановки — sed "$f" может оказаться sed -i
+  assert.deepEqual(writes(`f=$(ls .workflow/tickets/*/FIX-033.md 2>/dev/null | head -1); sed -n '/## Результат/,/## История/p' "$f" 2>&1 | head -60`), ['?']);
+  // без TMPDIR в окружении $TMPDIR пуст — запись ушла бы в корень
+  assert.deepEqual(writes('npm test > "$TMPDIR/base.txt"'), ['?']);
+});
+
+test('explainShellWrites (2026-09-30): причина «?» называет токен и что сделать', () => {
+  const why = (command, opts = {}) => explainShellWrites(command, { cwd: SCOPE, env: {}, ...opts }).why.join(' | ');
+  // PulseProxy 0b297a20 (P0E1), ListeningGlass 67dbbb9d (P0S2): PowerShell-идиома в bash
+  assert.match(why(`find ${S} -name "QA-168*" 2>$null | head -20`), /«\$null» — в bash это пустая переменная.*\/dev\/null/);
+  // PulseProxy 5c5ebc86 (P0S3), ses_f0e3 (P0E1): `\"` в конце пути
+  assert.match(why(String.raw`ls -la "D:\Dev\PulseProxy\.workflow\tickets\in-progress\" 2>&1 | grep -i fix`), /обратная косая перед кавычкой экранирует её/);
+  // PulseProxy ce68940c (P3S1): незаданная переменная
+  assert.match(why('mkdir -p "$SCRATCH" 2>/dev/null'), /\$SCRATCH не задана ни в этой команде, ни в окружении/);
+  // PulseProxy dcf15ca8 (P1S1)
+  assert.match(why('f=$(ls x | head -1); sed -n 1p "$f"'), /«"\$f"» у sed не вычислен и может оказаться флагом -i/);
+  assert.match(why('npm test > "$TMPDIR/base.txt"'), /\$TMPDIR нет в окружении хука/);
+  assert.match(why(`node -e "require('fs').writeFileSync('x', '1')"`), /код node вызывает запись.*writeFileSync\(/);
+  assert.match(why('touch "$(date +%s).txt"'), /подстановка/);
+  assert.match(why(`for d in a; do cd ${O}; touch x; done`), /каталог для «x» неизвестен/);
+  assert.equal(why('R=echo; "$R" S'), '', 'без записи причин нет');
+  assert.match(why('R=sudo; "$R" rm x'), /«"\$R"» — это sudo/);
+  assert.match(why('Remove-Item "$TMPDIR\\x"', { dialect: 'powershell' }), /\$TMPDIR в PowerShell — переменная сессии.*\$env:TMPDIR/);
+  assert.deepEqual(explainShellWrites('touch a', { cwd: SCOPE, env: {} }), { writes: [at(SCOPE, 'a')], why: [] });
+  assert.deepEqual(detectShellWrites('mkdir -p "$SCRATCH"', { cwd: SCOPE, env: {} }), ['?'], 'detectShellWrites — прежний контракт');
+});
+
+test('поведение bash (2026-09-30), на которое опираются правила цикла и префикса', () => {
+  if (process.platform !== 'win32') return;
+  const base = mkdtempSync(join(tmpdir(), 'rails-0930-'));
+  const out = (script, env) => execFileSync('bash', ['-c', script], { cwd: base, encoding: 'utf8', env: env ?? process.env }).trim();
+  try {
+    // префикс-присваивание после do/then — команда выполняется
+    out('for i in 1; do X=1 touch do-prefix.txt; done; if true; then X=1 touch then-prefix.txt; fi');
+    assert.equal(existsSync(join(base, 'do-prefix.txt')), true);
+    assert.equal(existsSync(join(base, 'then-prefix.txt')), true);
+    // после цикла переменная — последнее значение; в конвейере и в фоне — прежняя
+    assert.equal(out('d=old; for d in a b; do :; done; echo $d'), 'b');
+    assert.equal(out('d=old; for d in a b; do :; done | cat; echo $d'), 'old');
+    assert.equal(out('d=old; for d in a b; do :; done & wait; echo $d'), 'old');
+    assert.equal(out('S=old; S=new && for i in a; do :; done & wait; echo $S'), 'old', 'and-or список с присваиванием ушёл в фон целиком');
+    // команда через переменную с литералом — вызов программы по значению
+    assert.equal(out('R=echo; "$R" hi'), 'hi');
+    // без TMPDIR в окружении $TMPDIR пуст
+    const env = { ...process.env };
+    delete env.TMPDIR;
+    assert.equal(out('echo "[$TMPDIR]"', env), '[]');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// --- 2026-10-01: ревью правок 2026-09-30 — ложные разрешения, которых не было в HEAD ------
+
+// Имя через переменную вычисляется только на месте команды. После обёртки невычисленное слово —
+// её флаг, позиционный аргумент или присваивание: разбор брал значение (5, -p, --) за имя
+// команды, rm уходил в аргументы, и записи не было видно (HEAD давал «?»).
+test('detectShellWrites (2026-10-01): переменная сразу после обёртки — не имя команды', () => {
+  const cases = [
+    `T=5; timeout "$T" rm -rf "${O}/z"`,
+    `for T in 5; do timeout "$T" rm -rf "${O}/z"; done`,
+    `L=${S}/lock; flock "$L" rm -rf "${O}/z"`,
+    `L=${S}/lock; flock -x "$L" -c 'rm -rf ${O}/z'`,
+    `A=X=1; env "$A" rm -rf "${O}/z"`,
+    `F=-p; command "$F" rm -rf "${O}/z"`,
+    `F=--; nohup "$F" rm -rf "${O}/z"`,
+    `F=-E; sudo "$F" rm -rf "${O}/z"`,
+  ];
+  for (const c of cases) {
+    const r = writes(c);
+    assert.ok(r.includes('?') || r.includes(`${O}/z`), `${c} → ${JSON.stringify(r)}`);
+  }
+  assert.match(explainShellWrites(cases[0], { cwd: SCOPE, env: {} }).why.join(' | '), /«"\$T"» после timeout не вычисляется/);
+  // на месте команды — по-прежнему по значению: первое слово и после ключевого слова
+  assert.deepEqual(writes(`R=rm; "$R" -rf ${O}/z`), [`${O}/z`]);
+  assert.deepEqual(writes(`R=rm; for i in 1; do "$R" -rf ${O}/z; done`), [`${O}/z`]);
+  assert.deepEqual(writes('R=echo; if true; then "$R" hi; fi'), []);
+  // литеральный аргумент обёртки разбирается как раньше
+  assert.deepEqual(writes(`timeout 5 rm -rf ${O}/z`), [`${O}/z`]);
+});
+
+// Переменную цикла по литеральному списку второй проход знает, а окружение вложенного
+// интерпретатора брало значение из окружения хука: `for TMPDIR in <вне>; do bash -c 'rm -rf
+// "$TMPDIR/x"'; done` давал цель во временном каталоге (у Bash Claude — allow по allow_temp).
+test('detectShellWrites (2026-10-01): переменная цикла не идёт во вложенный bash значением из окружения хука', () => {
+  const r = writes(`for TMPDIR in "${O}"; do bash -c 'rm -rf "$TMPDIR/x"'; done`, { env: { TMPDIR: S } });
+  assert.ok(!r.includes(`${S}/x`) && (r.includes('?') || r.includes(`${O}/x`)), JSON.stringify(r));
+  // та же переменная без вложенного интерпретатора — значения цикла
+  assert.deepEqual(writes(`for TMPDIR in "${O}"; do rm -rf "$TMPDIR/x"; done`, { env: { TMPDIR: S } }), [`${O}/x`]);
+});
+
+// sudo принимает VAR=value перед командой (синопсис `sudo -h`): `sudo X=1 rm <вне>` давал имя
+// команды «x=1» и пустой список (было и в HEAD). -R (chroot) и -e (sudoedit) — «?».
+test('detectShellWrites (2026-10-01): sudo X=1 cmd, sudo -R, sudo -e', () => {
+  assert.deepEqual(writes(`sudo X=1 rm -rf ${O}/z`), [`${O}/z`]);
+  assert.deepEqual(writes(`sudo -u root X=1 Y=2 rm -rf ${O}/z`), [`${O}/z`]);
+  assert.deepEqual(writes(`sudo -R ${S} rm -rf /z`), ['?']);
+  assert.deepEqual(writes(`sudo -e ${O}/f`), ['?']);
+  assert.deepEqual(writes(`sudo -ne ${O}/f`), ['?'], 'флаг в группе коротких');
+  assert.deepEqual(writes('sudo ls'), []);
+});
+
+// Kilo на Windows: команду выполнит bash или PowerShell. Совет «/dev/null» для `2>$null` вёл в
+// отказ PowerShell-разбора (C:\dev\null), «$TMP» и «$env:X» — в отказ другого диалекта.
+test('explainShellWrites (2026-10-01): mixed — советы годятся для обоих shell\'ов', () => {
+  const why = (command, opts = {}) => explainShellWrites(command, { cwd: SCOPE, env: {}, ...opts }).why.join(' | ');
+  assert.match(why('find . -name x 2>$null | head'), /используй \/dev\/null/);
+  const mixedNull = why('find . -name x 2>$null | head', { mixed: true });
+  assert.match(mixedNull, /перенаправь в 2>&1 или убери редирект/);
+  assert.doesNotMatch(mixedNull, /используй \/dev\/null/);
+  // совет исполним: 2>&1 без записи в обоих диалектах
+  assert.deepEqual(writes('find . -name x 2>&1 | head'), []);
+  assert.deepEqual(psWrites('find . -name x 2>&1 | head'), []);
+  const mixedTmp = why('npm test > "$TMPDIR/base.txt"', { mixed: true });
+  assert.match(mixedTmp, /\$TMPDIR нет в окружении хука — пиши абсолютный путь/);
+  assert.doesNotMatch(mixedTmp, /\$TMP /);
+  const psVar = why('npm test > "$TMPDIR/base.txt"', { mixed: true, dialect: 'powershell' });
+  assert.match(psVar, /пиши путь литералом/);
+  assert.doesNotMatch(psVar, /используй \$env:/);
+  // вложенный bash — shell известен, совет обычный
+  assert.match(why(`bash -c 'find . 2>$null'`, { mixed: true }), /bash: .*используй \/dev\/null/);
 });

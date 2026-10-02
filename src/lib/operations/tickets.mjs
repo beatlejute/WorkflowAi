@@ -27,6 +27,80 @@ const VALID_TRANSITIONS = {
 };
 
 /**
+ * Ставит машинную метку начала работы `started_at` при входе тикета в in-progress/.
+ *
+ * created_at тикета пишет модель декомпозиции, а часов у неё нет: у PulseProxy
+ * PLAN-020 все 36 тикетов получили «2026-09-30T00:00:00Z» (полночь из будущего),
+ * у ListeningGlass PLAN-001 — «2026-09-29T18:00:00+03:00». Гейт file_unchanged
+ * брал эту метку точкой отсчёта, а при метке из будущего откатывался на updated_at,
+ * который переписывается на каждом повторе, — правка прошлой попытки считалась
+ * «неизменённой», 7 ложных отказов 2026-09-29/30. started_at ставит код в момент
+ * первого входа в in-progress/, повторы его не сдвигают.
+ *
+ * - Метка ставится только при target === 'in-progress'; уход из колонки её не
+ *   трогает — функцию зовут на любом переходе.
+ * - Стоящая метка не меняется: вход после ревью — продолжение той же работы.
+ * - Пустая, неразбираемая или будущая метка за машинную не считается и
+ *   заменяется: её вписал не код, а модель (как created_at).
+ *
+ * Общая для всех путей в in-progress/: move-ticket.js, moveTicket ниже (MCP
+ * move_ticket), авто-коррекция pick-next-task.js.
+ *
+ * @param {object} frontmatter - frontmatter тикета, меняется на месте
+ * @param {string} target - целевая колонка
+ * @param {string} [now] - текущее время, ISO 8601 (то же, что уходит в updated_at)
+ * @returns {boolean} true — метка поставлена
+ */
+export function stampStartedAt(frontmatter, target, now = new Date().toISOString()) {
+  if (target !== 'in-progress') return false;
+  const current = frontmatter.started_at;
+  if (current) {
+    const startedMs = new Date(current).getTime();
+    if (Number.isFinite(startedMs) && startedMs <= Date.parse(now)) return false;
+  }
+  frontmatter.started_at = now;
+  return true;
+}
+
+const TIME_FIELDS = ['created_at', 'updated_at'];
+// Допуск на расхождение часов — тот же, что у гейта file_unchanged стадии ревью.
+const CLOCK_SKEW_TOLERANCE_MS = 60 * 1000;
+
+/**
+ * Машинные метки created_at и updated_at тикета: пустое, неразбираемое или будущее
+ * (дальше допуска на расхождение часов) значение заменяется текущим временем, валидное
+ * прошлое не меняется, completed_at не трогается.
+ *
+ * Поля времени тикета пишет модель, а часов у неё нет: PulseProxy PLAN-020 2026-09-29 —
+ * у всех 36 тикетов created_at «2026-09-30T00:00:00Z», полночь из будущего. Правило то
+ * же, что у stampTicketTimes в verify-atomicity.js (стадия пайплайна с --activate); эта
+ * функция — для тикетов, которые туда не попадают: тикеты доработки decompose-gaps и
+ * тикеты плана после обхода check-atomicity-limit. Её зовёт move-to-ready.js при
+ * переносе из backlog/.
+ *
+ * Значение не строкой и не датой (число из YAML) читается как текст даты — как его
+ * прочтёт текстовая копия правила в verify-atomicity.js.
+ *
+ * @param {object} frontmatter - frontmatter тикета, меняется на месте
+ * @param {string} [now] - текущее время, ISO 8601
+ * @returns {string[]} поля, которым поставлена метка
+ */
+export function stampTimeFields(frontmatter, now = new Date().toISOString()) {
+  const cutoffMs = Date.parse(now) + CLOCK_SKEW_TOLERANCE_MS;
+  const stamped = [];
+  for (const field of TIME_FIELDS) {
+    const current = frontmatter[field];
+    if (current) {
+      const ms = new Date(current instanceof Date ? current : String(current)).getTime();
+      if (Number.isFinite(ms) && ms <= cutoffMs) continue;
+    }
+    frontmatter[field] = now;
+    stamped.push(field);
+  }
+  return stamped;
+}
+
+/**
  * Форматирует номер с ведущими нулями (1 → 001)
  */
 function formatNumber(num) {
@@ -239,6 +313,7 @@ export async function moveTicket(projectRoot, id, target) {
   // Обновление frontmatter
   const now = new Date().toISOString();
   frontmatter.updated_at = now;
+  stampStartedAt(frontmatter, target, now);
 
   // Если переход в done, добавляем completed_at
   if (target === "done" && from !== "done") {

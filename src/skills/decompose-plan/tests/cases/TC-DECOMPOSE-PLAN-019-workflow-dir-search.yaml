@@ -1,0 +1,48 @@
+id: TC-DECOMPOSE-PLAN-019
+title: "Поиск по .workflow — с корнем внутри каталога, отсутствие файла — только по Read или ошибке запуска"
+origin:
+  chg: ["ad-hoc-2026-10-01-analysis"]
+  incidents:
+    - "ListeningGlass 2026-09-29 (журнал pipeline_2026-09-29_18-53-24): каталог .workflow/ в .gitignore. У kilo-агентов на стадиях отчёта и разбора Glob «.workflow/tickets/**/*.md» от корня проекта дал 0 совпадений, а с корнем поиска внутри каталога Glob «*.md» в .workflow/tickets/done нашёл 26 файлов, «**/FIX-001.*» в .workflow — 1. Те же kilo-агенты (gpt-luna, deepseek-flash) стоят запасными у стадий декомпозиции, а узел P10G5 проверял занятость ID Glob-ом от корня проекта."
+    - "ListeningGlass decompose-plan (claude-sonnet, 2026-09-29): Glob «.workflow/src/skills/decompose-plan/scripts/*.js» вернул «No files found» — каталог скилов подключён ссылкой, относительный поиск в неё не заходит; стадия записала ложное «scripts/check-duplicates.js нет» и сделала дедупликацию вручную. Абсолютный шаблон в следующей сессии скрипт нашёл."
+  principle: "Наличие или отсутствие файла под .workflow проверяется поиском с корнем внутри каталога (параметр пути поиска) или Read по точному пути; пустой ответ поиска от корня проекта или по каталогу-ссылке отсутствия не доказывает (workflows/decompose.md узлы P10G5, P10S10, P10S15; algorithms/deduplication.md шаг 1)."
+  backlog_sources: []
+tags: [id-generation, glob-check, ignored-dir, regression-guard]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила. Негативный anchor выражен
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10G5\{"[^"]*Glob по маске \*\*/\{TYPE\}-\{NNN\}\.md с корнем поиска \.workflow/tickets/\) даёт 0 совпадений'
+      reason: "Пре-валидация занятости ищет с корнем внутри .workflow/tickets/."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10G5\{"[^"]*пустой ответ поиска от корня проекта свободный ID не доказывает, а «файла нет» по точному пути — только ответ Read'
+      reason: "Пустой поиск от корня проекта не считается доказательством свободного ID."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: '^(?![\s\S]*Glob по \.workflow/tickets/\*\*)'
+      reason: "Шаблон поиска от корня проекта по игнорируемому каталогу не вернулся."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S15\["[^"]*Поиск из узла P10G5 — проверка занятости пути, а не источник нумерации'
+      reason: "Шаг сохранения согласован с новой формой пре-валидации."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S10\["[^"]*«Скрипта нет» утверждается только по ошибке его запуска или по Read точного пути: каталог скилов в проекте бывает подключён ссылкой, и поиск в неё не заходит'
+      reason: "Отсутствие скрипта дедупликации не выводится из пустого поиска по каталогу-ссылке."
+    - kind: skill_contains
+      file: "algorithms/deduplication.md"
+      pattern: 'ручной поиск — только с корнем внутри `\.workflow/tickets/` \(параметр пути поиска\)'
+      reason: "Ручное сканирование доски в алгоритме дедупликации — с корнем внутри .workflow/tickets/."
+
+execution:
+  timeout_s: 60

@@ -69,6 +69,93 @@ function formatTransitions(state, graph, config, guardCtx) {
   return `Переходы:\n${lines.map((l) => `  ${l}`).join('\n')}`;
 }
 
+// Строка, которую выражение `output.final_requires`/`pause_requires` находит в ответе, или null,
+// если литералом её не записать. `\s*` после «:» — пробел, иначе ничего; `\s+` и `\s` — пробел; `\b` — ничего;
+// экранированный знак — он сам; группа литеральных вариантов `(a|b)`/`(?:a|b)` — «<a|b>».
+// Классы, `.`, квантификаторы, якоря и прочие escape'ы (`\d`, `\n`) — null: такое выражение
+// печатается как есть.
+const REGEX_META = new Set(['.', '*', '+', '?', '[', ']', '{', '}', '^', '$', '|', ')']);
+const ESCAPED_LITERAL_RE = /^[^A-Za-z0-9]$/;
+const ALTERNATIVE_RE = /^[\p{L}\p{N}_ -]+$/u;
+
+function requirementLiteral(pattern) {
+  const src = String(pattern ?? '');
+  let out = '';
+  for (let i = 0; i < src.length; i += 1) {
+    const c = src[i];
+    if (c === '\\') {
+      const n = src[i + 1];
+      if (n === undefined) return null;
+      i += 1;
+      if (n === 's') {
+        const q = src[i + 1];
+        if (q === '*') {
+          i += 1;
+          if (out.endsWith(':')) out += ' ';
+        } else {
+          if (q === '+') i += 1;
+          out += ' ';
+        }
+      } else if (n === 'b') {
+        // граница слова — не символ
+      } else if (ESCAPED_LITERAL_RE.test(n)) {
+        out += n;
+      } else {
+        return null;
+      }
+      continue;
+    }
+    if (c === '(') {
+      const close = src.indexOf(')', i);
+      if (close === -1 || /^[?*+{]$/.test(src[close + 1] ?? '')) return null;
+      const body = src.slice(i + 1, close).replace(/^\?:/, '');
+      const variants = body.split('|');
+      if (!variants.every((v) => ALTERNATIVE_RE.test(v))) return null;
+      out += variants.length > 1 ? `<${variants.join('|')}>` : variants[0];
+      i = close;
+      continue;
+    }
+    if (REGEX_META.has(c)) return null;
+    out += c;
+  }
+  return out.trim() ? out : null;
+}
+
+// Требования выходного слоя к ответу в терминальном узле (литералы output.final_requires) или
+// в узле паузы (output.pause_requires) — рядом с лейблом узла, куда пришёл goto. Анализ
+// 2026-10-01 (final-answer-split): строки final_requires стояли в лейбле предыдущего узла,
+// терминал говорил только «Остановиться», и Stop-хук отклонял ответ; goto печатал лейбл
+// терминала и «Переходы: нет». Узел паузы требует тех же литералов, только из pause_requires
+// (output-check берёт набор по положению): без подсказки агент в P6S3 не знает строки RAILS.
+function formatFinalRequirements(state, config) {
+  const node = state?.node;
+  const terminal = Array.isArray(config?.terminal) ? config.terminal : [];
+  const pause = Array.isArray(config?.pause_nodes) ? config.pause_nodes : [];
+  const atTerminal = terminal.includes(node);
+  const atPause = !atTerminal && pause.includes(node);
+  if (!atTerminal && !atPause) return null;
+  const key = atPause ? 'pause_requires' : 'final_requires';
+  const requires = Array.isArray(config?.output?.[key]) ? config.output[key] : [];
+  if (requires.length === 0) return null;
+  const rows = requires.map((p) => {
+    const literal = requirementLiteral(p);
+    return literal === null ? `  выражение /${p}/` : `  ${literal}`;
+  });
+  const head = atPause ? 'Ответ в узле паузы' : 'Финальный ответ';
+  return `${head} — здесь, текстом сообщения; выходной слой требует в нём строки (output.${key}):\n${rows.join('\n')}`;
+}
+
+// Хвост вывода по текущему узлу — одинаковый у goto и status: требования выходного слоя в
+// терминале или узле паузы и допустимые переходы. QA-178: `status | grep «Переходы»` давал
+// пусто — перечень переходов печатали только start и goto.
+function nodeFooter(state, graph, config, guardCtx) {
+  const lines = [];
+  const requirements = formatFinalRequirements(state, config);
+  if (requirements) lines.push(requirements);
+  lines.push(formatTransitions(state, graph, config, guardCtx));
+  return lines;
+}
+
 // §5: --session, иначе WORKFLOW_RAILS_SESSION, иначе самый свежий файл
 // состояния проекта (с предупреждением в stderr — забота CLI).
 // Инцидент 2026-09-23: в проекте работали две сессии коуча, команда `goto` без `--session`
@@ -290,7 +377,7 @@ function cmdGoto(root, positional, flags, env) {
 
   const currentNode = graph.node(state.node);
   const label = currentNode ? currentNode.label : '';
-  const lines = [`RAILS: числится ${state.node} «${label}»`, formatTransitions(state, graph, config, guardCtx)];
+  const lines = [`RAILS: числится ${state.node} «${label}»`, ...nodeFooter(state, graph, config, guardCtx)];
   return { code: 0, stdout: `${lines.join('\n')}\n` };
 }
 
@@ -305,8 +392,9 @@ function cmdStatus(root, positional, flags, env) {
   if (!state) return { code: 1, stdout: `Ошибка: состояние сессии ${sessionId} не найдено.\n` };
 
   let graph = null;
+  let config = null;
   try {
-    ({ graph } = loadSkillRuntime(root, state.skill));
+    ({ config, graph } = loadSkillRuntime(root, state.skill));
   } catch {
     // граф может быть битым — статус всё равно печатаем по состоянию
   }
@@ -326,6 +414,9 @@ function cmdStatus(root, positional, flags, env) {
     `Отказы по узлам: ${JSON.stringify(state.denials || {})}`,
     `Последние переходы:${historyTail ? `\n${historyTail}` : ' нет'}`,
   ];
+  // Переходы — как у goto; граф не загрузился — перечня нет, и это сказано.
+  if (graph) lines.push(...nodeFooter(state, graph, config, guardContext(root, env, state)));
+  else lines.push('Переходы: граф скила не загружен (см. cli check --skill)');
   return { code: 0, stdout: `${lines.join('\n')}\n` };
 }
 
@@ -417,6 +508,9 @@ function cmdReport(root, positional, flags, cwd = process.cwd()) {
   lines.push(`Срабатывания потолков действий: ${JSON.stringify(summary.actionLimitHits)}`);
   lines.push(`Сбросы: ${summary.resets}`);
   lines.push(`Stop-блоки: ${summary.stopBlocks.total} (${JSON.stringify(summary.stopBlocks.byNode)})`);
+  // Канарейка — проверка живости, а не отказ: summarize() не кладёт её в «Отказы по узлу» и в
+  // узлы с повторами (журнал 2026-09-30: четверть–треть записей «отказов»), число — здесь.
+  lines.push(`Канарейка (проверка живости, не отказ): ${summary.canaries.total} (${JSON.stringify(summary.canaries.byNode)})`);
   lines.push(`Ошибки хука: ${summary.errors}`);
 
   return { code: 0, stdout: `${lines.join('\n')}\n` };

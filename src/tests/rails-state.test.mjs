@@ -616,6 +616,20 @@ test('allowedTransitions: рёбра текущего узла, лейбл об�
   assert.equal(allowed[0].label, NODES.find((n) => n.id === 'P5E1').label.slice(0, 60));
 });
 
+// Инцидент 2026-09-30 (65 отказов по цитате у execute-task PulseProxy с 29.09): `slice(0, 60)`
+// показывал «…а не типо», и модель дописывала оборванное слово вместо копирования команды.
+test('allowedTransitions: длинный лейбл обрезан по слову и помечен «…», слово не рвётся', () => {
+  const label = 'П3 ПРАВИЛО: Подход определяется содержимым тикета, а не типом. Тикет требует изменения кода';
+  const graph = makeGraph([
+    { id: 'P3E1', type: 'E', stage: 3, label: 'П3 ВХОД: выполнить работу' },
+    { id: 'P3R1', type: 'R', stage: 3, label },
+  ], [{ from: 'P3E1', to: 'P3R1' }]);
+  const [t] = allowedTransitions({ node: 'P3E1' }, graph);
+  assert.equal(t.label, 'П3 ПРАВИЛО: Подход определяется содержимым тикета, а не…');
+  assert.ok(t.label.length <= 60, t.label);
+  assert.ok(label.startsWith(t.label.slice(0, -1)), t.label);
+});
+
 // --- applyGoto: успешный переход ----------------------------------------------
 
 test('applyGoto: успешный переход по цитате из лейбла цели', () => {

@@ -225,3 +225,35 @@ test('summarize: repeatedNodes разделяет одноимённые узл�
   assert.equal(s.repeatedNodes.length, 1);
   assert.deepEqual(s.repeatedNodes[0], { node: 'P1S1', session: 's1', count: 3 });
 });
+// Анализ журналов 2026-09-30: канарейка давала четверть–треть записей «отказов» и выводила
+// P0S1/P0E1 в лидеры отказов по узлу. Канарейка — не отказ: ни событие canary, ни старая запись
+// type=denial с причиной «RAILS_CANARY: рельсы активны» в отказы по узлу не попадают.
+test('summarize (2026-10-01): канарейка считается отдельно — не в denialsByNode и repeatedNodes', () => {
+  const canaryReason = 'Отклонено: bash: echo RAILS_CANARY\nПочему: RAILS_CANARY: рельсы активны, узел P0E1; по P0E1 это 1-й отказ за сессию\nДоступно: переходы: P0R1';
+  const entries = [
+    { type: 'canary', session: 's1', node: 'P0S1' },
+    { type: 'canary', session: 's1', node: 'P0S1' },
+    { type: 'canary', session: 's1', node: 'P0S1' },
+    { type: 'denial', session: 's1', node: 'P0E1', reason: canaryReason },
+    { type: 'denial', session: 's1', node: 'P0E1', reason: canaryReason },
+    { type: 'denial', session: 's1', node: 'P0E1', reason: canaryReason },
+    // команда со словами канарейки, отклонённая другим правилом, — настоящий отказ
+    { type: 'denial', session: 's1', node: 'P0E1', reason: 'Отклонено: bash: echo "RAILS_CANARY: рельсы активны" > f\nПочему: путь «f» вне write_scope\nДоступно: …' },
+    { type: 'denial', session: 's1', node: 'P3S1', reason: 'Почему: нет ребра' },
+  ];
+  const s = summarize(entries);
+  assert.equal(s.total, 8);
+  assert.deepEqual(s.canaries, { total: 6, byNode: { P0S1: 3, P0E1: 3 } });
+  assert.deepEqual(s.denialsByNode, { P0E1: 1, P3S1: 1 });
+  assert.deepEqual(s.repeatedNodes, [], 'три канарейки на узле — не «≥3 повторов»');
+});
+
+test('summarize (2026-10-01): канарейка из appendEvent в журнале проекта — в canaries', () => {
+  withRoot((root) => {
+    appendEvent(root, { type: 'canary', session: 's1', skill: 'coach', node: 'P0S1' });
+    appendDenial(root, { session: 's1', skill: 'coach', node: 'P0S1', reason: 'Почему: нет ребра' });
+    const s = summarize(readJournal(root, { skill: 'coach' }));
+    assert.deepEqual(s.canaries, { total: 1, byNode: { P0S1: 1 } });
+    assert.deepEqual(s.denialsByNode, { P0S1: 1 });
+  });
+});

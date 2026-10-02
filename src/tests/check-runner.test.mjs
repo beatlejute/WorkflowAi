@@ -10,11 +10,12 @@
  * Запуск: node --import ./src/tests/_rails-home.mjs --test src/tests/check-runner.test.mjs
  */
 
-import { test, before, after } from 'node:test';
+import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 import {
   runCheck,
@@ -22,6 +23,7 @@ import {
   availableCheckTools,
   parseDodChecks,
   parseCheckRecord,
+  dodStartProblems,
   isDodFormat2,
   CHECK_TIMEOUT_MS,
   CHECK_OUTPUT_LIMIT,
@@ -645,4 +647,107 @@ test('isDodFormat2: только dod_format 2', () => {
   assert.equal(isDodFormat2({ dod_format: 1 }), false);
   assert.equal(isDodFormat2({}), false);
   assert.equal(isDodFormat2(undefined), false);
+});
+
+// ---------------------------------------------------------------------------
+// dodStartProblems: предупреждение о пути git grep под .gitignore. ListeningGlass
+// 2026-09-30: после добавления research/, spikes/, prototype/ и qa/ в .gitignore записи
+// `git grep -q --untracked` по этим каталогам дают exit 1 — пункт не закроется.
+// Предупреждение тикет не блокирует и в причины не входит.
+// ---------------------------------------------------------------------------
+
+describe('dodStartProblems: путь git grep под .gitignore', () => {
+  let repo;
+
+  before(() => {
+    repo = fs.mkdtempSync(path.join(os.tmpdir(), 'check-runner-ignored-'));
+    execFileSync('git', ['init', '-q', repo]);
+    fs.writeFileSync(path.join(repo, '.gitignore'), 'research/\n*.log\n', 'utf8');
+    fs.mkdirSync(path.join(repo, 'research'));
+    fs.mkdirSync(path.join(repo, 'src'));
+    fs.writeFileSync(path.join(repo, 'research', 'notes.md'), 'needle\n', 'utf8');
+    fs.writeFileSync(path.join(repo, 'src', 'a.md'), 'needle\n', 'utf8');
+    fs.writeFileSync(path.join(repo, 'kept.log'), 'needle\n', 'utf8');
+    // Файл под маской .gitignore, но в индексе: git grep его видит.
+    execFileSync('git', ['add', '-f', 'kept.log'], { cwd: repo });
+  });
+
+  after(() => fs.rmSync(repo, { recursive: true, force: true }));
+
+  const body = (...commands) => [
+    '## Критерии готовности (Definition of Done)',
+    '',
+    ...commands.flatMap((command, i) => [`- [ ] Пункт ${i + 1}`, `  - check: \`${command}\`, expect: \`exit 0\``]),
+    '',
+  ].join('\n');
+
+  async function gate(commands, projectRoot = repo) {
+    const warnings = [];
+    const problems = await dodStartProblems({ body: body(...commands), projectRoot, warnings });
+    return { problems, warnings };
+  }
+
+  test('путь после -- и без него, каталог и маска под .gitignore — предупреждение с номером пункта, не причина', async () => {
+    const { problems, warnings } = await gate([
+      'git grep -q --untracked "needle" -- research/notes.md',
+      'git grep -q -e absent -e other research/notes.md',
+      'git grep -q -A6 --max-depth 2 absent -- research research/*.md src/a.md',
+    ]);
+
+    assert.deepEqual(problems, []);
+    assert.equal(warnings.length, 3, warnings.join('\n'));
+    assert.match(warnings[0], /^check_path_ignored: пункт 1 \(research\/notes\.md — под \.gitignore/);
+    assert.match(warnings[1], /^check_path_ignored: пункт 2 \(research\/notes\.md — /);
+    assert.match(warnings[2], /^check_path_ignored: пункт 3 \(research, research\/\*\.md — /);
+  });
+
+  test('--untracked --no-exclude-standard, --no-index, отслеживаемый файл и путь вне .gitignore — без предупреждения', async () => {
+    const { problems, warnings } = await gate([
+      'git grep -q --untracked --no-exclude-standard "absent" -- research/notes.md',
+      'git grep -q --no-index "absent" -- research/notes.md',
+      'git grep -q "absent" -- kept.log',
+      'git grep -q --untracked "absent" -- src/a.md',
+    ]);
+
+    assert.deepEqual(problems, []);
+    assert.deepEqual(warnings, []);
+  });
+
+  test('--no-index с --exclude-standard — предупреждение; ревизия перед -- и магия пути — без него', async () => {
+    const { warnings } = await gate([
+      'git grep -q --no-index --exclude-standard "absent" -- research/notes.md',
+      'git grep -q "absent" HEAD -- research/notes.md',
+      'git grep -q "absent" -- :(glob)research/**',
+    ]);
+
+    assert.equal(warnings.length, 1, warnings.join('\n'));
+    assert.match(warnings[0], /^check_path_ignored: пункт 1 \(research\/notes\.md/);
+  });
+
+  test('регрессионная запись и тикет, который исполнитель уже брал, — предупреждение тоже', async () => {
+    const warnings = [];
+    const problems = await dodStartProblems({
+      body: [
+        '## Критерии готовности (Definition of Done)',
+        '',
+        '- [ ] Прежний поиск',
+        '  - check: `git grep -q "needle" -- research/notes.md`, expect: `exit 0`, regression: `true`',
+        '',
+      ].join('\n'),
+      projectRoot: repo,
+      warnings,
+    });
+
+    assert.deepEqual(problems, []);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /^check_path_ignored: пункт 1 /);
+  });
+
+  test('без массива warnings и вне репозитория — прежний результат без предупреждений', async () => {
+    const command = 'git grep -q --untracked "needle" -- research/notes.md';
+    assert.deepEqual(await dodStartProblems({ body: body(command), projectRoot: repo }), []);
+    // Корень тестов этого файла — не репозиторий: check-ignore завершается ошибкой.
+    const { warnings } = await gate([command], root);
+    assert.deepEqual(warnings, []);
+  });
 });

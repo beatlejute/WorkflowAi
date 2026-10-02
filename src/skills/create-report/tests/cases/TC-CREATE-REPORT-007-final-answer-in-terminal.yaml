@@ -1,0 +1,44 @@
+id: TC-CREATE-REPORT-007
+title: "Финальный ответ и все обязательные строки выходного слоя — в лейбле терминального узла P6S2, текстом, а не командой оболочки"
+origin:
+  chg: ["ad-hoc-2026-10-01"]
+  incidents:
+    - "PulseProxy .workflow/logs/rails-denials.jsonl, 2026-09-25…29: пять stop_block create-report на P6S2 — 2026-09-25T23:28 [---RESULT---], 2026-09-28T12:22 и 22:07 [---RESULT---, report_id], 2026-09-29T03:10:48 [---RESULT---, report_id] и через 4 с [RAILS: P6S2, verdict, Файлы:] (сессия affebdc1). Литерала ---RESULT--- не было ни в одном узле, обязательные строки стояли в P6S1, терминал P6S2 — «Остановиться»."
+    - "Контрольная группа: review-result пишет весь формат ответа в лейбле терминального узла — 0 stop_block на терминале; у kilo-моделей execute-task блок ---RESULT--- выводился командой echo (4 повтора output-check)."
+  principle: "Каждый литерал output.final_requires из rails.yaml стоит в лейбле терминального узла вместе с оговоркой «текстом сообщения, не командой оболочки»; нетерминальный узел не велит выводить ответ (концепция рельс, принцип 9)."
+  backlog_sources:
+    - "D:/Dev/PulseProxy/.workflow/logs/rails-denials.jsonl"
+tags: [output, rails, result-format, regression-guard]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P6S2\["П6 ШАГ: Финальный ответ — текстом сообщения, не командой оболочки'
+      reason: "Терминальный узел велит вывести ответ текстом, а не echo."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P6S2\["[^"]*RAILS: P6S2, verdict=default и Файлы:'
+      reason: "Строки RAILS, verdict и Файлы — в лейбле терминала."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P6S2\["[^"]*---RESULT---, status: default, report_id: REPORT-NNN, ---RESULT---'
+      reason: "Литерал блока результата с report_id — в лейбле терминала."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P6S1\["(?![^"]*Обязательные строки ответа)П6 ШАГ: Собери содержание финального ответа'
+      reason: "Нетерминальный P6S1 не требует вывода обязательных строк."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: 'terminal: \[P6S2\][\s\S]*final_requires:[\s\S]*"---RESULT---"[\s\S]*"report_id:'
+      reason: "Терминал и литералы выходного слоя, которые лейбл P6S2 обязан содержать."
+
+execution:
+  timeout_s: 60

@@ -120,9 +120,13 @@ pipeline:
     # платная, уровень, оценки Artificial Analysis). Обёртка задаёт два вопроса decisions:
     # самый низкий достаточный уровень (score по рубрике; required_level — наименьший
     # уровень с накопленной вероятностью ≥ --level-quantile 0.5) и порядок кандидатов
-    # внутри уровня (choice). Сбой, таймаут или ответ без уровня — лестница от слабых.
-    # Раннер вызывает его не больше одного раза на попытку и снимает через 60 с: --timeout
-    # 15 даёт 3 × 15 + 6 = 51 с на все повторы клиента. Отдельный id от селектора пула:
+    # внутри уровня (choice). Сбой или таймаут — один повтор вызова (без повтора при
+    # auth, no_key, bad_request, usage, bad_prompt: тот же вызов не пройдёт). Сбой и после
+    # повтора, ответ без уровня или селектор нездоров — старт обхода по complexity тикета:
+    # simple — нижний уровень выживших, medium — средний, complex — верхний; тикет без
+    # complexity — лестница от слабых (2026-09-30 PulseProxy: 12 сбоев из 50, QA-177
+    # complex ушёл на уровень 1). Раннер вызывает его не больше двух раз на попытку и
+    # снимает каждый вызов через 60 с. Отдельный id от селектора пула:
     # сбой одного не помечает нездоровым другого. Цена вызова с ~35 кандидатами не
     # измерена — cost_usd печатается в строке SELECT_MODEL.
     # Селектор участника пула (models.selector, агент jev-select 1.16) из поставляемого
@@ -387,6 +391,9 @@ pipeline:
   #     skill:          <skill-id> — какой skill использовать (.workflow/src/skills/<skill>/SKILL.md)
   #     instructions:   <string>   — доп. инструкции, передаваемые агенту в промпте
   #     counter:        <string>   — имя счётчика попыток для этого stage
+  #     scope:          plan       — стадия уровня плана: ключей тикета (ticket_id, task_type,
+  #                                   required_capabilities, …) в её контексте нет; plan_id
+  #                                   пуст — из related_plan отчёта report_id
   #     agents_by_type:            — маршрутизация списка агентов по типу задачи (task_type);
   #                                   полностью перекрывает stage.agents / stage.instructions
   #       <type>:
@@ -550,8 +557,8 @@ pipeline:
     # Декомпозирует план на тикеты в backlog/
     # На входе ОБЯЗАТЕЛЬНО: plan_file и id_ranges_json (выделенные стадией
     # allocate-ticket-ids). id_ranges_json — это JSON-строка вида
-    # {"QA":26,"HUMAN":2,...}; декомпозитор парсит её сам (см. decompose.md,
-    # шаг 9.0). Передача именно строки, а не объекта, обусловлена тем, что
+    # {"QA":26,"HUMAN":2,...}; декомпозитор парсит её сам (гейт нумерации P10G3
+    # в workflows/decompose.md). Передача именно строки, а не объекта, обусловлена тем, что
     # runner workflow-ai при подстановке $context.* в instructions применяет
     # неявный toString() — объекты превращаются в "[object Object]".
     # Декомпозитор НЕ вызывает get-next-id.js самостоятельно.
@@ -560,7 +567,7 @@ pipeline:
       description: "Декомпозировать план на тикеты"
       agents: [claude-sonnet, gpt-luna]
       skill: decompose-plan
-      instructions: "Декомпозируй план .workflow/$context.plan_file на тикеты. ID тикетов бери ТОЛЬКО из JSON-карты id_ranges_json=$context.id_ranges_json — это стартовые номера по префиксам в формате {\"PREFIX\":N_start,...}, уже выделенные стадией allocate-ticket-ids. Распарси JSON, используй значения как есть. НЕ вызывай get-next-id.js и НЕ изобретай номера самостоятельно. Подробности: см. шаг 9.0 в workflows/decompose.md. При наличии $context.atomicity_failures — учти их при декомпозиции: исправь неатомарные тикеты."
+      instructions: "Декомпозируй план .workflow/$context.plan_file на тикеты. ID тикетов бери ТОЛЬКО из JSON-карты id_ranges_json=$context.id_ranges_json — это стартовые номера по префиксам в формате {\"PREFIX\":N_start,...}, уже выделенные стадией allocate-ticket-ids. Распарси JSON, используй значения как есть. НЕ вызывай get-next-id.js и НЕ изобретай номера самостоятельно. Подробности: гейт нумерации P10G3 в workflows/decompose.md. Если в Context есть atomicity_failures — учти их при декомпозиции: исправь неатомарные тикеты."
       goto:
         default: check-atomicity-limit
 
@@ -667,6 +674,11 @@ pipeline:
           params:
             plan_id: "$result.plan_id"
         unchanged: end
+        # План стоит: у плана отчёта тикеты в blocked/, разбиение их не сняло (plan_id,
+        # blocked_tickets и строка WARN с blocked_reason каждого). Отчёт и разбор на той же
+        # доске ничего не дадут — конец, а раннер пишет итог «Pipeline stopped: plan … is
+        # stuck» вместо «Pipeline completed successfully!»: нужно решение человека.
+        stuck: end
         default: create-report
         error: create-report
 
@@ -842,7 +854,7 @@ pipeline:
           instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: правка скилов по описанию и DoD тикета."
         qa:
           agents: [claude-haiku, gpt-luna, gemini-flash-lite, claude-sonnet, claude-opus]
-          instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: по описанию и DoD тикета напиши и реально запусти тесты и проверки, результаты и дефекты запиши в тикет."
+          instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: по описанию и DoD тикета напиши и реально запусти тесты и проверки: каждый случай тикета — отдельный тест против продукта (модуль, сборка, запущенное приложение в среде из тикета, плана или shared), значения в отчёте — измеренные, расхождение с ожиданием — в «### Найденные дефекты»."
         arch:
           agents: [claude-opus, gpt-sol]
       goto:
@@ -965,8 +977,11 @@ pipeline:
     # Исходы по тикетам dod_format: 2 (PLAN-002): all_green — все пункты DoD
     # закрыты зелёными проверками → move-ticket done без модели; passed и default →
     # review-result с evidence_file и required_capabilities из результата.
-    # legacy (тикет без dod_format: 2) и error → review-result-legacy, агент со
-    # скилом. Обе ветки явно обнуляют evidence_file: updateContext только
+    # legacy (тикет без dod_format: 2, а также тикет executor_type: human с файлами
+    # проекта вне своей области — context.files, маски пунктов visual, пути после -- в
+    # проверках check; warnings: human_out_of_scope_changes) и error →
+    # review-result-legacy, агент со скилом: правку продукта человеком смотрит агент с
+    # инструментами, а не модель по evidence. Обе ветки явно обнуляют evidence_file: updateContext только
     # присваивает ключи из params и ничего не удаляет, а переходы pick-* его не
     # задают — без пустого значения в промпт review-result-legacy попал бы файл
     # evidence предыдущего тикета прогона. Пустое значение в промпт не попадает.
@@ -1065,11 +1080,13 @@ pipeline:
     # -------------------------------------------------------------------------
     # 4'. review-result-legacy
     # Прежнее ревью агентом со скилом review-result — для тикетов без
-    # dod_format: 2 и для ветки error предпроверки (PLAN-002). Копия записи
-    # review-result, какой она была до PLAN-002: агенты, скил, счётчик, переходы.
+    # dod_format: 2, для тикета человека с файлами вне своей области
+    # (human_out_of_scope_changes, ветка legacy verify-artifacts) и для ветки error
+    # предпроверки (PLAN-002). Копия записи review-result, какой она была до PLAN-002:
+    # агенты, скил, счётчик, переходы.
     # -------------------------------------------------------------------------
     review-result-legacy:
-      description: "Проверить результат выполнения на соответствие DoD тикета (тикеты без dod_format: 2)"
+      description: "Проверить результат выполнения на соответствие DoD тикета (тикеты без dod_format: 2, тикет человека с правками вне своей области)"
       agents: [claude-haiku, gpt-luna, gemini-flash-lite, claude-sonnet]
       skill: review-result
       counter: task_attempts
@@ -1165,14 +1182,22 @@ pipeline:
       agents: [gpt-luna, gemini-flash-lite, claude-sonnet, deepseek-flash]
       skill: create-report
       counter: create_report_attempts
+      # Стадия уровня плана: ключей тикета (ticket_id, task_type, required_capabilities, …)
+      # раннер ей не передаёт — ни в промпт, ни в выбор агента, ни в журнал запусков и
+      # историю работы тикета; при пустом plan_id и заданном report_id — plan_id из
+      # related_plan отчёта (runner.mjs, stageContext). Контекст раннера между стадиями не
+      # очищается: 2026-09-29/30 create-report, analyze-report и decompose-gaps шли с
+      # последним тикетом (HUMAN-003 в ListeningGlass, QA-180 в PulseProxy).
+      scope: plan
       goto:
         default:
           stage: analyze-report
           params:
             report_id: "$result.report_id"
-        # blocked означает, что required_capabilities из контекста (от предыдущего
-        # тикета) не покрыты ни одним агентом create-report. Это не фатально —
-        # завершаем пайплайн, отчёт не создан, но данные не теряются.
+        # blocked — все агенты стадии нездоровы по health-реестру (all_unhealthy) или агент
+        # ответил status: blocked. Это не фатально — завершаем пайплайн, отчёт не создан, но
+        # данные не теряются. Прежний повод — required_capabilities предыдущего тикета
+        # (no_capable_agent, 2026-04-20) — снят scope: plan.
         blocked: end
         error:
           stage: increment-create-report-attempts
@@ -1197,6 +1222,7 @@ pipeline:
       agents: [gpt-luna, gemini-flash-lite, claude-sonnet, deepseek-flash]
       skill: analyze-report
       counter: analyze_report_attempts
+      scope: plan   # см. create-report
       goto:
         completed: complete-plan
         has_gaps:
@@ -1222,14 +1248,20 @@ pipeline:
     # -------------------------------------------------------------------------
     # 7a. complete-plan
     # Завершает план: обновляет status → completed, архивирует done-тикеты.
-    # Если plan_id не задан в контексте — ищет единственный активный план.
-    # При not_ready (не все тикеты завершены) — тоже завершает пайплайн (end),
-    # т.к. analyze-report уже подтвердил completed.
+    # Если plan_id не задан в контексте — план отчёта report_id (scope: plan), нет и его —
+    # единственный активный план.
+    # completed — план закрыт сейчас или раньше (повтор на закрытом плане —
+    # already_completed: true, без изменений). not_ready — у плана открытые тикеты (тикеты
+    # в blocked/ — в blocked_tickets и строкой WARN с первой строкой blocked_reason) или
+    # готовый тикет записал в «### Найденные дефекты» дефект без исправления (defects и
+    # строка WARN). Все исходы — end: план закрывает только эта стадия, а not_ready ждёт
+    # тикетов или решения человека.
     # -------------------------------------------------------------------------
     complete-plan:
       description: "Завершить план (status: completed) и архивировать тикеты"
       agent: script-complete-plan
       timeout: 120
+      scope: plan   # см. create-report
       goto:
         completed: end
         not_ready: end
@@ -1260,6 +1292,9 @@ pipeline:
       description: "Декомпозировать недочёты из отчёта в новые тикеты"
       agents: [claude-sonnet, gpt-luna, deepseek-flash]
       skill: decompose-gaps
+      # plan_id, которого требует скил (узлы P0R2 и P0Q1), при запуске без --plan — из
+      # related_plan отчёта report_id; см. create-report.
+      scope: plan
       # Без новых тикетов check-conditions → empty → check-report-needed: доска та же, после
       # разбора было разбиение — unchanged, конец. Прежняя стадия check-decompose-result
       # (1.16.3) читала поле created_tickets блока RESULT, а список без отступа под ключом

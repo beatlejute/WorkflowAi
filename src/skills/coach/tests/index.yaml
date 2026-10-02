@@ -52,3 +52,18 @@ cases:
     origin_chg: ["ad-hoc-2026-09-29"]
     tags: [draft, anti-pattern, regression-guard]
     severity: high
+  - id: TC-COACH-008
+    file: cases/TC-COACH-008-analyze-facts-from-pipeline-records.yaml
+    origin_chg: ["ad-hoc-2026-10-01-analysis"]
+    tags: [analyze, evidence-based, rails, regression-guard]
+    severity: high
+  - id: TC-COACH-009
+    file: cases/TC-COACH-009-final-answer-in-terminal-node.yaml
+    origin_chg: ["ad-hoc-2026-10-01-analysis"]
+    tags: [rails, anatomy, output-layer, regression-guard]
+    severity: high
+  - id: TC-COACH-010
+    file: cases/TC-COACH-010-rule-chains-and-label-opening.yaml
+    origin_chg: ["ad-hoc-2026-10-01-analysis"]
+    tags: [rails, anatomy, graph-grammar, regression-guard]
+    severity: medium

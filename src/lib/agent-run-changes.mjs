@@ -1,7 +1,8 @@
 /**
  * Сколько файлов проекта изменил запуск агента — для градации «пусто» журнала запусков
  * (src/lib/agent-runs.mjs, PLAN-003). «Ничего не сделал (вообще)» — ни одного
- * изменённого файла проекта, включая тикет.
+ * изменённого файла проекта, включая тикет. Какие файлы — listRunChanges: их раннер
+ * называет после запуска со сбоем (failedRunChanges).
  *
  * Снимок artifact-snapshot в executeWithFallback для этого не годится: его область —
  * `src` и `configs`, без тестов и тикета, а снимок «после» делается только в ветке ошибки.
@@ -153,6 +154,41 @@ export function captureRunChanges(projectRoot, ticketPath = null) {
  * @returns {number|null} null — снимка нет или сравнить не удалось.
  */
 export function countRunChanges(projectRoot, before, ticketPath = null) {
+  const paths = listRunChanges(projectRoot, before, ticketPath);
+  return paths === null ? null : paths.length;
+}
+
+/**
+ * Статусы запуска, после которых раннер называет изменённые файлы — в событии `run`
+ * (`changed_paths`) и в строке «Истории работы» тикета (колонка «Изменённые файлы»):
+ * запуск оборвался, а правки остались в рабочем дереве. Те же статусы, по которым шаг
+ * P1S2 скила execute-task сверяет рабочее дерево следующей попытки; без списка он выводил
+ * правки оборванной попытки из общего незакоммиченного дерева, где лежит и работа других
+ * тикетов (2026-09-30: упавший по таймауту запуск удалил ключ локали, следующая попытка
+ * вставила его заново с выдуманным описанием).
+ */
+export const FAILED_RUN_STATUSES = Object.freeze(new Set(['error', 'timeout', 'network_error']));
+
+// Больше путей в событии и в строке истории не пишется: полное число — `changed_files`.
+export const FAILED_RUN_PATHS_MAX = 30;
+
+/**
+ * Изменённые файлы запуска со сбоем (FAILED_RUN_STATUSES): `{paths, total}` — первые
+ * FAILED_RUN_PATHS_MAX путей из `paths` (listRunChanges) и их полное число. Другой статус,
+ * нет списка или он пуст — null.
+ */
+export function failedRunChanges(status, paths) {
+  if (!FAILED_RUN_STATUSES.has(status) || !Array.isArray(paths) || paths.length === 0) return null;
+  return { paths: paths.slice(0, FAILED_RUN_PATHS_MAX), total: paths.length };
+}
+
+/**
+ * Файлы проекта, изменённые после снимка `before`, — пути от корня проекта через «/», по
+ * алфавиту; тот же набор, что считает countRunChanges. `ticketPath` — путь тикета после
+ * запуска или null.
+ * @returns {string[]|null} null — снимка нет или сравнить не удалось.
+ */
+export function listRunChanges(projectRoot, before, ticketPath = null) {
   if (!before) return null;
   try {
     const changed = new Set();
@@ -186,11 +222,7 @@ export function countRunChanges(projectRoot, before, ticketPath = null) {
         changed.add(afterKey);
       }
     }
-    let count = 0;
-    for (const key of changed) {
-      if (!isOutside(key) && !isRunnerPath(key)) count += 1;
-    }
-    return count;
+    return [...changed].filter((key) => !isOutside(key) && !isRunnerPath(key)).sort();
   } catch {
     return null;
   }

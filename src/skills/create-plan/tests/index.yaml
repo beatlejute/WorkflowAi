@@ -53,3 +53,18 @@ cases:
     origin_chg: ["ad-hoc-2026-09-26-check-tools"]
     tags: [verification-line, check-tools, plan-quality]
     severity: high
+  - id: TC-CREATE-PLAN-009
+    file: cases/TC-CREATE-PLAN-009-criterion-owned-by-proving-task.yaml
+    origin_chg: ["ad-hoc-2026-10-01-analyze"]
+    tags: [criterion-ownership, verification-line, plan-quality, regression-guard]
+    severity: high
+  - id: TC-CREATE-PLAN-010
+    file: cases/TC-CREATE-PLAN-010-source-proves-dependency.yaml
+    origin_chg: ["ad-hoc-2026-10-01-analyze"]
+    tags: [evidence, test-hygiene, verification-line, plan-quality]
+    severity: medium
+  - id: TC-CREATE-PLAN-011
+    file: cases/TC-CREATE-PLAN-011-approved-plan-edit.yaml
+    origin_chg: ["ad-hoc-2026-10-01-analyze"]
+    tags: [lifecycle, plan-quality]
+    severity: medium

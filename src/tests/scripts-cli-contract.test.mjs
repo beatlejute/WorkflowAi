@@ -307,7 +307,7 @@ test('move-ticket: битый frontmatter — отказ, тикет остаё�
 });
 
 // ============================================================================
-// pick-next-task.js — фильтр по плану, закрытие плана и авто-коррекция
+// pick-next-task.js — фильтр по плану, подсчёт готовых тикетов плана и авто-коррекция
 // ============================================================================
 
 test('pick-next-task: в контексте есть plan_id — берётся тикет своего плана, чужой не трогается', () => {
@@ -329,13 +329,16 @@ test('pick-next-task: в контексте есть plan_id — берётся 
   cleanup(dir);
 });
 
-test('pick-next-task: все тикеты плана в done — план закрывается, очередь пуста', () => {
+// План закрывает только complete-plan после разбора completed: 2026-09-30 PulseProxy PLAN-020
+// выбор задачи закрыл план и архивировал 36 тикетов до create-report и analyze-report.
+test('pick-next-task: все тикеты плана в done — план не тронут, тикет в done/, очередь пуста', () => {
   const { dir, workflowDir, ticketsDir } = makeProject();
   const planFile = writePlan(workflowDir, 'PLAN-103');
   writeTicket(ticketsDir, 'done', 'IMPL-230', {
     parent_plan: 'plans/current/PLAN-103.md',
     completed_at: '2026-04-02T10:00:00.000Z',
   });
+  const planBefore = readTicket(planFile);
 
   const prompt = 'pick-next-task\n\nContext:\n  plan_id: PLAN-103\n';
   const result = run(PICK_NEXT_TASK, [prompt], dir);
@@ -343,8 +346,11 @@ test('pick-next-task: все тикеты плана в done — план зак
 
   assert.strictEqual(result.code, 0, 'пустая очередь — штатный конец плана, а не падение стадии');
   assert.strictEqual(parsed.status, 'empty');
-  assert.match(result.stdout, /PLAN-103 closed/, 'закрытие плана должно быть видно в логе стадии');
-  assert.match(readTicket(planFile), /status: completed/, 'план обязан быть помечен завершённым, иначе он вечно в работе');
+  assert.match(result.stdout, /Plan PLAN-103: all 1 tickets done — closing is up to complete-plan/, 'готовность плана должна быть видна в логе стадии');
+  assert.doesNotMatch(result.stdout, /PLAN-103 closed/, 'выбор задачи план не закрывает');
+  assert.strictEqual(readTicket(planFile), planBefore, 'выбор задачи переписал план: закрывает его только complete-plan после разбора');
+  assert.ok(fs.existsSync(path.join(ticketsDir, 'done', 'IMPL-230.md')), 'тикет обязан остаться в done/ до закрытия плана');
+  assert.ok(!fs.existsSync(path.join(ticketsDir, 'archive', 'IMPL-230.md')), 'выбор задачи архивировал тикет');
 
   cleanup(dir);
 });

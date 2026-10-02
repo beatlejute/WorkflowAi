@@ -58,3 +58,13 @@ cases:
     origin_chg: ["ad-hoc-2026-09-30"]
     tags: [gaps, blocked, check-record, regression-guard]
     severity: high
+  - id: TC-ANALYZE-REPORT-010
+    file: cases/TC-ANALYZE-REPORT-010-recorded-defects-are-gaps.yaml
+    origin_chg: ["ad-hoc-2026-10-01"]
+    tags: [gaps, defects, qa, completion, regression-guard]
+    severity: high
+  - id: TC-ANALYZE-REPORT-011
+    file: cases/TC-ANALYZE-REPORT-011-review-rework-metrics.yaml
+    origin_chg: ["ad-hoc-2026-10-01"]
+    tags: [metrics, review, rework, consistency, regression-guard]
+    severity: high

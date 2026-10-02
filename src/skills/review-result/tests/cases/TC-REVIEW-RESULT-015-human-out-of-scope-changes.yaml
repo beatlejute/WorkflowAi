@@ -1,0 +1,80 @@
+id: TC-REVIEW-RESULT-015
+title: "Тикет человека с файлами проекта вне своей области не уходит all_green: ревью агентом со скилом проверяет эти файлы как у тикета агента"
+origin:
+  chg: ["ad-hoc-2026-10-01-human-ticket-product-edits-unchecked"]
+  incidents:
+    - "ListeningGlass HUMAN-002 (2026-09-30): в «Изменённых файлах» кроме qa/phone.md (context.files) — src/background.js, build.js и два теста. verify-artifacts закрыл тикет all_green по двум проверкам git grep файла результата и отправил в done без модели (review.agent null): правки фонового скрипта и сборки не прошли ни ревью диффа, ни прогона тестов пайплайном."
+    - "ListeningGlass HUMAN-003 (2026-09-30): кроме store/published.md — .gitignore и перенос фикстур test/e2e/fixtures/; all_green по одной проверке, архив, собранный непроверенным build.js, ушёл на модерацию магазина."
+  principle: "Проверки DoD тикета человека смотрят только его результат. Файл проекта вне context.files, масок visual и путей после -- в проверках check — правка, которой они не видят, в том числе записанная не в формате строки «Изменённых файлов». Скрипт предпроверки отдаёт legacy с предупреждением human_out_of_scope_changes (статус passed не помог бы — у тикета из одних check вопросов к модели нет, и стадия ревью по evidence закрывается без модели), а ревью агентом со скилом по узлу P4R2 проверяет эти файлы как у тикета агента: освобождение человека касается только артефактов вне корня проекта."
+  backlog_sources: []
+tags: [verify-artifacts, human-ticket, scope, regression-guard]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над узлами графа, справочником верификации и скриптом предпроверки.
+    Поведение скрипта закрепляют юнит-тесты src/tests/verify-artifacts.test.mjs.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/review.md"
+      pattern: 'P4R2\["П4 ПРАВИЛО: Верификация реальных изменений применяется к тикету с executor_type не human — ко всем «Изменённым файлам», к тикету с executor_type human — к файлам проекта из «Изменённых файлов» вне context\.files и вне путей проверок DoD'
+      reason: "Узел P4R2 проверяет у тикета человека файлы проекта вне его области, а не пропускает тикет целиком."
+    - kind: skill_contains
+      file: "workflows/review.md"
+      pattern: 'P4R2\[[^\n]*освобождение человека от проверки касается только артефактов вне корня проекта'
+      reason: "Исключение для человека сужено до артефактов вне корня проекта."
+    - kind: skill_contains
+      file: "workflows/review.md"
+      pattern: 'P4R2\[[^\n]*для кода вне области тикета человека — ещё и красный прогон тестов проекта, которые подключают изменённый модуль'
+      reason: "Правку кода вне области тикета человека ревью проверяет прогоном тестов (HUMAN-002: фоновый скрипт и сборка без прогона)."
+    - kind: skill_contains
+      file: "workflows/review.md"
+      pattern: '^(?![\s\S]*применяется только для тикетов с executor_type не human)'
+      reason: "Прежнее полное освобождение тикета человека от верификации изменений удалено."
+    - kind: skill_contains
+      file: "workflows/review.md"
+      pattern: '\n- Пропустить файлы проекта вне области тикета человека без проверки, сославшись на то, что человек работает вне системы \(узел P4R2\)'
+      reason: "Антипаттерн к P4R2: прежнее «человек мог внести изменения вне системы» как оправдание пропуска не возвращается."
+    - kind: skill_contains
+      file: "algorithms/verification.md"
+      pattern: '\| Тикет с `executor_type: human` \| Артефакты вне корня проекта не проверять[^\n]*проверять шагами 1–4, как у тикета агента'
+      reason: "Граничный случай алгоритма согласован с P4R2: файлы проекта вне области тикета человека проходят шаги 1–4."
+    - kind: skill_contains
+      file: "algorithms/verification.md"
+      pattern: '^(?![\s\S]*Пропустить верификацию файлов — человек мог внести изменения вне системы)'
+      reason: "Строка о пропуске верификации всех файлов тикета человека удалена — она противоречила бы P4R2."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P2S1\["П2 ШАГ:[^\n]*fail_reasons, warnings\.[^\n]*human_out_of_scope_changes'
+      reason: "Ревьюер читает предупреждения предпроверки: human_out_of_scope_changes называет файлы для P4R2."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: '^(?![\s\S]*верификации реальных изменений для тикетов с executor_type не human)'
+      reason: "Узел P0S2 не противоречит P4R2: справочник верификации загружается и для тикета человека."
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: 'warnings\.push\(`human_out_of_scope_changes=\$\{humanOutOfScope\.join\(.,.\)\}`\)'
+      reason: "Скрипт предпроверки называет файлы вне области тикета человека в warnings."
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: '\} else if \(!evidence \|\| \(result\.human_out_of_scope \|\| \[\]\)\.length > 0\) \{[\s\S]{0,800}?status = ''legacy'';\s*\} else if \(evidence\.items\.every'
+      reason: "Тикет человека с файлами вне области получает legacy раньше, чем проверяется all_green."
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: 'Array\.isArray\(frontmatter\.context\?\.files\)'
+      reason: "Область тикета человека строится из context.files (и масок visual, путей после -- в проверках check)."
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: '\[\.\.\.new Set\(\[\.\.\.filePaths, \.\.\.unparsedPaths\]\)\]\.filter\(\s*\(filePath\) => isInsideProject\(path\.resolve\(PROJECT_DIR, filePath\)\) && !inHumanScope\(filePath, humanScope\)'
+      reason: "С областью сравниваются и пути не в формате строки (правку вне области не прячет отсутствие кавычек), а путь вне корня проекта область не нарушает."
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: '\.replace\(/\\\*\\\*\\//g, ''\\u0001''\)'
+      reason: "Маска `**/` покрывает и ноль каталогов: src/**/*.js включает src/a.js."
+
+execution:
+  timeout_s: 60

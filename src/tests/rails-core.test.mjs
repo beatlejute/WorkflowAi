@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve as resolvePathAbs } from 'node:path';
 import {
   existsSync,
   mkdtempSync,
@@ -19,6 +19,7 @@ import { startState, saveState, loadState } from '../rails/state.mjs';
 import { readJournal } from '../rails/journal.mjs';
 import { run as runCli } from '../rails/cli.mjs';
 import { createJunction } from '../junction-manager.mjs';
+import { realpathDeep } from '../rails/paths.mjs';
 import { fromClaude, fromKilo } from '../rails/actions.mjs';
 
 // Память «сессия → корень» (session-memo.mjs) живёт в <WORKFLOW_HOME>/state —
@@ -179,7 +180,8 @@ test('decide: cwd без корня проекта, но путь Edit внут�
 test('decide: тот же toolUseId дважды -> второй ответ из кэша, счётчики и журнал не растут', () => {
   withProject(({ root }) => {
     const { sessionId } = makeState(root, 'P4S1');
-    const canary = { tool: 'Bash', kind: 'shell', command: 'echo RAILS_CANARY' };
+    // отказ deny_shell: канарейка с 2026-10-01 счётчик denials не трогает
+    const canary = { tool: 'Bash', kind: 'shell', command: 'git commit -m x' };
     const first = decide({ action: canary, ctx: { cwd: root, sessionId, toolUseId: 'toolu_1', event: 'PreToolUse' } });
     const second = decide({ action: canary, ctx: { cwd: root, sessionId, toolUseId: 'toolu_1', event: 'PreToolUse' } });
     assert.equal(first.decision, 'deny');
@@ -1208,7 +1210,7 @@ test('decide: текст отказа содержит три части (что
 test('decide: каждый отказ пишется в журнал и увеличивает denials[node] на диске', () => {
   withProject(({ root }) => {
     const { sessionId, state } = makeState(root, 'P4S1');
-    const action = { tool: 'Bash', kind: 'shell', command: 'echo RAILS_CANARY' };
+    const action = { tool: 'Bash', kind: 'shell', command: 'git commit -m x' };
     const ctx = { cwd: root, sessionId, run: 'run-42' };
 
     decide({ action, ctx });
@@ -2797,5 +2799,179 @@ test('decide: отказ — ребро, закрытое стражем {ticket
       if (prev === undefined) delete process.env.WORKFLOW_RAILS_TICKET;
       else process.env.WORKFLOW_RAILS_TICKET = prev;
     }
+  });
+});
+
+// --- 2026-09-30 / 2026-10-01: канарейка, текст отказов write_scope и «похожа на запись» ------
+
+// Анализ журналов 2026-09-30: канарейка давала 332 из 1786 записей «отказов» PulseProxy и 48 из
+// 156 ListeningGlass, выводила P0S1/P0E1 в лидеры отказов по узлу, а у коуча — «P0S1: 20 в одной
+// сессии». Проверка живости — событие canary: отказ агенту тот же, счётчик denials не растёт.
+test('decide (2026-10-01): канарейка — событие canary в журнале, denials[node] не растёт, без «N-й отказ»', () => {
+  withProject(({ root }) => {
+    const { sessionId } = makeState(root, 'P4S1');
+    const action = { tool: 'Bash', kind: 'shell', command: 'echo RAILS_CANARY' };
+    decide({ action, ctx: { cwd: root, sessionId, run: 'run-7' } });
+    const r = decide({ action, ctx: { cwd: root, sessionId, run: 'run-7' } });
+    assert.equal(r.decision, 'deny');
+    assert.match(r.reason, /Почему: RAILS_CANARY: рельсы активны, узел P4S1\n/);
+    assert.match(r.reason, /Доступно: .*P5E1/);
+    assert.doesNotMatch(r.reason, /отказ за сессию/);
+    assert.deepEqual(loadState(root, sessionId).denials, {}, 'канарейка — не отказ узла');
+    const entries = readJournal(root, {}).filter((e) => e.session === sessionId);
+    assert.equal(entries.length, 2);
+    for (const e of entries) {
+      assert.equal(e.type, 'canary');
+      assert.equal(e.node, 'P4S1');
+      assert.equal(e.skill, 'coretest');
+      assert.equal(e.run, 'run-7');
+      assert.equal(e.command, 'echo RAILS_CANARY');
+    }
+    // настоящий отказ после двух канареек — первый по счёту
+    const real = decide({ action: { tool: 'Bash', kind: 'shell', command: 'git commit -m x' }, ctx: { cwd: root, sessionId } });
+    assert.match(real.reason, /по P4S1 это 1-й отказ за сессию/);
+    assert.equal(loadState(root, sessionId).denials.P4S1, 1);
+  });
+});
+
+// Инцидент 2026-09-30 (PulseProxy IMPL-119/124, ListeningGlass IMPL-006): Kilo писал Edit/Write по
+// угаданному корню, отказ «путь вне write_scope» не говорил, куда путь ведёт и какой корень верен.
+test('decide (2026-09-30): отказ write_scope называет фактическую цель и корень проекта', () => {
+  withProject(({ root }) => {
+    const { sessionId } = makeState(root, 'P4S1');
+    const work = join(root, '.workflow', 'work');
+    const r = decide({ action: { tool: 'edit', kind: 'edit', path: '../../outside.txt' }, ctx: { cwd: work, sessionId } });
+    assert.equal(r.decision, 'deny');
+    assert.match(r.reason, /вне write_scope/);
+    // цель — как её понял гард (realpath: на раннере GitHub TEMP короткий, RUNNER~1)
+    assert.ok(r.reason.includes(`путь «../../outside.txt» ведёт в «${realpathDeep(join(root, 'outside.txt'))}»`), r.reason);
+    assert.ok(r.reason.includes(`проекта «${root}»`), r.reason);
+    assert.match(r.reason, /укажи путь относительно корня проекта \(как в context\.files\)/);
+    // абсолютный путь, который гард понял так же, как написан, не повторяется
+    const abs = decide({ action: { tool: 'Write', kind: 'write', path: join(root, 'outside.txt') }, ctx: { cwd: root, sessionId } });
+    const absPath = join(root, 'outside.txt');
+    const sameAsReal = realpathDeep(absPath).toLowerCase() === absPath.toLowerCase();
+    assert.ok(abs.reason.includes(sameAsReal ? `путь «${absPath}» вне write_scope` : `путь «${absPath}» ведёт в «${realpathDeep(absPath)}»`), abs.reason);
+  }, { allowTemp: false });
+});
+
+test('decide (2026-09-30): Edit по пути /d/… на Windows — отказ, путь не переводится, в тексте фактическая цель и корень', { skip: process.platform !== 'win32' ? 'запись /x/… Git Bash — только Windows' : false }, () => {
+  withProject(({ root }) => {
+    const { sessionId } = makeState(root, 'P4S1');
+    // та же цель в записи Git Bash: Kilo 7.7.9 в write/edit берёт путь как есть, и из диска
+    // процесса запись уходит в <диск>:\c\Users\… — рельсы проверяют именно эту цель
+    const bash = `/${root[0].toLowerCase()}/${root.slice(3).replace(/\\/g, '/')}/.workflow/work/f.txt`;
+    const r = decide({ action: { tool: 'edit', kind: 'edit', path: bash }, ctx: { cwd: root, sessionId } });
+    assert.equal(r.decision, 'deny', 'нормализация /d/… открыла бы запись вне проекта');
+    assert.ok(r.reason.includes(`ведёт в «${realpathDeep(resolvePathAbs(bash))}»`), r.reason);
+    assert.ok(r.reason.includes(`проекта «${root}»`), r.reason);
+    assert.match(r.reason, new RegExp(`запись /${root[0].toLowerCase()}/… инструмент правки не переводит в ${root[0].toUpperCase()}:`));
+  }, { allowTemp: false });
+});
+
+test('decide (2026-09-30): отказ «похожа на запись» называет токен, из-за которого путь не вычислить', () => {
+  withProject(({ root }) => {
+    const { sessionId } = makeState(root, 'P4S1');
+    const run = (command, shell = 'posix') => decide({ action: { tool: 'Bash', kind: 'shell', command, shell }, ctx: { cwd: root, sessionId } });
+    const nul = run('find . -name "QA-168*" 2>$null | head -20');
+    assert.equal(nul.decision, 'deny');
+    assert.match(nul.reason, /путь не удалось определить: «\$null» — в bash это пустая переменная, а не устройство: используй \/dev\/null — используй Edit\/Write или укажи путь явно/);
+    assert.match(run('mkdir -p "$SCRATCH_ZZ_UNSET"').reason, /\$SCRATCH_ZZ_UNSET не задана ни в этой команде, ни в окружении/);
+    // Kilo на Windows: цели по обоим диалектам — у причины назван диалект
+    const kilo = decide({ action: { tool: 'bash', kind: 'shell', command: 'mkdir -p "$SCRATCH_ZZ_UNSET"', shell: 'posix', dialects: ['posix', 'powershell'] }, ctx: { cwd: root, sessionId } });
+    assert.match(kilo.reason, /bash: \$SCRATCH_ZZ_UNSET не задана/);
+    assert.match(kilo.reason, /PowerShell: \$SCRATCH_ZZ_UNSET/);
+  });
+});
+
+// Инцидент 2026-09-29 (PulseProxy, IMPL-113, P3S1, сессии bc5c713e и 58d74f48): база тестов
+// `npm test > "$TMPDIR/base.txt"` отклонялась — в окружении хука TMPDIR нет, а Bash-инструмент
+// Claude Code задаёт его shell'у сам (проверено запуском 2026-10-01).
+test('decide (2026-10-01): Bash Claude Code на Windows — $TMPDIR — временный каталог, запись в него по allow_temp', { skip: process.platform !== 'win32' ? 'TMPDIR Bash-инструмента — только Windows' : false }, () => {
+  const prev = process.env.TMPDIR;
+  delete process.env.TMPDIR;
+  try {
+    withProject(({ root }) => {
+      const { sessionId } = makeState(root, 'P5S1');
+      const command = 'npm test -- tests/a.test.ts > "$TMPDIR/rails-core-base.txt" 2>&1; tail -12 "$TMPDIR/rails-core-base.txt"';
+      const claude = decide({ action: { tool: 'Bash', kind: 'shell', command, shell: 'posix' }, ctx: { cwd: root, sessionId } });
+      assert.equal(claude.decision, 'allow', claude.reason);
+      // Kilo: что его bash получает в TMPDIR, не проверено — «?» остаётся, с причиной
+      const kilo = decide({ action: { tool: 'bash', kind: 'shell', command, shell: 'posix', dialects: ['posix', 'powershell'] }, ctx: { cwd: root, sessionId } });
+      assert.equal(kilo.decision, 'deny');
+      assert.match(kilo.reason, /\$TMPDIR нет в окружении хука/);
+    });
+  } finally {
+    if (prev === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = prev;
+  }
+});
+
+// --- 2026-10-01: ревью правок 2026-09-30 ---------------------------------------------------
+
+// Журналы PulseProxy и ListeningGlass: `for pair in "P5E1|…" …; do n="${pair%%|*}"; …; node
+// .workflow/src/rails/cli.mjs goto "$n" --quote "$q"; done` проходил узлы пачкой. Раньше его
+// случайно останавливал маркер «?» (`do n="${…}"`), после правки 2026-09-30 он стал allow — и
+// мимо распознавания cli: без --session и без переписывания --quote. Временная мера до решения
+// владельца о переходах по одному — отказ с подсказкой.
+test('decide (2026-10-01): goto внутри цикла, условия, подоболочки, подстановки, bash -c — отказ; список cli-вызовов — allow', () => {
+  withProject(({ root }) => {
+    const { sessionId } = makeState(root, 'P4R1');
+    const run = (command, shell = 'posix', tool = 'Bash') => decide({ action: { tool, kind: 'shell', command, shell }, ctx: { cwd: root, sessionId } });
+    const cli = 'node .workflow/src/rails/cli.mjs';
+    const compound = [
+      `for pair in "P4S1|Внести правку" "P5E1|Переход"; do n="\${pair%%|*}"; q="\${pair#*|}"; ${cli} goto "$n" --quote "$q"; done`,
+      `for n in P4S1 P5E1; do echo "$n"; ${cli} goto $n; done`,
+      `if true; then ${cli} goto P4S1 --quote x; fi`,
+      `(${cli} goto P4S1 --quote x)`,
+      `x=$(${cli} goto P4S1 --quote x); echo "$x"`,
+      `bash -c "${cli} goto P4S1 --quote x"`,
+      // префикс-присваивание со значением из подстановки перед node
+      `for n in P4S1; do WORKFLOW_RAILS_RUN="$RUN" ${cli} goto "$n"; done`,
+    ];
+    let n = 0;
+    for (const c of compound) {
+      const r = run(c);
+      n += 1;
+      assert.equal(r.decision, 'deny', c);
+      assert.match(r.reason, /Почему: goto внутри цикла, условия, группы, подоболочки или подстановки .*каждый переход — отдельной командой/, c);
+      assert.equal(loadState(root, sessionId).denials.P4R1, n, 'настоящий отказ — считается');
+    }
+    const ps = run(`foreach ($n in "P4S1","P5E1") { ${cli} goto $n }`, 'powershell', 'PowerShell');
+    assert.equal(ps.decision, 'deny');
+    assert.match(ps.reason, /goto внутри цикла/);
+    // журнал ListeningGlass (Kilo): результат goto присваивается переменной в теле цикла
+    const psAssign = run(`$nodes = @("P4S1","P5E1"); for($i=0; $i -lt $nodes.Count; $i++) { $result = ${cli} goto $nodes[$i] 2>&1; Write-Output $result }`, 'powershell', 'PowerShell');
+    assert.match(psAssign.reason, /goto внутри цикла/);
+    assert.equal(run(`$r = ${cli} goto P4S1 --quote x`, 'powershell', 'PowerShell').decision, 'allow', 'не составная — общие правила, как раньше');
+    // список cli-вызовов верхнего уровня распознан на шаге 1 — как раньше
+    const list = run(`${cli} goto P4S1 --quote "Внести правку рабочего файла и продолжить" && ${cli} status`);
+    assert.equal(list.decision, 'allow');
+    assert.match(list.updatedCommand, /--session /);
+    // не cli, но и не составная — общие правила, как раньше
+    assert.equal(run(`${cli} goto P4S1 --quote x; ls`).decision, 'allow');
+    // текст «cli.mjs goto» в аргументе команды в цикле — не вызов
+    assert.equal(run('for f in a b; do echo "$f $(grep -c "rails/cli.mjs goto" "$f")"; done').decision, 'allow');
+    assert.equal(run('for i in 1; do node .workflow/src/rails/cli.mjs status; done').decision, 'allow', 'status в цикле не переход');
+  });
+});
+
+// Kilo на Windows: совет «/dev/null» для `2>$null` вёл в отказ PowerShell-разбора (C:\dev\null);
+// причина вложенного bash получала второй префикс («bash: bash: …»).
+test('decide (2026-10-01): Kilo с двумя диалектами — совет для $null исполним, без двойного префикса', () => {
+  withProject(({ root }) => {
+    const { sessionId } = makeState(root, 'P4S1');
+    const kilo = (command) => decide({ action: { tool: 'bash', kind: 'shell', command, shell: 'posix', dialects: ['posix', 'powershell'] }, ctx: { cwd: root, sessionId } });
+    const nul = kilo('find . -name "QA-168*" 2>$null | head -20');
+    assert.equal(nul.decision, 'deny');
+    assert.match(nul.reason, /bash: «\$null» — в bash это пустая переменная, а не устройство: команду выполнит bash или PowerShell.*перенаправь в 2>&1 или убери редирект/);
+    assert.doesNotMatch(nul.reason, /используй \/dev\/null/);
+    // совет ведёт в allow, а не в следующий отказ
+    assert.equal(kilo('find . -name "QA-168*" 2>&1 | head -20').decision, 'allow');
+    assert.equal(kilo('find . -name "QA-168*" 2>/dev/null | head -20').decision, 'deny', '/dev/null в PowerShell — путь от корня диска');
+    const nested = kilo(`bash -c 'mkdir -p "$SCRATCH_ZZ_UNSET"'`);
+    assert.equal(nested.decision, 'deny');
+    assert.match(nested.reason, /bash: \$SCRATCH_ZZ_UNSET не задана/);
+    assert.doesNotMatch(nested.reason, /bash: bash:/);
   });
 });

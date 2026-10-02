@@ -13,6 +13,8 @@ velocity_day = done_count / days_elapsed
 velocity_week = velocity_day * 7
 ```
 
+`days_elapsed` — от начала работы по плану до момента отчёта, не меньше 1 дня. Начало — самая ранняя запись «## История работы» среди тикетов плана (`start_source: first_run`), записей нет — дата создания плана, затем самая ранняя `created_at` тикета. Дата черновика плана раньше начала работы и занижает velocity.
+
 **Сглаживание** (при наличии предыдущего отчёта):
 
 ```
@@ -36,6 +38,8 @@ expected = days_since_start / total_planned_days * 100%
 delta = completion - expected
 ```
 
+`total_planned_days` — срок плана: `end_date − created_at` или `duration_days` из frontmatter плана (`horizon_source`). Срока нет — `expected` и `delta` не считаются, статус `n/a`, горизонт по умолчанию не подставляется: подставленный горизонт даёт ожидаемое выполнение, которого у плана нет.
+
 ### Пороги
 
 | Статус | Условие | Действие |
@@ -43,6 +47,7 @@ delta = completion - expected
 | ON_TRACK | delta >= 0 | Нет |
 | AT_RISK | -25% < delta < 0 | Указать в отчёте |
 | OFF_TRACK | delta <= -25% | Пометить CRITICAL в отчёте |
+| n/a | срока плана нет (`horizon_source: none`) | Написать в отчёте «plan health не рассчитан: у плана нет срока» |
 
 ### Пример
 
@@ -79,6 +84,7 @@ type_pct = count_by_type / total * 100%
 | Stale in-progress | in_progress с `updated_at` > 3 дней назад | MEDIUM |
 | Result without move | in_progress с непустым Result | MEDIUM |
 | Zero velocity | done_count = 0 за период | HIGH |
+| Review rework | тикетов плана хотя бы с одной строкой ❌ в «## Ревью» ≥ 25% от всех тикетов плана | MEDIUM |
 
 ### Пример
 

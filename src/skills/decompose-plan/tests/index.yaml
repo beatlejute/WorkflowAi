@@ -83,3 +83,28 @@ cases:
     origin_chg: [ad-hoc-2026-09-30-pulseproxy-qa-180]
     tags: [dod-transfer, check-record, regression-sweep, regression-guard]
     severity: high
+  - id: TC-DECOMPOSE-PLAN-015
+    file: cases/TC-DECOMPOSE-PLAN-015-split-task-criterion-text.yaml
+    origin_chg: [ad-hoc-2026-10-01-analysis]
+    tags: [dod-transfer, verbatim, split-task, regression-guard]
+    severity: high
+  - id: TC-DECOMPOSE-PLAN-016
+    file: cases/TC-DECOMPOSE-PLAN-016-time-fields-by-script.yaml
+    origin_chg: [ad-hoc-2026-10-01-analysis]
+    tags: [ticket-fields, time-fields, regression-guard]
+    severity: high
+  - id: TC-DECOMPOSE-PLAN-017
+    file: cases/TC-DECOMPOSE-PLAN-017-human-dod-no-extra-item.yaml
+    origin_chg: [ad-hoc-2026-10-01-analysis]
+    tags: [human-ticket, dod-transfer, regression-guard]
+    severity: medium
+  - id: TC-DECOMPOSE-PLAN-018
+    file: cases/TC-DECOMPOSE-PLAN-018-summary-direct-dependencies.yaml
+    origin_chg: [ad-hoc-2026-10-01-analysis]
+    tags: [paired-tickets, dependencies, regression-sweep, regression-guard]
+    severity: medium
+  - id: TC-DECOMPOSE-PLAN-019
+    file: cases/TC-DECOMPOSE-PLAN-019-workflow-dir-search.yaml
+    origin_chg: [ad-hoc-2026-10-01-analysis]
+    tags: [id-generation, glob-check, ignored-dir, regression-guard]
+    severity: medium

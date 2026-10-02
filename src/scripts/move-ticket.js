@@ -23,6 +23,7 @@ import {
   appendReviewEntry,
   replaceFileAtomicSync,
 } from "workflow-ai/lib/utils.mjs";
+import { stampStartedAt } from "workflow-ai/lib/operations/tickets.mjs";
 import { updateApprovalFilesHook as updateApprovalFilesHookCore } from "./move-ticket-core.js";
 
 const logger = {
@@ -186,6 +187,10 @@ async function moveTicket(ticketId, target) {
   // frontmatter (MCP get_ticket_stats, check-conditions, валидатор расширения) видели
   // фантомное состояние.
   frontmatter.status = target;
+
+  // Машинная метка начала работы — точка отсчёта гейта file_unchanged вместо
+  // created_at, который пишет модель (PulseProxy PLAN-020, 2026-09-30).
+  stampStartedAt(frontmatter, target, now);
 
   // Если переход в done, добавляем completed_at
   if (target === "done" && currentStatus !== "done") {

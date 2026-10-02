@@ -1,0 +1,44 @@
+id: TC-EXECUTE-TASK-028
+title: "Финальный ответ целиком — в терминальном узле, текстом сообщения, а не командой оболочки"
+origin:
+  chg: ["ad-hoc-2026-10-01-final-answer-terminal"]
+  incidents:
+    - "PulseProxy (2026-09-27 и 2026-09-30, claude-haiku): 8 stop_block «position: P7S1 не входит в terminal» — строку итога агент выводил на нетерминальном узле P7S1 (QA-164, QA-169, QA-171, QA-176 30.09); ещё 3 stop_block на P7S2 без блока RESULT."
+    - "PulseProxy IMPL-117 (2026-09-30, бесплатная модель через kilo): блок RESULT выведен командами echo на P7S2, финальный текст — без блока; повтор output-check тоже не прошёл, стадия ушла в error. Из 15 повторов output-check у исполнителя 4 — терминал без RESULT, все через echo или cat."
+  principle: "Действие «выведи финальный ответ» и литералы final_requires стоят в лейбле терминального узла, с оговоркой «текстом сообщения, не командой оболочки»; терминал rails.yaml — P7S2 (SKILL.md P7S2)."
+  backlog_sources:
+    - "D:/Dev/PulseProxy/.workflow/logs/rails-denials.jsonl"
+tags: [rails, output, regression-guard]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P7S2\["П7 ШАГ: Финальный ответ — в этом узле, текстом сообщения, а не командой оболочки'
+      reason: "Ответ даётся на терминале и текстом, а не echo."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P7S2\["[^"]*одна содержательная строка о фактически сделанном, последними строками блок ---RESULT--- со строкой status: default'
+      reason: "Обе обязательные части ответа — в лейбле терминала."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: '^(?![\s\S]*P7S1\[)'
+      reason: "Нетерминального узла с выводом ответа нет."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P7R2 --> P7S2'
+      reason: "Из правил вывода — прямо в терминал."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: 'terminal: \[P7S2\]'
+      reason: "Терминал гардов совпадает с узлом ответа."
+
+execution:
+  timeout_s: 60

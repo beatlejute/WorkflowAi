@@ -1,0 +1,64 @@
+id: TC-EXECUTE-TASK-024
+title: "Лейблы и проза ссылаются на файлы скила полным путём от корня проекта; прочитанные модули shared названы в Result"
+origin:
+  chg: ["ad-hoc-2026-10-01-skill-file-paths"]
+  incidents:
+    - "PulseProxy PLAN-020 (2026-09-30): algorithms/execution-strategy.md загрузили 2 сессии исполнителя из 16. Лейбл P0S2 давал путь без корня, агенты подставляли .workflow/src или .workflow (QA-165 прочитал SKILL.md и всё равно искал .workflow/src/algorithms/execution-strategy.md) — 10 ошибок «File does not exist»; Glob и find через ссылку каталога скила файл не нашли."
+    - "PulseProxy PLAN-020 (2026-09-30): индекс .workflow/shared/ прочитали 6 сессий из 16 — остальные 10 пропустили вторую половину P0S2, путь к индексу был указан от корня и существовал."
+  principle: "Лейбл видят в выводе goto без контекста SKILL.md: ссылка на собственный файл скила — путь от корня проекта .workflow/src/skills/execute-task/…; каноническая строка shared не меняется, а прочитанные модули shared (или их отсутствие) записываются в «Заметки» и проверяются GATE-3 (SKILL.md P0S2, P2S2, P4R1, P5S1, таблица «Справочники»; workflows/execute.md P6S3; algorithms/execution-strategy.md)."
+  backlog_sources:
+    - "D:/Dev/PulseProxy/.workflow/logs/rails-denials.jsonl"
+tags: [paths, lazy-loading, shared, regression-guard]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P0S2\["П0 ШАГ: Загрузи \.workflow/src/skills/execute-task/algorithms/execution-strategy\.md — ВСЕГДА'
+      reason: "Стратегия грузится по полному пути."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P0S2\["[^"]*Файлы скила читай по полному пути от корня проекта'
+      reason: "Правило для всех ссылок скила на свои файлы."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P2S2\["[^"]*\.workflow/src/skills/execute-task/knowledge/context-checkpoints\.md[^"]*\.workflow/src/skills/execute-task/knowledge/ticket-structure\.md'
+      reason: "Ленивые справочники — по полному пути."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4R1\["[^"]*\.workflow/src/skills/execute-task/algorithms/execution-strategy\.md'
+      reason: "Ссылка на таксономию соразмерности — по полному пути."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5S1\["[^"]*\.workflow/src/skills/execute-task/templates/result-template\.md'
+      reason: "Шаблон Result — по полному пути."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: '^(?![\s\S]*[^/](algorithms|knowledge|templates|workflows)/[\w-]+\.md)'
+      reason: "В ядре не осталось ссылки на файл скила без корня проекта."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: '^(?![\s\S]*[^/](algorithms|knowledge|templates|workflows)/[\w-]+\.md)'
+      reason: "Во фрагменте графа не осталось ссылки на файл скила без корня проекта."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5S1\["[^"]*В «Заметках» назови прочитанные модули \.workflow/shared/ или запиши, что их нет'
+      reason: "Шаг записи результата фиксирует чтение shared."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P6S3\["[^"]*заметки с прочитанными модулями \.workflow/shared/ или записью, что их нет'
+      reason: "GATE-3 проверяет запись о shared."
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: '- \[ \] В «Заметках» названы прочитанные модули `\.workflow/shared/` или записано, что их нет'
+      reason: "Чеклист стратегии согласован с гейтом."
+
+execution:
+  timeout_s: 60

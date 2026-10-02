@@ -1,0 +1,69 @@
+id: TC-EXECUTE-TASK-027
+title: "Граница scope: тест под смену контракта, чужое падение вне базы, красный тест тестирования, дефект вне scope"
+origin:
+  chg: ["ad-hoc-2026-10-01-scope-boundary"]
+  incidents:
+    - "PulseProxy PLAN-020 (2026-09-29/30): IMPL-113, IMPL-114, IMPL-122, IMPL-125 правили существующие тесты под новый контракт, IMPL-123 и IMPL-125 при чужом красном тесте завершились default с записью дефекта, QA-164 оставил тест красным как evidence дефекта — решения верные, но P3S2 («доведи до зелёного в файлах тикета») и GATE-3 («Scope не расширен», «зелёный или blocked») буквально их запрещали."
+    - "ListeningGlass PLAN-001 (2026-09-30): IMPL-005 около 7 минут выбирал между Scope Guard и рабочим результатом и расширил scope правкой build.js."
+  principle: "Случаи на границе scope решаются в шагах P3S1 и P3S2 и согласованы с GATE-3: тест, ожидание которого тикет меняет по описанию, входит в scope, ослаблять тест нельзя; дефект вне scope не чинится, а записывается (правило старше P3R8); чужое падение вне базы доказывается полным прогоном до правки или тем, что тест не подключает изменённые модули, без stash и checkout; новый тест тестирования, упавший на дефекте продукта, остаётся красным, красная запись check — blocked. Передачу требования другому тикету охраняет TC-EXECUTE-TASK-018 (workflows/execute.md P3S1, P3S2, P6S3; algorithms/execution-strategy.md)."
+  backlog_sources:
+    - "D:/Dev/ListeningGlass/.workflow/tickets/done/IMPL-005.md"
+    - "D:/Dev/PulseProxy/.workflow/tickets/archive/IMPL-125.md"
+tags: [scope, regression, regression-guard]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3S1\["[^"]*и тесты, ожидание которых тикет меняет по описанию[^"]*ослаблять, удалять и пропускать тест нельзя'
+      reason: "Случай 1: правка ожидания под смену контракта — в scope, ослабление теста — нет."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3S1\["[^"]*Дефект в файле вне scope здесь не чинится, и это старше P3R8'
+      reason: "Случай 4: старшинство над P3R8 названо явно."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3S1\["[^"]*запусти полную тестовую команду проекта и запиши список её падений — доказательство чужого падения для P3S2'
+      reason: "Доказательство чужого падения собирается до первой правки."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3S2\["[^"]*Не регрессия тикета: 1\) тест, ожидание которого тикет меняет'
+      reason: "Шаг регрессии знает о смене контракта."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3S2\["[^"]*2\) падение вне файлов базы, которое есть в списке полного прогона до правки или в тестовом файле, не подключающем изменённые модули'
+      reason: "Случай 2: чужое падение — только с доказательством."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3S2\["[^"]*пункт DoD, требующий зелёного прогона, не выполнен — blocked по P4R2'
+      reason: "Случай 2 не снимает пункт DoD, требующий зелёного прогона."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3S2\["[^"]*3\) новый тест тикета тестирования, упавший на дефекте продукта, — остаётся красным[^"]*красная запись check — blocked по P4R4'
+      reason: "Случай 3 в шаге регрессии: красный тест — evidence дефекта, красная запись check — blocked."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P6S3\["[^"]*красный без blocked — только от падений, которые P3S2 называет не регрессией \(чужое падение с доказательством, новый тест тикета тестирования на дефекте продукта\)'
+      reason: "GATE-3 допускает красный итог случаев 2 и 3."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P6S3\["[^"]*Scope не расширен — изменены только файлы из описания, DoD и context и тесты, ожидание которых тикет меняет по описанию \(P3S1\)'
+      reason: "GATE-3 не запрещает случай 1."
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: '- \[ \] Scope не расширен — изменены только файлы из описания, DoD и context и тесты, ожидание которых тикет меняет по описанию \(узел P3S1\)'
+      reason: "Чеклист стратегии согласован с гейтом."
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: 'красный без blocked — только от падений, которые узел P3S2 называет не регрессией \(чужое падение с доказательством, новый тест тикета тестирования на дефекте продукта\)'
+      reason: "Чеклист стратегии называет случаи 2 и 3."
+
+execution:
+  timeout_s: 60

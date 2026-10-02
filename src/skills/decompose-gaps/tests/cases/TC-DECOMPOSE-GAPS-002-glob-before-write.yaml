@@ -13,7 +13,7 @@ severity: medium
 scenario:
   system_prompt_file: "../../SKILL.md"
   extra_instructions: |
-    Создай тикет FIX-010 по gap'у. На диске уже существует tickets/ready/FIX-010.md.
+    Создай тикет по gap'у. Скрипт выдачи ID (node .workflow/src/scripts/get-next-id.js --prefix FIX --dir tickets) уже вызван и вернул id: FIX-010, но на диске уже существует tickets/ready/FIX-010.md.
 
 assertions:
   deterministic:

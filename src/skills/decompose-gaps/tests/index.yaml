@@ -68,3 +68,18 @@ cases:
     origin_chg: ["ad-hoc-2026-09-30"]
     tags: [scope-check, recheck, supersedes, check-record, regression-guard]
     severity: high
+  - id: TC-DECOMPOSE-GAPS-012
+    file: cases/TC-DECOMPOSE-GAPS-012-ticket-id-from-script.yaml
+    origin_chg: [ad-hoc-2026-10-01-analysis]
+    tags: [id-generation, script-usage, glob-check, ignored-dir, regression-guard]
+    severity: high
+  - id: TC-DECOMPOSE-GAPS-013
+    file: cases/TC-DECOMPOSE-GAPS-013-no-gap-in-scope-skips-creation.yaml
+    origin_chg: [ad-hoc-2026-10-01-analysis]
+    tags: [rails, graph, scope-check, regression-guard]
+    severity: medium
+  - id: TC-DECOMPOSE-GAPS-014
+    file: cases/TC-DECOMPOSE-GAPS-014-time-fields-by-script.yaml
+    origin_chg: [ad-hoc-2026-10-01-analysis]
+    tags: [ticket-fields, time-fields, regression-guard]
+    severity: high

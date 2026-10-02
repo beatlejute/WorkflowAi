@@ -3,11 +3,31 @@ import { replaceFileAtomicSync } from './utils.mjs';
 
 const HISTORY_HEADER_4COL = '| Дата/время | Скил | Агент | Статус |';
 const HISTORY_SEP_4COL = '|------------|------|-------|--------|';
+// Пятая колонка появляется в таблице с первой строкой, у которой есть изменённые файлы
+// (запуск со сбоем, runner.mjs _auditAgentRun). Строки без файлов остаются в четыре
+// ячейки: недостающую ячейку таблица Markdown показывает пустой, а статус остаётся в
+// своей ячейке — его читают по имени колонки (calc-metrics.js скила create-report) и по
+// значению (шаг P1S2 скила execute-task: error, timeout, network_error).
+const HISTORY_HEADER_5COL = '| Дата/время | Скил | Агент | Статус | Изменённые файлы |';
+const HISTORY_SEP_5COL = '|------------|------|-------|--------|------------------|';
 
 function escapeCell(value) {
   return String(value ?? '').replace(/\|/g, '\\|');
 }
 
+// Ячейка «Изменённые файлы»: пути в обратных кавычках через запятую; путей больше, чем
+// передано (`files_total`), — хвост «… ещё N».
+function filesCell(files, total) {
+  const listed = files.map((file) => `\`${file}\``).join(', ');
+  const rest = Number.isInteger(total) && total > files.length ? total - files.length : 0;
+  return rest > 0 ? `${listed}, … ещё ${rest}` : listed;
+}
+
+/**
+ * Строка запуска агента в «## История работы» тикета. `entry` — `timestamp`, `skill`,
+ * `agent`, `status` и необязательные `files` (изменённые файлы запуска, пути от корня
+ * проекта) с `files_total` (их полное число, если `files` — только начало списка).
+ */
 export function appendAgentRun(ticketPath, entry) {
   if (!ticketPath || !entry) {
     return { ok: false, code: 'INVALID_INPUT' };
@@ -16,6 +36,10 @@ export function appendAgentRun(ticketPath, entry) {
   if (!timestamp || !skill || !agent || !status) {
     return { ok: false, code: 'INVALID_ENTRY' };
   }
+  const files = Array.isArray(entry.files) ? entry.files.filter((file) => typeof file === 'string' && file) : [];
+  const withFiles = files.length > 0;
+  const header = withFiles ? HISTORY_HEADER_5COL : HISTORY_HEADER_4COL;
+  const separator = withFiles ? HISTORY_SEP_5COL : HISTORY_SEP_4COL;
 
   let content;
   try {
@@ -24,7 +48,8 @@ export function appendAgentRun(ticketPath, entry) {
     return { ok: false, code: 'READ_ERROR', error: err.message };
   }
 
-  const newRow = `| ${escapeCell(timestamp)} | ${escapeCell(skill)} | ${escapeCell(agent)} | ${escapeCell(status)} |`;
+  const rowCells = [timestamp, skill, agent, status, ...(withFiles ? [filesCell(files, entry.files_total)] : [])];
+  const newRow = `| ${rowCells.map(escapeCell).join(' | ')} |`;
   const sectionRegex = /(^|\n)## История работы\s*\n([\s\S]*?)(?=\n## |\n*$)/;
   const match = content.match(sectionRegex);
 
@@ -32,7 +57,7 @@ export function appendAgentRun(ticketPath, entry) {
   if (!match) {
     // No section — append new section at end of file
     const trailing = content.endsWith('\n') ? '' : '\n';
-    updated = `${content}${trailing}\n## История работы\n\n${HISTORY_HEADER_4COL}\n${HISTORY_SEP_4COL}\n${newRow}\n`;
+    updated = `${content}${trailing}\n## История работы\n\n${header}\n${separator}\n${newRow}\n`;
   } else {
     const sectionBody = match[2];
     const lines = sectionBody.split('\n');
@@ -40,7 +65,7 @@ export function appendAgentRun(ticketPath, entry) {
     const headerIdx = lines.findIndex(l => /^\s*\|.*\|/.test(l) && !/^\s*\|[\s\-|]+\|\s*$/.test(l));
     if (headerIdx === -1) {
       // Section exists but no table — create table fresh
-      updated = content.replace(sectionRegex, `$1## История работы\n\n${HISTORY_HEADER_4COL}\n${HISTORY_SEP_4COL}\n${newRow}\n`);
+      updated = content.replace(sectionRegex, `$1## История работы\n\n${header}\n${separator}\n${newRow}\n`);
     } else {
       const headerLine = lines[headerIdx];
       const headerCols = headerLine.split('|').filter(c => c.trim() !== '').length;
@@ -62,6 +87,15 @@ export function appendAgentRun(ticketPath, entry) {
           if (cells.length === 3) {
             lines[i] = `| ${cells[0]} | ${cells[1]} | ${cells[2]} | unknown |`;
           }
+        }
+      }
+
+      // Первая строка с изменёнными файлами — заголовок в пять колонок. Заголовок другой
+      // ширины (не три и не четыре колонки) не трогается.
+      if (withFiles && (needMigration || headerCols === 4)) {
+        lines[headerIdx] = HISTORY_HEADER_5COL;
+        if (sepIdx < lines.length && /^\s*\|[\s\-|]+\|\s*$/.test(lines[sepIdx])) {
+          lines[sepIdx] = HISTORY_SEP_5COL;
         }
       }
 
@@ -108,11 +142,14 @@ export function parseAgentHistory(content) {
     if (cells.length === 3) {
       cells.push('unknown');
     }
-    if (cells.length !== 4) {
+    if (cells.length !== 4 && cells.length !== 5) {
       console.warn('Invalid row: ' + row);
       return;
     }
-    result.push({ timestamp: cells[0], skill: cells[1], agent: cells[2], status: cells[3] });
+    const run = { timestamp: cells[0], skill: cells[1], agent: cells[2], status: cells[3] };
+    // Пятая ячейка — изменённые файлы запуска со сбоем (appendAgentRun), как записаны.
+    if (cells.length === 5) run.files = cells[4];
+    result.push(run);
   });
   return result;
 }

@@ -14,7 +14,13 @@
  * таймауту или неполная проверка отправляет тикет в blocked/ с причиной в
  * `blocked_reason` (PLAN-002, задача 18). Туда же — любая проверка `check`, в том
  * числе регрессионная, которую исполнитель отклонит или которой нет исполняемого
- * файла на машине: она красная всегда.
+ * файла на машине: она красная всегда. Предупреждения гейта (путь поиска `git grep`
+ * под .gitignore) печатаются строкой [WARN] и перенос не останавливают.
+ *
+ * Пустые, неразбираемые и будущие created_at и updated_at получают текущее время
+ * (stampTimeFields, lib/operations/tickets.mjs), валидное прошлое не меняется: тикеты
+ * доработки и тикеты плана после обхода check-atomicity-limit не проходят стадию
+ * verify-atomicity с --activate, которая ставит эти метки.
  *
  * Выводит результат:
  *   ---RESULT---
@@ -30,6 +36,7 @@ import path from 'path';
 import YAML from 'workflow-ai/lib/js-yaml.mjs';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { parseFrontmatter, serializeFrontmatter, replaceFileAtomicSync } from 'workflow-ai/lib/utils.mjs';
+import { stampTimeFields } from 'workflow-ai/lib/operations/tickets.mjs';
 import { dodStartProblems, isDodFormat2 } from '../lib/check-runner.mjs';
 
 // Корень проекта
@@ -74,7 +81,9 @@ async function moveToReady(ticketId) {
     console.log(`[INFO] ${ticketId}: type is 'human' (выполняется человеком через manual-gate)`);
   } else if (isDodFormat2(frontmatter)) {
     // Гейт — dodStartProblems (lib/check-runner.mjs); его же зовёт автор тикета через check-ticket-dod.js.
-    const problems = await dodStartProblems({ body, projectRoot: PROJECT_DIR });
+    const warnings = [];
+    const problems = await dodStartProblems({ body, projectRoot: PROJECT_DIR, warnings });
+    for (const warning of warnings) console.log(`[WARN] ${ticketId}: ${warning}`);
     if (problems.length > 0) {
       // blocked_reason снимают move-ticket.js и operations/tickets.mjs при выходе из blocked/.
       frontmatter.blocked_reason = problems.join('; ');
@@ -83,7 +92,13 @@ async function moveToReady(ticketId) {
     }
   }
 
-  frontmatter.updated_at = new Date().toISOString();
+  const now = new Date().toISOString();
+  // created_at от модели (полночь из будущего, пустая строка шаблона) — не метка времени:
+  // от неё считают длительность отчёты и порядок выбора следующей задачи.
+  if (stampTimeFields(frontmatter, now).includes('created_at')) {
+    console.log(`[INFO] ${ticketId}: created_at → ${now} (метка была пустой, неразбираемой или в будущем)`);
+  }
+  frontmatter.updated_at = now;
 
   const newContent = serializeFrontmatter(frontmatter) + body;
   const targetPath = path.join(targetDir, `${ticketId}.md`);

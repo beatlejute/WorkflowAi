@@ -41,8 +41,8 @@ assertions:
       reason: "Пре-валидация занятости — отдельный пункт непосредственно перед пунктом сохранения файла."
     - kind: skill_contains
       file: "workflows/decompose.md"
-      pattern: "Glob[^\\n]{0,20}\\.workflow/tickets/\\*\\*/\\{TYPE\\}-\\{NNN\\}\\.md"
-      reason: "Пре-валидация ищет занятость по всем папкам tickets/ (**), а не только в backlog/."
+      pattern: "Glob по маске \\*\\*/\\{TYPE\\}-\\{NNN\\}\\.md с корнем поиска \\.workflow/tickets/"
+      reason: "Пре-валидация ищет занятость по всем папкам tickets/ (**), а не только в backlog/, и корень поиска — внутри .workflow/tickets/, а не корень проекта: каталог .workflow в .gitignore, поиск части агентов от корня его не видит."
     - kind: skill_contains
       file: "workflows/decompose.md"
       pattern: "Есть совпадение\\*\\*[^\\n]{0,30}СТОП"

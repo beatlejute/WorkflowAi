@@ -1,0 +1,45 @@
+id: TC-DECOMPOSE-PLAN-016
+title: "Декомпозитор не заполняет поля времени тикета — их ставит скрипт стадии проверки атомарности"
+origin:
+  chg: ["ad-hoc-2026-10-01-analysis"]
+  incidents:
+    - "PulseProxy PLAN-020 (decompose-plan claude-sonnet 2026-09-29 18:56–19:16Z): у всех 36 тикетов created_at «2026-09-30T00:00:00Z» — полночь местной даты (UTC+5) с суффиксом Z, на 4 ч 44 мин в будущем. Узел P10S14 велел «заполни шаблон», в шаблоне пример `2026-02-28T12:00:00Z`, источника времени нет. Гейт file_unchanged (verify-artifacts resolveWorkStartBaseline) отбросил метку и взял updated_at, который переписывается при каждом повторе: 7 ложных отказов (IMPL-113 ×2, IMPL-121 ×2, IMPL-120 ×3), 7 платных перезапусков около 73 мин (4 из них попутно исправили реальные дефекты, чистая потеря — 3 запуска, около 28 мин), IMPL-120 переставил ключи I18nKey ради нового mtime. У 5 из 36 тикетов completed_at раньше created_at."
+    - "ListeningGlass PLAN-001 (2026-09-29): у 25 из 26 тикетов created_at «2026-09-29T18:00:00+03:00» — одна выдуманная метка на весь план, время цикла в метриках занижено на 6 ч 19 мин."
+  principle: "Поля времени тикета (created_at, updated_at, completed_at) модель не заполняет и не выдумывает: у неё нет часов, а метка становится точкой отсчёта гейта изменённых файлов и метрик (workflows/decompose.md узел P10S14). У тикетов плана пустые, неразбираемые и будущие created_at и updated_at заменяет машинным временем scripts/verify-atomicity.js в запуске стадией (флаг --activate), при любом итоге проверки; самопроверка агента без флага файлы не пишет. База гейта file_unchanged без отката на updated_at — вне скила."
+  backlog_sources:
+    - "D:/Dev/PulseProxy/.workflow/tickets/archive/IMPL-120.md"
+    - "D:/Dev/ListeningGlass/.workflow/tickets/done/IMPL-001.md"
+tags: [ticket-fields, time-fields, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S14\["[^"]*Поля времени \(created_at, updated_at, completed_at\) не заполняй и значения не выдумывай'
+      reason: "Узел создания тикета запрещает модели писать поля времени."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S14\["[^"]*их ставит скрипт пайплайна по часам машины, а метка модели становится точкой отсчёта проверки изменённых файлов'
+      reason: "Причина правила названа: метка модели — база гейта file_unchanged и метрик."
+    - kind: skill_contains
+      file: "scripts/verify-atomicity.js"
+      pattern: 'const timeFieldsStamped = activate \? stampTicketTimes\(tickets, new Date\(\)\.toISOString\(\)\) : 0;\s+const results = tickets\.map\(checkTicket\);'
+      reason: "Машинную метку ставит только запуск стадией пайплайна, до проверок и при любом их итоге; самопроверка агента файлы не пишет."
+    - kind: skill_contains
+      file: "scripts/verify-atomicity.js"
+      pattern: "const TIME_FIELDS = \\['created_at', 'updated_at'\\];"
+      reason: "Штампуются оба поля, которые читает гейт file_unchanged."
+    - kind: skill_contains
+      file: "scripts/verify-atomicity.js"
+      pattern: 'if \(isMachineTime\(raw, nowMs\)\) continue;'
+      reason: "Валидная прошлая метка не переписывается: повторная декомпозиция сохраняет время первого запуска."
+
+execution:
+  timeout_s: 60

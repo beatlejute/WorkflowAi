@@ -44,8 +44,8 @@ assertions:
       reason: "Permission-гейт контекста — Q-узел с ребром на blocked (инцидент DOCS-18)."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "P7E1 --> P7R1 --> P7R2 --> P7S1 --> P7S2"
-      reason: "Вывод результата — последний этап графа, терминал P7S2."
+      pattern: "P7E1 --> P7R1 --> P7R2 --> P7S2"
+      reason: "Вывод результата — последний этап графа, терминал P7S2: строка итога и блок RESULT — один узел (2026-10-01, stop_block на нетерминальном P7S1)."
 
     # 2. Фрагмент — выполнение и гейты
     - kind: skill_contains

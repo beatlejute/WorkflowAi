@@ -1,0 +1,77 @@
+id: TC-EXECUTE-TASK-020
+title: "Пункт prose или visual тикета dod_format: 2 подкрепляется тем, что видит модель ревью: ссылки путь:строка и «Изменённые файлы» в обратных кавычках, а не текст Result"
+origin:
+  chg: ["ad-hoc-2026-10-01-review-evidence"]
+  incidents:
+    - "PulseProxy PLAN-020 (2026-09-29/30): после отказа ревью по пункту prose IMPL-113 (попытка 1) не менял код, а дописал обоснование в Result; IMPL-119 (попытка 2) вставил в Result дифф и вывод команд, а строки «Изменённых файлов» без обратных кавычек дали changed_files [] и пустой дифф в evidence. IMPL-119 дописал в строку пункта prose «(не применимо: … задачей 17 плана PLAN-020)» — форма из P4S1 ушла в вопрос модели ревью."
+    - "ListeningGlass PLAN-001 (2026-09-29/30): IMPL-002 (итерация 3) и IMPL-010 (итерация 15:14) выясняли состав пакета ревью чтением скриптов и JSON evidence; IMPL-010 положил замеры в Result, IMPL-006 дописывал ссылки после проверки. Раздела Result в данных модели ревью нет."
+  principle: "Модель ревью тикета dod_format: 2 видит вывод check, дифф файлов из «Изменённых файлов» (строки «- `путь`»), фрагменты по ссылкам путь:строка из Result и изображения, но не текст Result; пункт подкрепляется ссылкой, на отказ отвечают правкой кода или теста; пункт prose пометкой в строке не закрывается. Для тикетов без dod_format: 2 обоснование одной строкой в Result сохраняется — их проверяет агент по файлу тикета (SKILL.md P4R1, P2S2, P5S1; workflows/execute.md P3R2; knowledge/review-evidence.md; templates/result-template.md)."
+  backlog_sources:
+    - "D:/Dev/PulseProxy/.workflow/tickets/archive/IMPL-119.md"
+    - "D:/Dev/ListeningGlass/.workflow/tickets/done/IMPL-010.md"
+tags: [review-evidence, dod-format-2, result-template, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4R1\["[^"]*Пункт с записью prose или visual тикета с dod_format: 2 судит модель ревью'
+      reason: "Утверждение о данных ревью ограничено тикетами dod_format: 2."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4R1\["[^"]*строк «Изменённых файлов» с путём в обратных кавычках, фрагменты исходника по ссылкам путь:строка из раздела «Результат выполнения»[^"]*а текст Result — нет'
+      reason: "Узел называет, из чего модель собирает факты и чего не видит."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4R1\["[^"]*на отказ ревью отвечай правкой кода или теста либо новой ссылкой, а не абзацем в Result'
+      reason: "Ответ на отказ ревью — факт в данных модели, а не текст."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4R1\["[^"]*свойство, недоказуемое записью DoD, — status: blocked без файлов вне scope'
+      reason: "Недоказуемое свойство пункта — blocked, а не вспомогательные файлы."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4R1\["[^"]*в Result явно обоснуй одной строкой, почему структурной проверки недостаточно, и подкрепи критерий ссылкой путь:строка'
+      reason: "Для всех тикетов — строка-обоснование и ссылка: агент ревью тикетов без dod_format: 2 читает Result."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P2S2\["[^"]*dod_format: 2[^"]*prose или visual[^"]*knowledge/review-evidence\.md'
+      reason: "Справочник о данных ревью загружается по триггеру."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5S1\["[^"]*по одному на строку в форме «- `путь/к/файлу` — что изменено», путь от корня проекта в обратных кавычках'
+      reason: "Шаг записи результата задаёт формат строки, который разбирает пайплайн."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: '\| `\.workflow/src/skills/execute-task/knowledge/review-evidence\.md` \|'
+      reason: "Справочник есть в таблице загрузки."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R2\["[^"]*пункт с записью prose, недоказуемый в тикете: его текст — вопрос модели ревью, в строку ничего не дописывай'
+      reason: "Пометка «не применимо» у пункта prose попадает в вопрос модели ревью."
+    - kind: skill_contains
+      file: "templates/result-template.md"
+      pattern: '\n- `\{путь/от/корня/проекта\}` — \{что изменено\}'
+      reason: "Шаблон даёт строку с путём в обратных кавычках."
+    - kind: skill_contains
+      file: "templates/result-template.md"
+      pattern: '^(?![\s\S]*\n- \{путь/к/файлу\})'
+      reason: "Строка без обратных кавычек в шаблон не возвращается."
+    - kind: skill_contains
+      file: "knowledge/review-evidence.md"
+      pattern: '## Чего модель не видит[\s\S]*Текста раздела «Результат выполнения»'
+      reason: "Справочник перечисляет, чего модель ревью не видит."
+    - kind: skill_contains
+      file: "knowledge/review-evidence.md"
+      pattern: 'Тикет без `dod_format: 2` проверяет агент ревью по файлу тикета'
+      reason: "Справочник ограничен тикетами dod_format: 2."
+
+execution:
+  timeout_s: 60

@@ -478,23 +478,14 @@ export function loadTicketMovementRules(configPath) {
   return YAML.load(content);
 }
 
-/**
- * Проверяет все тикеты плана и закрывает его если все выполнены.
- *
- * @param {string} workflowDir - Путь к директории .workflow/
- * @param {string} planId - Нормализованный ID плана (например "PLAN-002")
- * @returns {{ closed: boolean, reason: string, total: number, done: number }}
- */
-export function checkAndClosePlan(workflowDir, planId) {
-  if (!workflowDir || !planId) {
-    return { closed: false, reason: 'Missing workflowDir or planId', total: 0, done: 0 };
-  }
+const PLAN_TICKET_DIRS = ['backlog', 'ready', 'in-progress', 'blocked', 'review', 'done', 'archive'];
+// Колонки готового тикета — те же, что у check-conditions.js (FINISHED_COLUMNS).
+const PLAN_FINISHED_DIRS = new Set(['done', 'archive']);
 
-  const ticketsDir = path.join(workflowDir, 'tickets');
-  const allDirNames = ['backlog', 'ready', 'in-progress', 'blocked', 'review', 'done', 'archive'];
-  const allTickets = [];
-
-  for (const dirName of allDirNames) {
+/** Тикеты плана во всех колонках: id, колонка, frontmatter и тело; нечитаемые пропускаются. */
+function readPlanTickets(ticketsDir, planId) {
+  const tickets = [];
+  for (const dirName of PLAN_TICKET_DIRS) {
     const dir = path.join(ticketsDir, dirName);
     if (!fs.existsSync(dir)) continue;
 
@@ -503,23 +494,228 @@ export function checkAndClosePlan(workflowDir, planId) {
     for (const file of files) {
       try {
         const content = fs.readFileSync(path.join(dir, file), 'utf8');
-        const { frontmatter } = parseFrontmatter(content);
+        const { frontmatter, body } = parseFrontmatter(content);
         if (normalizePlanId(frontmatter.parent_plan) === planId) {
-          allTickets.push({ id: frontmatter.id || file.replace('.md', ''), dir: dirName });
+          tickets.push({ id: String(frontmatter.id || file.replace('.md', '')), dir: dirName, frontmatter, body });
         }
       } catch (_) { /* skip malformed */ }
     }
   }
+  return tickets;
+}
+
+// Первая непустая строка значения поля: строка журнала и RESULT однострочные.
+function firstNonEmptyLine(value) {
+  if (value === undefined || value === null) return '';
+  return String(value).split(/\r?\n/).map(l => l.trim()).find(Boolean) || '';
+}
+
+/**
+ * Сколько тикетов у плана и сколько из них готово (done/ или archive/) — без записи.
+ *
+ * Выбор задачи план не закрывает: 2026-09-30 PulseProxy PLAN-020 pick-next-task через
+ * checkAndClosePlan закрыл план и архивировал 36 тикетов в 17:33, до create-report и
+ * analyze-report, в обход гейта критериев успеха разбора; complete-plan после разбора
+ * ответил not_ready «Plan already completed». Закрывает только complete-plan.
+ *
+ * @param {string} workflowDir - Путь к директории .workflow/
+ * @param {string} planId - Нормализованный ID плана (например "PLAN-002")
+ * @returns {{ total: number, done: number }}
+ */
+export function countPlanTickets(workflowDir, planId) {
+  if (!workflowDir || !planId) return { total: 0, done: 0 };
+  const tickets = readPlanTickets(path.join(workflowDir, 'tickets'), planId);
+  return { total: tickets.length, done: tickets.filter(t => PLAN_FINISHED_DIRS.has(t.dir)).length };
+}
+
+// Секция результата — как в verify-artifacts.js: «Результат выполнения» перед «Результат».
+const RESULT_SECTION_RE = /^##\s*(Результат выполнения|Результат|Result)\s*$/m;
+// Разделы, которые пишут после исполнителя: ими секция результата кончается. Свой H2 внутри
+// результата исполнитель ставит сам — 2026-10-01 ревью: workflowAiVsCode QA-54 записал пять
+// дефектов под «### Найденные дефекты» после «## Отчёт о тестировании» внутри результата, и
+// граница «до следующего H2» их не видела. Замер 2026-10-01 по тикетам проектов D:\Dev:
+// из 806 с результатом за ним «## Ревью» или «## История…» у 741, свой H2 перед ними — у 32.
+const AFTER_RESULT_RE = /^##\s*(Ревью|Review|История|History)/m;
+const DEFECTS_HEADING_RE = /^###\s*Найденные дефекты[ \t]*$/gm;
+// Запись «дефектов нет» — первая строка подраздела без выделения, маркера пункта и точки в
+// конце. 2026-10-01 ревью: PulseProxy QA-004 «Дефектов не обнаружено.» (и следом
+// задокументированные поведения) и QA-031 «**Дефектов не обнаружено.**» читались дефектом.
+const NO_DEFECTS_RE = /^(?:нет|нет дефектов|дефектов нет|(?:дефектов )?не (?:обнаружено|найдено|выявлено)|дефекты не (?:обнаружены|найдены|выявлены)|0|—|–|-)$/i;
+
+/**
+ * Текст, в котором строки блоков кода (``` и ~~~) заменены пробелами той же длины:
+ * «## …» или «# …» в коде — не заголовок, а смещения совпадают с исходным текстом, и запись
+ * дефекта берётся из него вместе с кодом (2026-10-01 ревью: строка «## …» в блоке кода
+ * обрывала секцию результата, «# …» — подраздел).
+ */
+function maskFencedCode(text) {
+  let open = null;
+  return text.split('\n').map(line => {
+    const fence = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (open) {
+      if (fence && fence[1][0] === open[0] && fence[1].length >= open.length) open = null;
+      return ' '.repeat(line.length);
+    }
+    if (fence) {
+      open = fence[1];
+      return ' '.repeat(line.length);
+    }
+    return line;
+  }).join('\n');
+}
+
+function isNoDefectsRecord(text) {
+  const first = text.split(/\r?\n/).map(l => l.trim()).find(Boolean);
+  if (first === undefined) return true;
+  const plain = first.replace(/[*_`]/g, '').trim().replace(/^[-+]\s+/, '').replace(/[.!]+$/, '').trim();
+  return NO_DEFECTS_RE.test(plain);
+}
+
+/**
+ * Записанный тикетом дефект: текст подраздела «### Найденные дефекты» секции результата
+ * без HTML-комментариев шаблона — или null: подраздела нет, он пуст или его первая строка —
+ * «дефектов нет» (NO_DEFECTS_RE; регистр, выделение, точка в конце и маркер пункта списка
+ * не важны). Подраздел пишет исполнитель; у тикетов до него подраздела нет, и они проходят.
+ *
+ * Секция результата — от «## Результат выполнения» до «## Ревью» или «## История…»
+ * (AFTER_RESULT_RE), с H2 исполнителя внутри. Подразделов несколько (повторное выполнение
+ * дописало результат) — решает последний. Подраздел — до следующего заголовка уровня 1–3;
+ * заголовки внутри блоков кода не считаются.
+ */
+export function recordedDefects(body) {
+  const text = body || '';
+  const masked = maskFencedCode(text);
+  const section = RESULT_SECTION_RE.exec(masked);
+  if (!section) return null;
+  const start = section.index + section[0].length;
+  const end = masked.slice(start).search(AFTER_RESULT_RE);
+  const region = masked.slice(start, end === -1 ? masked.length : start + end);
+  let heading = null;
+  for (const m of region.matchAll(DEFECTS_HEADING_RE)) heading = m;
+  if (!heading) return null;
+  const from = start + heading.index + heading[0].length;
+  const next = masked.slice(from).search(/^#{1,3}\s/m);
+  const to = next === -1 ? start + region.length : Math.min(from + next, start + region.length);
+  const record = text.slice(from, to).replace(/<!--[\s\S]*?-->/g, '').trim();
+  if (record === '' || isNoDefectsRecord(record)) return null;
+  return record;
+}
+
+// Время из frontmatter в мс, как timeOf в check-conditions.js: js-yaml читает ISO без
+// кавычек как Date, в кавычках — как строку; нет поля или не дата — NaN.
+function planTimeOf(value) {
+  return value === undefined || value === null || value === '' ? NaN : new Date(value).getTime();
+}
+
+// Когда тикет сделал свою работу — как recheckTimeOf в check-conditions.js: закрытый заменой
+// (`superseded_by`) несёт время заменившей проверки в `rechecked_at`, его `completed_at` —
+// только время закрытия.
+function workTimeOf(fm) {
+  if (fm.superseded_by !== undefined && fm.superseded_by !== null) return planTimeOf(fm.rechecked_at);
+  return planTimeOf(fm.completed_at);
+}
+
+// Список id из frontmatter, как idList в check-conditions.js: массив непустых строк, иначе
+// пусто (поле испорчено — ссылкой не считается, как и там).
+function planIdList(value) {
+  if (!Array.isArray(value) || value.some(v => typeof v !== 'string' || v.trim() === '')) return [];
+  return value.map(v => v.trim());
+}
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Текст «## Описание» тикета без HTML-комментариев шаблона.
+function descriptionOf(body) {
+  const heading = /^##\s*Описание\s*$/m.exec(body || '');
+  if (!heading) return '';
+  const rest = body.slice(heading.index + heading[0].length);
+  const next = rest.search(/^##\s/m);
+  return (next === -1 ? rest : rest.slice(0, next)).replace(/<!--[\s\S]*?-->/g, '');
+}
+
+/**
+ * Называет ли тикет `fixer` тикет `target` своим исправлением: `target` в `unblocks` или
+ * `supersedes` (поля check-conditions.js) либо «исправление дефекта <ID>» в заголовке или
+ * «## Описание».
+ */
+function namesAsFixed(fixer, target) {
+  const fm = fixer.frontmatter;
+  if (planIdList(fm.unblocks).includes(target.id) || planIdList(fm.supersedes).includes(target.id)) return true;
+  const mention = new RegExp(`исправление дефекта\\s+${escapeRegExp(target.id)}(?![\\w-])`, 'i');
+  return mention.test(String(fm.title || '')) || mention.test(descriptionOf(fixer.body));
+}
+
+/**
+ * Готовые тикеты плана с записанным дефектом, который ничем не исправлен: [{ id, defects }].
+ *
+ * Дефект исправлен, если другой готовый (done/, archive/) тикет того же плана называет
+ * записавший его тикет (namesAsFixed) и сделал свою работу позже (workTimeOf строго больше
+ * `completed_at` записавшего). Время не сверить — не исправлен, как в check-conditions.js.
+ * Тикет, закрытый заменой (`superseded_by`), исправлен своей заменой без сверки времени:
+ * его запись заменила проверка, которая называет его в `supersedes` и которую
+ * check-conditions.js уже сверил с исправлениями; её собственный подраздел проверяется
+ * здесь же как у любого тикета.
+ *
+ * Зачем: тикет тестирования по канону закрывается в done/ и с найденным дефектом, а дефект
+ * остаётся строкой его результата. 2026-09-30 PulseProxy: QA-175 записал дефект подсказки
+ * geoBlockedTitle, три разбора его пропустили, PLAN-020 закрыт с дефектом в коде.
+ */
+function unfixedDefects(tickets) {
+  const finished = tickets.filter(t => PLAN_FINISHED_DIRS.has(t.dir));
+  const unfixed = [];
+  for (const target of finished) {
+    const defects = recordedDefects(target.body);
+    if (defects === null) continue;
+    const supersededBy = target.frontmatter.superseded_by;
+    const fixed = finished.some(fixer => {
+      if (fixer === target || fixer.id === target.id || !namesAsFixed(fixer, target)) return false;
+      if (supersededBy !== undefined && supersededBy !== null && String(supersededBy) === fixer.id
+        && planIdList(fixer.frontmatter.supersedes).includes(target.id)) return true;
+      return workTimeOf(fixer.frontmatter) > planTimeOf(target.frontmatter.completed_at);
+    });
+    if (!fixed) unfixed.push({ id: target.id, defects });
+  }
+  return unfixed;
+}
+
+/**
+ * Закрывает план, если все его тикеты готовы и ни один не записал неисправленный дефект.
+ * Единственный вызывающий в боевом коде — complete-plan.js (стадия после разбора).
+ *
+ * Исходы: `closed: true` — план закрыт, done-тикеты в archive/; `already: true` — план уже
+ * закрыт, ничего не меняется; `defects` — список неисправленных дефектов (unfixedDefects),
+ * план не тронут; не все тикеты готовы — `blocked`: тикеты плана в blocked/ с первой строкой
+ * `blocked_reason` (может быть пуст); иначе — причина, почему не закрыт.
+ *
+ * @param {string} workflowDir - Путь к директории .workflow/
+ * @param {string} planId - Нормализованный ID плана (например "PLAN-002")
+ * @returns {{ closed: boolean, reason: string, total: number, done: number, already?: boolean, defects?: Array<{id: string, defects: string}>, blocked?: Array<{id: string, reason: string}>, archived?: string[] }}
+ */
+export function checkAndClosePlan(workflowDir, planId) {
+  if (!workflowDir || !planId) {
+    return { closed: false, reason: 'Missing workflowDir or planId', total: 0, done: 0 };
+  }
+
+  const ticketsDir = path.join(workflowDir, 'tickets');
+  const allTickets = readPlanTickets(ticketsDir, planId);
 
   const total = allTickets.length;
-  const done = allTickets.filter(t => t.dir === 'done' || t.dir === 'archive').length;
+  const done = allTickets.filter(t => PLAN_FINISHED_DIRS.has(t.dir)).length;
 
   if (total === 0) {
     return { closed: false, reason: 'No tickets found for plan', total, done };
   }
 
   if (done < total) {
-    return { closed: false, reason: `${done}/${total} tickets done`, total, done };
+    // Тикет в blocked/ сам не сдвинется, и стадия закрытия — последний шанс его назвать:
+    // 2026-10-01 ревью — после разбора completed прогон шёл complete-plan → not_ready
+    // «N-1/N tickets done» → end на каждом запуске, без строки о том, что держит план.
+    const blocked = allTickets
+      .filter(t => t.dir === 'blocked')
+      .map(t => ({ id: t.id, reason: firstNonEmptyLine(t.frontmatter.blocked_reason) }));
+    return { closed: false, reason: `${done}/${total} tickets done`, total, done, blocked };
   }
 
   const plansDir = path.join(workflowDir, 'plans', 'current');
@@ -539,8 +735,15 @@ export function checkAndClosePlan(workflowDir, planId) {
   const planContent = fs.readFileSync(planPath, 'utf8');
   const { frontmatter, body } = parseFrontmatter(planContent);
 
+  // Повторный вызов на закрытом плане — ничего не меняет. Прежний ответ not_ready читался
+  // как «план не готов» (2026-09-30 PulseProxy PLAN-020, см. countPlanTickets).
   if (frontmatter.status === 'completed') {
-    return { closed: false, reason: 'Plan already completed', total, done };
+    return { closed: false, already: true, reason: 'Plan already completed', total, done };
+  }
+
+  const defects = unfixedDefects(allTickets);
+  if (defects.length > 0) {
+    return { closed: false, reason: `Unfixed defects: ${defects.map(d => d.id).join(', ')}`, total, done, defects };
   }
 
   frontmatter.status = 'completed';

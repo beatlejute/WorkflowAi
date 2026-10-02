@@ -8,6 +8,13 @@
  * проверка, зелёная с `regression: true`, красная, `denied`, неполная запись,
  * пункты prose и visual, тикет без `dod_format` и human-тикет.
  *
+ * Предупреждение гейта — путь поиска `git grep` под .gitignore — печатается строкой
+ * [WARN] и тикет не блокирует. Пустой, неразбираемый и будущий created_at при переносе в
+ * ready/ и в blocked/ получает машинное время (stampTimeFields), валидное прошлое не
+ * меняется: тикеты доработки и тикеты плана после обхода check-atomicity-limit стадию
+ * verify-atomicity с --activate не проходят (PulseProxy PLAN-020, 2026-09-29: created_at
+ * «2026-09-30T00:00:00Z» у всех 36 тикетов).
+ *
  * Скрипт вычисляет каталоги доски от корня проекта при импорте, поэтому он
  * запускается дочерним процессом с cwd во временном корне и промптом раннера —
  * как в FIX-70-002 (src/tests/regression-human-ticket-ready-loop.test.mjs).
@@ -21,7 +28,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { parseFrontmatter } from 'workflow-ai/lib/utils.mjs';
@@ -54,7 +61,7 @@ const ran = name => fs.existsSync(path.join(root, name));
 /**
  * Тикет в backlog/. dod — строки секции DoD как есть (пункты и вложенные проверки).
  */
-function putTicket(id, { dodFormat = 2, type = 'impl', dod, history = [] }) {
+function putTicket(id, { dodFormat = 2, type = 'impl', dod, history = [], extraFrontmatter = [] }) {
   const frontmatter = [
     '---',
     `id: "${id}"`,
@@ -62,6 +69,7 @@ function putTicket(id, { dodFormat = 2, type = 'impl', dod, history = [] }) {
     `type: ${type}`,
     ...(dodFormat === null ? [] : [`dod_format: ${dodFormat}`]),
     'updated_at: "2026-09-26T08:00:00.000Z"',
+    ...extraFrontmatter,
     '---'
   ];
   const text = [
@@ -335,4 +343,57 @@ test('human-тикет с dod_format: 2 — как раньше: в ready/ бе�
   assert.equal(columnOf('HUMAN-GATE'), 'ready', output);
   assert.doesNotMatch(output, /check_green_before_start/);
   assert.equal(ran('human-ran'), false, 'проверка human-тикета запускалась');
+});
+
+// ---------------------------------------------------------------------------
+// Предупреждения гейта и метки времени
+// ---------------------------------------------------------------------------
+
+test('путь git grep под .gitignore — [WARN] с номером пункта, тикет в ready/ без blocked_reason', () => {
+  execFileSync('git', ['init', '-q', root]);
+  fs.writeFileSync(path.join(root, '.gitignore'), 'research/\n', 'utf8');
+  fs.mkdirSync(path.join(root, 'research'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'research', 'notes.md'), 'needle\n', 'utf8');
+  putTicket('IMPL-IGNORED', {
+    dod: ['- [ ] Заметка записана', checkLine('git grep -q --untracked "needle" -- research/notes.md')]
+  });
+
+  const { output, result } = moveToReady(['IMPL-IGNORED']);
+
+  assert.equal(columnOf('IMPL-IGNORED'), 'ready', output);
+  assert.match(output, /\[WARN\] IMPL-IGNORED: check_path_ignored: пункт 1 \(research\/notes\.md — под \.gitignore/);
+  assert.equal(frontmatterOf('IMPL-IGNORED').blocked_reason, undefined);
+  assert.equal(result.moved, '1');
+});
+
+test('created_at нет или в будущем — машинное время при переносе в ready/ и в blocked/; валидное прошлое не меняется', () => {
+  putTicket('TIME-EMPTY', { dod: ['- [ ] Критерий', checkLine(RED)] });
+  putTicket('TIME-FUTURE', { dod: ['- [ ] Критерий', checkLine(GREEN)], extraFrontmatter: ['created_at: "2099-01-01T00:00:00Z"'] });
+  putTicket('TIME-TEMPLATE', {
+    type: 'human',
+    dod: ['- [ ] Критерий'],
+    extraFrontmatter: ['created_at: ""                   # ISO 8601: 2026-02-28T12:00:00Z']
+  });
+  putTicket('TIME-PAST', {
+    dod: ['- [ ] Критерий', checkLine(RED)],
+    extraFrontmatter: ['created_at: "2026-09-20T10:00:00+03:00"']
+  });
+  putTicket('TIME-PAST-DATE', { dod: ['- [ ] Критерий', checkLine(RED)], extraFrontmatter: ['created_at: 2026-09-20T07:00:00Z'] });
+  const t0 = Date.now();
+
+  const { output } = moveToReady(['TIME-EMPTY', 'TIME-FUTURE', 'TIME-TEMPLATE', 'TIME-PAST', 'TIME-PAST-DATE']);
+
+  assert.equal(columnOf('TIME-EMPTY'), 'ready', output);
+  assert.equal(columnOf('TIME-FUTURE'), 'blocked', output);
+  assert.equal(columnOf('TIME-TEMPLATE'), 'ready', output);
+  for (const id of ['TIME-EMPTY', 'TIME-FUTURE', 'TIME-TEMPLATE']) {
+    const fm = frontmatterOf(id);
+    const ms = new Date(fm.created_at).getTime();
+    assert.ok(ms >= t0 - 1000 && ms <= Date.now(), `${id}: created_at=${fm.created_at}`);
+    assert.equal(new Date(fm.updated_at).getTime(), ms, `${id}: created_at и updated_at — одно время переноса`);
+    assert.ok(output.includes(`[INFO] ${id}: created_at → `), `${id}: нет строки о метке`);
+  }
+  assert.equal(new Date(frontmatterOf('TIME-PAST').created_at).toISOString(), '2026-09-20T07:00:00.000Z');
+  assert.equal(new Date(frontmatterOf('TIME-PAST-DATE').created_at).toISOString(), '2026-09-20T07:00:00.000Z');
+  assert.doesNotMatch(output, /TIME-PAST(-DATE)?: created_at →/);
 });

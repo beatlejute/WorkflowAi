@@ -16,7 +16,10 @@
  *     `auth: { kilo_oauth: true }` (`~/.local/share/kilo/auth.json`, поле
  *     `kilo.access`). В вывод и в сообщения ошибок ключ не попадает.
  *   - Прокси — первая заданная из HTTPS_PROXY, https_proxy, HTTP_PROXY, http_proxy,
- *     ALL_PROXY, all_proxy; только для `https:`-адресов, туннелем CONNECT.
+ *     ALL_PROXY, all_proxy; только для `https:`-адресов, туннелем CONNECT. Установка
+ *     TCP до прокси и его ответ на CONNECT — до 30 с (PROXY_CONNECT_TIMEOUT_MS,
+ *     `options.proxyConnectTimeoutMs` — другой срок, для тестов); `timeout_s` попытки
+ *     сильнее — истёк раньше, класс `timeout`.
  *   - `http:` — только для адреса своей машины (localhost, 127.0.0.1, ::1): ключ
  *     уходит в заголовке, и опечатка в схеме отправила бы его открытым текстом.
  *   - Повторы — при HTTP 429, 500, 502, 503 и сетевой ошибке, до двух, с паузами
@@ -287,8 +290,18 @@ function excerpt(body, secret) {
  * Туннель CONNECT через HTTP-прокси; возвращает сокет до `host:port`. Запрос
  * CONNECT кладётся в `handles.connect`, чтобы таймаут и прерывание могли его снять.
  * Прокси без порта — 8080, как у скрипта исследования (perplexity-research.js).
+ *
+ * Срок `connectTimeoutMs` (PROXY_CONNECT_TIMEOUT_MS) — своим таймером от создания
+ * запроса до ответа на CONNECT, включая установку TCP. Прежде срок ставил
+ * req.setTimeout(30 000), и объявленные 30 с не действовали: CONNECT шёл через
+ * http.globalAgent, у которого в Node ≥ 19 timeout 5000, сокет взводил эти 5 с сразу, и
+ * их событие `timeout` вызывало обработчик req.setTimeout — подключение к прокси
+ * обрывалось через 5 с; а без таймаута сокета req.setTimeout до установки TCP не
+ * взводится вовсе. 2026-09-29/30 PulseProxy: 12 сбоев селектора jev-place и 6 сбоев jev
+ * по ~21,3 с — ровно 3 × 5 с и паузы 2 и 4 с (Node v25.5.0, проверено запуском). Запрос
+ * идёт своим соединением (`agent: false`) — без чужого таймаута сокета.
  */
-function openProxyTunnel(proxyUrl, host, port, handles) {
+function openProxyTunnel(proxyUrl, host, port, handles, connectTimeoutMs = PROXY_CONNECT_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     let proxy;
     try {
@@ -311,12 +324,24 @@ function openProxyTunnel(proxyUrl, host, port, handles) {
       method: 'CONNECT',
       path: authority,
       headers,
+      agent: false,
     });
     handles.connect = req;
-    req.setTimeout(PROXY_CONNECT_TIMEOUT_MS, () => {
-      req.destroy(Object.assign(new Error('proxy connection timeout'), { network: true }));
-    });
+    // Текст сообщения различает фазы: TCP до прокси не установлен (прокси недоступен) или
+    // прокси принял соединение и не ответил на CONNECT. Префикс «proxy connection timeout»
+    // прежний — по нему ищут сбой в логах прогонов.
+    let tcpConnected = false;
+    req.once('socket', (socket) => socket.once('connect', () => { tcpConnected = true; }));
+    const seconds = connectTimeoutMs / 1000;
+    const timer = setTimeout(() => {
+      const phase = tcpConnected ? `no CONNECT response in ${seconds}s` : `TCP connection not established in ${seconds}s`;
+      req.destroy(Object.assign(new Error(`proxy connection timeout: ${phase}`), { network: true }));
+    }, connectTimeoutMs);
+    // Запрос снят прерыванием или таймаутом попытки (requestOnce, destroyAll): таймер не
+    // должен держать процесс до своего срока.
+    req.once('close', () => clearTimeout(timer));
     req.on('connect', (res, socket) => {
+      clearTimeout(timer);
       if (res.statusCode !== 200) {
         socket.destroy();
         reject(Object.assign(new Error(`proxy CONNECT failed: ${res.statusCode}`), { network: true }));
@@ -324,7 +349,10 @@ function openProxyTunnel(proxyUrl, host, port, handles) {
       }
       resolve(socket);
     });
-    req.on('error', (err) => reject(Object.assign(err, { network: true })));
+    req.on('error', (err) => {
+      clearTimeout(timer);
+      reject(Object.assign(err, { network: true }));
+    });
     req.end();
   });
 }
@@ -335,7 +363,7 @@ function openProxyTunnel(proxyUrl, host, port, handles) {
  * `timedOut: true`, прерывание — с `aborted: true`. Таймаут и прерывание снимают
  * запрос, CONNECT и сокет туннеля.
  */
-async function requestOnce(target, headers, payload, { timeoutMs, env, platform, signal, ca }) {
+async function requestOnce(target, headers, payload, { timeoutMs, env, platform, signal, ca, proxyConnectTimeoutMs }) {
   // Уже прерванный signal: запрос не отправляется вовсе (без этого `attempt` ниже
   // синхронно доходил до req.end — платный вызов уходил, ответ выбрасывался).
   if (signal?.aborted) throw Object.assign(new Error('request aborted'), { aborted: true });
@@ -371,7 +399,7 @@ async function requestOnce(target, headers, payload, { timeoutMs, env, platform,
   });
 
   const attempt = (async () => {
-    if (proxyUrl && !settled) handles.socket = await openProxyTunnel(proxyUrl, hostname, port, handles);
+    if (proxyUrl && !settled) handles.socket = await openProxyTunnel(proxyUrl, hostname, port, handles, proxyConnectTimeoutMs);
     // Таймаут или прерывание уже сработали — запрос не создаётся.
     if (settled) {
       handles.socket?.destroy();
@@ -454,7 +482,9 @@ async function postJson(agent, body, options) {
   const timeoutMs = Math.round((agent.timeout_s || DEFAULT_TIMEOUT_S) * 1000);
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` };
   const payload = JSON.stringify(body);
-  const transport = { timeoutMs, env, platform, signal: options.signal, ca: options.ca };
+  const transport = {
+    timeoutMs, env, platform, signal: options.signal, ca: options.ca, proxyConnectTimeoutMs: options.proxyConnectTimeoutMs,
+  };
 
   const pause = async (attempt) => {
     try {
@@ -464,6 +494,9 @@ async function postJson(agent, body, options) {
     }
   };
 
+  // Число попыток — в тексте ошибки: поле `attempts` до журнала не доходит, в логе прогона
+  // остаётся только сообщение (обёртки печатают его в RESULT, раннер — в MODEL_IO), и
+  // «три попытки по 5 с» 2026-09-30 восстанавливали по коду и таймингам.
   for (let attempt = 0; ; attempt++) {
     const canRetry = attempt < retryDelays.length;
     let response;
@@ -472,13 +505,17 @@ async function postJson(agent, body, options) {
     } catch (err) {
       if (err.aborted) throw abortedError(attempt + 1);
       if (err.timedOut) {
-        throw new ModelClientError('timeout', `Model request timed out after ${timeoutMs / 1000}s`, { attempts: attempt + 1 });
+        throw new ModelClientError('timeout',
+          `Model request timed out after ${timeoutMs / 1000}s (attempt ${attempt + 1} of ${retryDelays.length + 1})`,
+          { attempts: attempt + 1 });
       }
       if (canRetry) {
         await pause(attempt);
         continue;
       }
-      throw new ModelClientError('network', `Model request failed: ${scrub(err.message, key)}`, { attempts: attempt + 1 });
+      throw new ModelClientError('network',
+        `Model request failed after ${attempt + 1} attempt${attempt === 0 ? '' : 's'}: ${scrub(err.message, key)}`,
+        { attempts: attempt + 1 });
     }
 
     const { status, body: text } = response;
@@ -515,15 +552,16 @@ function httpStatusError(status, text, key, attempts) {
  * @param {object} [options]
  * @param {string|null} [options.key] - ключ для `Authorization: Bearer` (resolveModelKey); null — без заголовка
  * @param {number} [options.timeoutS] - таймаут запроса, с
+ * @param {number} [options.proxyConnectTimeoutMs] - срок подключения к прокси (PROXY_CONNECT_TIMEOUT_MS)
  * @returns {Promise<any>} разобранный JSON ответа 2xx; ошибка — ModelClientError
  */
-export async function getJson(url, { key = null, timeoutS = DEFAULT_TIMEOUT_S, env = process.env, platform = process.platform, signal, ca } = {}) {
+export async function getJson(url, { key = null, timeoutS = DEFAULT_TIMEOUT_S, env = process.env, platform = process.platform, signal, ca, proxyConnectTimeoutMs } = {}) {
   const target = assertModelUrl(url);
   const timeoutMs = Math.round(timeoutS * 1000);
   const headers = { Accept: 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) };
   let response;
   try {
-    response = await requestOnce(target, headers, null, { timeoutMs, env, platform, signal, ca });
+    response = await requestOnce(target, headers, null, { timeoutMs, env, platform, signal, ca, proxyConnectTimeoutMs });
   } catch (err) {
     if (err.aborted) throw abortedError(1);
     if (err.timedOut) throw new ModelClientError('timeout', `Request timed out after ${timeoutMs / 1000}s`, { attempts: 1 });

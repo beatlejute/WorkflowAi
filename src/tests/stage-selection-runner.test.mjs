@@ -742,3 +742,116 @@ describe('журнал и строки лога', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Сбой селектора: один повтор, затем старт по complexity тикета (2026-09-30)
+// ---------------------------------------------------------------------------
+
+// Селектор с памятью вызовов: <журнал> <план.json>. План — список ответов по номеру вызова
+// (exit1 — выход 1; auth — status: error с error_class auth; число — required_level;
+// unknown — ответ без уровня); вызовы сверх плана — последний ответ.
+const FLAKY_SELECTOR_SCRIPT = `
+const fs = require('fs');
+const [log, planFile] = process.argv.slice(2);
+let input = '';
+process.stdin.on('data', (c) => { input += c; });
+process.stdin.on('end', () => {
+  fs.appendFileSync(log, JSON.stringify({ prompt: input }) + '\\n');
+  const calls = fs.readFileSync(log, 'utf8').split('\\n').filter(Boolean).length;
+  const plan = JSON.parse(fs.readFileSync(planFile, 'utf8'));
+  const step = plan[Math.min(calls, plan.length) - 1];
+  const out = (lines) => process.stdout.write(['---RESULT---', ...lines, '---RESULT---'].join('\\n') + '\\n');
+  if (step === 'exit1') process.exit(1);
+  if (step === 'auth') { out(['status: error', 'error_class: auth', 'error: key rejected']); process.exit(1); }
+  if (step === 'unknown') { out(['cost_usd: 0.0002']); return; }
+  out(['cost_usd: 0.0002', 'required_level: ' + step]);
+});
+`;
+
+describe('сбой селектора — один повтор, затем старт по complexity тикета', () => {
+  // Уровни: a 1, m-1 2 (бесплатный), b 3, m-2 4 (бесплатный), c 5.
+  const LADDER = [mem(M1), mem(M2), 'agent-a', 'agent-b', 'agent-c'];
+  // R = 5: платный уровня 5, затем хвост ниже R по убыванию уровня.
+  const FROM_TOP = ['agent-c', mem(M2), 'agent-b', mem(M1), 'agent-a'];
+  // R = 3: бесплатный ≥ 3, платные ≥ 3 по возрастанию, хвост ниже R.
+  const FROM_MIDDLE = [mem(M2), 'agent-b', 'agent-c', mem(M1), 'agent-a'];
+
+  const setComplexity = (env, complexity) => {
+    const file = path.join(env.root, '.workflow', 'tickets', 'in-progress', 'IMPL-1.md');
+    const text = fs.readFileSync(file, 'utf8');
+    fs.writeFileSync(file, text.replace('type: impl\n', `type: impl\ncomplexity: ${complexity}\n`));
+  };
+  const run = async (plan, { complexity = null, arrange } = {}) => {
+    const env = makeEnv();
+    if (complexity) setComplexity(env, complexity);
+    const planFile = path.join(env.root, '..', 'selector-plan.json');
+    fs.writeFileSync(planFile, JSON.stringify(plan));
+    arrange?.(env);
+    const flaky = { command: 'node', args: [path.join(env.root, '..', 'tools', 'flaky.cjs'), env.selectorLog, planFile], prompt_stdin: true, capabilities: ['text'] };
+    fs.writeFileSync(flaky.args[0], FLAKY_SELECTOR_SCRIPT);
+    const prepared = await prepare(env, agentsOf(env, { extra: { 'sel-stage': flaky } }));
+    const out = await prepared.attempt(stageOf(env));
+    return {
+      env, ...prepared, ...out,
+      calls: readJsonLines(env.selectorLog).length,
+      select: lines(prepared.logger, 'SELECT_MODEL'),
+      fallbackLines: lines(prepared.logger, 'SELECT_FALLBACK'),
+    };
+  };
+
+  test('сбой, повтор ответил — уровень селектора, селектор не помечен нездоровым', async () => {
+    const r = await run(['exit1', 3], { complexity: 'complex' });
+    assert.equal(r.calls, 2, 'селектор вызван дважды: сбой и повтор');
+    assert.match(r.select[0], / required_level=3 .* fallback=none /);
+    assert.deepEqual(r.runs, FROM_MIDDLE);
+    assert.deepEqual(r.fallbackLines, []);
+    assert.ok(r.logger.lines.some((l) => /^WARN selector "sel-stage" failed \(fallback=error class=-\) — one retry$/.test(l)), r.logger.lines.join('\n'));
+    assert.equal(healthEntry(r.env.root, 'sel-stage'), null);
+    assert.equal(r.events[0].selection, 'selector');
+  });
+
+  test('сбой и после повтора — старт по complexity: complex — верхний уровень, medium — средний, simple — нижний', async () => {
+    for (const [complexity, order, level] of [['complex', FROM_TOP, 5], ['medium', FROM_MIDDLE, 3], ['simple', LADDER, 1]]) {
+      const r = await run(['exit1'], { complexity });
+      assert.equal(r.calls, 2, `${complexity}: повтор ровно один`);
+      assert.deepEqual(r.runs, order, complexity);
+      assert.match(r.select[0], / required_level=- .* fallback=error /);
+      assert.deepEqual(r.fallbackLines, [
+        `INFO SELECT_FALLBACK stage="execute-task" fallback=error complexity=${complexity} level=${level} available=1,2,3,4,5`,
+      ]);
+      assert.equal(r.events[0].selection, 'ladder');
+      assert.equal(r.events[0].required_level, null);
+    }
+  });
+
+  test('тикет без complexity — прежняя лестница с нижнего уровня', async () => {
+    const r = await run(['exit1']);
+    assert.equal(r.calls, 2);
+    assert.deepEqual(r.runs, LADDER);
+    assert.deepEqual(r.fallbackLines, []);
+  });
+
+  test('auth — без повтора (тот же ключ не пройдёт), старт по complexity', async () => {
+    const r = await run(['auth', 3], { complexity: 'complex' });
+    assert.equal(r.calls, 1, 'повтор при auth не нужен');
+    assert.deepEqual(r.runs, FROM_TOP);
+    assert.equal(healthEntry(r.env.root, 'sel-stage')?.class, 'misconfigured');
+  });
+
+  test('unknown_level — без повтора, старт по complexity', async () => {
+    const r = await run(['unknown', 3], { complexity: 'complex' });
+    assert.equal(r.calls, 1);
+    assert.match(r.select[0], / fallback=unknown_level /);
+    assert.deepEqual(r.runs, FROM_TOP);
+  });
+
+  test('селектор нездоров после прошлого сбоя — не вызывается, старт по complexity', async () => {
+    const r = await run([3], {
+      complexity: 'complex',
+      arrange: (env) => markUnhealthy(env.root, 'sel-stage', { class: 'transient', ttl: '5m', rule_id: 't', reason: 't' }),
+    });
+    assert.equal(r.calls, 0);
+    assert.match(r.select[0], / fallback=skipped:unhealthy /);
+    assert.deepEqual(r.runs, FROM_TOP);
+  });
+});

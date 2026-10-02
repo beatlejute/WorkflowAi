@@ -43,6 +43,10 @@ deny_shell:
   - pattern: "\\bgit\\s+(commit|add|push|checkout|switch|restore|reset|rebase|merge|stash)\\b"
     reason: "Декомпозитор не делает git-операций — коммит на стороне человека"
     incident: "SKILL.md P0R1: границы компетенции"
+  # Самопроверка узла P10G7 — тот же скрипт без флага; с --activate он переводит план в active.
+  - pattern: "\\bverify-atomicity(\\.js)?\\b[^\\n]*\\s--activate\\b"
+    reason: "План активирует только стадия пайплайна (узел P0R9) — самопроверка P10G7 запускается без флага --activate"
+    incident: "PulseProxy PLAN-020 2026-09-29: самопроверка перевела план в active внутри стадии"
 
 deny_mcp:
   - move_ticket

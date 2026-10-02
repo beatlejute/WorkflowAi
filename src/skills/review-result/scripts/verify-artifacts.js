@@ -31,7 +31,9 @@
  *                 пройдены; в `## Ревью` дописана строка passed с путём evidence
  *     passed    — dod_format: 2, проверки зелёные, есть пункты prose или visual
  *                 для модели стадии ревью
- *     legacy    — тикет без dod_format: 2, прежние гейты пройдены
+ *     legacy    — тикет без dod_format: 2 или тикет executor_type: human с файлами
+ *                 проекта вне своей области (humanScopeEntries), прежние гейты
+ *                 пройдены — ревью агентом со скилом
  *     failed    — провален прежний гейт или пункт DoD (проверка не прошла,
  *                 у visual нет изображений, запись проверки не разобрана)
  *   dod_completion_pct: <int>
@@ -42,7 +44,12 @@
  *   required_capabilities: <JSON-массив одной строкой — способности агента стадии
  *                           ревью: text, при пункте visual ещё multimodal>
  *   dod_check_total, dod_check_failed, dod_prose_total, dod_visual_total: <int>
- *   warnings: <предупреждения через "; "; строка печатается только при наличии>
+ *   У любого тикета:
+ *   warnings: <предупреждения через "; "; строка печатается только при наличии>,
+ *     среди них human_out_of_scope_changes=<пути через запятую> — файлы тикета
+ *     executor_type: human вне его области — и «путь не в формате … не проверен: …»
+ *     у тикета без dod_format: 2 (у dod_format: 2 такой путь называют diff_error
+ *     evidence и предупреждение «дифф неполон»)
  *   ---RESULT---
  */
 
@@ -59,12 +66,44 @@ const TICKETS_DIR = path.join(PROJECT_DIR, '.workflow', 'tickets');
 const REVIEW_STATUSES = ['review', 'in-progress', 'done', 'ready', 'backlog'];
 const SCRIPT_AGENT_ID = 'script-verify-artifacts';
 
+// Формат строки «Изменённых файлов» — «- `путь` — что изменено»: пути в обратных кавычках
+// подряд в начале строки-буллета, через запятую, «и» или пробел. Пути в тексте описания
+// после них файлами не считаются — там стоят команды и прежние места перенесённых файлов.
+const LEADING_PATHS = /^(?:`[^`]+`(?:\s*(?:,|и|and)\s*|\s+)?)+/;
+const QUOTED = /`([^`]+)`/g;
+// Слово похоже на путь: абсолютный путь Windows, сегменты через `/` или `\` либо имя с
+// расширением. Суффикс строк `:12` или `:12-20` снимается до проверки.
+const PATH_LIKE = /^(?:[A-Za-z]:[\\/]\S*|[\\/]?[\w.@~-]+(?:[\\/][\w.@~-]*)+|[\w.-]+\.[A-Za-z][A-Za-z0-9]{0,9})$/;
+// Сокращения вида «e.g» и «i.e» — не имена файлов.
+const ABBREVIATION = /^[a-z]\.[a-z]$/i;
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+function looksLikePath(word) {
+  return !URL_SCHEME.test(word) && !ABBREVIATION.test(word) && PATH_LIKE.test(word);
+}
+
+/**
+ * Пути «Изменённых файлов» (`files`) и пути строк не в формате (`unparsed`): первое слово
+ * строки-буллета, похожее на путь без обратных кавычек («- src/a.js — …»), либо, если его
+ * нет, первая цепочка путей в кавычках дальше по строке («- Создан: `a`», «- **Изменён:**
+ * `b`»). Путь из `unparsed` как файл не проверяется — в тексте описания так же стоят
+ * команды и прежние места файлов, — но вызывающий о нём предупреждает.
+ *
+ * HTML-комментарии снимаются до разбора, как у Summary в checkResultSection: пример
+ * пути из комментария шаблона тикета — не файл. 2026-09-29…30: пример из комментария
+ * провалил готовую работу как «файл не найден» и стоил лишней платной попытки; второй
+ * путь строки и путь без кавычек выпадали из проверки существования и из диффа ревью
+ * молча — ревью прошло по пустому диффу.
+ *
+ * @returns {{files: string[], unparsed: string[]}}
+ */
 function parseChangedFiles(body) {
   const files = [];
+  const unparsed = [];
   const changedFilesRegex = /^###\s*(?:Изменённые файлы|Changed files)\s*$/gm;
   const match = changedFilesRegex.exec(body);
 
-  if (!match) return files;
+  if (!match) return { files, unparsed };
 
   // Граница H3-секции — следующий H3 ИЛИ H2 (что встретится раньше),
   // иначе захватываем соседние подзаголовки вроде "### Время выполнения",
@@ -74,17 +113,34 @@ function parseChangedFiles(body) {
   const nextH2 = body.indexOf('\n## ', startIdx);
   const candidates = [nextH3, nextH2].filter((i) => i !== -1);
   const sectionEnd = candidates.length > 0 ? Math.min(...candidates) : body.length;
-  const sectionContent = body.substring(startIdx, sectionEnd);
+  const sectionContent = body.substring(startIdx, sectionEnd).replace(/<!--[\s\S]*?-->/g, '');
 
-  // Пути принимаем только из строк-буллетов ("- `path`" или "* `path`"):
+  // Пути принимаем только из строк-буллетов без отступа ("- `path`" или "* `path`"):
   // это страхует от ложных срабатываний на цитатах/командах в инлайн-коде.
-  const bulletFileRegex = /^[-*]\s+`([^`]+)`/gm;
-  let fileMatch;
-  while ((fileMatch = bulletFileRegex.exec(sectionContent)) !== null) {
-    files.push(stripLineSuffix(fileMatch[1]));
+  const bulletRegex = /^[-*][ \t]+(.*)$/gm;
+  let bullet;
+  while ((bullet = bulletRegex.exec(sectionContent)) !== null) {
+    const text = bullet[1].trim();
+    const lead = text.match(LEADING_PATHS);
+    if (lead) {
+      for (const [, filePath] of lead[0].matchAll(QUOTED)) files.push(stripLineSuffix(filePath));
+      continue;
+    }
+    const first = stripLineSuffix((text.split(/\s+/)[0] || '').replace(/[,;:.]+$/, ''));
+    if (looksLikePath(first)) {
+      unparsed.push(first);
+      continue;
+    }
+    const tick = text.indexOf('`');
+    const later = tick === -1 ? null : text.slice(tick).match(LEADING_PATHS);
+    if (!later) continue;
+    for (const [, token] of later[0].matchAll(QUOTED)) {
+      const candidate = stripLineSuffix(token);
+      if (looksLikePath(candidate)) unparsed.push(candidate);
+    }
   }
 
-  return files;
+  return { files, unparsed };
 }
 
 // Поддержка отраслевой нотации ссылок на код: `path:line`, `path:start-end`.
@@ -106,10 +162,15 @@ const CLOCK_SKEW_TOLERANCE_MS = 60 * 1000;
  * FIX-68: LLM-агенты регулярно пишут во frontmatter ЛОКАЛЬНОЕ время с суффиксом Z
  * (тикет реально создан в 17:31Z, а в created_at лежит "2026-08-04T22:30:00.000Z").
  * Метка «из будущего» делает unchanged=true для ЛЮБОГО свежего артефакта — verify
- * фейлится, и никакой touch не помогает. Поэтому:
- *   - created_at в будущем → метка битая, пробуем updated_at;
- *   - updated_at тоже в будущем (или отсутствует) → проверку unchanged НЕ применяем
- *     вовсе (пропускаем, а не фейлим — ложный fail хуже пропущенной проверки).
+ * фейлится, и никакой touch не помогает.
+ *
+ * Точка отсчёта — только started_at: его ставит скрипт при первом входе тикета в
+ * in-progress, и повторный вход его не меняет. created_at и updated_at пишет агент
+ * или каждое перемещение: PulseProxy PLAN-020 2026-09-30 — created_at полуночью у всех
+ * 36 тикетов, работа до полуночи объявлена «не изменённой», 7 ложных отказов и
+ * косметическая правка ради mtime. Нет started_at, он битый или в будущем —
+ * проверку unchanged НЕ применяем (пропускаем, а не фейлим — ложный fail хуже
+ * пропущенной проверки).
  *
  * @returns {{baseline: string|Date|null, source: string|null, warnings: string[]}}
  */
@@ -118,9 +179,12 @@ function resolveWorkStartBaseline(frontmatter, nowMs = Date.now()) {
   const cutoffMs = nowMs + CLOCK_SKEW_TOLERANCE_MS;
   const skip = { baseline: null, source: null, warnings };
 
-  for (const field of ['created_at', 'updated_at']) {
+  for (const field of ['started_at']) {
     const raw = frontmatter[field];
-    if (!raw) continue;
+    if (!raw) {
+      warnings.push(`${field} нет — тикет не входил в in-progress через скрипты пайплайна`);
+      continue;
+    }
 
     const ms = new Date(raw).getTime();
     if (Number.isNaN(ms)) {
@@ -221,6 +285,63 @@ function isBoardPath(filePath) {
   const fullPath = path.isAbsolute(filePath) ? filePath : path.join(PROJECT_DIR, filePath);
   const rel = path.relative(TICKETS_DIR, path.resolve(fullPath));
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
+ * Область тикета человека (`executor_type: human`): пути `context.files`, маски `visual`
+ * и аргументы после `--` в командах `check` пунктов DoD — то, что его проверки смотрят.
+ * Путь «Изменённых файлов» вне области — правка, которой проверки DoD не видят.
+ * 2026-09-30: два тикета человека несли правки сборки, фонового скрипта и тестов вне
+ * `context.files`, проверки DoD искали текст только в файле результата, и оба тикета
+ * ушли all_green в done без ревью диффа и прогона тестов.
+ */
+function humanScopeEntries(frontmatter, dodItems) {
+  const entries = Array.isArray(frontmatter.context?.files) ? frontmatter.context.files.map(String) : [];
+  for (const item of dodItems) {
+    if (item.kind === 'visual' && typeof item.mask === 'string') entries.push(item.mask);
+    if (item.kind !== 'check' || typeof item.command !== 'string') continue;
+    // Пути — после последнего `--`: `git grep -q "a -- b" -- file` смотрит только file.
+    const tail = item.command.match(/(?:^|.*\s)--\s+(.*)$/);
+    if (!tail) continue;
+    for (const token of tail[1].split(/\s+/)) {
+      const arg = token.replace(/^['"]|['"]$/g, '');
+      if (arg && !arg.startsWith('-')) entries.push(arg);
+    }
+  }
+  return entries;
+}
+
+// Путь от корня проекта через `/`: абсолютный путь внутри проекта приводится к нему.
+function normalizeScopePath(p) {
+  const raw = path.isAbsolute(String(p)) ? path.relative(PROJECT_DIR, String(p)) : String(p);
+  const normalized = raw.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '').replace(/\/+$/, '');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+/**
+ * Путь внутри области: совпадает с записью, лежит в каталоге записи или подходит под
+ * маску (`*` и `?` — внутри сегмента, `**` — через сегменты, а `**` с косой чертой
+ * после — ноль и больше каталогов). `.` и пустая запись областью не считаются: иначе
+ * проверка `-- .` покрыла бы весь репозиторий.
+ */
+function inHumanScope(filePath, entries) {
+  const file = normalizeScopePath(filePath);
+  return entries.some((entry) => {
+    const scope = normalizeScopePath(entry);
+    if (scope === '' || scope === '.') return false;
+    if (/[*?]/.test(scope)) {
+      const source = scope
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*\*\//g, '\u0001')
+        .replace(/\*\*/g, '\u0000')
+        .replace(/\*/g, '[^/]*')
+        .replace(/\?/g, '[^/]')
+        .replace(/\u0001/g, '(?:.*/)?')
+        .replace(/\u0000/g, '.*');
+      return new RegExp(`^${source}$`).test(file);
+    }
+    return file === scope || file.startsWith(`${scope}/`);
+  });
 }
 
 function parseDoDCompletion(body) {
@@ -693,10 +814,13 @@ function gitDiff(pathspecs, problems) {
  * изменённых, и в проекте, где тикеты хранятся в git, дифф принёс бы текст
  * Result — нынешний и прежней попытки из копии тикета в HEAD под другим
  * статусом. Что не собрано и почему — в diff_error (null — собрано всё) и в
- * предупреждении: модель отличит «дифф не собран» от «изменений нет».
+ * предупреждении: модель отличит «дифф не собран» от «изменений нет». Путь, записанный
+ * в «Изменённых файлах» не в формате строки (`unparsed`, parseChangedFiles), в дифф не
+ * идёт и тоже называется в diff_error: 2026-09-29 ревью прошло по пустому диффу, не
+ * зная, что файл тикета в нём просто не разобран.
  */
-function collectDiff(changedFiles, ticketPath, warnings) {
-  const problems = [];
+function collectDiff(changedFiles, ticketPath, warnings, unparsed = []) {
+  const problems = unparsed.map((file) => 'путь не в формате «- `путь` — …» в «Изменённых файлах»: ' + file);
   const files = changedFiles.filter((file) => {
     const inside = isInsideProject(path.resolve(PROJECT_DIR, file));
     if (!inside) problems.push(`не внутри корня проекта: ${file}`);
@@ -732,7 +856,7 @@ async function collectEvidence(result, ticketPath, attempt) {
     items: await collectDodItems(result.dod_items),
     source_refs: result.source_refs,
     changed_files: result.changed_files,
-    ...collectDiff(result.changed_files, ticketPath, result.warnings),
+    ...collectDiff(result.changed_files, ticketPath, result.warnings, result.unparsed_changed_files),
   };
 }
 
@@ -784,13 +908,12 @@ function verifyTicket(ticketPath) {
   const content = fs.readFileSync(ticketPath, 'utf8');
   const { frontmatter, body } = parseFrontmatter(content);
 
-  const filePaths = parseChangedFiles(body).filter((filePath) => !isBoardPath(filePath));
-  // Точка отсчёта для mtime — created_at: это стабильная метка, которая не
-  // перезаписывается при move-ticket / retry-циклах. updated_at мутирует на
-  // каждом перемещении (ready → in-progress → review → ready → …), поэтому
-  // в retry файлы, реально изменённые в ранней попытке, становятся формально
-  // «unchanged» относительно нового updated_at и тикет ложно блокируется.
-  // На updated_at откатываемся, только если created_at не прошёл валидацию
+  const changed = parseChangedFiles(body);
+  const filePaths = changed.files.filter((filePath) => !isBoardPath(filePath));
+  const unparsedPaths = changed.unparsed.filter((filePath) => !isBoardPath(filePath));
+  // Точка отсчёта для mtime — started_at: машинная метка первого входа в
+  // in-progress, retry-циклы её не меняют. updated_at мутирует на каждом
+  // перемещении, а created_at пишет агент — на них не откатываемся
   // (см. resolveWorkStartBaseline).
   const workStart = resolveWorkStartBaseline(frontmatter);
   const filesExist = checkFilesExist(filePaths, workStart.baseline);
@@ -804,6 +927,28 @@ function verifyTicket(ticketPath) {
   // Проверки пунктов DoD и ссылки Result нужны только evidence тикета нового формата.
   const dodFormat2 = isDodFormat2(frontmatter);
   const sourceGrounding = checkSourceGrounding(body, { dodFormat2 });
+  const dodItems = dodFormat2 ? parseDodChecks(body) : [];
+
+  const warnings = workStart.warnings;
+  // У тикета dod_format: 2 о таких путях говорят diff_error evidence (collectDiff) и
+  // предупреждение «дифф неполон»; у all_green его дифф не читает никто, и путь виден
+  // только в warnings.
+  if (unparsedPaths.length > 0 && !dodFormat2) {
+    warnings.push('«Изменённые файлы»: путь не в формате «- `путь` — …» не проверен: ' + unparsedPaths.join(', '));
+  }
+  // Путь не в формате строки входит в сравнение: иначе правку вне области прятало бы
+  // одно отсутствие кавычек. Путь вне корня проекта — артефакт, проверка которого
+  // человеку не положена (workflows/review.md, узел P4R2). Пустая область — любой файл
+  // вне её: лишнее ревью агентом безопаснее, чем правка без ревью.
+  const humanScope = frontmatter.executor_type === 'human' ? humanScopeEntries(frontmatter, dodItems) : null;
+  const humanOutOfScope = humanScope
+    ? [...new Set([...filePaths, ...unparsedPaths])].filter(
+      (filePath) => isInsideProject(path.resolve(PROJECT_DIR, filePath)) && !inHumanScope(filePath, humanScope)
+    )
+    : [];
+  if (humanOutOfScope.length > 0) {
+    warnings.push(`human_out_of_scope_changes=${humanOutOfScope.join(',')}`);
+  }
 
   return {
     ticket_id: frontmatter.id,
@@ -817,11 +962,13 @@ function verifyTicket(ticketPath) {
     assertions,
     source_grounding: sourceGrounding,
     work_start_source: workStart.source,
-    warnings: workStart.warnings,
+    warnings,
     changed_files: filePaths,
+    unparsed_changed_files: unparsedPaths,
+    human_out_of_scope: humanOutOfScope,
     required_capabilities: Array.isArray(frontmatter.required_capabilities) ? frontmatter.required_capabilities : [],
     dod_format_2: dodFormat2,
-    dod_items: dodFormat2 ? parseDodChecks(body) : [],
+    dod_items: dodItems,
     source_refs: dodFormat2 ? collectSourceRefs(body) : [],
   };
 }
@@ -927,8 +1074,12 @@ function formatVerdict(result, evidence) {
   let status;
   if (failReasons.length > 0) {
     status = 'failed';
-  } else if (!evidence) {
-    // Тикет без dod_format: 2 — прежний маршрут, ревью агентом со скилом.
+  } else if (!evidence || (result.human_out_of_scope || []).length > 0) {
+    // Тикет без dod_format: 2 — прежний маршрут, ревью агентом со скилом. Туда же тикет
+    // человека с файлами вне своей области (humanScopeEntries): правку продукта смотрит
+    // агент с инструментами — дифф, тесты (workflows/review.md, узел P4R2). Статус
+    // passed её бы не показал никому: у тикета из одних check вопросов к модели нет, и
+    // prepare-review.js закрывает стадию ревью по evidence без модели.
     status = 'legacy';
   } else if (evidence.items.every((item) => item.status === 'passed')) {
     status = 'all_green';

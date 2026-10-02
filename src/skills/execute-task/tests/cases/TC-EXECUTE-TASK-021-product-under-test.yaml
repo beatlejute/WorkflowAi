@@ -1,0 +1,97 @@
+id: TC-EXECUTE-TASK-021
+title: "Тикет тестирования: каждый случай — свой тест против продукта; копия кода, симуляция, тест без утверждения и литерал вместо измерения — заглушка; сбой на реальном пути — дефект"
+origin:
+  chg: ["ad-hoc-2026-10-01-product-under-test"]
+  incidents:
+    - "PulseProxy PLAN-020 (2026-09-30, claude-haiku): QA-168 — в pool-chain.test.ts нет ни FindProxyForURL, ни исполнения PAC, а «Заметки» пишут, что цепочка совпадает с PAC; QA-169 — «состав из PAC» проверен length > 0 и toBeDefined; QA-173 — title как expect.any(String); QA-174 — два теста с комментарием «verified by the fact…» вместо утверждения; QA-176 — три случая из 11 не сделаны, Result называет 12 тестов покрывающими тикет; QA-177 — reloadCount и exclusionsCount у TC3/TC4 литералы. Записи DoD требовали числа тестов — verify-artifacts дал all_green, план completed."
+    - "ListeningGlass PLAN-001 (2026-09-30): QA-004 — тест объявляет у себя копии функций адаптера и файл адаптера не загружает; QA-002, QA-006, QA-008 — 11 зелёных e2e на подменном окружении вместо загруженного расширения, сбой загрузки продукта записан «ограничением окружения», хотя QA-005 и QA-007 уже записали его дефектом, а причину нашёл человек на телефоне (HUMAN-002); IMPL-005 записал «среды, которой у исполнителя нет» при окружении, описанном в плане."
+  principle: "Каждый случай тикета тестирования — отдельный тест или проверка с утверждением о свойстве случая, исполненные против продукта в среде, которую называют тикет, план или shared; таблица «случай → тест» в Result; копия кода, симуляция вместо объекта, тест без утверждения и литерал вместо измерения — заглушка по P3R8; сбой продукта на реальном пути — дефект, ограничение окружения — только с попыткой запуска и эталоном, и тогда пункт неотмеченный и status: blocked (workflows/execute.md P3R1, P3R9, P3R2, P6S3; SKILL.md P4R1, P4R3; algorithms/execution-strategy.md)."
+  backlog_sources:
+    - "D:/Dev/PulseProxy/.workflow/tickets/archive/QA-177.md"
+    - "D:/Dev/ListeningGlass/.workflow/tickets/done/QA-004.md"
+tags: [verification, qa, placeholder, regression-guard]
+severity: critical
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R1\["[^"]*Требует тестирования — каждый случай из описания, «Деталей задачи» и «Тест-кейсов» получает свой тест или проверку против продукта с утверждением о свойстве этого случая'
+      reason: "Тикет тестирования мерится списком случаев, а не чеклистом DoD."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R1\["[^"]*таблица «случай → тест, место, pass или fail»'
+      reason: "Покрытие случаев видно в Result."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: '^(?![\s\S]*выполнить чеклист проверок из DoD и зафиксировать pass или fail)'
+      reason: "Прежняя привязка тикета тестирования к DoD не возвращается."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R9\["П3 ПРАВИЛО: Доказательность\. 1\) Проверяется продукт'
+      reason: "Правило о проверяемом продукте — узел этапа выполнения."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R9\["[^"]*приложение в среде, которую называют тикет, план или \.workflow/shared/'
+      reason: "Среда проверки — названная тикетом, планом или shared, а не пользовательская."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R9\["[^"]*Заглушка по P3R8 — копия кода продукта в тесте'
+      reason: "Копия кода продукта в тесте — заглушка."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R9\["[^"]*симуляция вместо самого проверяемого объекта'
+      reason: "Симуляция вместо проверяемого объекта — заглушка."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R9\["[^"]*тест без утверждения о названном свойстве'
+      reason: "Тест без утверждения о свойстве — заглушка."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R9\["[^"]*литерал вместо значения, прочитанного из ответа, хранилища или состояния'
+      reason: "Литерал вместо измерения — заглушка."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R8 --> P3R9 --> P3S1'
+      reason: "Правило о проверяемом продукте читается сразу после правила о заглушках."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R2\["[^"]*4\) пункт тикета тестирования при ограничении окружения, доказанном по P4R3'
+      reason: "Доказанное ограничение окружения — неотмеченный пункт и blocked, а не «не применимо»."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4R3\["[^"]*продукт падает на реальном пути[^"]*выявленный дефект[^"]*а не ограничение окружения'
+      reason: "Сбой продукта на реальном пути — дефект."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4R3\["[^"]*Ограничение окружения — только если та же попытка запуска падает и на заведомо рабочем эталоне'
+      reason: "«Среды нет» — только после попытки запуска и эталона."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: '^(?![\s\S]*отметь пункт выполненным и укажи, что выявлен дефект)'
+      reason: "Прежняя формулировка P4R3 без требования проверять продукт не возвращается."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P4R1\["[^"]*«Проверка невозможна в доступном окружении» — только после попытки запуска в окружении из плана и \.workflow/shared/'
+      reason: "Невозможность проверки доказывается запуском."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P6S3\["[^"]*у тикета тестирования в Result — таблица «случай → тест» по всем случаям'
+      reason: "GATE-3 проверяет покрытие случаев по записи в Result."
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: '\| Тестирование \| Каждый случай тикета — тест против продукта'
+      reason: "Таблица циклов стратегии согласована с графом."
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: 'У тикета тестирования доказанное ограничение окружения — `status: blocked` с неотмеченным пунктом'
+      reason: "Стратегия не противоречит P4R3 и P3R2."
+
+execution:
+  timeout_s: 60

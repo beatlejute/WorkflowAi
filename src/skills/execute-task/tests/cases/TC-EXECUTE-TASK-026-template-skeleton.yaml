@@ -1,0 +1,57 @@
+id: TC-EXECUTE-TASK-026
+title: "Секция результата из шаблона тикета заполняется, заглушки удаляются, второй секции нет; время, модель и агент — запись пайплайна"
+origin:
+  chg: ["ad-hoc-2026-10-01-template-skeleton"]
+  incidents:
+    - "PulseProxy RSH-002 (2026-09-29): закомментированный пример `path/to/file1.ts` из шаблона тикета остался в «Изменённых файлах» — проверка артефактов провалила тикет («не найдены заявленные файлы»), повтор на claude-opus (~18 мин). IMPL-119: буквальное «если секции нет — создай» дало вторую секцию результата."
+    - "PulseProxy IMPL-121, IMPL-124, QA-170, QA-174 и ListeningGlass QA-004, IMPL-006, IMPL-010 (2026-09-30): Started/Completed скопированы из чужих строк «Истории работы» или выдуманы (местное время с меткой Z), «Agent used» — первый или неуспешный агент; QA-168, QA-176, QA-178 дописали свои строки в «Историю работы»."
+  principle: "Секция «Результат выполнения» есть в тикете из шаблона — её подсекции заполняются по шаблону скила, комментарии-заглушки удаляются, вторая секция не создаётся; время, модель и агент исполнения пишет пайплайн, «История работы» не правится (SKILL.md P5S1, P5R1; workflows/execute.md P6S2; templates/result-template.md; knowledge/ticket-structure.md)."
+  backlog_sources:
+    - "D:/Dev/PulseProxy/.workflow/tickets/archive/RSH-002.md"
+    - "D:/Dev/PulseProxy/.workflow/tickets/archive/IMPL-121.md"
+tags: [result-template, self-report, regression-guard]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5S1\["[^"]*Секция уже есть из шаблона тикета — заполни её'
+      reason: "Шаг записи работает с секцией, которая есть всегда."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5S1\["[^"]*удали комментарии-заглушки шаблона и вторую секцию не создавай'
+      reason: "Заглушка шаблона и дубль секции не проходят."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: '^(?![\s\S]*P5S1\["П5 ШАГ: Если секции «Результат выполнения» ещё нет)'
+      reason: "Узел не привязан к несуществующему случаю."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5R1\["[^"]*Время, модель и агент исполнения пишет пайплайн[^"]*не заполняй их'
+      reason: "Самоотчёт о времени и агенте запрещён."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5R1\["[^"]*«Историю работы» не правь'
+      reason: "«История работы» — запись пайплайна."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P6S2\["[^"]*без комментариев-заглушек и второй такой секции'
+      reason: "GATE-2 проверяет заглушки и дубль."
+    - kind: skill_contains
+      file: "templates/result-template.md"
+      pattern: 'Время, модель, агент исполнения \| Не пишутся'
+      reason: "Правила заполнения шаблона повторяют запрет."
+    - kind: skill_contains
+      file: "knowledge/ticket-structure.md"
+      pattern: '`## История работы` \|[^\n]*пишет пайплайн, исполнитель не правит'
+      reason: "Справочник тикета называет владельца «Истории работы»."
+
+execution:
+  timeout_s: 60

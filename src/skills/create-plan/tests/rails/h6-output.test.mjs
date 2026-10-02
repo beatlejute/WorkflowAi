@@ -46,3 +46,29 @@ test('H6: финальный ответ не в терминале — отка�
     assert.ok(r.missing.some((m) => m.startsWith('position:')), JSON.stringify(r.missing));
   });
 });
+
+// Узел вопроса стейкхолдеру P6S3 — пауза (pause_nodes): лейблы P6E1 и P6S3 разрешают ответ
+// в нём, а без pause_nodes выходной слой отклонял его по положению. ListeningGlass PLAN-002
+// (2026-09-30): P5S4 велел «сообщи и остановись», reason циклов — «спроси стейкхолдера», а
+// pause_nodes был пуст — законной остановки для вопроса стейкхолдеру в графе не было.
+const QUESTION = 'Скрипт get-next-id.js недоступен — продолжить не могу, нужен ответ.\nRAILS: P6S3\n';
+
+test('H6: вопрос стейкхолдеру в узле паузы P6S3 со строкой RAILS: P6S3 — принят, без неё — отказ', () => {
+  withProject(({ root }) => {
+    assert.deepEqual(answer(root, QUESTION, 'P6S3'), { ok: true, missing: [] });
+    const bare = answer(root, 'Скрипт get-next-id.js недоступен — продолжить не могу, нужен ответ.\n', 'P6S3');
+    assert.equal(bare.ok, false);
+    assert.ok(bare.missing.some((m) => /RAILS/.test(m)), JSON.stringify(bare.missing));
+    assert.ok(!bare.missing.some((m) => m.startsWith('position:')), 'P6S3 — узел паузы, положение верное');
+  });
+});
+
+test('H6: вопрос стейкхолдеру, объявивший план утверждённым, — отказ', () => {
+  withProject(({ root }) => {
+    for (const tail of ['\nстатус: approved', '\nстатус плана: утверждён', '\nstatus: approved']) {
+      const r = answer(root, QUESTION + tail, 'P6S3');
+      assert.equal(r.ok, false, tail);
+      assert.ok(r.missing.some((m) => m.startsWith('forbidden:')), `${tail}: ${JSON.stringify(r.missing)}`);
+    }
+  });
+});

@@ -213,14 +213,15 @@ test('before: один и тот же callID -> один отказ в журн�
     // Kilo передал callID: повтор хука (рельсы зарегистрированы дважды) считается одним вызовом.
     await assert.rejects(() => hooks['tool.execute.before']({ tool: 'bash', sessionID: withId, callID: 'dup' }, cmd()));
     await assert.rejects(() => hooks['tool.execute.before']({ tool: 'bash', sessionID: withId, callID: 'dup' }, cmd()));
-    const dedup = readJournal(root, {}).filter((e) => e.type === 'denial' && e.session === withId);
+    // канарейка с 2026-10-01 пишется событием canary, а не отказом (core.mjs, шаг 2)
+    const dedup = readJournal(root, {}).filter((e) => e.type === 'canary' && e.session === withId);
     assert.equal(dedup.length, 1, 'повтор одного вызова не должен дважды тратить потолки и плодить записи в журнале');
 
     // callID нет — дедуплицировать нечем, и это видно: два отказа на два вызова.
     const noId = makeState(root, 'P4S1');
     await assert.rejects(() => hooks['tool.execute.before']({ tool: 'bash', sessionID: noId }, cmd()));
     await assert.rejects(() => hooks['tool.execute.before']({ tool: 'bash', sessionID: noId }, cmd()));
-    const plain = readJournal(root, {}).filter((e) => e.type === 'denial' && e.session === noId);
+    const plain = readJournal(root, {}).filter((e) => e.type === 'canary' && e.session === noId);
     assert.equal(plain.length, 2, 'без идентификатора вызова каждый вызов учитывается отдельно');
   });
 });

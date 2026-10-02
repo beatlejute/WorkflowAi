@@ -31,8 +31,8 @@ import {
 } from './state.mjs';
 import { appendDenial, appendEvent } from './journal.mjs';
 import { realpathDeep, isInside, matchesGlob } from './paths.mjs';
-import { detectShellWrites, shellAbsolutePath } from './actions.mjs';
-import { scanCommand, toSingleQuoted } from './shell-scan.mjs';
+import { explainShellWrites, shellAbsolutePath } from './actions.mjs';
+import { nestedScripts, scanCommand, toSingleQuoted } from './shell-scan.mjs';
 
 // --- cli.mjs: узнаём вызов служебной команды (§7.4.1) -----------------------
 //
@@ -656,11 +656,14 @@ function collectWriteTargets(action, ctx) {
   if (!action) return [];
   if (action.kind === 'edit' || action.kind === 'write') {
     // apply_patch Kilo правит несколько файлов: `paths` — все пути патча, null — патч не разобран.
-    if (action.paths === null) return [{ marker: true, display: `${action.tool ?? 'patch'}: пути патча не разобраны` }];
+    if (action.paths === null) {
+      const display = `${action.tool ?? 'patch'}: пути патча не разобраны`;
+      return [{ marker: true, display, why: [display] }];
+    }
     const paths = Array.isArray(action.paths) ? action.paths : (action.path ? [action.path] : []);
     return paths.map((p) => {
       const real = safeRealpath(resolveMaybeRelative(p, ctx?.cwd));
-      return real === null ? { marker: true, display: p } : { real, display: p };
+      return real === null ? { marker: true, display: p, why: [`путь ${JSON.stringify(p)} не разрешается`] } : { real, display: p };
     });
   }
   if (action.kind === 'shell') {
@@ -671,29 +674,62 @@ function collectWriteTargets(action, ctx) {
     // добавляются, отказов от этого больше, разрешений — нет.
     // Каталог запуска — shellCwd: у Kilo bash он задаётся аргументом workdir (2026-09-24).
     // opaque — команду исполнитель берёт не из вызова (background_process restart Kilo).
-    if (action.opaque) return [{ marker: true, display: `${action.tool ?? 'shell'}: команда не видна хуку` }];
+    if (action.opaque) {
+      const display = `${action.tool ?? 'shell'}: команда не видна хуку`;
+      return [{ marker: true, display, why: [display] }];
+    }
     const cwd = shellCwd(action, ctx);
     if (action.workdir !== undefined && cwd === undefined) {
-      return [{ marker: true, display: `workdir ${JSON.stringify(action.workdir)}` }];
+      const display = `workdir ${JSON.stringify(action.workdir)}`;
+      return [{ marker: true, display, why: [`каталог запуска ${display} не вычисляется`] }];
     }
     // dialects — если shell исполнителя неизвестен (Kilo на Windows), цели по каждому диалекту.
     const dialects = Array.isArray(action.dialects) && action.dialects.length > 0 ? action.dialects : [action.shell];
     const writes = [];
+    const why = [];
+    const mixed = dialects.length > 1;
     for (const text of commandTextVariants(action.command)) {
       for (const dialect of dialects) {
-        for (const w of detectShellWrites(text, { cwd, dialect })) {
+        const r = explainShellWrites(text, { cwd, dialect, env: shellEnv(action, dialect), mixed });
+        for (const w of r.writes) {
           if (!writes.includes(w)) writes.push(w);
+        }
+        for (const y of r.why) {
+          // причина из вложенного интерпретатора уже названа его именем («bash: …»), второй
+          // префикс диалекта («bash: bash: …») не нужен
+          const shownWhy = mixed && !NESTED_WHY_RE.test(y) ? `${dialect === 'powershell' ? 'PowerShell' : 'bash'}: ${y}` : y;
+          if (!why.includes(shownWhy)) why.push(shownWhy);
         }
       }
     }
     return writes.map((w) => {
-      if (w === '?') return { marker: true, display: '?' };
+      if (w === '?') return { marker: true, display: '?', why };
       const real = safeRealpath(resolveMaybeRelative(w, cwd));
-      if (real === null) return { marker: true, display: w };
+      if (real === null) return { marker: true, display: w, why: [`путь ${JSON.stringify(w)} не разрешается`] };
       return { real, display: w };
     });
   }
   return [];
+}
+
+// Причина маркера из вложенного интерпретатора (actions.nestedShellWrites: «bash: …»).
+const NESTED_WHY_RE = /^(?:bash|sh|dash|zsh|ksh|powershell|pwsh): /;
+
+// Окружение для `$NAME` в команде shell-инструмента. В Bash-инструменте Claude Code на Windows
+// TMPDIR задан и совпадает с временным каталогом (TMP) в записи Git Bash, а в окружении хука
+// его нет — наблюдалось запуском 2026-10-01 (Claude Code 2.1.285: в Bash `TMPDIR=/c/Users/…/Temp`,
+// в PowerShell-инструменте `$env:TMPDIR` пуст). Откуда значение, не проверено: /etc/profile Git
+// for Windows сам ставит TMPDIR=TMP в login-shell (`env -u TMPDIR bash -lc 'echo $TMPDIR'` даёт
+// `C:/Users/…/Temp`, без -l — пусто; shell Bash-инструмента не login, проверено запуском), так
+// что оно может идти от профиля, а не от Claude Code; если профиль пользователя переопределит
+// TMPDIR, значение здесь будет неверным. Без этого
+// `npm test > "$TMPDIR/base.txt"` давал «?» (инцидент 2026-09-29, PulseProxy, P3S1, две сессии).
+// Что в TMPDIR у bash Kilo — не проверено: для него «?» остаётся; в PowerShell `$TMPDIR` —
+// переменная сессии, а не окружения, и тоже остаётся «?».
+function shellEnv(action, dialect) {
+  if (process.platform !== 'win32' || dialect !== 'posix' || action?.tool !== 'Bash') return process.env;
+  if (typeof process.env.TMPDIR === 'string' && process.env.TMPDIR !== '') return process.env;
+  return { ...process.env, TMPDIR: tmpdir() };
 }
 
 function describeWhat(action) {
@@ -891,6 +927,122 @@ function denyAndLog({ root, ctx, state, action, what, why, allowedText }) {
   return { decision: 'deny', reason };
 }
 
+// Что именно не дало вычислить путь записи (actions.explainShellWrites): токен и что сделать.
+// Инцидент 2026-09-30: отказ «похожа на запись» токена не называл, и агент не узнавал
+// настоящую ошибку (`2>$null` в bash, `\"` в конце пути, незаданная переменная).
+function markerDetail(t) {
+  return Array.isArray(t?.why) && t.why.length > 0 ? `: ${t.why.join('; ')}` : '';
+}
+
+// Отказ write_scope называет, куда путь ведёт на самом деле и какой корень проекта верен.
+// Инцидент 2026-09-30 (PulseProxy IMPL-119, IMPL-124; ListeningGlass IMPL-006): исполнители
+// Kilo писали Edit/Write по угаданному корню (`/d/Dev/…`, `/workdir/…`, `/workspace/…`), получали
+// «путь вне write_scope» и доходили до конца процедуры с пустым Result. Путь `/d/…` не
+// переводится: Kilo 7.7.9 в write/edit берёт его как есть, и из D:\Dev запись уходит в
+// D:\d\Dev\… (проверено запуском node) — это та же цель, что видит гард.
+function writeScopeWhy(action, t, root) {
+  const norm = (p) => (process.platform === 'win32' ? p.replace(/\//g, '\\').toLowerCase() : p);
+  const display = String(t.display ?? '');
+  const where = norm(display) === norm(t.real) ? `путь «${display}»` : `путь «${display}» ведёт в «${t.real}» —`;
+  const edit = action?.kind === 'edit' || action?.kind === 'write';
+  const drive = edit && process.platform === 'win32' ? /^\/([A-Za-z])(?:\/|$)/.exec(display) : null;
+  const hint = drive ? `; запись /${drive[1]}/… инструмент правки не переводит в ${drive[1].toUpperCase()}:\\…` : '';
+  return `${where} вне write_scope проекта «${root}»${hint}; укажи путь относительно корня проекта (как в context.files) или абсолютный под «${root}»`;
+}
+
+// Канарейка (§7.4 шаг 2): агенту — тот же отказ из трёх частей, в журнал — событие `canary`.
+function canaryAndLog({ root, ctx, state, action, allowedText }) {
+  const node = state?.node ?? null;
+  const reason = buildDenyReason({ what: describeWhat(action), why: `RAILS_CANARY: рельсы активны, узел ${node}`, allowed: allowedText });
+  try {
+    appendEvent(root, {
+      type: 'canary',
+      session: ctx?.sessionId ?? null,
+      skill: state?.skill ?? null,
+      node,
+      run: ctx?.run ?? null,
+      tool: action?.tool,
+      command: action?.command,
+    });
+  } catch {
+    // журнал не должен ронять decide()
+  }
+  return { decision: 'deny', reason };
+}
+
+// Вызов `cli.mjs goto` внутри составной команды: цикла, условия, группы `{…}`, подоболочки,
+// подстановки, `bash -c '…'`, scriptblock'а PowerShell. Ревью 2026-10-01 (журналы PulseProxy и
+// ListeningGlass): `for pair in "P5E1|…" …; do n="${pair%%|*}"; …; node .workflow/src/rails/cli.mjs
+// goto "$n" --quote "$q"; done` и такие же пачки P0R2…P0R9 у execute-task и P1E1… у Kilo проходили
+// узлы, не выполняя их. Такой вызов analyzeCliCommand cli-вызовом не считает: хук не вставляет
+// --session (без него goto берёт WORKFLOW_RAILS_SESSION или единственную сессию проекта, при двух
+// и более — отказ, см. cli.mjs resolveSessionId) и не переписывает --quote с ` и $ в "…".
+// Временная мера до решения владельца о переходах по одному: отказ с подсказкой. Список cli-вызовов
+// верхнего уровня (`goto A && goto B`, `cd … && goto …`) это правило не трогает — он распознан
+// как cli на шаге 1.
+const GOTO_LEAD_POSIX = new Set(['do', 'then', 'else', 'elif', 'if', 'while', 'until', '{', '!', 'time']);
+const GOTO_OPENERS = new Set(['for', 'select', 'case', 'if', 'while', 'until', '{']);
+const GOTO_CLOSERS = new Set(['done', 'fi', 'esac', '}']);
+const GOTO_NESTED_SHELLS = new Set(['bash', 'sh', 'dash', 'zsh', 'ksh']);
+const MAX_GOTO_NESTING = 4;
+
+function isGotoCall(tokens, j) {
+  let k = j;
+  if (NODE_NAME_RE.test(tokens[k]?.value ?? '')) k += 1;
+  const path = tokens[k]?.value;
+  return typeof path === 'string' && CLI_PATH_RE.test(path) && tokens[k + 1]?.value === 'goto';
+}
+
+function gotoInCompound(text, dialect, nested = 0) {
+  if (nested > MAX_GOTO_NESTING) return false;
+  let scan;
+  try {
+    scan = scanCommand(String(text ?? ''), dialect);
+  } catch {
+    return false;
+  }
+  if (!scan?.ok) return false;
+  const ps = dialect === 'powershell';
+  let depth = 0;
+  let parens = 0;
+  for (const seg of scan.segments) {
+    if (seg.sepBefore === '(') parens += 1;
+    else if (seg.sepBefore === ')') parens = Math.max(0, parens - 1);
+    for (const cmd of seg.commands) {
+      const t = cmd.tokens;
+      let j = 0;
+      let lead = false;
+      if (!ps) {
+        for (; j < t.length && GOTO_LEAD_POSIX.has(t[j].value); j += 1) {
+          lead = true;
+          if (GOTO_OPENERS.has(t[j].value)) depth += 1;
+        }
+        if (GOTO_OPENERS.has(t[j]?.value)) depth += 1;
+        else if (GOTO_CLOSERS.has(t[j]?.value)) depth = Math.max(0, depth - 1);
+        // префикс-присваивание, в том числе со значением из подстановки (`n="$x" node …`)
+        while (j < t.length && t[j].parts?.[0]?.kind === 'bare' && ASSIGNMENT_RE.test(t[j].parts[0].raw ?? '')) j += 1;
+      } else {
+        // `$result = node … goto …` (журнал ListeningGlass, Kilo, цикл for по P0R5…P2S1) и `& node …`
+        if (t[1]?.value === '=' && /^\$/.test(t[0]?.parts?.[0]?.raw ?? '')) j = 2;
+        if (t[j]?.value === '&') j += 1;
+      }
+      if ((nested > 0 || lead || depth > 0 || parens > 0) && isGotoCall(t, j)) return true;
+      for (const tok of t) {
+        for (const script of nestedScripts(tok, dialect).scripts) {
+          if (gotoInCompound(script, dialect, nested + 1)) return true;
+        }
+      }
+      // `bash -c '<скрипт>'` с литеральным скриптом
+      if (!ps && GOTO_NESTED_SHELLS.has(String(t[j]?.value ?? '').replace(/^.*[\\/]/, '').replace(/\.exe$/i, ''))) {
+        const c = t.findIndex((x, i) => i > j && /^-[A-Za-z]*c[A-Za-z]*$/.test(x.value ?? ''));
+        const script = c === -1 ? null : t[c + 1]?.value;
+        if (typeof script === 'string' && gotoInCompound(script, 'posix', nested + 1)) return true;
+      }
+    }
+  }
+  return false;
+}
+
 // --- режим скила (§7.4) --------------------------------------------------------
 
 function decideSkillMode({ root, action, ctx, state, config, graph }) {
@@ -913,9 +1065,25 @@ function decideSkillMode({ root, action, ctx, state, config, graph }) {
     denyAndLog({ root, ctx, state, action, what, why, allowedText: describeAllowed(state, graph, config, guardCtx) });
   const shellTexts = action?.kind === 'shell' ? commandTextVariants(action.command) : [];
 
-  // 2. Канарейка.
+  // 2. Канарейка — проверка живости, а не отказ: событие `canary` в журнале, state.denials не
+  // растёт, приписки «N-й отказ за сессию» нет. Анализ журналов 2026-09-30: канарейка давала
+  // 332 из 1786 записей «отказов» PulseProxy и 48 из 156 ListeningGlass, выводила P0S1/P0E1 в
+  // лидеры отказов по узлу, а у коуча — «P0S1: 20 в одной сессии», что проверка B1 читает как
+  // дефект формулировки узла.
   if (action?.kind === 'shell' && config.canary && shellTexts.some((text) => sameCanary(text, config.canary, action.shell))) {
-    return deny(describeWhat(action), `RAILS_CANARY: рельсы активны, узел ${state.node}`);
+    return canaryAndLog({ root, ctx, state, action, allowedText: describeAllowed(state, graph, config, guardCtx) });
+  }
+
+  // 2б. goto внутри составной команды (gotoInCompound): cli-вызовом он не распознан на шаге 1.
+  if (action?.kind === 'shell') {
+    const dialects = Array.isArray(action.dialects) && action.dialects.length > 0 ? action.dialects : [action.shell];
+    const inCompound = shellTexts.some((text) => dialects.some((d) => gotoInCompound(text, d === 'powershell' ? 'powershell' : 'posix')));
+    if (inCompound) {
+      return deny(
+        describeWhat(action),
+        "goto внутри цикла, условия, группы, подоболочки или подстановки — хук не распознаёт его как команду рельс (не вставляет --session, не переписывает --quote), а переходы пачкой проходят узлы, не выполняя их; каждый переход — отдельной командой `node .workflow/src/rails/cli.mjs goto <узел> --quote '…'` после того, что велит текущий узел"
+      );
+    }
   }
 
   // 3. deny_shell.
@@ -952,7 +1120,7 @@ function decideSkillMode({ root, action, ctx, state, config, graph }) {
     if (t.marker) {
       return deny(
         describeWhat(action),
-        'команда похожа на запись, но путь не удалось определить — используй Edit/Write или укажи путь явно'
+        `команда похожа на запись, но путь не удалось определить${markerDetail(t)} — используй Edit/Write или укажи путь явно`
       );
     }
     const inScope = (config.write_scope || []).some((pattern) => matchesGlob(t.real, pattern, root));
@@ -963,7 +1131,7 @@ function decideSkillMode({ root, action, ctx, state, config, graph }) {
       && isInside(t.real, tmpdir(), { followLinks: false })
       && !isInside(t.real, root, { followLinks: false });
     if (!inScope && !inTemp) {
-      return deny(describeWhat(action), `путь «${t.display}» вне write_scope`);
+      return deny(describeWhat(action), writeScopeWhy(action, t, root));
     }
   }
 
@@ -1189,7 +1357,7 @@ function decideSandbox(sandboxRoot, action, ctx) {
 
   for (const t of targets) {
     if (t.marker) {
-      return { decision: 'deny', reason: sandboxDenyReason(sandboxRoot, 'команда похожа на запись, но путь не удалось определить — в песочнице пиши явным путём') };
+      return { decision: 'deny', reason: sandboxDenyReason(sandboxRoot, `команда похожа на запись, но путь не удалось определить${markerDetail(t)} — в песочнице пиши явным путём`) };
     }
     // Жёсткая ссылка неотличима от файла по realpath: запись в неё меняет и файл вне
     // песочницы (ревью 2026-09-24). Существующий файл с несколькими именами — отказ.

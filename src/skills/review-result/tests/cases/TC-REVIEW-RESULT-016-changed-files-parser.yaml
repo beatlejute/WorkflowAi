@@ -1,0 +1,57 @@
+id: TC-REVIEW-RESULT-016
+title: "Разбор «Изменённых файлов»: без путей из HTML-комментария, все пути в начале строки, путь не в формате строки — не молча"
+origin:
+  chg: ["ad-hoc-2026-10-01-changed-files-parser-contract"]
+  incidents:
+    - "PulseProxy RSH-002 (2026-09-29): исполнитель дописал Result, но оставил комментарий-заготовку шаблона тикета с `path/to/file1.ts`; verify-artifacts принял пример за заявленный файл и провалил готовую работу «не найдены заявленные файлы» — лишняя попытка claude-opus 1051 с. Тот же путь — в fail_reasons ещё пяти тикетов (IMPL-119, IMPL-120, IMPL-121, IMPL-124, DOCS-013)."
+    - "ListeningGlass IMPL-006 (2026-09-29): путь записан без обратных кавычек («- src/page/core.js (175 строк, переписан)»); в evidence changed_files [] и пустой дифф, предупреждения нет, тикет прошёл ревью по пустому диффу."
+    - "ListeningGlass HUMAN-002 (2026-09-30): строка «- `test/background-scope.test.mjs`, `test/build.test.mjs` — регрессионные тесты» — второй путь не попал ни в проверку существования, ни в дифф."
+  principle: "Скрипт предпроверки разбирает «Изменённые файлы» по тому формату, в котором их пишут: HTML-комментарии снимаются до разбора, из строки-буллета берутся все пути в обратных кавычках подряд в её начале (пути из описания файлами не считаются), а путь не в формате строки — без кавычек, с суффиксом строк, после подписи «Создан:» — предупреждение и строка diff_error evidence, а не молчаливый пропуск."
+  backlog_sources: []
+tags: [verify-artifacts, path-parsing, evidence-review, regression-guard]
+severity: medium
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над скриптом скила. Поведение закрепляют юнит-тесты
+    src/tests/verify-artifacts.test.mjs.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: 'sectionEnd\)\.replace\(/<!--\[\\s\\S\]\*\?-->/g, ''''\)'
+      reason: "HTML-комментарии секции снимаются до разбора: пример пути из заготовки шаблона — не файл (RSH-002)."
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: 'const LEADING_PATHS = /\^\(\?:`\[\^`\]\+`'
+      reason: "Берётся вся цепочка путей в обратных кавычках в начале строки, а не только первый (HUMAN-002)."
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: 'for \(const \[, filePath\] of lead\[0\]\.matchAll\(QUOTED\)\) files\.push\(stripLineSuffix\(filePath\)\)'
+      reason: "Каждый путь цепочки идёт в список файлов с отрезанным суффиксом строк."
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: 'const first = stripLineSuffix\(\(text\.split\(/\\s\+/\)\[0\] \|\| ''''\)\.replace\(/\[,;:\.\]\+\$/, ''''\)\);\s*if \(looksLikePath\(first\)\) \{\s*unparsed\.push\(first\);'
+      reason: "Первое слово без кавычек, похожее на путь (в том числе с суффиксом строк), не пропускается молча (IMPL-006)."
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: 'const later = tick === -1 \? null : text\.slice\(tick\)\.match\(LEADING_PATHS\);'
+      reason: "Путь в кавычках после подписи («- Создан: `a`») тоже не пропускается молча."
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: '«Изменённые файлы»: путь не в формате «- `путь` — …» не проверен: '
+      reason: "Путь не в формате строки у тикета без dod_format: 2 — предупреждение в warnings (IMPL-006)."
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: 'const problems = unparsed\.map\(\(file\) => ''путь не в формате «- `путь` — …» в «Изменённых файлах»: '' \+ file\);'
+      reason: "У тикета dod_format: 2 такой путь называет diff_error evidence — модель ревью видит, что дифф неполон (IMPL-006)."
+    - kind: skill_contains
+      file: "scripts/verify-artifacts.js"
+      pattern: '^(?![\s\S]*bulletFileRegex)'
+      reason: "Прежний разбор одного первого пути строки удалён."
+
+execution:
+  timeout_s: 60

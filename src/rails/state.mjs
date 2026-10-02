@@ -208,8 +208,8 @@ function bumpDenialCounter(state, node) {
 }
 
 /**
- * Допустимые переходы из текущего узла: рёбра из графа, лейбл цели обрезан
- * до 60 символов (§5: «id: первые 60 символов лейбла»).
+ * Допустимые переходы из текущего узла: рёбра из графа, лейбл цели — до 60 символов
+ * (§5: «id: первые 60 символов лейбла»), обрезка по слову с «…».
  *
  * @param {object} state
  * @param {{ node(id: string): object|undefined, outgoing(id: string): Array<{to: string, label: string|null}> }} graph
@@ -221,8 +221,19 @@ export function allowedTransitions(state, graph) {
   return edges.map((e) => {
     const target = graph.node(e.to);
     const label = target ? String(target.label) : '';
-    return { id: e.to, label: label.slice(0, 60) };
+    return { id: e.to, label: shortLabel(label, 60) };
   });
+}
+
+// Начало лейбла не длиннее max символов, обрезанное по слову и помеченное «…». Инцидент
+// 2026-09-30 (журнал отказов execute-task PulseProxy с 29.09: 65 отказов по цитате из 435):
+// `slice(0, 60)` резал посреди слова («…а не типо», «…с DoD п»), и слабая модель дописывала
+// оборванное слово своими словами вместо копирования готовой команды.
+function shortLabel(label, max) {
+  const s = String(label ?? '');
+  if (s.length <= max) return s;
+  const cut = s.lastIndexOf(' ', max - 1);
+  return `${(cut > 0 ? s.slice(0, cut) : s.slice(0, max - 1)).replace(/[\s,.:;—–-]+$/, '')}…`;
 }
 
 /** Путь CLI рельс от корня проекта — так его вызывает агент (§10). */
@@ -237,6 +248,11 @@ export const RAILS_CLI = '.workflow/src/rails/cli.mjs';
  * Зачем: отказ и вывод CLI называли допустимые переходы, но не команду. Прогон deep-research
  * 2026-09-25: haiku после отказа писала «пройду граф правильно» и снова не делала ни одного
  * перехода — из текста рельс не было видно, какой командой двигаться.
+ *
+ * Длинный лейбл режется по границе фразы (перед «.», «:», «;», «,», «?», «!», « —», « (»),
+ * по пробелу — только если фразы нужной длины в 60 символах нет. Инцидент 2026-09-30 (65
+ * отказов по цитате у execute-task PulseProxy с 29.09): цитата, оборванная по слову, кончалась
+ * висящим словом («…с более чем 5», «…тикета, а не»), и модель дописывала фразу своими словами.
  *
  * @param {string} label сырой лейбл узла
  * @param {number} [quoteMin]
@@ -254,14 +270,44 @@ export function readyQuote(label, quoteMin = 25) {
   // (`'a’b c'` — ParserError в PowerShell 5.1 и pwsh 7.6, проверено запуском 2026-09-25)
   for (const chunk of clean.split(/['‘-‛]/)) {
     let q = chunk.replace(/^[\s-]+/, '').trimEnd();
-    if (q.length > 60) {
-      const cut = q.lastIndexOf(' ', 60);
-      q = (cut > 0 && normalizeLabel(q.slice(0, cut)).length >= quoteMin ? q.slice(0, cut) : q.slice(0, 60)).trimEnd();
-    }
+    if (q.length > 60) q = quoteCut(q, quoteMin);
     const norm = normalizeLabel(q);
     if (norm.length >= quoteMin && target.includes(norm)) return q;
   }
   return null;
+}
+
+// Конец цитаты длинного куска: последняя граница фразы в пределах 60 символов, при которой
+// цитата не короче quoteMin; иначе последний пробел; иначе 60 символов. «.» после сокращения —
+// слова из частей в одну-две буквы через точку («т. е.», «т.д.», «и т. п.») — фразу не
+// заканчивает. Ревью 2026-10-01: проверка «слово короче трёх букв» пропускала «т.д» (три символа
+// с точкой внутри), и из «…и т.д. и тому…» выходило «…и т.д».
+const PHRASE_END_RE = /[.:;,?!](?=\s)|\s(?=[—–(])/g;
+const ABBREV_TAIL_RE = /(?:^|\s)(?:[^\s.]{1,2}\.)*[^\s.]{1,2}$/;
+// Хвост «т.» / «т. е.» у запасной обрезки по пробелу.
+const ABBREV_DOT_TAIL_RE = /(?:^|\s)(?:[^\s.]{1,2}\.)+$/;
+
+function quoteCut(q, quoteMin) {
+  const head = q.slice(0, 62);
+  const long = (end) => end > 0 && normalizeLabel(q.slice(0, end)).length >= quoteMin;
+  let best = -1;
+  for (const m of head.matchAll(PHRASE_END_RE)) {
+    const end = m.index;
+    if (end > 60) continue;
+    if (m[0] === '.' && ABBREV_TAIL_RE.test(q.slice(0, end))) continue;
+    if (long(end)) best = end;
+  }
+  if (best > 0) return q.slice(0, best).trimEnd();
+  let cut = q.lastIndexOf(' ', 60);
+  if (!long(cut)) return q.slice(0, 60).trimEnd();
+  // запасная обрезка не кончается сокращением («…, т. е.»): отступаем на слово назад, пока
+  // цитата не короче quoteMin
+  while (ABBREV_DOT_TAIL_RE.test(q.slice(0, cut))) {
+    const prev = q.lastIndexOf(' ', cut - 1);
+    if (!long(prev)) break;
+    cut = prev;
+  }
+  return q.slice(0, cut).trimEnd();
 }
 
 /**
@@ -299,8 +345,17 @@ export function describeTransitions(state, graph, config, { root, ticket } = {})
     const guard = edgeGuardHit(config, from, t.id, { root, ticket });
     if (guard) return `${t.id}: ${t.label} — закрыто: ${guard.reason} (есть ${guard.path})`;
     const full = graph.node(t.id)?.label ?? t.label;
-    return `${t.id}: ${t.label} → ${gotoCommand(t.id, full, quoteMin)}`;
+    return `${t.id}: ${rowLabel(full, t.label, quoteMin)} → ${gotoCommand(t.id, full, quoteMin)}`;
   });
+}
+
+// Лейблом строки — та же цитата, что в команде: второй, иначе обрезанный текст лейбла, модель
+// брала за цитату и дописывала (инцидент 2026-09-30, см. shortLabel). Но только если цитата —
+// начало лейбла: после деления по апострофу она может оказаться куском из середины, и строка
+// теряет тип и этап узла («B: — the real chunk…» вместо «П1 ШАГ: 'x' — …»; ревью 2026-10-01).
+function rowLabel(full, short, quoteMin) {
+  const q = readyQuote(full, quoteMin);
+  return q !== null && normalizeLabel(full).startsWith(normalizeLabel(q)) ? q : short;
 }
 
 /**

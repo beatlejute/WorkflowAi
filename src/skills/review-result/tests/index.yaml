@@ -78,3 +78,23 @@ cases:
     origin_chg: ["ad-hoc-2026-09-29"]
     tags: [rails, navigation, regression-guard]
     severity: medium
+  - id: TC-REVIEW-RESULT-014
+    file: cases/TC-REVIEW-RESULT-014-scale-self-written-fact.yaml
+    origin_chg: ["ad-hoc-2026-10-01-judge-lenient-without-evidence"]
+    tags: [evidence-review, dod-evidence-scale, judge]
+    severity: medium
+  - id: TC-REVIEW-RESULT-015
+    file: cases/TC-REVIEW-RESULT-015-human-out-of-scope-changes.yaml
+    origin_chg: ["ad-hoc-2026-10-01-human-ticket-product-edits-unchecked"]
+    tags: [verify-artifacts, human-ticket, scope, regression-guard]
+    severity: medium
+  - id: TC-REVIEW-RESULT-016
+    file: cases/TC-REVIEW-RESULT-016-changed-files-parser.yaml
+    origin_chg: ["ad-hoc-2026-10-01-changed-files-parser-contract"]
+    tags: [verify-artifacts, path-parsing, evidence-review, regression-guard]
+    severity: medium
+  - id: TC-REVIEW-RESULT-017
+    file: cases/TC-REVIEW-RESULT-017-graph-scope.yaml
+    origin_chg: ["ad-hoc-2026-10-01-review-graph-dod2"]
+    tags: [scope, evidence-review, consistency]
+    severity: low

@@ -1,0 +1,74 @@
+id: TC-EXECUTE-TASK-023
+title: "Рабочее дерево сверяется на входе после сбоя прошлой попытки и на выходе со снимком: незаявленная правка оборванного запуска и побочный файл не проходят, чужая работа не откатывается"
+origin:
+  chg: ["ad-hoc-2026-10-01-worktree-reconcile"]
+  incidents:
+    - "PulseProxy PLAN-020 (2026-09-30): IMPL-119 — попытка 2 написала «уже содержит вызов… Никаких изменений кода не потребовалось», хотя вызов добавил запуск с network_error; IMPL-120 — запуск, упавший по timeout (272 шага), удалил ключ publicPoolHttpHint в en, попытка 2 вставила ключ с придуманным description, не сверившись с HEAD; порчу, включая сбитые отступы в 8 локалях, исправила только попытка 4; IMPL-121 — модуль с дефектом типа requestId из запуска с error приняли две попытки со ссылкой на П1R2, дефект нашла только попытка 4."
+    - "PulseProxy QA-174, QA-176 (2026-09-30, claude-haiku): вывод тестов записан командой tee в test-output.json в корне проекта, в Result файла нет, он остался untracked."
+    - "Ревью правки 2026-10-01: в PulseProxy работа всего плана лежит в дереве незакоммиченной (все 8 файлов _locales изменены) — откат файла scope к последнему коммиту стёр бы правки других тикетов."
+  principle: "На этапе 1 — снимок git status; после сбоя исполнителя (error, timeout, network_error) незаявленные правки файлов scope проверяются git diff, строки, удалённые без требования тикета, возвращаются построчно из последнего коммита, файлы из «Изменённых файлов» других тикетов не откатываются, checkout, restore и stash запрещены; П1R2 такую работу не защищает; вывод команд — не в файлы проекта; GATE-3 сверяет git status со снимком (SKILL.md P1R1, P1R2, P1S2; workflows/execute.md P3R6, P3S1, P6S3)."
+  backlog_sources:
+    - "D:/Dev/PulseProxy/.workflow/tickets/archive/IMPL-120.md"
+    - "D:/Dev/PulseProxy/.workflow/tickets/archive/IMPL-121.md"
+tags: [worktree, continuation, cleanup, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P1S2\["П1 ШАГ: Сверь рабочее дерево — git status --short'
+      reason: "Снимок рабочего дерева до работы."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P1S2\["[^"]*строка execute-task со статусом error, timeout или network_error \(rate_limit и строки других стадий — не признак\)'
+      reason: "Признак оборванной попытки сужен: rate_limit и чужие стадии не включают сверку."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P1S2\["[^"]*не перечисленного в «Изменённых файлах» тикета: это непроверенная правка оборванной попытки'
+      reason: "Незаявленная правка файла scope — непроверенная."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P1S2\["[^"]*Файл из «Изменённых файлов» другого тикета \(поиск по \.workflow/tickets/\) не возвращай[^"]*в «Найденные дефекты»'
+      reason: "Незакоммиченная работа других тикетов не откатывается."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P1S2\["[^"]*на этапе 3 верни построчно по git show HEAD:путь'
+      reason: "Удалённое оборванным запуском возвращается из коммита построчно, а не придумывается."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P1S2\["[^"]*git checkout, git restore и git stash запрещены'
+      reason: "Файл целиком не откатывается."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P1S1 --> P1S2 --> P1S3 --> P2E1'
+      reason: "Сверка стоит до определения объёма остатка."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P1R2\["[^"]*Исключение — правка в рабочем дереве без записи в «Изменённых файлах»[^"]*«код уже содержит…» пишется только после git diff файла'
+      reason: "Антипаттерн переделки не защищает правку упавшего запуска."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P1R1\["[^"]*Result нет — выполняй тикет с нуля, но сначала сверь рабочее дерево \(P1S2\)'
+      reason: "Ветка «Result нет» не пропускает оставленные правки."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R6\["[^"]*Вывод команд \(tee, перенаправление >, запись отчёта в файл\) в файлы проекта не пиши'
+      reason: "Вывод команд — во временный каталог вне проекта."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3S1\["[^"]*дерево до правки не воспроизводи через git stash, checkout, restore или worktree'
+      reason: "Дерево с незакоммиченной работой плана не переключается ради прогона до правки."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P6S3\["[^"]*git status --short сверен со снимком P1S2'
+      reason: "Механическая сверка дерева перед выводом."
+
+execution:
+  timeout_s: 60

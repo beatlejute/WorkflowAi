@@ -21,8 +21,9 @@
 import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
-import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, getLastReviewStatus, serializeFrontmatter, loadTicketMovementRules, checkAndClosePlan, replaceFileAtomicSync } from 'workflow-ai/lib/utils.mjs';
+import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, getLastReviewStatus, serializeFrontmatter, loadTicketMovementRules, countPlanTickets, replaceFileAtomicSync } from 'workflow-ai/lib/utils.mjs';
 import { createLogger } from 'workflow-ai/lib/logger.mjs';
+import { stampStartedAt } from 'workflow-ai/lib/operations/tickets.mjs';
 import * as core from './pick-next-task-core.js';
 
 const logger = createLogger();
@@ -82,6 +83,9 @@ function autoCorrectTickets(config) {
       const { frontmatter, body } = parseFrontmatter(content);
 
       frontmatter.updated_at = new Date().toISOString();
+      // Правило конфига может вести и в in_progress: метка начала работы ставится
+      // на любом пути в колонку (PulseProxy PLAN-020, 2026-09-30).
+      stampStartedAt(frontmatter, path.basename(toDir), frontmatter.updated_at);
 
       if (toDir === DONE_DIR && !frontmatter.completed_at) {
         frontmatter.completed_at = new Date().toISOString();
@@ -276,12 +280,16 @@ async function main() {
     logger.info(`Archived ${archiveResult.archived.length} ticket(s) from archived plans: ${archiveResult.archived.join(', ')}`);
   }
 
+  // Выбор задачи план только считает: закрывает его стадия complete-plan после разбора
+  // completed. 2026-09-30 PulseProxy PLAN-020: здесь стоял checkAndClosePlan — план закрыт и
+  // 36 тикетов архивированы в 17:33, до create-report и analyze-report, в обход гейта
+  // критериев успеха разбора, и complete-plan после разбора ответил not_ready.
   if (planId) {
-    const closeResult = checkAndClosePlan(WORKFLOW_DIR, planId);
-    if (closeResult.closed) {
-      logger.info(`Plan ${planId} closed: all ${closeResult.total} tickets done`);
-    } else if (closeResult.total > 0) {
-      logger.info(`Plan ${planId} progress: ${closeResult.done}/${closeResult.total} tickets done`);
+    const progress = countPlanTickets(WORKFLOW_DIR, planId);
+    if (progress.total > 0 && progress.done === progress.total) {
+      logger.info(`Plan ${planId}: all ${progress.total} tickets done — closing is up to complete-plan after analyze-report`);
+    } else if (progress.total > 0) {
+      logger.info(`Plan ${planId} progress: ${progress.done}/${progress.total} tickets done`);
     }
   }
 

@@ -18,7 +18,11 @@
  *  - план переходит в active только с флагом --activate (его передаёт args агента стадии
  *    в поставляемом конфиге): без флага, при failed и при уже активном плане статус не
  *    меняется, флаг внутри текста промпта флагом не считается, один флаг без промпта —
- *    код 1 и Usage.
+ *    код 1 и Usage;
+ *  - с --activate пустые, неразбираемые и будущие created_at и updated_at тикетов плана
+ *    получают машинное время при любом итоге (time_fields_stamped), валидное прошлое и
+ *    completed_at не меняются, поле без строки дописывается в конец frontmatter, переводы
+ *    строк и остальной текст файла сохраняются; без флага файлы тикетов не пишутся.
  *
  * Скрипт берёт plan_file из промпта раннера, а тикеты плана — из .workflow/tickets/backlog/
  * корня проекта, найденного от cwd, поэтому запускается дочерним процессом с cwd во
@@ -283,4 +287,85 @@ test('только флаг без промпта — код 1 и строка U
   const run = spawnSync(process.execPath, [SCRIPT, '--activate'], { cwd: root, encoding: 'utf8' });
   assert.equal(run.status, 1);
   assert.match(run.stderr, /Usage: node verify-atomicity\.js \[--activate\]/);
+});
+
+// ---------------------------------------------------------------------------
+// Метки времени тикетов плана (stampTicketTimes). PulseProxy PLAN-020 2026-09-29: у всех
+// 36 тикетов created_at «2026-09-30T00:00:00Z» — полночь из будущего, вписанная моделью;
+// гейт file_unchanged семь раз отклонил работу прошлых попыток.
+// ---------------------------------------------------------------------------
+
+const ticketFile = (id) => path.join(root, '.workflow', 'tickets', 'backlog', `${id}.md`);
+
+/** План planId и его тикет с дополнительными строками frontmatter как есть. */
+function putStampTicket(planId, id, fmLines, { eol = '\n', dod = WELL_FORMED_DOD } = {}) {
+  fs.writeFileSync(planFile(planId), ['---', `id: "${planId}"`, 'status: approved', '---', ''].join('\n'), 'utf8');
+  const lines = [
+    '---', `id: "${id}"`, 'title: "Задача"', `parent_plan: "plans/current/${planId}.md"`, 'dod_format: 2', ...fmLines, '---',
+    '', `# ${id}`, '', '## Критерии готовности (Definition of Done)', '', ...dod, '', '## Результат выполнения', '',
+  ];
+  fs.writeFileSync(ticketFile(id), lines.join(eol), 'utf8');
+}
+
+function verifyStdout(planId, flags) {
+  const prompt = `verify-atomicity\n\nContext:\n  plan_file: plans/current/${planId}.md`;
+  const run = spawnSync(process.execPath, [SCRIPT, ...flags, prompt], { cwd: root, encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  return run.stdout;
+}
+
+const fieldOf = (id, name) => (new RegExp(`^${name}: "?([^"\\r\\n]*)"?`, 'm').exec(fs.readFileSync(ticketFile(id), 'utf8')) || [])[1];
+
+test('--activate: пустые поля времени из шаблона получают машинное время, completed_at не трогается', () => {
+  putStampTicket('PLAN-201', 'IMPL-201', [
+    'created_at: ""                   # ISO 8601: 2026-02-28T12:00:00Z',
+    'updated_at: ""                   # Обновляется при изменении',
+    'completed_at: ""',
+  ]);
+  const t0 = Date.now();
+
+  const out = verifyStdout('PLAN-201', ['--activate']);
+
+  assert.match(out, /time_fields_stamped: 1/);
+  for (const field of ['created_at', 'updated_at']) {
+    const ms = Date.parse(fieldOf('IMPL-201', field));
+    assert.ok(ms >= t0 - 1000 && ms <= Date.now() + 1000, `${field}=${fieldOf('IMPL-201', field)}`);
+  }
+  assert.equal(fieldOf('IMPL-201', 'completed_at'), '');
+  assert.doesNotMatch(fs.readFileSync(ticketFile('IMPL-201'), 'utf8'), /# ISO 8601/, 'строка поля переписана целиком');
+});
+
+test('--activate: будущая и неразбираемая метки заменяются, валидная прошлая — нет, файл тот же байт в байт', () => {
+  putStampTicket('PLAN-202', 'IMPL-202', ['created_at: "2099-01-01T00:00:00Z"', 'updated_at: "вчера"']);
+  putStampTicket('PLAN-203', 'IMPL-203', ['created_at: "2026-01-01T00:00:00Z"', 'updated_at: 2026-01-02T00:00:00+03:00']);
+
+  verifyStdout('PLAN-202', ['--activate']);
+
+  assert.notEqual(fieldOf('IMPL-202', 'created_at'), '2099-01-01T00:00:00Z');
+  assert.ok(Date.parse(fieldOf('IMPL-202', 'created_at')) <= Date.now());
+  assert.ok(Date.parse(fieldOf('IMPL-202', 'updated_at')) <= Date.now(), fieldOf('IMPL-202', 'updated_at'));
+
+  const before = fs.readFileSync(ticketFile('IMPL-203'), 'utf8');
+  const out = verifyStdout('PLAN-203', ['--activate']);
+  assert.doesNotMatch(out, /time_fields_stamped/);
+  assert.equal(fs.readFileSync(ticketFile('IMPL-203'), 'utf8'), before);
+});
+
+test('без флага тикеты не пишутся; поле без строки дописывается в конец frontmatter, CRLF сохраняется; при failed метка тоже ставится', () => {
+  putStampTicket('PLAN-204', 'IMPL-204', [], { eol: '\r\n' });
+  const before = fs.readFileSync(ticketFile('IMPL-204'), 'utf8');
+
+  verifyStdout('PLAN-204', []);
+  assert.equal(fs.readFileSync(ticketFile('IMPL-204'), 'utf8'), before, 'без --activate файл тикета не пишется');
+
+  verifyStdout('PLAN-204', ['--activate']);
+  const after = fs.readFileSync(ticketFile('IMPL-204'), 'utf8');
+  assert.ok(!/[^\r]\n/.test(after), 'только CRLF');
+  assert.match(after, /dod_format: 2\r\ncreated_at: "[^"]+"\r\nupdated_at: "[^"]+"\r\n---\r\n/);
+  assert.equal(after.replace(/created_at: "[^"]+"\r\nupdated_at: "[^"]+"\r\n/, ''), before, 'остальной текст не меняется');
+
+  putStampTicket('PLAN-205', 'IMPL-205', ['created_at: ""'], { dod: ['- [ ] Без записи', '  - check: `npm test`'] });
+  const out = verifyStdout('PLAN-205', ['--activate']);
+  assert.match(out, /status: failed/);
+  assert.ok(Date.parse(fieldOf('IMPL-205', 'created_at')), fieldOf('IMPL-205', 'created_at'));
 });

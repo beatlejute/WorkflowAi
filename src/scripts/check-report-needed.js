@@ -25,17 +25,30 @@
  *               нет → analyze-report с `report_id`;
  *   close_plan — отчёт и разбор по этой доске есть, последний разбор `completed` →
  *               complete-plan: бесплатный скрипт, повтор ничего не меняет (нет плана —
- *               no_plan, открытые тикеты — not_ready). Так план закрывается, даже если
+ *               no_plan, открытые тикеты или неисправленный дефект — not_ready, тикеты плана
+ *               в blocked/ он называет строкой WARN и в blocked_tickets, план уже
+ *               закрыт — completed). Так план закрывается, даже если
  *               прогон с разбором `completed` остановили до complete-plan (пауза, снятие
  *               процесса, сбой скрипта): стадии-скрипты событий журнала не пишут, и
  *               узнать, дошёл ли прогон до закрытия, гейту не из чего (ревью, третий раунд);
  *   unchanged — отчёт и разбор по этой доске есть, после последнего разбора с пробелами
- *               было разбиение → конец пайплайна.
+ *               было разбиение → конец пайплайна;
+ *   stuck     — то же, что unchanged, но у плана отчёта есть тикеты в blocked/: план стоит.
+ *               Разбиение тикетов не дало, а заблокированный тикет пайплайн сам не снимет —
+ *               нужно решение человека. В RESULT — plan_id и blocked_tickets, в журнале —
+ *               строка WARN с id и первой строкой blocked_reason каждого тикета. Стадия
+ *               ведёт stuck в end (configs/pipeline.yaml), а раннер кончает такой прогон
+ *               строкой «Pipeline stopped: plan … is stuck», а не «Pipeline completed
+ *               successfully!» (STUCK_END_STATUSES в src/runner.mjs). 2026-09-30 PulseProxy:
+ *               DOCS-014 стоял в blocked/ из-за write_deny, decompose-gaps по канону отнёс его
+ *               «вне scope», и прогон кончился «Pipeline completed successfully!» без единого
+ *               сигнала. Конфиг проекта без ключа stuck уводит его в default: create-report —
+ *               платный отчёт и разбор на той же доске: после обновления ключ нужен и в нём.
  *
  * Время события журнала (`ts`) — время записи, то есть конец запуска.
  *
- * Разбиение после разбора с пробелами обязательно для unchanged: без него пробелы остаются
- * без тикетов. 2026-09-28 PulseProxy: второй разбор прогона нашёл пробел, счётчик
+ * Разбиение после разбора с пробелами обязательно для unchanged и stuck: без него пробелы
+ * остаются без тикетов. 2026-09-28 PulseProxy: второй разбор прогона нашёл пробел, счётчик
  * plan_iterations дошёл до max, и пайплайн завершился, не запустив decompose-gaps, — а
  * со «разбор есть» следующий запуск тоже завершился бы сразу. Разбор `completed` ведёт в
  * complete-plan, а не в разбиение, и ждать разбиения после него — платный разбор на
@@ -48,8 +61,10 @@
  *
  * Вывод:
  *   ---RESULT---
- *   status: needed | analyze | close_plan | unchanged
+ *   status: needed | analyze | close_plan | unchanged | stuck
  *   report_id: REPORT-NNN
+ *   plan_id: PLAN-NNN            — план отчёта: у close_plan и у stuck, иначе пусто
+ *   blocked_tickets: ID, ID      — только у stuck: тикеты плана в blocked/
  *   reason: <почему>
  *   ---RESULT---
  */
@@ -64,7 +79,11 @@ import { readRunEvents } from 'workflow-ai/lib/agent-runs.mjs';
 export const STATE_FILE = '.workflow/state/report-gate.json';
 export const SIGNATURE_FORMAT = 2;
 
-/** Тикеты доски: колонка, id и время из frontmatter, по всем колонкам. */
+/**
+ * Тикеты доски: колонка, id и время из frontmatter, по всем колонкам; план (`parent_plan`) и
+ * первая строка `blocked_reason` — для заблокированных тикетов плана. Подпись доски их не
+ * читает.
+ */
 export function boardTickets(ticketsDir) {
   let columns = [];
   try {
@@ -87,10 +106,18 @@ export function boardTickets(ticketsDir) {
         id: String(frontmatter.id || path.basename(file, '.md')),
         updated_at: frontmatter.updated_at ? String(frontmatter.updated_at) : '',
         completed_at: frontmatter.completed_at ? String(frontmatter.completed_at) : '',
+        plan: frontmatter.parent_plan ? normalizePlanId(String(frontmatter.parent_plan)) : null,
+        blocked_reason: firstLine(frontmatter.blocked_reason),
       });
     }
   }
   return tickets;
+}
+
+// Первая непустая строка значения: RESULT и строка журнала однострочные.
+function firstLine(value) {
+  if (value === undefined || value === null) return '';
+  return String(value).split(/\r?\n/).map((l) => l.trim()).find(Boolean) || '';
 }
 
 const FINAL_COLUMNS = new Set(['done', 'archive']);
@@ -155,7 +182,7 @@ export function lastOkRunAfter(events, skill, sinceMs, accept = () => true) {
 
 /**
  * Решение по доске, отчёту, состоянию и журналу.
- * @returns {{status: 'needed'|'analyze'|'close_plan'|'unchanged', report_id?: string, reason: string}}
+ * @returns {{status: 'needed'|'analyze'|'close_plan'|'unchanged'|'stuck', report_id?: string, plan_id?: string, blocked?: Array<{id: string, reason: string}>, reason: string}}
  */
 export function decide({ tickets, report, state, events }) {
   if (!report) return { status: 'needed', reason: 'отчётов нет' };
@@ -196,6 +223,18 @@ export function decide({ tickets, report, state, events }) {
   }
   if (!lastOkRunAfter(events, 'decompose-gaps', analysis.ts)) {
     return { status: 'analyze', report_id: report.id, reason: `доска не менялась с ${report.id}, после разбора не было разбиения пробелов` };
+  }
+  // План стоит на заблокированном тикете: доска та же, разбиение тикетов не дало.
+  const blocked = report.planId ? tickets.filter((t) => t.column === 'blocked' && t.plan === report.planId) : [];
+  if (blocked.length > 0) {
+    const list = blocked.map((t) => (t.blocked_reason ? `${t.id} (${t.blocked_reason})` : t.id)).join('; ');
+    return {
+      status: 'stuck',
+      report_id: report.id,
+      plan_id: report.planId,
+      blocked: blocked.map((t) => ({ id: t.id, reason: t.blocked_reason || '' })),
+      reason: `план ${report.planId} стоит: в blocked/ ${list} — доска не менялась с ${report.id}, разбор и разбиение по нему есть; нужно решение человека`,
+    };
   }
   return { status: 'unchanged', report_id: report.id, reason: `доска не менялась с ${report.id}, разбор и разбиение по нему есть` };
 }
@@ -241,8 +280,18 @@ function main() {
       console.error(`[WARN] ${STATE_FILE} не записан: ${err.message}`);
     }
   }
-  console.log(`[INFO] ${result.reason}`);
-  printResult({ status: result.status, report_id: result.report_id || '', plan_id: result.plan_id || '', reason: result.reason });
+  const blocked = result.blocked || [];
+  for (const t of blocked) {
+    console.log(`[WARN] ${t.id}: blocked — ${t.reason || 'причина не записана'}`);
+  }
+  console.log(`[${blocked.length > 0 ? 'WARN' : 'INFO'}] ${result.reason}`);
+  printResult({
+    status: result.status,
+    report_id: result.report_id || '',
+    plan_id: result.plan_id || '',
+    ...(blocked.length > 0 ? { blocked_tickets: blocked.map((t) => t.id).join(', ') } : {}),
+    reason: result.reason,
+  });
 }
 
 // По имени файла, а не по import.meta.url: через junction .workflow/src/scripts пути

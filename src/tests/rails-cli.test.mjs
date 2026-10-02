@@ -564,6 +564,134 @@ test('run report --skill: фильтрует записи журнала по с
   });
 });
 
+// --- goto в терминал и status: требования выходного слоя и переходы -------------------------
+//
+// Анализ 2026-10-01 (final-answer-split): строки final_requires стояли в лейбле предыдущего узла,
+// терминал говорил «Остановиться», goto в него печатал лейбл и «Переходы: нет», и Stop-хук
+// отклонял ответ. QA-178: `status | grep «Переходы»` давал пусто — переходы печатали только
+// start и goto.
+
+const RAILS_YAML_OUTPUT = [
+  'version: 1',
+  'skill: clitest',
+  'entry: P4E1',
+  'terminal: [P5S1]',
+  'pause_nodes: []',
+  'quote_min: 25',
+  '',
+  'output:',
+  '  final_requires:',
+  String.raw`    - 'RAILS:\s*P5S1\b'`,
+  String.raw`    - 'verdict\s*='`,
+  '    - "Файлы:"',
+  '    - "---RESULT---"',
+  String.raw`    - 'status:\s*(default|blocked)'`,
+  String.raw`    - 'report_id:\s+REPORT\-'`,
+  String.raw`    - 'RAILS:\s*P\d+[ERSGQ]\d+'`,
+  "    - '[Ии]тог:'",
+  '  max_stop_blocks: 2',
+  '',
+].join('\n');
+
+const Q_P4S1 = 'Выполнить шаг мини-скила теста CLI и продолжить дальше';
+const Q_P5E1 = 'Переход к финальному этапу мини-скила теста CLI процедуры';
+const Q_P5S1 = 'Завершить работу и подготовить финальный ответ агента здесь';
+
+test('run goto: переход в терминал печатает литералы output.final_requires рядом с лейблом; не в терминале — нет', () => {
+  withProject(({ root, skillDir }) => {
+    writeFileSync(join(skillDir, 'rails.yaml'), RAILS_YAML_OUTPUT, 'utf8');
+    const sessionId = randomUUID();
+    run(['start', 'clitest', '--session', sessionId], { cwd: root, env: {} });
+    for (const [node, quote] of [['P4S1', Q_P4S1], ['P5E1', Q_P5E1]]) {
+      const r = run(['goto', node, '--quote', quote, '--session', sessionId], { cwd: root, env: {} });
+      assert.equal(r.code, 0, r.stdout);
+      assert.doesNotMatch(r.stdout, /final_requires/, `${node} не терминал`);
+    }
+    const r = run(['goto', 'P5S1', '--quote', Q_P5S1, '--session', sessionId], { cwd: root, env: {} });
+    assert.equal(r.code, 0, r.stdout);
+    const lines = r.stdout.split('\n');
+    assert.match(lines[0], /^RAILS: числится P5S1 «/);
+    assert.match(lines[1], /выходной слой требует в нём строки \(output\.final_requires\):$/);
+    assert.deepEqual(lines.slice(2, 10), [
+      '  RAILS: P5S1',
+      '  verdict=',
+      '  Файлы:',
+      '  ---RESULT---',
+      '  status: <default|blocked>',
+      '  report_id: REPORT-',
+      String.raw`  выражение /RAILS:\s*P\d+[ERSGQ]\d+/`,
+      '  выражение /[Ии]тог:/',
+    ]);
+    assert.equal(lines[10], 'Переходы: нет');
+  });
+});
+
+test('run goto: терминал без final_requires — только лейбл и «Переходы: нет»', () => {
+  withProject(({ root }) => {
+    const sessionId = randomUUID();
+    run(['start', 'clitest', '--session', sessionId], { cwd: root, env: {} });
+    run(['goto', 'P4S1', '--quote', Q_P4S1, '--session', sessionId], { cwd: root, env: {} });
+    run(['goto', 'P5E1', '--quote', Q_P5E1, '--session', sessionId], { cwd: root, env: {} });
+    const r = run(['goto', 'P5S1', '--quote', Q_P5S1, '--session', sessionId], { cwd: root, env: {} });
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(r.stdout, /final_requires/);
+    assert.match(r.stdout, /\nПереходы: нет\n$/);
+  });
+});
+
+test('run status: печатает «Переходы» с готовой командой, как goto; в терминале — и требования выходного слоя', () => {
+  withProject(({ root, skillDir }) => {
+    writeFileSync(join(skillDir, 'rails.yaml'), RAILS_YAML_OUTPUT, 'utf8');
+    const sessionId = randomUUID();
+    run(['start', 'clitest', '--session', sessionId], { cwd: root, env: {} });
+    const goto = run(['goto', 'P4S1', '--quote', Q_P4S1, '--session', sessionId], { cwd: root, env: {} });
+    const status = run(['status', '--session', sessionId], { cwd: root, env: {} });
+    assert.equal(status.code, 0);
+    const transitions = (out) => out.slice(out.indexOf('\nПереходы:'));
+    assert.match(status.stdout, /\nПереходы:\n {2}P5E1: [^\n]*→ node \.workflow\/src\/rails\/cli\.mjs goto P5E1 --quote '/);
+    assert.equal(transitions(status.stdout), transitions(goto.stdout), 'перечень переходов status совпадает с goto');
+    assert.doesNotMatch(status.stdout, /final_requires/, 'P4S1 не терминал');
+
+    run(['goto', 'P5E1', '--quote', Q_P5E1, '--session', sessionId], { cwd: root, env: {} });
+    run(['goto', 'P5S1', '--quote', Q_P5S1, '--session', sessionId], { cwd: root, env: {} });
+    const atTerminal = run(['status', '--session', sessionId], { cwd: root, env: {} });
+    assert.match(atTerminal.stdout, /output\.final_requires\):\n {2}RAILS: P5S1\n/);
+    assert.match(atTerminal.stdout, /\nПереходы: нет\n$/);
+  });
+});
+
+test('run goto: узел паузы печатает литералы output.pause_requires — как терминал печатает final_requires', () => {
+  withProject(({ root, skillDir }) => {
+    const yaml = [
+      'version: 1',
+      'skill: clitest',
+      'entry: P4E1',
+      'terminal: [P5S1]',
+      'pause_nodes: [P5E1]',
+      'quote_min: 25',
+      '',
+      'output:',
+      '  final_requires:',
+      String.raw`    - 'RAILS:\s*P5S1\b'`,
+      '  pause_requires:',
+      String.raw`    - 'RAILS:\s*P5E1\b'`,
+      '    - "нужен ответ стейкхолдера"',
+      '  max_stop_blocks: 2',
+      '',
+    ].join('\n');
+    writeFileSync(join(skillDir, 'rails.yaml'), yaml, 'utf8');
+    const sessionId = randomUUID();
+    run(['start', 'clitest', '--session', sessionId], { cwd: root, env: {} });
+    run(['goto', 'P4S1', '--quote', Q_P4S1, '--session', sessionId], { cwd: root, env: {} });
+    const atPause = run(['goto', 'P5E1', '--quote', Q_P5E1, '--session', sessionId], { cwd: root, env: {} });
+    assert.equal(atPause.code, 0, atPause.stdout);
+    assert.match(atPause.stdout, /выходной слой требует в нём строки \(output\.pause_requires\):\n {2}RAILS: P5E1\n {2}нужен ответ стейкхолдера\n/);
+    assert.doesNotMatch(atPause.stdout, /final_requires/, 'в узле паузы действует набор pause_*, а не final_*');
+    const status = run(['status', '--session', sessionId], { cwd: root, env: {} });
+    assert.match(status.stdout, /\(output\.pause_requires\):/, 'status печатает тот же хвост, что goto');
+  });
+});
+
 test('run check --skill: валидный скил -> code 0, OK', () => {
   withProject(({ root }) => {
     const r = run(['check', '--skill', 'clitest'], { cwd: root, env: {} });

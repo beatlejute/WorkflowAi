@@ -1,0 +1,65 @@
+id: TC-DECOMPOSE-GAPS-012
+title: "Номер тикета доработки выдаёт скрипт, а не ручной максимум; занятость проверяется поиском с корнем внутри .workflow/tickets/"
+origin:
+  chg: ["ad-hoc-2026-10-01-analysis"]
+  incidents:
+    - "Аудит 2026-09-21, decompose-gaps #20 LOW (.workflow/reports/audit-2026-09-21/decompose-gaps.md): P10S8 велит агенту самому искать файлы {TYPE}-*.md и брать максимум + 1 при наличии src/scripts/get-next-id.js --prefix --dir. Находка не выполнена к 1.23.1; там же отмечено, что кейса на нумерацию при тикетах в разных папках нет."
+    - "PulseProxy 2026-09-30, запуск 1 decompose-gaps: FIX-033 пронумерован вручную — совпал с верным, потому что план тикетов FIX не создавал. В контексте стадии лежал устаревший id_ranges_json от выделения для декомпозиции плана (IMPL:112, QA:164, DOCS:13 уже израсходованы, файлы существуют) — номер оттуда дал бы занятый QA-164. ListeningGlass 2026-09-29: каталог .workflow/ в .gitignore, у kilo-агентов (gpt-luna, deepseek-flash стоят в agents стадии) Glob от корня проекта по .workflow/tickets/** дал 0 совпадений: ручной максимум дал бы 001, а гейт P10G2 на том же Glob запись не остановил бы."
+  principle: "Стартовый номер тикетов каждого префикса выдаёт скрипт выдачи ID по всем папкам .workflow/tickets/, следующие тикеты прохода — номера подряд; агент номер по поиску не считает и не берёт из чужого id_ranges; занятость и «файла нет» проверяются поиском с корнем внутри .workflow/tickets/ или Read по точному пути (workflows/decompose.md узлы P10S8, P10G2, P10G3)."
+  backlog_sources:
+    - ".workflow/reports/audit-2026-09-21/decompose-gaps.md"
+tags: [id-generation, script-usage, glob-check, ignored-dir, regression-guard]
+severity: high
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяются только static
+    assertions над содержимым рабочих файлов скила. Негативные anchors выражены
+    через lookahead — runner поддерживает только skill_contains.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S8\["П10 ШАГ: Определи ID тикетов этого прохода — по каждому их префиксу вызови node \.workflow/src/scripts/get-next-id\.js --prefix \{TYPE\} --dir tickets и возьми поле id из блока ---RESULT---'
+      reason: "Стартовый номер каждого префикса выдаёт скрипт по всем папкам доски."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S8\["[^"]*следующие тикеты того же префикса в этом проходе получают следующие номера подряд'
+      reason: "Все тикеты прохода нумеруются за один проход, без возврата по потолку циклов."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S8\["[^"]*Номер по поиску файлов не считай и из id_ranges в контексте стадии не бери'
+      reason: "Ни ручной максимум, ни чужой id_ranges контекста источником номера не служат."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10S8\["[^"]*Скрипт недоступен или вернул ошибку — это инфраструктурная ошибка: сообщи о ней и тикет не создавай'
+      reason: "Ручного fallback при сбое скрипта нет."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: '^(?![\s\S]*возьми максимальный номер)'
+      reason: "Ручной расчёт номера не вернулся."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10G2\{"П10 ГЕЙТ \(СТОП, до записи файла\): Glob по маске \*\*/\{TYPE\}-\{NNN\}\.md с корнем поиска \.workflow/tickets/ даёт ноль совпадений'
+      reason: "Гейт занятости ищет с корнем внутри .workflow/tickets/, а не от корня проекта."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10G2\{"[^"]*пустой ответ поиска от корня проекта не доказывает, что ID свободен, а «файла нет» по точному пути — только ответ Read'
+      reason: "Пустой ответ слепого поиска не принимается за свободный ID."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10G2\{"[^"]*вернись к узлу P10S8 за новым номером'
+      reason: "При занятом файле новый номер снова выдаёт скрипт, а не агент."
+    - kind: skill_contains
+      file: "workflows/decompose.md"
+      pattern: 'P10G3\{"[^"]*перепроверь Read каждого созданного файла — ни одного пустого значения'
+      reason: "Проверка parent_plan в чеклисте не опирается на поиск, слепой к игнорируемому каталогу."
+    - kind: skill_contains
+      file: "rails.yaml"
+      pattern: '^(?![\s\S]*deny_shell:[\s\S]*get-next-id)'
+      reason: "Скрипт выдачи ID — источник номера этой стадии, гард его вызов не закрывает."
+
+execution:
+  timeout_s: 60

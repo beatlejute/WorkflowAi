@@ -12,7 +12,7 @@
 | **Weighted Completion** | Σ(done × complexity) / Σ(total × complexity) × 100% | Прогресс с учётом сложности |
 | **Throughput** | done / time_elapsed | Скорость выполнения |
 | **Block Rate** | blocked / total × 100% | Доля заблокированных задач |
-| **Rework Rate** | reworked / done × 100% | Доля задач с переделками |
+| **Rework Rate** | формула — в `algorithms/progress-assessment.md` шаг 3, значение — поле rework_rate скрипта | Доля задач с переделками: тикеты хотя бы с одной строкой ❌ в «## Ревью» среди прошедших ревью |
 | **First-Pass Rate** | формула — в `algorithms/progress-assessment.md` | Качество выполнения с первого раза |
 
 ### Качественные индикаторы

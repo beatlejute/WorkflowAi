@@ -14,7 +14,8 @@ execute-task/
 │   └── execute.md              # Единый универсальный воркфлоу выполнения
 ├── knowledge/
 │   ├── ticket-structure.md         # Структура тикета, поля и их семантика
-│   └── context-checkpoints.md      # Управление контекстом при длительных задачах
+│   ├── context-checkpoints.md      # Управление контекстом при длительных задачах
+│   └── review-evidence.md          # Что видит модель ревью по пунктам prose и visual
 └── templates/
     └── result-template.md          # Шаблон секции Result с правилами заполнения
 ```

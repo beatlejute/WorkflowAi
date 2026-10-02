@@ -36,7 +36,18 @@ function runScript(ticketPath, cwd = PROJECT_ROOT) {
   return fields;
 }
 
-function makeTicket(dir, { id, createdAt, updatedAt, deliverablePath, dod }) {
+/**
+ * Строка started_at frontmatter — точки отсчёта file_unchanged (метку ставит скрипт при
+ * первом входе тикета в in-progress). startedAt null — строки нет; startedAtRaw — значение
+ * как есть, без кавычек (YAML разберёт его в Date).
+ */
+function startedAtLine(startedAt, startedAtRaw) {
+  if (startedAtRaw !== null) return `started_at: ${startedAtRaw}\n`;
+  return startedAt === null ? '' : `started_at: "${startedAt}"\n`;
+}
+
+// startedAt по умолчанию — createdAt: прежние тесты писались, когда базой был created_at.
+function makeTicket(dir, { id, createdAt, updatedAt, startedAt = createdAt, startedAtRaw = null, deliverablePath, dod }) {
   mkdirSync(dir, { recursive: true });
   const ticketPath = join(dir, `${id}.md`);
   const content = `---
@@ -47,7 +58,7 @@ type: impl
 required_capabilities: []
 created_at: "${createdAt}"
 updated_at: "${updatedAt}"
-completed_at: "${updatedAt}"
+${startedAtLine(startedAt, startedAtRaw)}completed_at: "${updatedAt}"
 parent_plan: ""
 parent_task: ""
 dependencies: []
@@ -80,7 +91,7 @@ fixture summary.
   return ticketPath;
 }
 
-test('verify-artifacts: файл с mtime между created_at и updated_at проходит (retry-цикл)', () => {
+test('verify-artifacts: файл с mtime между started_at и updated_at проходит (retry-цикл)', () => {
   const tmpDir = join(PROJECT_ROOT, '.tmp-verify-artifacts-retry');
   rmSync(tmpDir, { recursive: true, force: true });
   mkdirSync(tmpDir, { recursive: true });
@@ -90,7 +101,7 @@ test('verify-artifacts: файл с mtime между created_at и updated_at п
   writeFileSync(deliverableAbs, 'payload', 'utf8');
 
   // Симуляция retry-цикла:
-  //   created_at = момент создания тикета (00:00)
+  //   created_at = started_at = момент создания тикета и начала работы (00:00)
   //   файл модифицирован агентом в attempt 2   (05:00)
   //   updated_at = последний move-ticket при retry (10:00, обновлён move-to-ready
   //     после возврата из blocked → ready → in-progress)
@@ -120,7 +131,7 @@ test('verify-artifacts: файл с mtime между created_at и updated_at п
   }
 });
 
-test('verify-artifacts: файл с mtime до created_at валит (ghost execution — агент не трогал файл)', () => {
+test('verify-artifacts: файл с mtime до started_at валит (ghost execution — агент не трогал файл)', () => {
   const tmpDir = join(PROJECT_ROOT, '.tmp-verify-artifacts-ghost');
   rmSync(tmpDir, { recursive: true, force: true });
   mkdirSync(tmpDir, { recursive: true });
@@ -182,14 +193,16 @@ test('verify-artifacts: отсутствующий файл всегда вал�
 });
 
 // ============================================================================
-// FIX-68: битая точка отсчёта (created_at в будущем).
+// FIX-68: битая точка отсчёта (метка в будущем).
 // LLM-агенты пишут в created_at локальное время с суффиксом Z — тогда ЛЮБОЙ
 // свежий артефакт формально «старше» тикета и ложно попадает в unchanged_files.
+// Точка отсчёта теперь — started_at (машинная метка входа в in-progress); битая
+// или будущая started_at так же не используется.
 // ============================================================================
 
 const HOUR_MS = 60 * 60 * 1000;
 
-test('verify-artifacts: created_at в будущем + свежий файл → unchanged не выставляется', () => {
+test('verify-artifacts: started_at в будущем + свежий файл → unchanged не выставляется', () => {
   const tmpDir = join(PROJECT_ROOT, '.tmp-verify-artifacts-future-created');
   rmSync(tmpDir, { recursive: true, force: true });
   mkdirSync(tmpDir, { recursive: true });
@@ -230,13 +243,16 @@ test('verify-artifacts: created_at в будущем + свежий файл →
       'legacy',
       `Ожидался legacy, получили ${result.status}. fail_reasons=${result.fail_reasons || ''}`
     );
-    assert.match(result.warnings || '', /created_at/, 'должно быть предупреждение о битой метке');
+    assert.match(result.warnings || '', /started_at="[^"]+" в будущем/, 'должно быть предупреждение о битой метке');
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 
-test('verify-artifacts: created_at в будущем → fallback на updated_at (unchanged всё ещё детектится)', () => {
+// Прежде будущий created_at откатывал базу на updated_at, а его переписывает каждое
+// перемещение: правка прошлой попытки становилась «неизменённой» (PulseProxy PLAN-020,
+// 2026-09-30 — 7 ложных отказов). Теперь отката нет: проверка пропускается.
+test('verify-artifacts: started_at в будущем → на updated_at не откатывается, проверка file_unchanged пропущена', () => {
   const tmpDir = join(PROJECT_ROOT, '.tmp-verify-artifacts-future-fallback');
   rmSync(tmpDir, { recursive: true, force: true });
   mkdirSync(tmpDir, { recursive: true });
@@ -259,15 +275,16 @@ test('verify-artifacts: created_at в будущем → fallback на updated_a
 
   try {
     const result = runScript(ticketPath);
-    assert.equal(result.status, 'failed', 'Ожидался failed: файл старше updated_at');
-    assert.match(result.unchanged_files || '', /deliverable\.txt/);
-    assert.match(result.warnings || '', /created_at/);
+    assert.equal(result.status, 'legacy', `файл старше updated_at, но updated_at не база: ${result.fail_reasons || ''}`);
+    assert.equal(result.unchanged_files, '');
+    assert.match(result.warnings || '', /started_at="[^"]+" в будущем/);
+    assert.match(result.warnings || '', /проверка file_unchanged пропущена: нет корректной точки отсчёта/);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 
-test('verify-artifacts: регресс — валидный created_at в прошлом + старый файл → unchanged детектится', () => {
+test('verify-artifacts: регресс — валидный started_at в прошлом + старый файл → unchanged детектится', () => {
   const tmpDir = join(PROJECT_ROOT, '.tmp-verify-artifacts-past-regress');
   rmSync(tmpDir, { recursive: true, force: true });
   mkdirSync(tmpDir, { recursive: true });
@@ -315,6 +332,7 @@ type: impl
 required_capabilities: []
 created_at: "${createdAt}"
 updated_at: "${createdAt}"
+started_at: "${createdAt}"
 completed_at: "${createdAt}"
 parent_plan: ""
 parent_task: ""
@@ -707,7 +725,7 @@ test('ghost-маркер: честно выполненный тикет мар�
     deliverablePath: deliverableRel,
     dod: '- [x] deliverable создан',
   });
-  // Файл создан ПОСЛЕ created_at тикета — работа настоящая.
+  // Файл создан ПОСЛЕ started_at тикета — работа настоящая.
   writeFileSync(deliverableAbs, 'payload', 'utf8');
 
   try {
@@ -775,7 +793,7 @@ describe('verify-artifacts: dod_format: 2', () => {
   const reviewTicket = (id) => join(root, '.workflow', 'tickets', 'review', `${id}.md`);
 
   /**
-   * Тикет в `review/` корня. Заявленный файл пишется сейчас — после created_at,
+   * Тикет в `review/` корня. Заявленный файл пишется сейчас — после started_at,
    * так что прежние гейты (файлы, baseline) его пропускают.
    */
   function makeDod2Ticket(id, { dod, capabilities = '[]', summary = 'fixture summary.', dodFormat = 'dod_format: 2' }) {
@@ -793,6 +811,7 @@ required_capabilities: ${capabilities}
 ${dodFormat}
 created_at: "2026-04-21T00:00:00Z"
 updated_at: "2026-04-21T10:00:00Z"
+started_at: "2026-04-21T00:00:00Z"
 completed_at: ""
 parent_plan: ""
 parent_task: ""
@@ -1237,6 +1256,7 @@ type: qa
 dod_format: 2
 created_at: "2026-04-21T00:00:00Z"
 updated_at: "2026-04-21T10:00:00Z"
+started_at: "2026-04-21T00:00:00Z"
 ---
 ## Критерии готовности (Definition of Done)
 
@@ -1308,5 +1328,281 @@ ${files.map((file) => `- \`${file}\``).join('\n')}
 
     assert.doesNotMatch(result.fail_reasons || '', /source_grounding_missing/);
     assert.equal(result.status, 'all_green', `fail_reasons=${result.fail_reasons || ''}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// База file_unchanged — только started_at (resolveWorkStartBaseline). Его ставит скрипт
+// при первом входе тикета в in-progress, повторный вход его не сдвигает. created_at и
+// updated_at базой не служат: created_at пишет модель (PulseProxy PLAN-020 2026-09-30 —
+// полночь из будущего у всех 36 тикетов), updated_at переписывает каждое перемещение —
+// откат на него сделал правку прошлой попытки «неизменённой», 7 ложных отказов. Нет
+// started_at, она битая или в будущем — проверка пропускается с предупреждением.
+// ---------------------------------------------------------------------------
+
+describe('verify-artifacts: база file_unchanged — started_at', () => {
+  const now = Date.now();
+  const at = (hours) => new Date(now + hours * HOUR_MS);
+  let seq = 0;
+
+  /** Тикет legacy с одним заявленным файлом, mtime которого — fileMtime. */
+  function ticketWithFile(id, { fileMtime, ...stamps }) {
+    const dir = `.tmp-verify-artifacts-baseline-${++seq}`;
+    const tmpDir = join(PROJECT_ROOT, dir);
+    rmSync(tmpDir, { recursive: true, force: true });
+    mkdirSync(tmpDir, { recursive: true });
+    const deliverableAbs = join(tmpDir, 'deliverable.txt');
+    writeFileSync(deliverableAbs, 'payload', 'utf8');
+    utimesSync(deliverableAbs, fileMtime, fileMtime);
+    const ticketPath = makeTicket(tmpDir, {
+      id,
+      deliverablePath: `${dir}/deliverable.txt`,
+      dod: '- [x] deliverable создан',
+      ...stamps,
+    });
+    return { ticketPath, cleanup: () => rmSync(tmpDir, { recursive: true, force: true }) };
+  }
+
+  function verify(id, options) {
+    const { ticketPath, cleanup } = ticketWithFile(id, options);
+    try {
+      return runScript(ticketPath);
+    } finally {
+      cleanup();
+    }
+  }
+
+  test('started_at есть, created_at пуст — база started_at: файл старше неё — unchanged', () => {
+    const result = verify('QA-960', {
+      createdAt: '',
+      updatedAt: at(-1).toISOString(),
+      startedAt: at(-3).toISOString(),
+      fileMtime: at(-5),
+    });
+
+    assert.equal(result.status, 'failed', `fail_reasons=${result.fail_reasons || ''}`);
+    assert.match(result.unchanged_files || '', /deliverable\.txt/);
+    assert.equal(result.warnings, undefined, `при валидной started_at предупреждений нет: ${result.warnings}`);
+  });
+
+  test('регресс PLAN-020: файл изменён в попытке 1 после started_at, в попытке 2 updated_at свежее — не unchanged', () => {
+    const result = verify('QA-961', {
+      createdAt: at(5).toISOString(),
+      startedAt: at(-3).toISOString(),
+      fileMtime: at(-2),
+      updatedAt: at(-1).toISOString(),
+    });
+
+    assert.equal(result.status, 'legacy', `fail_reasons=${result.fail_reasons || ''}`);
+    assert.equal(result.unchanged_files, '');
+    assert.doesNotMatch(result.warnings || '', /created_at/, 'будущий created_at базой не служит и не упоминается');
+  });
+
+  test('started_at нет, created_at пуст — проверка пропущена с предупреждением, отката на updated_at нет', () => {
+    const result = verify('QA-962', {
+      createdAt: '',
+      updatedAt: at(-1).toISOString(),
+      startedAt: null,
+      fileMtime: at(-5),
+    });
+
+    assert.equal(result.status, 'legacy', `файл старше updated_at, но updated_at не база: ${result.fail_reasons || ''}`);
+    assert.equal(result.unchanged_files, '');
+    assert.match(result.warnings || '', /started_at нет — тикет не входил в in-progress через скрипты пайплайна/);
+    assert.match(result.warnings || '', /проверка file_unchanged пропущена: нет корректной точки отсчёта/);
+  });
+
+  test('started_at нет, created_at в прошлом — created_at не база, проверка пропущена', () => {
+    const result = verify('QA-963', {
+      createdAt: at(-2).toISOString(),
+      updatedAt: at(-1).toISOString(),
+      startedAt: null,
+      fileMtime: at(-5),
+    });
+
+    assert.equal(result.status, 'legacy', `fail_reasons=${result.fail_reasons || ''}`);
+    assert.equal(result.unchanged_files, '');
+    assert.match(result.warnings || '', /проверка file_unchanged пропущена/);
+  });
+
+  test('started_at неразбираемая — проверка пропущена с предупреждением', () => {
+    const result = verify('QA-964', {
+      createdAt: at(-2).toISOString(),
+      updatedAt: at(-1).toISOString(),
+      startedAt: 'вчера',
+      fileMtime: at(-5),
+    });
+
+    assert.equal(result.status, 'legacy', `fail_reasons=${result.fail_reasons || ''}`);
+    assert.equal(result.unchanged_files, '');
+    assert.match(result.warnings || '', /started_at="вчера" не парсится как дата — проверка file_unchanged пропущена/);
+  });
+
+  test('started_at без кавычек (YAML даёт Date) — база работает', () => {
+    const result = verify('QA-965', {
+      createdAt: '',
+      updatedAt: '2026-04-21T10:00:00Z',
+      startedAtRaw: '2026-04-21T00:00:00Z',
+      fileMtime: new Date('2026-04-20T00:00:00Z'),
+    });
+
+    assert.equal(result.status, 'failed', `fail_reasons=${result.fail_reasons || ''}`);
+    assert.match(result.unchanged_files || '', /deliverable\.txt/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Разбор «Изменённых файлов» и область тикета человека (2026-09-29…30):
+//  - пример пути из HTML-комментария шаблона провалил готовую работу как «файл не найден»;
+//  - второй путь строки «- `a`, `b` — …» и путь без обратных кавычек выпадали молча —
+//    из проверки существования и из диффа ревью;
+//  - тикеты человека с правками кода вне context.files уходили all_green в done.
+// ---------------------------------------------------------------------------
+
+describe('verify-artifacts: «Изменённые файлы» и область тикета человека', () => {
+  let root;
+
+  before(() => {
+    root = mkdtempSync(join(tmpdir(), 'verify-artifacts-changed-'));
+    mkdirSync(join(root, '.workflow', 'tickets', 'review'), { recursive: true });
+    mkdirSync(join(root, 'src', 'deep'), { recursive: true });
+    mkdirSync(join(root, 'qa'), { recursive: true });
+    writeFileSync(join(root, 'qa', 'result.md'), 'x', 'utf8');
+    writeFileSync(join(root, 'src', 'app.js'), 'x', 'utf8');
+    writeFileSync(join(root, 'src', 'deep', 'mod.js'), 'x', 'utf8');
+  });
+
+  after(() => rmSync(root, { recursive: true, force: true }));
+
+  function writeTicket(id, { section, dod = '- [x] deliverable создан', extraFrontmatter = '' }) {
+    const ticketPath = join(root, '.workflow', 'tickets', 'review', `${id}.md`);
+    writeFileSync(ticketPath, `---
+id: ${id}
+created_at: "2026-04-21T00:00:00Z"
+${extraFrontmatter}
+---
+## Критерии готовности (Definition of Done)
+
+${dod}
+
+## Результат выполнения
+
+### Summary
+fixture summary.
+
+### Изменённые файлы
+
+${section}
+`, 'utf8');
+    return ticketPath;
+  }
+
+  const readEvidence = (id) =>
+    JSON.parse(readFileSync(join(root, '.workflow', 'state', 'evidence', `${id}.json`), 'utf8'));
+
+  // Тикет человека dod_format: 2 с одной зелёной проверкой `check` по файлу результата.
+  const humanTicket = (id, section, { files = ['qa/'], checkArgs = 'qa/result.md' } = {}) => writeTicket(id, {
+    section,
+    dod: `- [x] Результат записан\n  - check: \`node -e "process.exit(0)" -- ${checkArgs}\`, expect: \`exit 0\``,
+    extraFrontmatter: `dod_format: 2\nexecutor_type: human\ncontext:\n  files:\n${files.map((f) => `    - "${f}"`).join('\n')}`,
+  });
+
+  test('путь из HTML-комментария заготовки — не заявленный файл', () => {
+    const ticketPath = writeTicket('IMPL-951', {
+      section: '<!--\n- `path/to/file1.ts` - описание изменений\n-->\n- `src/app.js` — правка',
+    });
+
+    const result = runScript(ticketPath, root);
+
+    assert.equal(result.missing_files, '', `пример из комментария принят за файл: ${result.fail_reasons || ''}`);
+    assert.equal(result.status, 'legacy', `fail_reasons=${result.fail_reasons || ''}`);
+  });
+
+  test('все пути в обратных кавычках в начале строки, но не пути из описания', () => {
+    const ticketPath = writeTicket('IMPL-952', {
+      section: '- `src/app.js`, `src/missing.test.mjs` — регрессионные тесты\n- `src/app.js` — перенесён из `old/place.mjs`',
+    });
+
+    const result = runScript(ticketPath, root);
+
+    // Второй путь строки проверяется: его нет на диске. Прежний путь из описания — нет.
+    assert.equal(result.missing_files, 'src/missing.test.mjs');
+    assert.equal(result.status, 'failed');
+  });
+
+  test('путь не в формате строки — без кавычек, с суффиксом строк, после подписи — предупреждение, у dod_format: 2 — ещё и diff_error evidence', () => {
+    const legacyPath = writeTicket('IMPL-953', {
+      section: [
+        '- src/app.js (175 строк, переписан)',
+        '- src/deep/mod.js:10-20 — правка',
+        '- **Создан:** `src/deep/extra.js` — новый модуль',
+        '- e.g. сборка не менялась',
+        '- https://example.com/page — ссылка',
+        '- Permission `webNavigation` оставлен без изменений',
+      ].join('\n'),
+    });
+
+    const legacy = runScript(legacyPath, root);
+
+    assert.equal(legacy.status, 'legacy', `fail_reasons=${legacy.fail_reasons || ''}`);
+    assert.match(
+      legacy.warnings || '',
+      /путь не в формате «- `путь` — …» не проверен: src\/app\.js, src\/deep\/mod\.js, src\/deep\/extra\.js(;|$)/
+    );
+
+    const dod2Path = writeTicket('IMPL-954', {
+      section: '- src/app.js (175 строк, переписан)',
+      dod: '- [x] Скрипт завершается без ошибки\n  - prose: `по диффу`',
+      extraFrontmatter: 'dod_format: 2',
+    });
+
+    const dod2 = runScript(dod2Path, root);
+
+    assert.equal(dod2.status, 'passed', `fail_reasons=${dod2.fail_reasons || ''}`);
+    assert.match(readEvidence('IMPL-954').diff_error || '', /путь не в формате «- `путь` — …» в «Изменённых файлах»: src\/app\.js/);
+  });
+
+  test('тикет человека: файл вне context.files и путей проверок — legacy, не all_green; в кавычках и без', () => {
+    const inScope = runScript(humanTicket('HUMAN-951', '- `qa/result.md` — результат проверки'), root);
+    assert.equal(inScope.status, 'all_green', `fail_reasons=${inScope.fail_reasons || ''}`);
+
+    const quotedPath = humanTicket('HUMAN-952', '- `qa/result.md` — результат проверки\n- `src/app.js` — исправление');
+    const quoted = runScript(quotedPath, root);
+    assert.equal(quoted.status, 'legacy', `fail_reasons=${quoted.fail_reasons || ''}`);
+    assert.match(quoted.warnings || '', /human_out_of_scope_changes=src\/app\.js/);
+    assert.doesNotMatch(readFileSync(quotedPath, 'utf8'), /## Ревью/, 'строки passed без ревью быть не должно');
+
+    const unquoted = runScript(humanTicket('HUMAN-953', '- `qa/result.md` — результат проверки\n- src/app.js — исправление'), root);
+    assert.equal(unquoted.status, 'legacy', `fail_reasons=${unquoted.fail_reasons || ''}`);
+    assert.match(unquoted.warnings || '', /human_out_of_scope_changes=src\/app\.js/);
+  });
+
+  test('тикет человека: область — маска **, абсолютный путь внутри корня; файл вне корня проекта области не нарушает; `-- .` область не расширяет', () => {
+    const glob = runScript(humanTicket('HUMAN-954', '- `qa/result.md` — результат\n- `src/app.js` — правка\n- `src/deep/mod.js` — правка', {
+      files: ['qa/', 'src/**/*.js'],
+    }), root);
+    assert.equal(glob.status, 'all_green', `warnings=${glob.warnings || ''}`);
+
+    const absolute = runScript(humanTicket('HUMAN-955', '- `qa/result.md` — результат\n- `src/app.js` — правка', {
+      files: ['qa/', `${root.replace(/\\/g, '/')}/src`],
+    }), root);
+    assert.equal(absolute.status, 'all_green', `warnings=${absolute.warnings || ''}`);
+
+    const outsideDir = mkdtempSync(join(tmpdir(), 'verify-artifacts-outside-'));
+    try {
+      const outsideFile = join(outsideDir, 'notes.md');
+      writeFileSync(outsideFile, 'x', 'utf8');
+      const outside = runScript(humanTicket('HUMAN-956', `- \`qa/result.md\` — результат\n- \`${outsideFile}\` — заметки`), root);
+      assert.equal(outside.status, 'all_green', `warnings=${outside.warnings || ''}`);
+      assert.doesNotMatch(outside.warnings || '', /human_out_of_scope_changes/);
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+
+    const dot = runScript(humanTicket('HUMAN-957', '- `qa/result.md` — результат\n- `src/app.js` — правка', {
+      checkArgs: '.',
+    }), root);
+    assert.equal(dot.status, 'legacy', `fail_reasons=${dot.fail_reasons || ''}`);
+    assert.match(dot.warnings || '', /human_out_of_scope_changes=src\/app\.js/);
   });
 });

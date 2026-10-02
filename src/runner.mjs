@@ -26,7 +26,7 @@ import {
   requestedModel, ticketTypeOf, isCrashStatus, newRunKey, writeOpenRun, clearOpenRun, closeInterruptedRun,
   gradeRuns,
 } from './lib/agent-runs.mjs';
-import { captureRunChanges, countRunChanges } from './lib/agent-run-changes.mjs';
+import { captureRunChanges, listRunChanges, failedRunChanges } from './lib/agent-run-changes.mjs';
 import {
   MODEL_PLACEHOLDER, expandModelPools, isModelPool, maxPerAttempt as poolMaxPerAttempt, poolMembers, healthRulesId,
   SELECTOR_TIMEOUT_MS, SELECTOR_MAX_CANDIDATES, poolSelectorData, selectorTicket, buildSelectorPrompt, selectorRanking,
@@ -39,6 +39,16 @@ import {
 
 // Как часто, пока kilo-агент работает, смотреть в базу kilo, какие модели ответили.
 const KILO_MODELS_POLL_MS = 15000;
+// Строка HEARTBEAT в лог прогона, пока работает процесс агента (_callAgentOnce). Во время
+// агента раннер иначе молчит: AGENT_MODELS пишется только при смене подписи kilo, и
+// 2026-09-29/30 в логе PulseProxy 30 пауз дольше 10 минут, самая длинная 1785 с, — момент
+// смерти раннера по логу и по mtime лога (last_log_at в workflow-mcp) не восстановить.
+// Строка идёт только пока взведён таймаут запуска агента: детектор stuck в workflow-mcp
+// (тишина лога дольше `timeout` стадии, по умолчанию 300 с, плюс запас) во время агента,
+// которого раннер ещё не снял, больше не срабатывает, а после таймаута раннера лог молчит,
+// как прежде. Двоеточия в строке нет: разбор лога workflow-mcp (parsers/pipeline-log.mjs)
+// принял бы её за строку блока Context шага.
+const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 // Повторы финального чтения базы kilo после выхода агента (_trackKiloModels).
 const KILO_FINAL_READ_RETRIES = 3;
 const KILO_FINAL_READ_DELAY_MS = 300;
@@ -48,6 +58,7 @@ import { evaluate as evaluateWithModel, validateInput } from './lib/model-evalua
 import { ModelClientError, assertModelUrl, redactNetworkDetail, imageBatches } from './lib/model-client.mjs';
 import { buildCliJudgePrompt, parseJudgeScore, parseJudgeExtras } from './lib/skill-judge.mjs';
 import { RUBRIC_LEVEL_COUNT } from './lib/rubric-levels.mjs';
+import { parseFrontmatter, normalizePlanId } from './lib/utils.mjs';
 
 // Ошибка клиента безынструментного агента или класс ошибки в ответе агента с
 // командой на шаге «модель» model_io → запись health-реестра. Классы и TTL —
@@ -62,6 +73,41 @@ const MODEL_ERROR_HEALTH = Object.freeze({
   timeout: { class: 'transient', ttl: '5m' },
   network: { class: 'transient', ttl: '5m' },
 });
+
+// Классы сбоя селектора модели стадии, которые повтор вызова с тем же промптом не
+// исправит (_stageSelection): ключ не принят или не найден, запрос отвергнут, неверные
+// аргументы обёртки или промпт (decisions-select.js: usage, bad_prompt). Остальные сбои —
+// сеть, таймаут, 5xx, выход без класса — повторяются один раз.
+const SELECTOR_NO_RETRY_CLASSES = new Set(['auth', 'no_key', 'bad_request', 'usage', 'bad_prompt']);
+
+/**
+ * `complexity` из frontmatter тикета — `simple`, `medium` или `complex`
+ * (templates/ticket-template.md); поля нет, значение другое, файл не читается — null.
+ * Не selectionTicket: тот без поля подставляет `medium` для промпта селектора, а здесь
+ * отсутствие поля — «не знаем», и старт остаётся прежним (лестница с нижнего уровня).
+ */
+function ticketComplexity(ticketPath) {
+  if (!ticketPath) return null;
+  try {
+    const value = parseFrontmatter(fs.readFileSync(ticketPath, 'utf8')).frontmatter?.complexity;
+    return value === 'simple' || value === 'medium' || value === 'complex' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Стартовый уровень обхода по complexity тикета, когда уровня не назвал селектор:
+ * `available` — уровни выживших над границей по возрастанию, без повторов; simple —
+ * нижний, complex — верхний, medium — средний (при чётном числе — нижний из двух
+ * средних: правило «самая слабая достаточная»). complexity null — null.
+ */
+function complexityStartLevel(complexity, available) {
+  if (!complexity || available.length === 0) return null;
+  if (complexity === 'simple') return available[0];
+  if (complexity === 'complex') return available[available.length - 1];
+  return available[Math.floor((available.length - 1) / 2)];
+}
 
 /**
  * TTL правила health (`5m`, `1h`, `until_utc_midnight`, …) в миллисекундах от текущего
@@ -133,9 +179,19 @@ function commandAgentQuestions(input) {
 // Audit-log helpers (used by executeWithFallback hook — IMPL-83)
 // ============================================================================
 
-function formatLocalDateTime(d) {
+/**
+ * Время строки «Истории работы»: местное время ISO 8601 со смещением зоны
+ * (`2026-10-01T03:12:45+05:00`). До 2026-10-01 — местное время без зоны
+ * (`2026-10-01 03:12:45`): исполнители переписывали его в Result с меткой Z (сдвиг до 5 ч),
+ * а разбор сопоставлял историю с UTC журнала запусков по сдвигу пояса. Читатели истории
+ * берут оба вида: parseAgentHistory — ячейку как есть, calc-metrics.js скила create-report
+ * — через Date (строка со смещением — абсолютное время, без зоны — местное).
+ */
+function formatLocalIsoDateTime(d) {
   const pad = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const offset = -d.getTimezoneOffset();
+  const zone = `${offset >= 0 ? '+' : '-'}${pad(Math.floor(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}`;
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}${zone}`;
 }
 
 // ============================================================================
@@ -161,6 +217,53 @@ function findTicketPathForId(ticketId, projectRoot) {
     try { if (fs.existsSync(p)) return p; } catch {}
   }
   return null;
+}
+
+// Колонки закрытого тикета: история работы туда не дописывается (_auditAgentRun).
+const CLOSED_TICKET_COLUMNS = new Set(['done', 'archive']);
+
+// Статусы стадии, после которых прогон, ушедший в end, кончается не успехом, а строкой
+// «Pipeline stopped: … stuck» (PipelineRunner.run). stuck — check-report-needed: план
+// стоит на тикетах в blocked/, разбиение их не сняло, нужно решение человека. До
+// 2026-10-01 такой прогон кончался «Pipeline completed successfully!» (2026-09-30
+// PulseProxy, DOCS-014 в blocked/ из-за write_deny) — ни строки о том, что план стоит.
+const STUCK_END_STATUSES = new Set(['stuck']);
+
+// Ключи контекста, которые описывают текущий тикет: их ставят переходы тикетных стадий
+// поставляемого configs/pipeline.yaml (pick-*.found, verify-artifacts, mark-blocked и т.д.;
+// ready_tickets — check-conditions.has_ready). Контекст раннера между стадиями не
+// очищается, и стадия уровня плана (`scope: plan`) без отсечки получала последний тикет:
+// 2026-09-29/30 create-report, analyze-report и decompose-gaps шли с ticket_id HUMAN-003
+// и task_type fix (ListeningGlass), QA-180 (PulseProxy) — в промпте, в журнале запусков и
+// строками истории работы закрытого тикета; 2026-04-20 устаревший required_capabilities
+// заблокировал create-report и analyze-report (no_capable_agent).
+const TICKET_CONTEXT_KEYS = Object.freeze([
+  'ticket_id', 'task_type', 'required_capabilities', 'target', 'attempt', 'attempts', 'reason',
+  'evidence_file', 'ready_tickets',
+]);
+
+/**
+ * План отчёта: `related_plan` из frontmatter `.workflow/reports/<reportId>.md`,
+ * нормализованный normalizePlanId (`plans/current/PLAN-020.md` → `PLAN-020`), — как
+ * latestReport в scripts/check-report-needed.js, включая разбор строкой, когда YAML отчёта
+ * не читается (PulseProxy REPORT-012). Id не вида `REPORT-<число>` (его пишет агент в
+ * RESULT), нет файла или поля — null.
+ */
+function reportPlanId(projectRoot, reportId) {
+  if (typeof reportId !== 'string' || !/^REPORT-\d+$/.test(reportId)) return null;
+  let text;
+  try {
+    text = fs.readFileSync(path.join(projectRoot, '.workflow', 'reports', `${reportId}.md`), 'utf8');
+  } catch {
+    return null;
+  }
+  try {
+    const related = parseFrontmatter(text).frontmatter?.related_plan;
+    return related ? normalizePlanId(String(related)) : null;
+  } catch {
+    const line = text.match(/^related_plan:[ \t]*["']?([^"'\r\n]+)/m);
+    return line ? normalizePlanId(line[1].trim()) : null;
+  }
 }
 
 // IMPL-86: normalize agent_id in last row of ## Ревью section
@@ -499,10 +602,11 @@ class Logger {
 // PromptBuilder — формирует промпты для CLI-агентов с подстановкой контекста
 // ============================================================================
 class PromptBuilder {
-  constructor(context, counters, previousResults = {}) {
+  constructor(context, counters, previousResults = {}, projectRoot = null) {
     this.context = context;
     this.counters = counters;
     this.previousResults = previousResults;
+    this.projectRoot = projectRoot;
   }
 
   /**
@@ -513,6 +617,8 @@ class PromptBuilder {
    */
   build(stage, stageId) {
     const parts = [stage.skill || stageId];
+    const skillDir = this.skillFilesLine(stage);
+    if (skillDir) parts.push(skillDir);
 
     // Добавляем контекст если есть непустые значения
     const contextEntries = Object.entries(this.context)
@@ -541,6 +647,28 @@ class PromptBuilder {
     }
 
     return parts.join('\n');
+  }
+
+  /**
+   * Строка промпта с каталогом скила стадии — вторая строка, сразу после имени скила:
+   * `Файлы скила: .workflow/src/skills/<skill>/ — начни с …/SKILL.md; …`. Без неё агент
+   * искал файлы скила по имени, а каталог скила в проекте — ссылка на канон, и поиск через
+   * неё файл не находит: 2026-09-30 стратегию исполнения execute-task прочитали 2 сессии из
+   * 16. Только у стадии со `skill` без `model_io` (промпт стадии с model_io читают скрипты
+   * prepare и apply, а не модель) и только если каталог есть в проекте: несуществующий путь
+   * агенту не называется.
+   * @returns {string|null}
+   */
+  skillFilesLine(stage) {
+    const skill = stage?.skill;
+    if (typeof skill !== 'string' || !/^[\w.-]+$/.test(skill) || stage.model_io || !this.projectRoot) return null;
+    const dir = `.workflow/src/skills/${skill}/`;
+    try {
+      if (!fs.statSync(path.join(this.projectRoot, dir, 'SKILL.md')).isFile()) return null;
+    } catch {
+      return null;
+    }
+    return `Файлы скила: ${dir} — начни с ${dir}SKILL.md; пути к файлам скила (algorithms/, knowledge/, templates/) — от корня проекта.`;
   }
 
   /**
@@ -1091,7 +1219,7 @@ class StageExecutor {
     this.logger = logger;
 
     // Инициализируем билдер и парсер
-    this.promptBuilder = new PromptBuilder(context, counters, previousResults);
+    this.promptBuilder = new PromptBuilder(context, counters, previousResults, projectRoot);
     this.resultParser = new ResultParser();
 
     // Текущий дочерний процесс агента (для kill при shutdown)
@@ -1119,6 +1247,8 @@ class StageExecutor {
     // шлагбаум — 15 с (П14); тесты их уменьшают.
     this.selectorTimeoutMs = options.selectorTimeoutMs ?? SELECTOR_TIMEOUT_MS;
     this.gateTimeoutMs = options.gateTimeoutMs ?? GATE_TIMEOUT_MS;
+    // Период строки HEARTBEAT во время агента (HEARTBEAT_INTERVAL_MS); тесты его уменьшают.
+    this.heartbeatMs = options.heartbeatMs ?? HEARTBEAT_INTERVAL_MS;
 
     // Правила health-классификатора (инициализируются один раз в конструкторе)
     this.rules = loadRules(projectRoot);
@@ -1806,21 +1936,48 @@ class StageExecutor {
    * запрошена остановка, выживших над границей меньше двух или все на одном уровне. Сбой
    * вызова (выход ≠ 0, `status: error`, таймаут) — `error`/`timeout`, ответ без целого
    * `required_level` в 1..N — `unknown_level` (его ранжир всё равно идёт в порядок внутри
-   * уровня). Без ответа R — наименьший уровень выживших: обход — лестница от слабых.
+   * уровня). Сбой вызова повторяется один раз, кроме классов, которые повтор с тем же
+   * промптом не исправит (SELECTOR_NO_RETRY_CLASSES). Без ответа (сбой и после повтора,
+   * `unknown_level`, селектор нездоров) R — уровень по complexity тикета среди уровней
+   * выживших (complexityStartLevel: simple — нижний, medium — средний, complex — верхний),
+   * у тикета без complexity и при прочих пропусках — наименьший: обход — лестница от R.
    * Ответ R не выше границы поднимается до границы + 1. Сбой помечает селектора
-   * (_markSelectorFailure) — только его, не селекторы пулов.
+   * (_markSelectorFailure) — только его, не селекторы пулов, и только исход последнего
+   * вызова: сбой, прошедший повтором, селектора нездоровым не делает.
    */
   async _stageSelection({ stage, stageId, skillId, ticket, above, level, free, fact, floor, floorInfo, notRun, listIndex }) {
     const selectorId = stage.selection.selector;
     const selector = this.pipeline.agents[selectorId];
     const lowest = Math.min(...above.map(level));
     const ladder = (fallback, ranking = [], cost = null) => ({ R: lowest, ranking, mode: 'ladder', requiredLevel: null, fallback, cost });
+    const ticketPath = ticket ? findTicketPathForId(ticket, this.projectRoot) : null;
+    // Уровня не назвал селектор — старт по complexity тикета, а не с самого низкого:
+    // 2026-09-29/30 PulseProxy селектор срывался 12 раз из 50 (сеть до прокси), и каждый
+    // тикет шёл лестницей с уровня 1 — QA-177 (complex) достался claude-haiku. Квантиль
+    // селектора (--level-quantile) это не меняет: он действует, только когда ответ есть.
+    const byComplexity = (fallback, ranking = [], cost = null) => {
+      const complexity = ticketComplexity(ticketPath);
+      const available = [...new Set(above.map(level))].sort((a, b) => a - b);
+      const R = complexityStartLevel(complexity, available);
+      if (R === null) return ladder(fallback, ranking, cost);
+      if (this.logger) {
+        this.logger.info(
+          `SELECT_FALLBACK stage="${stageId}" fallback=${fallback} complexity=${complexity} level=${R} available=${available.join(',')}`,
+          stageId,
+        );
+      }
+      return { R, ranking, mode: 'ladder', requiredLevel: null, fallback, cost };
+    };
     let skip = null;
     if (!ticket) skip = 'no_ticket';
     else if (!selector || !isHealthy(this.projectRoot, selectorId)) skip = 'unhealthy';
     else if (this.stopRequested) skip = 'stopped';
     else if (above.length < 2) skip = 'single_candidate';
     else if (new Set(above.map(level)).size < 2) skip = 'single_level';
+    // Нездоровый селектор — последствие его сбоя (сеть — нездоров 5 мин, MODEL_ERROR_HEALTH):
+    // без ответа, как и сам сбой. Прочие пропуски выбора не требуют (один кандидат или
+    // уровень) или его не допускают (нет тикета, остановка).
+    if (skip === 'unhealthy') return byComplexity(`skipped:${skip}`);
     if (skip) return ladder(`skipped:${skip}`);
 
     // Кандидаты промпта — в порядке обхода без ответа (лестница от границы): так
@@ -1837,7 +1994,7 @@ class StageExecutor {
       };
     });
     const levels = stage.selection.levels;
-    const ticketData = selectionTicket(findTicketPathForId(ticket, this.projectRoot), {
+    const ticketData = selectionTicket(ticketPath, {
       id: ticket,
       type: ticketTypeOf(this.context),
       executorRuns: floorInfo.executorRuns,
@@ -1847,13 +2004,21 @@ class StageExecutor {
     const prompt = buildSelectionPrompt({
       stage: stageId, ticket: ticketData, levels, candidates, citation: stageFactsInfo(this.pipeline, stageId)?.citation ?? null,
     });
-    const call = await this._runSelector(selectorId, selector, prompt, stageId, skillId,
-      `selector stage=${stageId} candidates=${candidates.length} prompt_chars=${prompt.length}`);
+    const summary = `selector stage=${stageId} candidates=${candidates.length} prompt_chars=${prompt.length}`;
+    let call = await this._runSelector(selectorId, selector, prompt, stageId, skillId, summary);
+    if (call.fallback && !this.stopRequested && !SELECTOR_NO_RETRY_CLASSES.has(call.errorClass)) {
+      if (this.logger) {
+        this.logger.warn(`selector "${selectorId}" failed (fallback=${call.fallback} class=${call.errorClass ?? '-'}) — one retry`, stageId);
+      }
+      const first = call;
+      call = await this._runSelector(selectorId, selector, prompt, stageId, skillId, summary);
+      if (first.cost !== null) call.cost = (call.cost ?? 0) + first.cost;
+    }
     this._markSelectorFailure(selectorId, call, stageId);
-    if (call.fallback) return ladder(call.fallback, [], call.cost);
+    if (call.fallback) return byComplexity(call.fallback, [], call.cost);
     const ranking = selectorRanking(call.result.result?.ranking, above);
     const required = parseRequiredLevel(call.result.result?.required_level, levels.length);
-    if (required === null) return ladder('unknown_level', ranking, call.cost);
+    if (required === null) return byComplexity('unknown_level', ranking, call.cost);
     const R = required <= floor ? floor + 1 : required;
     return { R, ranking, mode: 'selector', requiredLevel: R, fallback: 'none', cost: call.cost };
   }
@@ -2052,7 +2217,7 @@ class StageExecutor {
           : await this.callAgent(agent, prompt, stageId, effectiveStage.skill, agentId, { bannedCheck: run.bannedCheck });
         // Снимок «после» — до записей раннера в тикет и в .workflow/metrics/: строка
         // истории работы попала бы в подсчёт, и «пусто» не срабатывало бы никогда.
-        const changedFiles = this._runChangedFiles(run);
+        const changedPaths = this._runChangedPaths(run);
         const stopRequested = this.stopRequested;
 
         if (result.modelError?.fallback) {
@@ -2064,12 +2229,12 @@ class StageExecutor {
           };
           const status = stopRequested ? 'aborted' : this._classifyRun(agentId, callResult);
           this._closeAgentRun(run, {
-            status, exitCode: -1, changedFiles, stopRequested,
+            status, exitCode: -1, changedPaths, stopRequested,
             crashTtlMs: ttlToMs(MODEL_ERROR_HEALTH[result.modelError.class]?.ttl),
           });
           // Агент — для события ревью, если эта ошибка станет результатом стадии.
           result.agentId = agentId;
-          await this._auditAgentRun(stageId, effectiveStage, agentId, { ...callResult, status });
+          await this._auditAgentRun(stageId, effectiveStage, agentId, { ...callResult, status, changedPaths });
           if (this.stopRequested) return result;
           if (this.logger) {
             this.logger.info(`agent ${agentId} model error ${result.modelError.class} — falling back in-stage`, stageId);
@@ -2091,7 +2256,7 @@ class StageExecutor {
         };
         const status = stopRequested ? 'aborted' : this._classifyRun(agentId, callResult);
         const event = this._closeAgentRun(run, {
-          status, exitCode: callResult.exitCode, changedFiles, stopRequested, resultStatus: result.status,
+          status, exitCode: callResult.exitCode, changedPaths, stopRequested, resultStatus: result.status,
           kiloModels: result.kiloModels, modelIoModel: result.modelIo?.model,
           crashTtlMs: result.modelError ? ttlToMs(MODEL_ERROR_HEALTH[result.modelError.class]?.ttl) : null,
         });
@@ -2100,7 +2265,7 @@ class StageExecutor {
         result.runModel = event.model;
 
         // IMPL-83: audit-log hook (success path)
-        await this._auditAgentRun(stageId, effectiveStage, agentId, { ...callResult, status });
+        await this._auditAgentRun(stageId, effectiveStage, agentId, { ...callResult, status, changedPaths });
 
         // IMPL-86: normalize agent_id in ## Ревью after review-result stage.
         // Стадия с model_io пропускается: строку ревью с id агента пишет её скрипт
@@ -2189,7 +2354,7 @@ class StageExecutor {
           throw err;
         }
 
-        const changedFiles = this._runChangedFiles(run);
+        const changedPaths = this._runChangedPaths(run);
         const stopRequested = this.stopRequested;
         const exitCode = err.exitCode ?? err.code;
         const stderr = err.stderr || '';
@@ -2222,12 +2387,12 @@ class StageExecutor {
           classification = await classify(this.rules, healthRulesId(agent, agentId), { exitCode, stderr });
         }
         this._closeAgentRun(run, {
-          status, exitCode, changedFiles, stopRequested,
+          status, exitCode, changedPaths, stopRequested,
           kiloModels: err.kiloModels, crashTtlMs: ttlToMs(classification?.ttl),
         });
 
         // IMPL-83: audit-log hook (failure path)
-        await this._auditAgentRun(stageId, effectiveStage, agentId, { ...callResult, status });
+        await this._auditAgentRun(stageId, effectiveStage, agentId, { ...callResult, status, changedPaths });
 
         // Агента убила остановка пайплайна: это не его сбой — без пометки в
         // health-реестре и без перехода к следующему агенту.
@@ -2263,10 +2428,10 @@ class StageExecutor {
         }
 
         if (!diffEmpty) {
-          const changedPaths = diffResult ? Object.keys(diffResult).join(', ') : 'unknown';
+          const modifiedArtifacts = diffResult ? Object.keys(diffResult).join(', ') : 'unknown';
           if (this.logger) {
             this.logger.warn(
-              `agent ${agentId} exited ${exitCode}, artifacts modified [${changedPaths}] — fallback blocked`,
+              `agent ${agentId} exited ${exitCode}, artifacts modified [${modifiedArtifacts}] — fallback blocked`,
               stageId
             );
           }
@@ -2345,10 +2510,13 @@ class StageExecutor {
     return { record, agent, agentId, modelIo, changes, bannedCheck, startedAt: Date.now() };
   }
 
-  /** Изменённые файлы проекта за запуск; у стадии с model_io и при сбое подсчёта — null. */
-  _runChangedFiles(run) {
+  /**
+   * Изменённые файлы проекта за запуск — пути от корня проекта (listRunChanges); у стадии
+   * с model_io и при сбое подсчёта — null.
+   */
+  _runChangedPaths(run) {
     if (run.modelIo) return null;
-    return countRunChanges(this.projectRoot, run.changes, findTicketPathForId(run.record.ticket, this.projectRoot));
+    return listRunChanges(this.projectRoot, run.changes, findTicketPathForId(run.record.ticket, this.projectRoot));
   }
 
   /**
@@ -2360,9 +2528,13 @@ class StageExecutor {
    * `resultStatus` — статус блока RESULT ответа (`result_status` события): по нему
    * scripts/check-report-needed.js отличает разбор `completed` от `has_gaps` — класс
    * запуска у обоих `ok`.
+   *
+   * `changedPaths` — изменённые файлы запуска (_runChangedPaths): в событии их число
+   * (`changed_files`), а у запуска со сбоем (error, timeout, network_error — failedRunChanges)
+   * с изменениями — и сами пути (`changed_paths`, не больше FAILED_RUN_PATHS_MAX).
    * @returns {object} событие (поле `model` — ключ модели запуска)
    */
-  _closeAgentRun(run, { status, exitCode, changedFiles, stopRequested, resultStatus = null, kiloModels = null, modelIoModel = null, crashTtlMs = null }) {
+  _closeAgentRun(run, { status, exitCode, changedPaths, stopRequested, resultStatus = null, kiloModels = null, modelIoModel = null, crashTtlMs = null }) {
     const { ts, ...record } = run.record;
     const event = { type: 'run', ...record, status };
     try {
@@ -2371,9 +2543,11 @@ class StageExecutor {
         model: runModelKey(run.agent, run.agentId, { kiloLast: kiloModels?.last ?? null, modelIoModel }),
         status,
         exit_code: typeof exitCode === 'number' ? exitCode : null,
-        changed_files: typeof changedFiles === 'number' ? changedFiles : null,
+        changed_files: Array.isArray(changedPaths) ? changedPaths.length : null,
         duration_ms: Date.now() - run.startedAt,
       });
+      const failedChanges = failedRunChanges(status, changedPaths);
+      if (failedChanges) event.changed_paths = failedChanges.paths;
       if (typeof resultStatus === 'string' && resultStatus) event.result_status = resultStatus;
       if (stopRequested) event.stop_requested = true;
       else if (isCrashStatus(event)) event.crash_ttl_ms = crashTtlMs ?? CRASH_TTL_DEFAULT_MS;
@@ -2407,7 +2581,10 @@ class StageExecutor {
   /**
    * IMPL-83: Audit-log hook — строка истории работы тикета. Статус — `callResult.status`
    * (его определяет executeWithFallback один раз для истории и журнала), без него —
-   * класс classifyAgentResult.
+   * класс classifyAgentResult. `callResult.changedPaths` — изменённые файлы запуска
+   * (_runChangedPaths): у запуска со сбоем (failedRunChanges) они идут в колонку
+   * «Изменённые файлы» строки — по ним следующая попытка отличает правки оборванного
+   * запуска от чужой незакоммиченной работы (шаг P1S2 скила execute-task).
    * Non-blocking: errors are logged via logger.warn, never thrown.
    */
   async _auditAgentRun(stageId, effectiveStage, agentId, callResult) {
@@ -2425,17 +2602,30 @@ class StageExecutor {
       }
       if (!ticketPath) {
         ticketPath = findTicketPathForId(ticketId, this.projectRoot);
+        // Закрытый тикет стадии не исполняет: ticket_id в контексте остался от прошлого
+        // тикета. 2026-09-29/30 строки create-report, analyze-report и decompose-gaps
+        // дописаны в done/HUMAN-003 (ListeningGlass) и в QA-180 (PulseProxy, затем
+        // archive/). Перемещение в done/ стадией move-* — выше, по parsedResult.to.
+        if (ticketPath && CLOSED_TICKET_COLUMNS.has(path.basename(path.dirname(ticketPath)))) {
+          if (this.logger) this.logger.info(`audit-log: ${ticketId} is closed (${path.basename(path.dirname(ticketPath))}) — no history row for stage ${stageId}`, stageId);
+          return;
+        }
       }
       if (!ticketPath) return;
 
       const skillName = effectiveStage.skill || stageId;
       const entry = {
-        timestamp: formatLocalDateTime(new Date()),
+        timestamp: formatLocalIsoDateTime(new Date()),
         skill: skillName,
         // В истории — подпись с фактической моделью kilo (`kilo-free(dots-3-note-preview)`).
         agent: callResult.agentLabel || agentId || 'unknown',
         status,
       };
+      const failedChanges = failedRunChanges(status, callResult.changedPaths);
+      if (failedChanges) {
+        entry.files = failedChanges.paths;
+        entry.files_total = failedChanges.total;
+      }
 
       try {
         const r = appendAgentRun(ticketPath, entry);
@@ -2934,8 +3124,22 @@ class StageExecutor {
         }
       };
 
+      // Строка жизни, пока агент работает (HEARTBEAT_INTERVAL_MS): снимается на выходе
+      // агента, на его ошибке, на досрочном снятии и на таймауте запуска.
+      const heartbeatStarted = Date.now();
+      const heartbeatTicket = this.context?.ticket_id ? ` ticket=${this.context.ticket_id}` : '';
+      const heartbeat = this.logger && this.heartbeatMs > 0
+        ? setInterval(() => {
+          const elapsed = Math.round((Date.now() - heartbeatStarted) / 1000);
+          this.logger.info(`HEARTBEAT agent_pid=${child.pid ?? '-'} elapsed_s=${elapsed}${heartbeatTicket}`, stageId);
+        }, this.heartbeatMs)
+        : null;
+      heartbeat?.unref();
+      const stopHeartbeat = () => { if (heartbeat) clearInterval(heartbeat); };
+
       // Таймаут
       const timeoutId = setTimeout(() => {
+        stopHeartbeat();
         timedOut = true;
         // На Windows SIGTERM игнорируется — используем taskkill /T /F для убийства дерева
         killChild();
@@ -3003,6 +3207,7 @@ class StageExecutor {
         earlyKilled = true;
         earlyKillRule = match;
         clearTimeout(timeoutId);
+        stopHeartbeat();
         if (this.logger) {
           this.logger.error(
             `Fatal stderr pattern matched for ${agentId} (rule=${match.rule_id}, class=${match.class}). Killing process.`,
@@ -3027,6 +3232,7 @@ class StageExecutor {
         // поздний close стёр бы ссылку на живого агента, и остановка его бы не сняла.
         if (this.currentChild === child) this.currentChild = null;
         clearTimeout(timeoutId);
+        stopHeartbeat();
         // Обрабатываем остаток буфера стриминга
         if (stdoutBuffer.trim()) {
           try {
@@ -3155,6 +3361,7 @@ class StageExecutor {
 
       child.on('error', (err) => {
         clearTimeout(timeoutId);
+        stopHeartbeat();
         if (!timedOut && !earlyKilled) {
           if (this.logger) {
             this.logger.error(`CLI error: ${err.message}`, stageId);
@@ -3581,6 +3788,8 @@ class PipelineRunner {
     this.tasksExecuted = 0;
     this.running = true;
     this.currentStage = this.pipeline.entry;
+    // Переход в end: стадия, статус и данные RESULT — для итога прогона (run).
+    this.endedBy = null;
 
     // Базовая директория проекта вычисляется динамически
     const projectRoot = args.project ? path.resolve(args.project) : findProjectRoot();
@@ -4118,7 +4327,9 @@ class PipelineRunner {
       this.logger.info(`Current stage: ${this.currentStage}`, 'PipelineRunner');
 
       if (this.currentStage === 'end') {
-        this.logger.info('Pipeline completed successfully!', 'PipelineRunner');
+        const stuck = this.stuckEnd();
+        if (stuck) this.logger.warn(stuck, 'PipelineRunner');
+        else this.logger.info('Pipeline completed successfully!', 'PipelineRunner');
         break;
       }
 
@@ -4137,7 +4348,7 @@ class PipelineRunner {
          } else if (stage.type === 'manual-gate') {
            result = await this.executeManualGate(this.currentStage, stage);
          } else {
-           this.currentExecutor = new StageExecutor(this.config, this.context, this.counters, {}, this.fileGuard, this.logger, this.projectRoot, { runId: this.runId });
+           this.currentExecutor = new StageExecutor(this.config, this.stageContext(this.currentStage, stage), this.counters, {}, this.fileGuard, this.logger, this.projectRoot, { runId: this.runId });
            result = await this.currentExecutor.execute(this.currentStage);
            this.currentExecutor = null;
            this.recordStageEvent(this.currentStage, stage, result);
@@ -4152,6 +4363,10 @@ class PipelineRunner {
         if (this.currentStage === 'execute-task' && result.status !== 'error') {
           this.tasksExecuted++;
         }
+
+        this.endedBy = nextStage === 'end'
+          ? { stage: this.currentStage, status: result.status, data: result.result || {} }
+          : null;
 
         // Переход к следующему stage
         this.currentStage = nextStage;
@@ -4199,8 +4414,23 @@ class PipelineRunner {
       steps: this.stepCount,
       tasksExecuted: this.tasksExecuted,
       context: this.context,
-      failed: !this.running && this.stepCount < maxSteps
+      failed: !this.running && this.stepCount < maxSteps,
+      // План стоит (STUCK_END_STATUSES): прогон не упал, но и успехом не кончился.
+      stuck: this.currentStage === 'end' && Boolean(this.stuckEnd()),
     };
+  }
+
+  /**
+   * Итог прогона, который ушёл в end по статусу из STUCK_END_STATUSES: строка
+   * «Pipeline stopped: plan … is stuck (<стадия>: <статус>, blocked: …) — needs a human
+   * decision» с plan_id и blocked_tickets из RESULT стадии. Иначе — null.
+   */
+  stuckEnd() {
+    const ended = this.endedBy;
+    if (!ended || !STUCK_END_STATUSES.has(ended.status)) return null;
+    const plan = ended.data.plan_id ? `plan ${ended.data.plan_id}` : 'plan';
+    const blocked = ended.data.blocked_tickets ? `, blocked: ${ended.data.blocked_tickets}` : '';
+    return `Pipeline stopped: ${plan} is stuck (${ended.stage}: ${ended.status}${blocked}) — needs a human decision`;
   }
 
   /**
@@ -4312,6 +4542,39 @@ class PipelineRunner {
   }
 
   /**
+   * Контекст, с которым исполняется стадия. У стадии тикета — сам контекст раннера. У
+   * стадии уровня плана (`scope: plan` в pipeline.yaml: отчёт, разбор, разбиение пробелов,
+   * закрытие плана) — копия без ключей тикета (TICKET_CONTEXT_KEYS): их не видят ни промпт,
+   * ни выбор агента (task_type, required_capabilities), ни журнал запусков, ни история
+   * работы тикета. Контекст раннера при этом не меняется: сброс ticket_id в нём отключил бы
+   * сброс счётчиков попыток при смене тикета (updateContext сравнивает с прежним ticket_id).
+   *
+   * plan_id пуст (запуск без --plan), а report_id есть — копии достаётся план отчёта
+   * (related_plan, reportPlanId). Только копии: план в контексте раннера сузил бы выбор и
+   * проверку тикетов до конца запуска (pick-next-task и check-conditions фильтруют по
+   * plan_id). 2026-09-29/30 decompose-gaps получала вход без plan_id, которого требуют
+   * узлы скила P0R2/P0Q1 (ListeningGlass REPORT-001, PulseProxy REPORT-031): план агент
+   * находил сам, а по ветке «нет» пробелы потерялись бы.
+   */
+  stageContext(stageId, stage) {
+    if (stage?.scope !== 'plan') return this.context;
+    const view = { ...this.context };
+    const dropped = TICKET_CONTEXT_KEYS.filter((key) => view[key] !== undefined && view[key] !== null && view[key] !== '');
+    for (const key of TICKET_CONTEXT_KEYS) delete view[key];
+    if (dropped.length > 0) {
+      this.logger.info(`scope=plan stage="${stageId}" ticket context not passed (${dropped.join(' ')})`, 'PipelineRunner');
+    }
+    if (!view.plan_id && view.report_id) {
+      const planId = reportPlanId(this.projectRoot, view.report_id);
+      if (planId) {
+        view.plan_id = planId;
+        this.logger.info(`scope=plan stage="${stageId}" plan_id=${planId} from related_plan of ${view.report_id}`, 'PipelineRunner');
+      }
+    }
+    return view;
+  }
+
+  /**
    * Утилита для задержки
    */
   sleep(ms) {
@@ -4358,19 +4621,19 @@ class PipelineRunner {
       }
     };
 
+    // SIGBREAK — Ctrl+Break в консоли Windows (runPipeline): та же мягкая остановка.
     this.signalHandlers = {
       SIGINT: () => shutdown('SIGINT'),
       SIGTERM: () => shutdown('SIGTERM'),
+      SIGBREAK: () => shutdown('SIGBREAK'),
     };
-    process.on('SIGINT', this.signalHandlers.SIGINT);
-    process.on('SIGTERM', this.signalHandlers.SIGTERM);
+    for (const [signal, handler] of Object.entries(this.signalHandlers)) process.on(signal, handler);
   }
 
   /** Снимает обработчики сигнала раннера — после завершения runPipeline. */
   disposeSignalHandlers() {
     if (!this.signalHandlers) return;
-    process.off('SIGINT', this.signalHandlers.SIGINT);
-    process.off('SIGTERM', this.signalHandlers.SIGTERM);
+    for (const [signal, handler] of Object.entries(this.signalHandlers)) process.off(signal, handler);
     this.signalHandlers = null;
   }
 
@@ -5041,6 +5304,11 @@ function validateConfig(config, projectRoot = null) {
         validateModelIo(stageId, stage.model_io, projectRoot, errors);
       }
 
+      // Опечатка в значении молча оставила бы стадии плана чужой тикет (stageContext).
+      if (stage.scope !== undefined && stage.scope !== 'plan') {
+        errors.push(`Stage "${stageId}" has invalid scope: ${JSON.stringify(stage.scope)} (only "plan" is supported)`);
+      }
+
       // Валидация для manual-gate стадии
       if (stage.type === 'manual-gate') {
         if (!stage.goto || !stage.goto.approved) {
@@ -5220,19 +5488,82 @@ async function runPipeline(argv = process.argv.slice(2)) {
   // вызывает слушателей без аргумента.
   let runner = null;
   let stopSignal = null;
+
+  // Смерть раннера без упорядоченного выхода — последней строкой в логе прогона, синхронно
+  // (appendFileSync логгера): необработанное исключение или отказ промиса, повторный
+  // сигнал во время мягкой остановки, process.exit и опустевший цикл событий до конца
+  // runPipeline. Запуск агента, открытый в этот момент, закрывается событием `run` со
+  // статусом `aborted` и `interrupted: true` сразу (closeInterruptedRun), а не следующим
+  // стартом с временем этого старта. Прежде такой раннер не оставлял в логе ни строки, а
+  // stderr раннера, запущенного из workflow-mcp, уходит в 'ignore': 2026-09-30 падение,
+  // жёсткое снятие и потерю родителя по следам различить было нельзя (PulseProxy
+  // 18-55-50, ListeningGlass 18-53-24 и 08-25-19). Снятие без обработчика (`taskkill /F`,
+  // SIGKILL) строки по-прежнему не оставляет — теперь его и отличает её отсутствие.
+  // Lock при падении не снимается: пока процесса нет, а lock лежит, workflow-mcp
+  // показывает прогон `stale`, а детектор crashed (мёртвый pid при свежем логе) видит
+  // строку падения как свежую запись; снимает lock следующий старт, как прежде.
+  let finished = false;
+  let deathLogged = false;
+  let deathLogger = null;
+  const writeDeath = (message) => {
+    deathLogged = true;
+    try {
+      deathLogger ??= runner?.logger ?? new Logger(logFilePath);
+      deathLogger.error(message, 'PipelineRunner');
+    } catch {}
+  };
+  const atStage = () => (runner?.currentStage ? ` stage="${runner.currentStage}"` : '');
+  const closeOpenRun = () => {
+    try {
+      if (runner) runner.closeInterruptedAgentRun();
+      else closeInterruptedRun(projectRoot);
+    } catch {}
+  };
+  const describeFailure = (value) => {
+    if (value instanceof Error) return value.stack || `${value.name}: ${value.message}`;
+    try { return typeof value === 'string' ? value : JSON.stringify(value); } catch { return String(value); }
+  };
+  // Поведение Node по умолчанию сохраняется: необработанное исключение и отказ промиса
+  // завершают процесс с кодом 1. Строка пишется до снятия агента: taskkill ждёт, а причина
+  // должна остаться в логе, даже если процесс снимут в эту минуту.
+  const onFatal = (reason) => (value) => {
+    writeDeath(`RUNNER CRASH reason=${reason} exit_code=1${atStage()} — ${describeFailure(value)}`);
+    try { runner?.forceStop(); } catch {}
+    closeOpenRun();
+    process.exit(1);
+  };
+  const onUncaughtException = onFatal('uncaughtException');
+  const onUnhandledRejection = onFatal('unhandledRejection');
+  // На 'exit' допустим только синхронный код: снятие агента (taskkill / SIGKILL) и запись
+  // журнала синхронные. Без снятия агент, записанный прерванным, работал бы дальше.
+  const onExit = (code) => {
+    if (finished) return;
+    if (!deathLogged) writeDeath(`RUNNER EXIT exit_code=${code}${atStage()} — process exited before the pipeline finished`);
+    try { runner?.forceStop(); } catch {}
+    closeOpenRun();
+  };
+
   const onSignal = (signal) => {
     if (runner && !stopSignal) {
       stopSignal = signal;
       return;
     }
+    writeDeath(`RUNNER STOP signal=${signal} forced exit_code=130${atStage()} — second stop signal during graceful shutdown`);
     runner?.forceStop();
     try { removeMarker(projectRoot); } catch {}
     process.exit(130); // 128 + SIGINT(2) — standard exit code for signal-terminated
   };
   const onSigint = () => onSignal('SIGINT');
   const onSigterm = () => onSignal('SIGTERM');
+  // SIGBREAK — Ctrl+Break в консоли Windows: та же мягкая остановка, что у SIGINT / SIGTERM.
+  // Доставку настоящего Ctrl+Break не проверяли: Node его не генерирует (тест — process.emit).
+  const onSigbreak = () => onSignal('SIGBREAK');
   process.on('SIGINT', onSigint);
   process.on('SIGTERM', onSigterm);
+  process.on('SIGBREAK', onSigbreak);
+  process.on('uncaughtException', onUncaughtException);
+  process.on('unhandledRejection', onUnhandledRejection);
+  process.on('exit', onExit);
 
   try {
     // Запускаем пайплайн. run_id и путь к логу уже записаны в маркер — раннер
@@ -5250,14 +5581,22 @@ async function runPipeline(argv = process.argv.slice(2)) {
   } catch (err) {
     console.error(`\nError: ${err.message}`);
     console.error(err.stack);
+    // Та же причина — в лог прогона: stderr раннера из workflow-mcp не сохраняется.
+    writeDeath(`RUNNER ERROR exit_code=1${atStage()} — ${describeFailure(err)}`);
+    closeOpenRun();
 
     // Даём файлу логов время записаться перед выходом
     await new Promise(resolve => setTimeout(resolve, 100));
 
     return { exitCode: 1, error: err.message, stack: err.stack };
   } finally {
+    finished = true;
     process.off('SIGINT', onSigint);
     process.off('SIGTERM', onSigterm);
+    process.off('SIGBREAK', onSigbreak);
+    process.off('uncaughtException', onUncaughtException);
+    process.off('unhandledRejection', onUnhandledRejection);
+    process.off('exit', onExit);
     runner?.disposeSignalHandlers();
     // Ensure marker is cleaned up on normal exit
     try {

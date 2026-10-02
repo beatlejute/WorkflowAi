@@ -1,0 +1,38 @@
+id: TC-REVIEW-RESULT-017
+title: "Шапка SKILL.md называет область графа: ревью агентом со скилом, а не тикеты dod_format 2 по evidence"
+origin:
+  chg: ["ad-hoc-2026-10-01-review-graph-dod2"]
+  incidents:
+    - "Разбор прогонов PulseProxy и ListeningGlass 2026-10-01: finder приложил граф review-result ко всему потоку ревью и записал «узлы P0R5, P0R6 и этап П5 не исполняются» на DOCS-013, DOCS-015, FIX-033, IMPL-120 — тикетах dod_format 2, которые закрыли скрипт предпроверки (all_green) и стадия с обменом model_io. В ListeningGlass 20 стадий ревью прошли через model_io, 0 сессий рельс. Что граф — процедура только старого маршрута, было сказано в README (с 1.22.0), но не в SKILL.md."
+  principle: "Шапка скила говорит, где исполняется граф: стадия, где ревью ведёт агент со скилом (тикет без dod_format 2, тикет человека с файлами проекта вне своей области, ветка error предпроверки). Остальные тикеты dod_format 2 закрывают скрипты и вопросы модели по шкале — соблюдение графа по ним не меряется."
+  backlog_sources: []
+tags: [scope, evidence-review, consistency]
+severity: low
+
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    (L0-only тест: scenario не запускает агентов, проверяется только static
+    assertion над содержимым рабочих файлов скила.)
+
+assertions:
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'Граф\s+—\s+процедура\s+стадии,\s+где\s+ревью\s+ведёт\s+агент\s+с\s+этим\s+скилом:\s+тикет\s+без\s+`dod_format:\s+2`,\s+тикет\s+с\s+`executor_type:\s+human`'
+      reason: "Шапка называет стадию, на которой исполняется граф: ревью агентом со скилом."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'Остальные\s+тикеты\s+`dod_format:\s+2`\s+закрывают\s+скрипты\s+предпроверки\s+и\s+вопросы\s+модели\s+по\s+шкале\s+`knowledge/dod-evidence-scale\.md`,\s+собранные\s+только\s+из\s+evidence:\s+узлы\s+графа\s+на\s+них\s+не\s+исполняются'
+      reason: "Сказано, что на остальных тикетах dod_format 2 узлы графа не исполняются — аудит не меряет по ним соблюдение графа."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'узлы\s+графа\s+на\s+них\s+не\s+исполняются[\s\S]*```mermaid'
+      reason: "Оговорка стоит в шапке до графа."
+    - kind: skill_contains
+      file: "README.md"
+      pattern: 'Скил с этим графом ревьюит тикеты без `dod_format: 2`, ветку error предпроверки и тикет с `executor_type: human`, у которого в «Изменённых файлах» есть файлы проекта вне `context\.files`, масок `visual` и путей после `--` в проверках `check`'
+      reason: "README согласован с шапкой SKILL.md и с кодом: та же область графа и та же область тикета человека."
+
+execution:
+  timeout_s: 60

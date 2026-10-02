@@ -15,6 +15,9 @@
  *   `dod_format_missing`: без поля пайплайн их не исполняет
  * - Шаги: количество шагов в "Детали задачи" (>5 → FAIL, отсутствует → SKIP)
  * - Файлы: количество файлов в context.files (>3 → WARNING, отсутствует → SKIP)
+ * - С флагом --activate — метки времени: пустые, неразбираемые и будущие created_at
+ *   и updated_at тикетов плана заменяются текущим временем при любом итоге проверки
+ *   (stampTicketTimes); без флага файлы тикетов не пишутся
  *
  * Использование:
  *   node verify-atomicity.js [--activate] "<prompt>"
@@ -31,6 +34,7 @@
  *   status: passed|failed
  *   tickets_checked: N
  *   tickets_failed: N
+ *   time_fields_stamped: N   (только с --activate и если метка поставлена)
  *   failures: [...]
  *   warnings: [...]
  *   ---RESULT---
@@ -88,6 +92,65 @@ function activatePlan(planAbsPath) {
   fs.writeFileSync(planAbsPath, newContent, 'utf8');
 
   return { activated: true, previous_status: currentStatus, new_status: 'active', path: planAbsPath };
+}
+
+const TIME_FIELDS = ['created_at', 'updated_at'];
+// Допуск на расхождение часов — тот же, что у гейта file_unchanged стадии ревью.
+const CLOCK_SKEW_TOLERANCE_MS = 60 * 1000;
+
+/**
+ * Машинные метки created_at и updated_at тикетов плана — только в запуске стадией
+ * пайплайна (флаг --activate); самопроверка агента декомпозиции файлов не пишет.
+ *
+ * Поля времени модель декомпозиции не заполняет (узел P10S14 workflows/decompose.md):
+ * часов у неё нет. PulseProxy PLAN-020 2026-09-29: у всех 36 тикетов created_at
+ * «2026-09-30T00:00:00Z» — полночь местной даты с суффиксом Z, на 4 ч 44 мин вперёд;
+ * гейт file_unchanged отбросил будущую метку, откатился на updated_at, который
+ * переписывается на каждом повторе, и семь раз отклонил работу прошлых попыток.
+ *
+ * Пустое, неразбираемое или будущее (дальше допуска на расхождение часов) значение
+ * заменяется текущим временем, валидное прошлое не меняется: повторная декомпозиция
+ * после FAIL правит те же файлы, и метка первого запуска остаётся. Меняются только
+ * строки этих полей во frontmatter, остальной текст файла и переводы строк — нет.
+ *
+ * @param {Array<{path: string, content: string}>} tickets — тикеты плана, content обновляется
+ * @param {string} nowIso — текущее время, ISO 8601
+ * @returns {number} число тикетов, в которых поставлена хотя бы одна метка
+ */
+function stampTicketTimes(tickets, nowIso) {
+  const nowMs = Date.parse(nowIso);
+  let stamped = 0;
+  for (const ticket of tickets) {
+    const next = stampTimeFields(ticket.content, nowIso, nowMs);
+    if (next === ticket.content) continue;
+    fs.writeFileSync(ticket.path, next, 'utf8');
+    ticket.content = next;
+    stamped++;
+  }
+  return stamped;
+}
+
+function isMachineTime(raw, nowMs) {
+  if (!raw) return false;
+  const ms = new Date(raw).getTime();
+  return Number.isFinite(ms) && ms <= nowMs + CLOCK_SKEW_TOLERANCE_MS;
+}
+
+function stampTimeFields(content, nowIso, nowMs) {
+  const fm = /^---(\r?\n)([\s\S]*?)\r?\n---/.exec(content);
+  if (!fm) return content;
+  const eol = fm[1];
+  let block = fm[2];
+  for (const field of TIME_FIELDS) {
+    const line = new RegExp(`^${field}:[ \\t]*(.*)$`, 'm');
+    const found = line.exec(block);
+    const raw = found ? found[1].replace(/\s+#.*$/, '').trim().replace(/^["']|["']$/g, '') : '';
+    if (isMachineTime(raw, nowMs)) continue;
+    const value = `${field}: "${nowIso}"`;
+    block = found ? block.replace(line, () => value) : `${block}${eol}${value}`;
+  }
+  if (block === fm[2]) return content;
+  return `${content.slice(0, fm.index)}---${eol}${block}${eol}---${content.slice(fm.index + fm[0].length)}`;
 }
 
 const DOD_THRESHOLD_FAIL = 7;
@@ -414,6 +477,9 @@ function main() {
     process.exit(0);
   }
 
+  // Метки времени ставит только запуск стадией пайплайна, при любом итоге проверки.
+  const timeFieldsStamped = activate ? stampTicketTimes(tickets, new Date().toISOString()) : 0;
+
   const results = tickets.map(checkTicket);
 
   const failures = [];
@@ -453,6 +519,7 @@ function main() {
   console.log(`status: ${status}`);
   console.log(`tickets_checked: ${results.length}`);
   console.log(`tickets_failed: ${ticketsFailed}`);
+  if (timeFieldsStamped > 0) console.log(`time_fields_stamped: ${timeFieldsStamped}`);
 
   if (activation) {
     if (activation.activated) {
