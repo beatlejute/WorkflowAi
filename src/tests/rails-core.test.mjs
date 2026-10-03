@@ -537,17 +537,16 @@ test('decide: форма --quote="…" с бэктиком -> тоже пере�
   });
 });
 
-test('decide: смешанная команда — два cli-сегмента через &&, переписывается только сегмент с неэкранированными ` / $', () => {
+test('decide: смешанная команда — goto и status через &&, переписывается только сегмент с неэкранированными ` / $', () => {
   withProject(({ root }) => {
     const { sessionId } = makeState(root, 'P4S1');
     const dirty = 'прогон ~$X минут — оценка перед стартом следующего этапа';
-    const clean = 'просто обычная цитата без единого спецсимвола совсем';
-    const command = `node .workflow/src/rails/cli.mjs goto P5E1 --quote "${dirty}" && node .workflow/src/rails/cli.mjs goto P4R1 --quote "${clean}"`;
+    const command = `node .workflow/src/rails/cli.mjs goto P5E1 --quote "${dirty}" && node .workflow/src/rails/cli.mjs status`;
     const r = decide({ action: { tool: 'Bash', kind: 'shell', command, shell: 'posix' }, ctx: { cwd: root, sessionId } });
     assert.equal(r.decision, 'allow');
     assert.equal(
       r.updatedCommand,
-      `node .workflow/src/rails/cli.mjs goto P5E1 --quote '${dirty}' --session ${sessionId} && node .workflow/src/rails/cli.mjs goto P4R1 --quote "${clean}" --session ${sessionId}`
+      `node .workflow/src/rails/cli.mjs goto P5E1 --quote '${dirty}' --session ${sessionId} && node .workflow/src/rails/cli.mjs status --session ${sessionId}`
     );
   });
 });
@@ -753,15 +752,14 @@ test("decide (B2, MEDIUM): апостроф + $ в первом cli-сегмен
     writeCliStub(root);
     const { sessionId } = makeState(root, 'P4S1');
     const first = "it's $X first segment quote text";
-    const second = 'second segment plain quote text';
-    const command = `node .workflow/src/rails/cli.mjs goto P5E1 --quote "${first}" && node .workflow/src/rails/cli.mjs goto P4R1 --quote "${second}"`;
+    const command = `node .workflow/src/rails/cli.mjs goto P5E1 --quote "${first}" && node .workflow/src/rails/cli.mjs status`;
     const r = decide({ action: { tool: 'Bash', kind: 'shell', command, shell: 'posix' }, ctx: { cwd: root, sessionId } });
     assert.equal(r.decision, 'allow');
-    assert.equal(r.updatedCommand, `node .workflow/src/rails/cli.mjs goto P5E1 --quote 'it'\\''s $X first segment quote text' --session ${sessionId} && node .workflow/src/rails/cli.mjs goto P4R1 --quote "${second}" --session ${sessionId}`);
+    assert.equal(r.updatedCommand, `node .workflow/src/rails/cli.mjs goto P5E1 --quote 'it'\\''s $X first segment quote text' --session ${sessionId} && node .workflow/src/rails/cli.mjs status --session ${sessionId}`);
     const lines = runBash(r.updatedCommand, root).trim().split('\n').map((l) => JSON.parse(l).slice(2));
     assert.deepEqual(lines, [
       ['goto', 'P5E1', '--quote', first, '--session', sessionId],
-      ['goto', 'P4R1', '--quote', second, '--session', sessionId],
+      ['status', '--session', sessionId],
     ]);
   });
 });
@@ -2948,6 +2946,17 @@ test('decide (2026-10-01): goto внутри цикла, условия, под�
     const list = run(`${cli} goto P4S1 --quote "Внести правку рабочего файла и продолжить" && ${cli} status`);
     assert.equal(list.decision, 'allow');
     assert.match(list.updatedCommand, /--session /);
+    // пачка goto одной командой — отказ (решение владельца 2026-10-03, после слияния
+    // цепочек правил): список проходит узлы, не выполняя их
+    const denialsBefore = loadState(root, sessionId).denials.P4R1 ?? 0;
+    const batch = run(`${cli} goto P4S1 --quote "один" && ${cli} goto P5E1 --quote "два"`);
+    assert.equal(batch.decision, 'deny');
+    assert.match(batch.reason, /несколько переходов goto одной командой/);
+    assert.equal(loadState(root, sessionId).denials.P4R1, denialsBefore + 1, 'отказ пачки считается');
+    const batchSemis = run(`${cli} goto P4S1 --quote "a"; ${cli} goto P5E1 --quote "b"; ${cli} goto P4R1 --quote "c"`);
+    assert.equal(batchSemis.decision, 'deny');
+    // один goto рядом с status и report — разрешён
+    assert.equal(run(`${cli} goto P4S1 --quote "один переход" && ${cli} status && ${cli} report --days 1`).decision, 'allow');
     // не cli, но и не составная — общие правила, как раньше
     assert.equal(run(`${cli} goto P4S1 --quote x; ls`).decision, 'allow');
     // текст «cli.mjs goto» в аргументе команды в цикле — не вызов

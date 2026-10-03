@@ -1046,23 +1046,39 @@ function gotoInCompound(text, dialect, nested = 0) {
 // --- режим скила (§7.4) --------------------------------------------------------
 
 function decideSkillMode({ root, action, ctx, state, config, graph }) {
+  // Тикет запуска для `{ticket}` в стражах рёбер — как у `goto` (cli.mjs runTicket): из
+  // состояния сессии, без него — хоста.
+  const guardCtx = { root, ticket: state?.ticket || hostTicket(ctx) };
+  const deny = (what, why) =>
+    denyAndLog({ root, ctx, state, action, what, why, allowedText: describeAllowed(state, graph, config, guardCtx) });
+
   // 1. cli.mjs — служебная команда: allow; испорченные shell'ом ` / $ в `--quote "…"`
   // переписаны в одинарные кавычки (2026-09-22), при отсутствии --session он вставлен —
   // обе правки в одном updatedCommand (analyzeCliCommand, разбор — shell-scan.mjs).
   if (action?.kind === 'shell') {
     const cli = analyzeCliCommand(action.command, action.shell, ctx?.sessionId, { root, cwd: shellCwd(action, ctx) });
     if (cli.isCli) {
+      // Пачка goto одной командой (решение владельца 2026-10-03, после слияния цепочек
+      // правил — 1.25.0): список `goto A && goto B` проходит узлы, не выполняя их —
+      // узлы объявляются раньше, чем сделана их работа. Каждый переход — отдельной
+      // командой, после того, что велит текущий узел. Один goto среди прочих cli-сегментов
+      // (status, report) разрешён. Сегменты — &&, ||, ;, перевод строки (SEGMENT_SEPARATORS).
+      const dialect = action.shell === 'powershell' ? 'powershell' : 'posix';
+      const scan = scanCommand(action.command, dialect);
+      const entries = scan.ok ? classifyCli(scan, dialect, { strict: true, scope: { root, cwd: shellCwd(action, ctx) } }) : null;
+      const gotoCount = entries ? entries.filter((e) => e.main.tokens[e.k + 1]?.value === 'goto').length : 0;
+      if (gotoCount > 1) {
+        return deny(
+          describeWhat(action),
+          "несколько переходов goto одной командой проходят узлы, не выполняя их; каждый переход — отдельной командой `node .workflow/src/rails/cli.mjs goto <узел> --quote '…'` после того, что велит текущий узел"
+        );
+      }
       const result = { decision: 'allow' };
       if (cli.command !== action.command) result.updatedCommand = cli.command;
       return result;
     }
   }
 
-  // Тикет запуска для `{ticket}` в стражах рёбер — как у `goto` (cli.mjs runTicket): из
-  // состояния сессии, без него — хоста.
-  const guardCtx = { root, ticket: state?.ticket || hostTicket(ctx) };
-  const deny = (what, why) =>
-    denyAndLog({ root, ctx, state, action, what, why, allowedText: describeAllowed(state, graph, config, guardCtx) });
   const shellTexts = action?.kind === 'shell' ? commandTextVariants(action.command) : [];
 
   // 2. Канарейка — проверка живости, а не отказ: событие `canary` в журнале, state.denials не

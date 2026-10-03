@@ -13,8 +13,8 @@ baseline: HEAD
 entries:
   # --- ссылки на принципы прозы -> узлы графа ---
   - phrase: "принцип 8)."
-    target: "P0R12"
+    target: "P0R7"
   - phrase: "(см. принцип 8)"
-    target: "P0R12"
+    target: "P0R7"
   - phrase: "принцип 4)"
-    target: "P0R10"
+    target: "P0R7"
