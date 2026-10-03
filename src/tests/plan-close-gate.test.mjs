@@ -160,12 +160,11 @@ test('checkAndClosePlan: дефект исправлен более поздни
   }
 });
 
-test('checkAndClosePlan: не исправление — раньше дефекта, без времени, другой план, чужой id, испорченное поле', () => {
+test('checkAndClosePlan: не исправление — раньше дефекта, без времени, чужой id, испорченное поле; тикет другого плана — исправление', () => {
   const cases = [
     { name: 'закрыт раньше записи дефекта', fixer: { fm: { unblocks: ['QA-175'], completed_at: '2026-09-30T06:00:00Z' } } },
     { name: 'то же время', fixer: { fm: { unblocks: ['QA-175'], completed_at: '2026-09-30T06:44:00Z' } } },
     { name: 'без completed_at', fixer: { fm: { unblocks: ['QA-175'] } } },
-    { name: 'тикет другого плана', fixer: { plan: 'PLAN-021', fm: { unblocks: ['QA-175'], completed_at: '2026-09-30T08:00:00Z' } } },
     { name: 'другой id с тем же началом', fixer: { fm: { completed_at: '2026-09-30T08:00:00Z' }, description: 'Исправление дефекта QA-1750.' } },
     { name: 'id без фразы', fixer: { fm: { completed_at: '2026-09-30T08:00:00Z' }, description: 'Дефект найден QA-175.' } },
     { name: 'unblocks строкой', fixer: { fm: { unblocks: 'QA-175', completed_at: '2026-09-30T08:00:00Z' } } },
@@ -181,6 +180,16 @@ test('checkAndClosePlan: не исправление — раньше дефек
     assert.deepEqual(result.defects, [{ id: 'QA-175', defects: DEFECT }], name);
     assert.equal(fs.readFileSync(project.planFile, 'utf8'), planBefore, name);
   }
+});
+
+// Решение владельца 2026-10-03: дефект, переданный в следующий план, засчитывается его
+// исправлением — готовый тикет другого плана с той же связью и более поздней работой.
+test('checkAndClosePlan: исправление из другого плана снимает дефект', () => {
+  const project = makeProject();
+  putTicket(project, 'done', 'QA-175', { fm: { completed_at: '2026-09-30T06:44:00Z' }, defects: DEFECT });
+  putTicket(project, 'done', 'FIX-50', { plan: 'PLAN-021', fm: { unblocks: ['QA-175'], completed_at: '2026-09-30T08:00:00Z' } });
+  const result = checkAndClosePlan(project.workflowDir, 'PLAN-020');
+  assert.equal(result.closed, true, JSON.stringify(result));
 });
 
 // check-conditions.js закрывает заблокированный тикет тестирования заменой: T в done/ с

@@ -504,6 +504,24 @@ function readPlanTickets(ticketsDir, planId) {
   return tickets;
 }
 
+/** Готовые (done/, archive/) тикеты любого плана: id, колонка, frontmatter и тело. */
+function readFinishedTicketsAnyPlan(ticketsDir) {
+  const tickets = [];
+  for (const dirName of PLAN_FINISHED_DIRS) {
+    const dir = path.join(ticketsDir, dirName);
+    if (!fs.existsSync(dir)) continue;
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.md') && !f.startsWith('.'));
+    for (const file of files) {
+      try {
+        const content = fs.readFileSync(path.join(dir, file), 'utf8');
+        const { frontmatter, body } = parseFrontmatter(content);
+        tickets.push({ id: String(frontmatter.id || file.replace('.md', '')), dir: dirName, frontmatter, body });
+      } catch (_) { /* skip malformed */ }
+    }
+  }
+  return tickets;
+}
+
 // Первая непустая строка значения поля: строка журнала и RESULT однострочные.
 function firstNonEmptyLine(value) {
   if (value === undefined || value === null) return '';
@@ -650,27 +668,29 @@ function namesAsFixed(fixer, target) {
 /**
  * Готовые тикеты плана с записанным дефектом, который ничем не исправлен: [{ id, defects }].
  *
- * Дефект исправлен, если другой готовый (done/, archive/) тикет того же плана называет
- * записавший его тикет (namesAsFixed) и сделал свою работу позже (workTimeOf строго больше
- * `completed_at` записавшего). Время не сверить — не исправлен, как в check-conditions.js.
- * Тикет, закрытый заменой (`superseded_by`), исправлен своей заменой без сверки времени:
- * его запись заменила проверка, которая называет его в `supersedes` и которую
- * check-conditions.js уже сверил с исправлениями; её собственный подраздел проверяется
- * здесь же как у любого тикета.
+ * Дефект исправлен, если другой готовый (done/, archive/) тикет — того же или любого
+ * другого плана (решение владельца 2026-10-03: дефект, переданный в следующий план,
+ * засчитывается его исправлением) — называет записавший его тикет (namesAsFixed) и сделал
+ * свою работу позже (workTimeOf строго больше `completed_at` записавшего). Время не
+ * сверить — не исправлен, как в check-conditions.js. Тикет, закрытый заменой
+ * (`superseded_by`), исправлен своей заменой без сверки времени: его запись заменила
+ * проверка, которая называет его в `supersedes` и которую check-conditions.js уже сверил
+ * с исправлениями; её собственный подраздел проверяется здесь же как у любого тикета.
  *
  * Зачем: тикет тестирования по канону закрывается в done/ и с найденным дефектом, а дефект
  * остаётся строкой его результата. 2026-09-30 PulseProxy: QA-175 записал дефект подсказки
  * geoBlockedTitle, три разбора его пропустили, PLAN-020 закрыт с дефектом в коде.
  */
-function unfixedDefects(tickets) {
+function unfixedDefects(tickets, ticketsDir) {
   const finished = tickets.filter(t => PLAN_FINISHED_DIRS.has(t.dir));
+  const fixersAnyPlan = ticketsDir ? readFinishedTicketsAnyPlan(ticketsDir) : finished;
   const unfixed = [];
   for (const target of finished) {
     const defects = recordedDefects(target.body);
     if (defects === null) continue;
     const supersededBy = target.frontmatter.superseded_by;
-    const fixed = finished.some(fixer => {
-      if (fixer === target || fixer.id === target.id || !namesAsFixed(fixer, target)) return false;
+    const fixed = fixersAnyPlan.some(fixer => {
+      if (fixer.id === target.id || !namesAsFixed(fixer, target)) return false;
       if (supersededBy !== undefined && supersededBy !== null && String(supersededBy) === fixer.id
         && planIdList(fixer.frontmatter.supersedes).includes(target.id)) return true;
       return workTimeOf(fixer.frontmatter) > planTimeOf(target.frontmatter.completed_at);
@@ -741,7 +761,7 @@ export function checkAndClosePlan(workflowDir, planId) {
     return { closed: false, already: true, reason: 'Plan already completed', total, done };
   }
 
-  const defects = unfixedDefects(allTickets);
+  const defects = unfixedDefects(allTickets, ticketsDir);
   if (defects.length > 0) {
     return { closed: false, reason: `Unfixed defects: ${defects.map(d => d.id).join(', ')}`, total, done, defects };
   }

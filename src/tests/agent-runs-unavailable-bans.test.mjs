@@ -11,8 +11,11 @@
  * Что охраняется:
  *  - серия из UNAVAILABLE_MIN_FAILURES сбоев `error` и `timeout` подряд — запрет на
  *    модель целиком (тип тикета не учитывается), на одну меньше — запрета нет;
- *  - ограничения провайдера (`rate_limit`) и сбои `network_error`, `auth_error`, `aborted`
- *    без остановки запрета не дают, как бы их ни было много, и серию не прерывают;
+ *  - ограничения провайдера (`rate_limit`) и сбои `auth_error`, `aborted` без остановки
+ *    запрета не дают, как бы их ни было много, и серию не прерывают; `network_error`
+ *    с 2026-10-03 идёт в серию наравне с `error` и `timeout` (решение владельца
+ *    «считать одинаково»: все такие запуски в журналах — досрочные снятия по
+ *    перегрузке провайдера);
  *    пройденный контроль после них — успех, серию обнуляет;
  *  - TTL: час на первой серии, каждый следующий неудачный запуск без успеха — вдвое
  *    больше, не больше суток; отсчёт от последнего запуска серии; истёкший не действует;
@@ -79,7 +82,6 @@ function failures(count, { lastAgo = 10, model = 'model-a', ticketType = 'impl',
 // Запуски, которые серию не продолжают и не прерывают, — по одному каждого вида.
 const NEUTRAL = [
   { status: 'rate_limit' },
-  { status: 'network_error' },
   { status: 'auth_error' },
   { status: 'aborted', exit_code: 143 },
   { status: 'model_banned' },
@@ -114,12 +116,13 @@ describe('unavailableBans: порог серии', () => {
     assert.deepEqual(ban.evidence.map((e) => e.grade), events.map(() => 'crashed'));
   });
 
-  test('одни error, одни timeout — тоже серия', () => {
+  test('одни error, одни timeout, одни network_error — тоже серия (решение 2026-10-03 «считать одинаково»)', () => {
     assert.equal(unavailableBans(failures(UNAVAILABLE_MIN_FAILURES, { status: 'error' }), NOW).length, 1);
     assert.equal(unavailableBans(failures(UNAVAILABLE_MIN_FAILURES, { status: 'timeout' }), NOW).length, 1);
+    assert.equal(unavailableBans(failures(UNAVAILABLE_MIN_FAILURES, { status: 'network_error' }), NOW).length, 1);
   });
 
-  for (const status of ['rate_limit', 'network_error', 'auth_error']) {
+  for (const status of ['rate_limit', 'auth_error']) {
     test(`одни ${status} — запрета нет, сколько бы их ни было`, () => {
       assert.deepEqual(unavailableBans(failures(12, { status }), NOW), []);
     });
@@ -257,7 +260,7 @@ describe('unavailableBans: что обнуляет и что не прерыва
     assert.equal(ban.failures, 3);
   });
 
-  test('rate_limit, network_error, auth_error, aborted сигналом — серию не прерывают и в неё не идут', () => {
+  test('rate_limit, auth_error, aborted сигналом — серию не прерывают и в неё не идут; network_error идёт в серию', () => {
     // Между каждой парой сбоев error/timeout — все виды «нейтральных» запусков, с правками
     // и без: серия остаётся из UNAVAILABLE_MIN_FAILURES сбоев, доказательства — только они.
     const crashes = failures(UNAVAILABLE_MIN_FAILURES, { lastAgo: 10 });
@@ -415,15 +418,18 @@ describe('resolveAgent: запрет «недоступна» на стадии 
     assert.equal(short.resolved.agentId, 'agent-n', JSON.stringify(short.resolved));
   });
 
-  test('ночь запусков rate_limit и network_error — агент не пропущен', () => {
+  test('ночь запусков rate_limit — агент не пропущен; вперемешку с network_error серия копится', () => {
     const now = Date.now();
-    // Временный запрет за последний network_error истёк (TTL минута): запрета серии нет.
+    // rate_limit серию не прерывает и не продолжают, но каждый третий network_error —
+    // сбой серии: 5 network_error подряд через rate_limit дают запрет «модель недоступна».
     const events = Array.from({ length: 10 }, (_, i) => runEvent({
       agent: 'agent-n', model: 'prov/model-b', status: i % 2 === 0 ? 'rate_limit' : 'network_error',
       crash_ttl_ms: MIN, ts: minutesAgo(20 - i, now),
     }));
     const night = resolve(projectWith(events));
-    assert.equal(night.resolved.agentId, 'agent-n', JSON.stringify(night.resolved));
-    assert.deepEqual(night.lines.filter((l) => / skipped: model /.test(l)), []);
+    const skipped = night.lines.filter((l) => / skipped: model /.test(l));
+    assert.equal(skipped.length, 1, night.lines.join('\n'));
+    // 5 network_error, перемежённых rate_limit: серия 3 (порог 3 + два удвоения хвоста).
+    assert.match(skipped[0], /unavailable: 5 failed runs in a row, series 3/);
   });
 });
