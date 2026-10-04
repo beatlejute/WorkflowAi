@@ -1,11 +1,50 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { execSync, execFileSync } from 'node:child_process';
 
 import { expandWord, nestedScripts, scanCommand, splitRedirects, toSingleQuoted } from '../rails/shell-scan.mjs';
+
+// Настоящий bash (Git/MSYS), а не заглушки: у bash из System32 (WSL) /tmp линуксовый —
+// файлы тестов C2 падают мимо каталога, а `node` внутри недоступен; bash из WindowsApps —
+// заглушка установщика. Нет настоящего — живые bash-блоки пропускаются (как не-win32).
+function findRealBash() {
+  if (process.platform !== 'win32') return 'bash';
+  try {
+    const lines = execSync('where.exe bash', { encoding: 'utf8' }).split(/\r?\n/).filter(Boolean);
+    const direct = lines.find((line) => /msys|git|cygwin/i.test(line))
+      ?? lines.find((line) => !/System32|WindowsApps/i.test(line));
+    if (direct) return direct;
+    // git.exe на PATH без bash рядом: bash лежит в <git>\bin\ (обычно cmd только в PATH).
+    for (const git of execSync('where.exe git', { encoding: 'utf8' }).split(/\r?\n/).filter(Boolean)) {
+      const candidate = join(dirname(git), '..', 'bin', 'bash.exe');
+      if (existsSync(candidate)) return candidate;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+const REAL_BASH = findRealBash();
+
+// Windows: свежие файлы внутри каталога держит открытыми антивирус/индексатор, и rm
+// сразу после spawn bash даёт EPERM (2026-10-04: падало стабильно; замок живёт больше
+// секунды, через минуту снимается). Повтор до ~10 секунд с паузой — синхронно, тесты
+// этого файла без async-очистки.
+function rmDirRetry(dir) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (err.code !== 'EPERM' || attempt >= 39) throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+    }
+  }
+}
 
 // ЗАДАЧА B2 (2026-09-22): единый разбор строки shell-команды для ядра рельс.
 // Поведение bash/PowerShell, на которое опираются ожидания ниже, проверено запуском
@@ -238,13 +277,14 @@ writeFileSync(STUB, 'console.log(JSON.stringify(process.argv.slice(2)));\n', 'ut
 process.on('exit', () => rmSync(STUB_DIR, { recursive: true, force: true }));
 
 test('scan posix + bash: буквальные значения токенов совпадают с argv настоящего bash', () => {
+  console.log('[probe] REAL_BASH =', JSON.stringify(REAL_BASH));
   const cases = [
     `'a'\\''b' "c \\" d" $'x\\ty' e\\ f "C:\\Users\\x" --quote="p q"'r' 'it'"'"'s' "cost \\$X" 'lit $X \`y\`' "" ''`,
     'a\\\nb "l1\nl2" c',
     "x --quote 'x --quote \"$X; touch PWNED; echo \"' $'y --quote \"$(z) w\"'",
   ];
   for (const args of cases) {
-    const argv = JSON.parse(execSync(`node ${STUB} ${args}`, { shell: 'bash', encoding: 'utf8' }));
+    const argv = JSON.parse(execSync(`node ${STUB} ${args}`, { shell: REAL_BASH, encoding: 'utf8' }));
     const values = toks(`node ${STUB} ${args}`).slice(2).map((t) => t[1]);
     assert.deepEqual(values, argv, args);
   }
@@ -446,14 +486,15 @@ test('scan posix (C2): `>|` — редирект с перезаписью, не
   assert.deepEqual(seps('echo \\>| f'), [[null, [['echo', '\\>'], ['f']]]], '`\\>` — литерал, `|` — пайп');
 });
 
-test('bash (C2): `\\>&` и `>|` — поведение, на которое опирается сканер', { skip: process.platform !== 'win32' ? 'Git Bash — только win32' : false }, () => {
+test('bash (C2): `\\>&` и `>|` — поведение, на которое опирается сканер', { skip: process.platform !== 'win32' ? 'Git Bash — только win32' : (!REAL_BASH ? 'нет настоящего bash на PATH' : false) }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'rails-c2-scan-'));
+
   try {
-    execSync('echo \\>& touch amp.txt; wait; echo a >| clob.txt', { cwd: dir, shell: 'bash' });
+    execSync('echo \\>& touch amp.txt; wait; echo a >| clob.txt', { cwd: dir, shell: REAL_BASH });
     assert.equal(existsSync(join(dir, 'amp.txt')), true);
     assert.equal(existsSync(join(dir, 'clob.txt')), true);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmDirRetry(dir);
   }
 });
 
@@ -567,11 +608,11 @@ test('scan posix (C2 r3, HIGH): `<<` внутри `(( … ))` — сдвиг, н
 });
 
 test('bash (C2 r3): поведение, на которое опирается разбор heredoc и here-string', () => {
-  if (process.platform !== 'win32') return;
+  if (process.platform !== 'win32' || !REAL_BASH) return;
   const base = mkdtempSync(join(tmpdir(), 'rails-scan-c2r3-'));
   const sh = (script) => {
     try {
-      execFileSync('bash', ['-c', script], { cwd: base, stdio: 'ignore' });
+      execFileSync(REAL_BASH, ['-c', script], { cwd: base, stdio: 'ignore' });
     } catch {
       /* команда после тела может вернуть ненулевой код (`EOF: command not found`) */
     }
@@ -585,7 +626,7 @@ test('bash (C2 r3): поведение, на которое опирается �
       assert.equal(existsSync(join(base, f)), true, `bash выполнил команду после тела heredoc: ${f}`);
     }
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    rmDirRetry(base);
   }
 });
 
@@ -688,11 +729,11 @@ test('scan posix (ревью C2 r5, HIGH): признак arith не уходи�
 });
 
 test('bash (C2 r5): правило `((` — арифметика только при `))`, иначе вложенные подоболочки', () => {
-  if (process.platform !== 'win32') return;
+  if (process.platform !== 'win32' || !REAL_BASH) return;
   const base = mkdtempSync(join(tmpdir(), 'rails-scan-r5-'));
   const sh = (script) => {
     try {
-      execFileSync('bash', ['-c', script], { cwd: base, stdio: 'ignore' });
+      execFileSync(REAL_BASH, ['-c', script], { cwd: base, stdio: 'ignore' });
     } catch {
       /* арифметическая ошибка даёт ненулевой код — важно, что файла нет */
     }
@@ -714,6 +755,6 @@ test('bash (C2 r5): правило `((` — арифметика только п
       assert.equal(existsSync(join(base, file)), created, `${script} -> ${file}`);
     }
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    rmDirRetry(base);
   }
 });

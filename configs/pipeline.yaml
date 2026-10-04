@@ -172,6 +172,21 @@ pipeline:
       capabilities: [text, multimodal]
       description: "Kilo GPT"
 
+    # Судья пунктов DoD со скриншотами на kilo-модели: аналог claude-judge.js, но
+    # картинки агент открывает сам инструментом чтения (gpt-5.6-luna, multimodal по
+    # метаданным kilo). Решение стейкхолдера 2026-10-04: Claude недоступен (аккаунт на
+    # холде), скриншоты в review-result оценивает gpt-luna. Проверено запуском
+    # 2026-10-04: красный тест-квадрат — score 5, images 1. kilo ищется по PATH
+    # (bin/@kilocode/cli/bin/kilo рядом с лаунчером), перекрывается KILO_BIN.
+    gpt-luna-vision:
+      command: "node"
+      args: [".workflow/src/scripts/kilo-judge.js", "--model", "openai/gpt-5.6-luna", "--timeout", "240"]
+      workdir: "."
+      prompt_stdin: true
+      tool_less: true
+      capabilities: [text, multimodal]
+      description: "GPT Luna через kilo — оценка пунктов DoD со скриншотами в стадии ревью"
+
     gpt-terra:
       command: "kilo"
       args: ["-m", "openai/gpt-5.6-terra", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
@@ -1051,7 +1066,9 @@ pipeline:
     # -------------------------------------------------------------------------
     review-result:
       description: "Оценить прозаические пункты и пункты со скриншотами по собранным evidence"
-      agents: [jev, claude-haiku-vision]
+      # 2026-10-04: Claude недоступен (аккаунт на холде) — скриншоты оценивает
+      # gpt-luna-vision; claude-haiku-vision возвращается после разблокировки.
+      agents: [jev, gpt-luna-vision]
       counter: task_attempts
       model_io:
         prepare: ".workflow/src/skills/review-result/scripts/prepare-review.js"

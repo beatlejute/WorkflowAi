@@ -1621,7 +1621,9 @@ prose. Часть критерия, которую записи check не до�
 
 ```yaml
     review-result:
-      agents: [jev, claude-haiku-vision]
+      # 2026-10-04: Claude недоступен (аккаунт на холде) — скриншоты оценивает
+      # gpt-luna-vision; claude-haiku-vision возвращается после разблокировки.
+      agents: [jev, gpt-luna-vision]
       counter: task_attempts
       model_io:
         prepare: ".workflow/src/skills/review-result/scripts/prepare-review.js"
@@ -1673,9 +1675,11 @@ prose. Часть критерия, которую записи check не до�
 тикет с `required_capabilities: [mcp]` не находил агента ревью). Есть скриншоты —
 остаются только агенты с `multimodal`; нет — все агенты списка. Первая попытка берёт
 первого из оставшихся по приоритету, следующие — по кругу. В действующем конфиге
-(`jev` — `[text]`, `claude-haiku-vision` — `[text, multimodal]`) единственный агент с
-`multimodal` — `claude-haiku-vision`: скриншоты ревьюит он, а тикет без них на первой
-попытке — `jev`.
+(`jev` — `[text]`, `gpt-luna-vision` — `[text, multimodal]`) единственный агент с
+`multimodal` — `gpt-luna-vision`: скриншоты ревьюит он, а тикет без них на первой
+попытке — `jev`. До 2026-10-04 скриншоты ревьюил `claude-haiku-vision` (Claude
+Haiku); аккаунт Claude ушёл на холд, и решением стейкхолдера его заменил
+`gpt-luna-vision` — GPT Luna через kilo и обёртку `kilo-judge.js`.
 
 **Почему в списке только `kind: http` и `tool_less: true`.** Модель должна видеть
 только evidence. Агент с инструментами и доступом к репозиторию прочтёт тикет и его
@@ -1684,8 +1688,9 @@ Result сам, и тогда оценка опирается на заявлен
 
 **Данные проектов — тексты пунктов DoD, вывод проверок, фрагменты исходников, дифф
 и скриншоты — уходят провайдеру модели выбранного агента: в действующем конфиге
-OpenRouter и TypeSafe (`jev`) или Anthropic (`claude-haiku-vision`)** (согласие
-стейкхолдера — 2026-09-26).
+OpenRouter и TypeSafe (`jev`) или OpenAI через kilo (`gpt-luna-vision`)** (согласие
+стейкхолдера — 2026-09-26; провайдер скриншотов заменён решением стейкхолдера
+2026-10-04 — Claude на холде).
 
 ### Claude без инструментов — claude-judge.js
 

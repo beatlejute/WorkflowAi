@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { tmpdir } from 'node:os';
-import { join, resolve as resolvePathAbs } from 'node:path';
+import { dirname, join, resolve as resolvePathAbs } from 'node:path';
 import {
   existsSync,
   mkdtempSync,
@@ -15,6 +15,29 @@ import { randomUUID } from 'node:crypto';
 import { execSync, execFileSync } from 'node:child_process';
 
 import { decide, buildDenyReason, loadSkillRuntime, analyzeCliCommand } from '../rails/core.mjs';
+
+// Настоящий bash (Git/MSYS), а не заглушки: у bash из System32 (WSL) /tmp линуксовый и
+// node недоступен, bash из WindowsApps — заглушка установщика. Нет настоящего — 'bash'
+// как раньше (живые блоки сами скажут о недоступности).
+function findRealBash() {
+  if (process.platform !== 'win32') return 'bash';
+  try {
+    const lines = execSync('where.exe bash', { encoding: 'utf8' }).split(/\r?\n/).filter(Boolean);
+    const direct = lines.find((line) => /msys|git|cygwin/i.test(line))
+      ?? lines.find((line) => !/System32|WindowsApps/i.test(line));
+    if (direct) return direct;
+    // git.exe на PATH без bash рядом: bash лежит в <git>\bin\ (обычно cmd только в PATH).
+    for (const git of execSync('where.exe git', { encoding: 'utf8' }).split(/\r?\n/).filter(Boolean)) {
+      const candidate = join(dirname(git), '..', 'bin', 'bash.exe');
+      if (existsSync(candidate)) return candidate;
+    }
+    return 'bash';
+  } catch {
+    return 'bash';
+  }
+}
+
+const REAL_BASH = findRealBash();
 import { startState, saveState, loadState } from '../rails/state.mjs';
 import { readJournal } from '../rails/journal.mjs';
 import { run as runCli } from '../rails/cli.mjs';
@@ -110,7 +133,17 @@ function withProject(fn, { allowTemp = true } = {}) {
     mkdirSync(join(root, '.workflow', 'work'), { recursive: true });
     fn({ root, skillDir });
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    // Windows: антивирус/индексатор держит свежие файлы открытыми, rm сразу после
+    // spawn bash/PowerShell даёт EPERM (2026-10-04); повтор до ~10 секунд.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        rmSync(base, { recursive: true, force: true });
+        break;
+      } catch (err) {
+        if (err.code !== 'EPERM' || attempt >= 39) throw err;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+      }
+    }
   }
 }
 
@@ -596,7 +629,7 @@ test('decide + bash: инцидент с бэктиками — переписа
     assert.equal(r.decision, 'allow');
     assert.ok(r.updatedCommand);
 
-    const out = execSync(r.updatedCommand, { cwd: root, shell: 'bash', encoding: 'utf8' });
+    const out = execSync(r.updatedCommand, { cwd: root, shell: REAL_BASH, encoding: 'utf8' });
     const argv = JSON.parse(out);
     const qi = argv.indexOf('--quote');
     assert.notEqual(qi, -1);
@@ -613,7 +646,7 @@ test('decide + bash: инцидент с $X — переписанная ком�
     const r = decide({ action: { tool: 'Bash', kind: 'shell', command, shell: 'posix' }, ctx: { cwd: root, sessionId } });
     assert.equal(r.decision, 'allow');
 
-    const out = execSync(r.updatedCommand, { cwd: root, shell: 'bash', encoding: 'utf8' });
+    const out = execSync(r.updatedCommand, { cwd: root, shell: REAL_BASH, encoding: 'utf8' });
     const argv = JSON.parse(out);
     const qi = argv.indexOf('--quote');
     assert.notEqual(qi, -1);
@@ -655,7 +688,7 @@ function markerPath(root) {
 }
 
 function runBash(command, root) {
-  return execSync(command, { cwd: root, shell: 'bash', encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  return execSync(command, { cwd: root, shell: REAL_BASH, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 function runPowerShell(command, root) {
@@ -1711,7 +1744,7 @@ test('decide (B2 r3): CR внутри слова не обходит canary, den
 });
 
 test('bash (B2 r3): msys-bash удаляет CR из текста команды — основание проверять правила по тексту без CR', { skip: process.platform !== 'win32' ? 'Git for Windows-специфичный тест' : false }, () => {
-  assert.match(execSync('ec\rho INJECTED', { shell: 'bash', encoding: 'utf8' }), /^INJECTED/);
+  assert.match(execSync('ec\rho INJECTED', { shell: REAL_BASH, encoding: 'utf8' }), /^INJECTED/);
 });
 
 // LOW (pre-existing, ревью B2 раунд 3): якорь `rails/cli.mjs` принимал любой каталог —
@@ -1864,7 +1897,7 @@ test('analyzeCliCommand (B3, MEDIUM): каталог cd, лексически р
     const tildeCmd = 'cd ~/root && node .workflow/src/rails/cli.mjs status';
     assert.equal(analyzeCliCommand(tildeCmd, 'posix', 'sess-1', { root: tildeRoot, cwd: base }).isCli, false);
     // bash идёт в $HOME/root, а не в <cwd>/~/root.
-    const out = execSync(tildeCmd, { cwd: base, shell: 'bash', encoding: 'utf8', env: { ...process.env, HOME: home.replace(/\\/g, '/') } });
+    const out = execSync(tildeCmd, { cwd: base, shell: REAL_BASH, encoding: 'utf8', env: { ...process.env, HOME: home.replace(/\\/g, '/') } });
     assert.match(out, /COPY-CLI/);
 
     const globRoot = join(base, '[r]oot');
@@ -1874,7 +1907,7 @@ test('analyzeCliCommand (B3, MEDIUM): каталог cd, лексически р
     assert.equal(analyzeCliCommand(`cd ${glob} && node .workflow/src/rails/cli.mjs status`, 'posix', 'sess-1', { root: globRoot, cwd: base }).isCli, false);
     assert.equal(analyzeCliCommand(`cd '${glob}'; node .workflow/src/rails/cli.mjs status`, 'powershell', 'sess-1', { root: globRoot, cwd: base }).isCli, false);
     // Контроль: bash без кавычек раскрывает шаблон в каталог `root`.
-    assert.match(execSync(`cd ${glob} && pwd`, { cwd: base, shell: 'bash', encoding: 'utf8' }), /\/root\s*$/);
+    assert.match(execSync(`cd ${glob} && pwd`, { cwd: base, shell: REAL_BASH, encoding: 'utf8' }), /\/root\s*$/);
     if (process.platform === 'win32') {
       assert.match(runPowerShell(`cd '${glob}'; node .workflow/src/rails/cli.mjs status`, base), /COPY-CLI/);
     }
@@ -1952,7 +1985,7 @@ test('decide (B3, LOW; B3 r3): msys-путь /<диск>/… под Git Bash —
     const msys = `/${root[0].toLowerCase()}${root.slice(2).replace(/\\/g, '/')}`;
     const run = (command, shell = 'posix') => decide({ action: { tool: shell === 'posix' ? 'Bash' : 'PowerShell', kind: 'shell', command, shell }, ctx: { cwd: root, sessionId } });
     const noConv = { ...process.env, MSYS_NO_PATHCONV: '1' };
-    const bashNoConv = (command) => execSync(command, { cwd: root, shell: 'bash', encoding: 'utf8', env: noConv, stdio: ['ignore', 'pipe', 'pipe'] });
+    const bashNoConv = (command) => execSync(command, { cwd: root, shell: REAL_BASH, encoding: 'utf8', env: noConv, stdio: ['ignore', 'pipe', 'pipe'] });
     for (const command of [
       `cd ${msys} && node .workflow/src/rails/cli.mjs status`,
       `cd /${root[0].toUpperCase()}${root.slice(2).replace(/\\/g, '/')} && node .workflow/src/rails/cli.mjs status`,
@@ -2169,7 +2202,7 @@ test('analyzeCliCommand (B3 r2, LOW): msys-путь с `..` (`cd /c/../tmp/…`)
   }
   assert.equal(analyzeCliCommand('cd /c/tmp/rails-b3-msys-proj && node .workflow/src/rails/cli.mjs status', 'posix', 'sess-1', scope).isCli, true);
   // Механизм: `/c/..` в Git Bash — не C:/.
-  const up = execSync('cd /c/.. && pwd -W', { shell: 'bash', encoding: 'utf8' }).trim();
+  const up = execSync('cd /c/.. && pwd -W', { shell: REAL_BASH, encoding: 'utf8' }).trim();
   assert.notEqual(up.toLowerCase(), 'c:/');
 });
 
@@ -2208,7 +2241,7 @@ test('decide (B3 r2): относительный каталог cd без `./` �
     writeCliCopy(join(root, '.workflow', 'work'));
     const { sessionId } = makeState(root, 'P4S1');
     const env = { ...process.env, CDPATH: '.workflow/work' };
-    const bashEnv = (command) => execSync(command, { cwd: root, shell: 'bash', encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const bashEnv = (command) => execSync(command, { cwd: root, shell: REAL_BASH, encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
     const bare = 'cd .workflow/src && node rails/cli.mjs status';
     notCli(decideAs('posix', bare, root, sessionId), bare);
     assert.match(bashEnv(bare), /COPY-CLI/);
@@ -2304,7 +2337,7 @@ test('decide (B3 r3, MEDIUM): `cd ./.workflow/work/mlnk && node ../../../.workfl
     const work = join(root, '.workflow', 'work');
     writeCliCopy(join(work, 'c'));
     mkdirSync(join(work, 'c', 'd1', 'd2', 'd3'), { recursive: true });
-    execFileSync('bash', ['-c', 'ln -s c/d1/d2/d3 mlnk'], { cwd: work, env: { ...process.env, MSYS: 'winsymlinks:sys' }, stdio: 'ignore' });
+    execFileSync(REAL_BASH, ['-c', 'ln -s c/d1/d2/d3 mlnk'], { cwd: work, env: { ...process.env, MSYS: 'winsymlinks:sys' }, stdio: 'ignore' });
     // Взгляд Windows: либо настоящий симлинк (включён Developer Mode), либо файл — не каталог.
     const st = lstatSync(join(work, 'mlnk'));
     assert.ok(st.isSymbolicLink() || !st.isDirectory(), 'msys-ссылка не должна выглядеть обычным каталогом');

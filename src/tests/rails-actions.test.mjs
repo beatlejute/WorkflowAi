@@ -1,10 +1,31 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { homedir, tmpdir } from 'node:os';
-import { join, resolve as resolvePathAbs } from 'node:path';
+import { dirname, join, resolve as resolvePathAbs } from 'node:path';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fromClaude, fromKilo, detectShellWrites, explainShellWrites } from '../rails/actions.mjs';
+
+// Настоящий bash (Git/MSYS), а не заглушки: у bash из System32 (WSL) /tmp линуксовый и
+// node недоступен, bash из WindowsApps — заглушка установщика (2026-10-04).
+function findRealBash() {
+  if (process.platform !== 'win32') return 'bash';
+  try {
+    const where = (util) => execFileSync('where.exe', [util], { encoding: 'utf8' }).split(/\r?\n/).filter(Boolean);
+    const direct = where('bash').find((line) => /msys|git|cygwin/i.test(line))
+      ?? where('bash').find((line) => !/System32|WindowsApps/i.test(line));
+    if (direct) return direct;
+    for (const git of where('git')) {
+      const candidate = join(dirname(git), '..', 'bin', 'bash.exe');
+      if (existsSync(candidate)) return candidate;
+    }
+    return 'bash';
+  } catch {
+    return 'bash';
+  }
+}
+
+const REAL_BASH = findRealBash();
 
 // --- fromClaude (таблица §6) ------------------------------------------------
 
@@ -596,7 +617,7 @@ test('detectShellWrites (C2): `..` после cd в junction — Git Bash пиш
     assert.deepEqual(p, [join(scope, 'x.txt'), join(base, 'x.txt')]);
     if (process.platform === 'win32') {
       // сверка с настоящим Git Bash: файл появляется рядом с целью junction
-      execFileSync('bash', ['-c', `cd '${fwd(join(scope, 'lnk'))}' && touch ../x.txt`]);
+      execFileSync(REAL_BASH, ['-c', `cd '${fwd(join(scope, 'lnk'))}' && touch ../x.txt`]);
       assert.equal(existsSync(join(far, 'x.txt')), true);
       assert.equal(existsSync(join(scope, 'x.txt')), false);
     }
@@ -716,7 +737,7 @@ test('detectShellWrites (C2 r2, LOW): `..` в cd — логический и ф�
     assert.deepEqual(detectShellWrites('cd ./sub/.. && touch x7', { cwd: work, env: {} }), [join(work, 'x7')]);
     if (process.platform === 'win32') {
       // сверка с Git Bash: после set -P файл появляется у родителя ЦЕЛИ ссылки
-      execFileSync('bash', ['-c', 'set -P; cd ./lnk/.. && touch x6'], { cwd: work });
+      execFileSync(REAL_BASH, ['-c', 'set -P; cd ./lnk/.. && touch x6'], { cwd: work });
       assert.equal(existsSync(join(base, 'x6')), true);
       assert.equal(existsSync(join(work, 'x6')), false);
     }
@@ -901,7 +922,7 @@ test('detectShellWrites (C2 r3): поведение bash, на которое о
   const base = mkdtempSync(join(tmpdir(), 'rails-c2r3-'));
   const sh = (script) => {
     try {
-      execFileSync('bash', ['-c', script], { cwd: base, stdio: 'ignore' });
+      execFileSync(REAL_BASH, ['-c', script], { cwd: base, stdio: 'ignore' });
     } catch {
       /* ненулевой код (`EOF: command not found`, coproc) не важен — важны созданные файлы */
     }
@@ -963,7 +984,7 @@ test('bash (C2 r4): `a=(<<E)` — синтаксическая ошибка, her
   try {
     for (const [script, file] of [['a=(<<E)\ntouch arr1.txt\nE', 'arr1.txt'], ['arr=(1<<2)\ntouch arr2.txt\n2', 'arr2.txt']]) {
       try {
-        execFileSync('bash', ['-c', script], { cwd: base, stdio: 'ignore' });
+        execFileSync(REAL_BASH, ['-c', script], { cwd: base, stdio: 'ignore' });
       } catch {
         /* syntax error — ненулевой код; важно, что следующая строка выполнена */
       }
@@ -1153,11 +1174,11 @@ test('поведение bash (ревью C2 r5): `#` внутри `(( ))` не 
   const NL = String.fromCharCode(10);
   // диалект posix моделирует Git Bash (msys); если PATH ведёт к другому bash (например к
   // WSL `C:/WINDOWS/system32/bash.exe`, у которого свой /home/<user>), пробу не проводим
-  if (execFileSync('bash', ['-c', 'echo $OSTYPE'], { encoding: 'utf8' }).trim() !== 'msys') return;
+  if (execFileSync(REAL_BASH, ['-c', 'echo $OSTYPE'], { encoding: 'utf8' }).trim() !== 'msys') return;
   const base = mkdtempSync(join(tmpdir(), 'rails-c2r5rev-'));
   const sh = (script, env) => {
     try {
-      execFileSync('bash', ['-c', script], { cwd: base, stdio: 'ignore', env: env ?? process.env });
+      execFileSync(REAL_BASH, ['-c', script], { cwd: base, stdio: 'ignore', env: env ?? process.env });
     } catch {
       /* арифметическая ошибка даёт ненулевой код — важно, что делает следующая команда */
     }
@@ -1190,8 +1211,8 @@ test('поведение bash (ревью C2 r5): `#` внутри `(( ))` не 
     // и `$HOME`, и `~` у того же bash дают ровно os.homedir(): msys синтезирует HOME при
     // старте, если его нет в окружении (проверено запуском — поэтому «$HOME пуст без HOME»
     // утверждать нельзя; пустым он остаётся только под `env -u HOME` из msys-родителя)
-    const seen = execFileSync('bash', ['-c', 'echo "[$HOME][$(echo ~)]"'], { cwd: base, env: noHome, encoding: 'utf8' }).trim();
-    const posixHomedir = execFileSync('bash', ['-c', 'cd ~ && pwd'], { cwd: base, encoding: 'utf8' }).trim();
+    const seen = execFileSync(REAL_BASH, ['-c', 'echo "[$HOME][$(echo ~)]"'], { cwd: base, env: noHome, encoding: 'utf8' }).trim();
+    const posixHomedir = execFileSync(REAL_BASH, ['-c', 'cd ~ && pwd'], { cwd: base, encoding: 'utf8' }).trim();
     assert.equal(seen, `[${posixHomedir}][${posixHomedir}]`, 'bash без HOME в окружении: $HOME и ~ — каталог пользователя');
     // node без HOME в окружении (так запускается процесс хука: `node claude-hook.mjs` из
     // окружения Claude Code, где HOME нет — проверено запуском вручную, в тесте это не
@@ -1213,7 +1234,7 @@ test('detectShellWrites (C2 r5): поведение bash, на которое о
   const base = mkdtempSync(join(tmpdir(), 'rails-c2r5-'));
   const sh = (script) => {
     try {
-      execFileSync('bash', ['-c', script], { cwd: base, stdio: 'ignore' });
+      execFileSync(REAL_BASH, ['-c', script], { cwd: base, stdio: 'ignore' });
     } catch {
       /* ненулевой код не важен — важны созданные файлы и каталог перехода */
     }
@@ -1340,7 +1361,7 @@ test('explainShellWrites (2026-09-30): причина «?» называет т�
 test('поведение bash (2026-09-30), на которое опираются правила цикла и префикса', () => {
   if (process.platform !== 'win32') return;
   const base = mkdtempSync(join(tmpdir(), 'rails-0930-'));
-  const out = (script, env) => execFileSync('bash', ['-c', script], { cwd: base, encoding: 'utf8', env: env ?? process.env }).trim();
+  const out = (script, env) => execFileSync(REAL_BASH, ['-c', script], { cwd: base, encoding: 'utf8', env: env ?? process.env }).trim();
   try {
     // префикс-присваивание после do/then — команда выполняется
     out('for i in 1; do X=1 touch do-prefix.txt; done; if true; then X=1 touch then-prefix.txt; fi');
