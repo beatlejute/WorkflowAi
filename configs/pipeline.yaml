@@ -176,8 +176,10 @@ pipeline:
     # картинки агент открывает сам инструментом чтения (gpt-5.6-luna, multimodal по
     # метаданным kilo). Решение стейкхолдера 2026-10-04: Claude недоступен (аккаунт на
     # холде), скриншоты в review-result оценивает gpt-luna. Проверено запуском
-    # 2026-10-04: красный тест-квадрат — score 5, images 1. kilo ищется по PATH
-    # (bin/@kilocode/cli/bin/kilo рядом с лаунчером), перекрывается KILO_BIN.
+    # 2026-10-04: красный квадрат — score 5, синий против рубрики «красный» — score 1.
+    # Вердикт — только строка VERDICT финального ответа; ненулевой exit kilo — отказ.
+    # kilo ищется по PATH (bin/@kilocode/cli/bin/kilo рядом с лаунчером), перекрывается
+    # --kilo/KILO_BIN.
     gpt-luna-vision:
       command: "node"
       args: [".workflow/src/scripts/kilo-judge.js", "--model", "openai/gpt-5.6-luna", "--timeout", "240"]

@@ -1234,10 +1234,8 @@ async function writeJudgeResults(skillName, caseId, results) {
 // Цена вызова судьи — `cost_per_call` записи агента-судьи (skill-judge.mjs,
 // judgeCallCost); прежняя константа $0.02 была в 11 раз ниже замера claude-opus
 // ($0.222 за вызов, 207 вызовов 2026-09-22).
-async function preFlightApproval(numCases, numModels, trials, judgeAgentCost = DEFAULT_JUDGE_CALL_COST, targetAgentCost = 0.01) {
-  const totalLlms = numCases * numModels * trials;
-  const judgeCalls = numCases * numModels * trials;
-  const targetCalls = numCases * numModels * trials;
+async function preFlightApproval(targetCalls, judgeCalls, judgeAgentCost = DEFAULT_JUDGE_CALL_COST, targetAgentCost = 0.01) {
+  const totalLlms = targetCalls + judgeCalls;
   const judgeCost = judgeCalls * judgeAgentCost;
   const targetCost = targetCalls * targetAgentCost;
   const estimatedCost = judgeCost + targetCost;
@@ -1268,7 +1266,8 @@ async function preFlightApproval(numCases, numModels, trials, judgeAgentCost = D
 async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judgeAgentId, pipelineConfig, options = {}) {
   const { trials = 3, timeout = 300 } = options;
   
-  if (!pipelineConfig.agents?.[judgeAgentId]) {
+  const withJudge = Boolean(judgeAgentId);
+  if (withJudge && !pipelineConfig.agents?.[judgeAgentId]) {
     throw new Error(`Judge agent not found: ${judgeAgentId}`);
   }
 
@@ -1285,7 +1284,7 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
     rubricCriterion = testCase.assertions.rubric[0].criterion || '';
   }
 
-  const rubric = loadRubric(skillName, rubricName);
+  const rubric = withJudge ? loadRubric(skillName, rubricName) : null;
   const results = {
     per_model: {},
     rubric_scores: [],
@@ -1407,6 +1406,24 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
           env: { WORKFLOW_SANDBOX_ROOT: taskWorkdir }
         }, taskWorkdir, skillName, caseTicket);
 
+        await writeTrialOutput(skillName, caseId, task.agentId, task.trial, targetOutput.output || '');
+        const l1 = evaluateTrialL1(targetOutput.output || '', task.testCase);
+        if (targetOutput.rails?.failed) {
+          l1.passed = false;
+          l1.failures.push('rails: procedure failed');
+        }
+        if (!withJudge) {
+          return {
+            trial: task.trial,
+            agentId: task.agentId,
+            output: targetOutput.output || '',
+            l1,
+            ...(targetOutput.rails ? { rails: targetOutput.rails } : {}),
+            passed: l1.passed,
+            errored: false
+          };
+        }
+
         // Snapshot ticket files after target-run (for judge to inspect actual file state).
         let ticketFilesSection = '';
         const ticketInputs = (testCase.scenario?.inputs || []).filter(i => i.kind === 'ticket_file');
@@ -1438,7 +1455,6 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
           env: { WORKFLOW_SANDBOX_ROOT: taskWorkdir }
         }));
 
-        await writeTrialOutput(skillName, caseId, task.agentId, task.trial, targetOutput.output || '');
         writeJudgeRecord(skillName, caseId, task.agentId, task.trial, judgeRecord);
 
         const trialBase = {
@@ -1446,7 +1462,7 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
           agentId: task.agentId,
           output: targetOutput.output || '',
           judge_output: judgeRecord.escalation?.raw_output ?? judgeRecord.raw_output ?? '',
-          l1: evaluateTrialL1(targetOutput.output || '', task.testCase),
+          l1,
           ...(targetOutput.rails ? { rails: targetOutput.rails } : {}),
           ...(judgeRecord.escalated ? { judge_escalated: true } : {}),
           ...(judgeRecord.fallback ? { judge_fallback: judgeRecord.fallback } : {})
@@ -1500,7 +1516,7 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
     } else if (result.passed) {
       results.per_model[result.agentId].pass_count++;
     }
-    results.rubric_scores.push({
+    if (withJudge) results.rubric_scores.push({
       agentId: result.agentId,
       trial: result.trial,
       score: result.score,
@@ -1680,8 +1696,8 @@ async function writeMetaJson(caseId, skillName, status, durationMs, l2Results = 
     meta.l1_skipped = true;
   }
 
-  const mergedPerModel = (existing && existing.per_model) ? { ...existing.per_model } : {};
-  let mergedRubricScores = (existing && existing.rubric_scores) ? [...existing.rubric_scores] : [];
+  const mergedPerModel = l2Results && existing?.per_model ? { ...existing.per_model } : {};
+  let mergedRubricScores = l2Results && existing?.rubric_scores ? [...existing.rubric_scores] : [];
 
   if (l2Results) {
     const aggregated = aggregateResults(l2Results, {});
@@ -1714,7 +1730,7 @@ async function writeMetaJson(caseId, skillName, status, durationMs, l2Results = 
   }
 
   const allPassed = Object.values(mergedPerModel).every(m => m.passed);
-  if (Object.keys(mergedPerModel).length > 0) {
+  if (status === 'passed' && Object.keys(mergedPerModel).length > 0) {
     meta.status = allPassed ? 'passed' : 'failed';
   }
 
@@ -1830,27 +1846,36 @@ async function runTestsForSkill(skillName, opts) {
         return tc.assertions?.rubric && tc.assertions.rubric.length > 0;
       } catch { return false; }
     });
-    const anyHasRubric = casesWithRubric.length > 0;
 
     if (casesWithRubric.length < cases.length) {
       const missing = cases.length - casesWithRubric.length;
       console.log(`[Runner] ${missing}/${cases.length} cases have no rubric — L2 will be skipped for them`);
     }
 
-    if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent && anyHasRubric) {
-      const trials = opts.fast ? 1 : 3;
-      const totalModels = effectiveTargetAgents.length;
-      const judgeCost = judgeCallCost(judgeAgent, pipelineConfig.agents);
+    const executionPlans = cases.map(caseDef => {
+      let tc;
+      try { tc = loadTestCase(skillName, caseDef.file); } catch { return { targets: [], judged: false, execute: false }; }
+      const targets = tc.execution?.target_agents?.length ? tc.execution.target_agents : effectiveTargetAgents;
+      validateAgents(targets, pipelineConfig);
+      const judged = runL2 && judgeAgent && (tc.assertions?.rubric || []).length > 0;
+      const deterministic = (!opts.layer || opts.layer === 'deterministic') && (tc.assertions?.deterministic || []).length > 0;
+      return { targets, judged, execute: targets.length > 0 && (judged || deterministic) };
+    });
+    const trials = opts.fast ? 1 : 3;
+    const targetCalls = executionPlans.reduce((n, p) => n + (p.execute ? p.targets.length * trials : 0), 0);
+    const judgeCalls = executionPlans.reduce((n, p) => n + (p.execute && p.judged ? p.targets.length * trials : 0), 0);
+    if (targetCalls > 0) {
+      const judgeCost = judgeCalls ? judgeCallCost(judgeAgent, pipelineConfig.agents) : { cost: 0, worst: 0, missing: [] };
       if (judgeCost.missing.length > 0) {
         console.log(`[Runner] ⚠ в записи судьи нет полей для оценки цены: ${judgeCost.missing.join(', ')} — вызов по $${DEFAULT_JUDGE_CALL_COST}, без доли переоценки — переоценка каждой оценки`);
       }
       // Судья, который не даст балла ни разу (нет ключа, сбой), отдаёт каждую
       // оценку escalate_to — оценка по доле переоценки тогда занижена.
       if (judgeCost.worst > judgeCost.cost) {
-        const calls = casesWithRubric.length * totalModels * trials;
+        const calls = judgeCalls;
         console.log(`[Runner] Если судья ${judgeAgent} не даст балла ни разу, каждую оценку даст ${pipelineConfig.agents[judgeAgent].escalate_to}: судья до ~$${(calls * judgeCost.worst).toFixed(2)}`);
       }
-      await preFlightApproval(casesWithRubric.length, totalModels, trials, judgeCost.cost);
+      await preFlightApproval(targetCalls, judgeCalls, judgeCost.cost);
     }
 
     let secretScanFailed = false;
@@ -1867,7 +1892,7 @@ async function runTestsForSkill(skillName, opts) {
       }
     }
 
-    if (anyRunL2 && effectiveTargetAgents.length > 0 && judgeAgent && anyHasRubric && !secretScanFailed) {
+    if (judgeCalls > 0 && !secretScanFailed) {
       const calibrationResult = await runCalibrationGate(skillName, pipelineConfig);
       if (!calibrationResult.passed) {
         console.error(`[Runner] Calibration gate FAILED: ${calibrationResult.error}`);
@@ -1895,6 +1920,11 @@ async function runTestsForSkill(skillName, opts) {
         const runL1 = !opts.layer || opts.layer === 'deterministic';
         const runL2 = !opts.layer || opts.layer === 'l2';
 
+        const selectedAgents = testCase.execution?.target_agents?.length
+          ? testCase.execution.target_agents : effectiveTargetAgents;
+        validateAgents(selectedAgents, pipelineConfig);
+        let l1Skipped = false;
+
         // Secret scan result propagated from pre-loop
         if (runL1 && !opts.skipSecretScan && secretScanFailed) {
           result.current_run.failed++;
@@ -1919,12 +1949,12 @@ async function runTestsForSkill(skillName, opts) {
 
         if (runL1) {
           const l1Declared = (testCase.assertions?.deterministic || []).length;
-          const willRunL2 = runL2 && effectiveTargetAgents.length > 0 && judgeAgent && hasRubric;
+          const willRunL2 = runL2 && selectedAgents.length > 0 && judgeAgent && hasRubric;
 
           let l2Results = null;
           let l2Failed = false;
 
-          if (willRunL2) {
+          if (willRunL2 || (l1Declared > 0 && selectedAgents.length > 0)) {
             const trials = opts.fast ? 1 : 3;
             const index = loadIndexYaml(skillName);
             const defaultTimeout = index.execution?.default_timeout_s || 300;
@@ -1942,7 +1972,7 @@ async function runTestsForSkill(skillName, opts) {
                 testCase,
                 caseDef,
                 perCaseAgents,
-                judgeAgent,
+                willRunL2 ? judgeAgent : null,
                 pipelineConfig,
                 { trials, concurrency: 2, timeout }
               );
@@ -1951,9 +1981,9 @@ async function runTestsForSkill(skillName, opts) {
               console.log(`[Runner] L2 Results for ${caseDef.id}:`, JSON.stringify(aggregated, null, 2));
               result.rails_warnings.push(...describeRailsEngagement(caseDef.id, aggregated));
 
-              await writeJudgeResults(skillName, caseDef.id, l2Results);
+              if (willRunL2) await writeJudgeResults(skillName, caseDef.id, l2Results);
 
-              if (!aggregated.overall_passed) {
+              if (willRunL2 && !aggregated.overall_passed) {
                 l2Failed = true;
               }
             } catch (l2Err) {
@@ -1962,13 +1992,12 @@ async function runTestsForSkill(skillName, opts) {
             }
           }
 
-          // L1 проверяется по выводу агента, а вывод появляется только вместе с
-          // L2: своего прогона агентов у слоя нет.
+          // L1 проверяет общие попытки исполнителя; судья подключается только для L2.
           let l1Verdict = 'passed';
           if (l1Declared > 0) {
             if (!l2Results) {
               l1Verdict = 'no_coverage';
-              result.l1_skipped = true;
+              l1Skipped = true;
             } else {
               const l1Aggregated = aggregateL1Results(l2Results, testCase);
               console.log(`[Runner] L1 Results for ${caseDef.id}:`, JSON.stringify(l1Aggregated, null, 2));
@@ -2001,8 +2030,8 @@ async function runTestsForSkill(skillName, opts) {
             result.current_run.passed++;
           }
 
-          await writeMetaJson(caseDef.id, skillName, caseStatus, Date.now() - caseStart, l2Results, result.l1_skipped, effectiveTargetAgents);
-        } else if (runL2 && effectiveTargetAgents.length > 0 && judgeAgent && hasRubric) {
+          await writeMetaJson(caseDef.id, skillName, caseStatus, Date.now() - caseStart, l2Results, l1Skipped, selectedAgents);
+        } else if (runL2 && selectedAgents.length > 0 && judgeAgent && hasRubric) {
           const trials = opts.fast ? 1 : 3;
           const defaultTimeout = index.execution?.default_timeout_s || 300;
           const timeout = testCase.execution?.timeout_s || defaultTimeout;
@@ -2047,7 +2076,7 @@ async function runTestsForSkill(skillName, opts) {
           }
 
           currentRunStatuses[caseDef.id] = caseStatus;
-          await writeMetaJson(caseDef.id, skillName, caseStatus, Date.now() - caseStart, l2Results, null, effectiveTargetAgents);
+          await writeMetaJson(caseDef.id, skillName, caseStatus, Date.now() - caseStart, l2Results, null, selectedAgents);
         } else {
           result.current_run.passed++;
           currentRunStatuses[caseDef.id] = 'passed';

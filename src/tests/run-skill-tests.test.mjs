@@ -2039,6 +2039,111 @@ describe('buildTargetPrompt() — сборка prompt из scenario', () => {
 // Моки: agent-a → MOCK_HIGH_SCORE (judge поставит 5 → L2 pass), mock-judge.
 // ============================================================================
 
+describe('Executor-only deterministic regressions', () => {
+  const skill = '__test-executor-only';
+  const dir = join(SKILLS_DIR, skill);
+  const tests = join(dir, 'tests');
+  const pipeline = join(SKILLS_DIR, 'executor-pipeline.yaml');
+  const log = join(SKILLS_DIR, 'executor-calls.jsonl');
+  const output = join(SKILLS_DIR, 'executor-output.txt');
+  const mock = join(SKILLS_DIR, 'executor-mock.cjs');
+  before(() => {
+    mkdirSync(join(tests, 'rubrics', 'calibration'), { recursive: true });
+    writeFileSync(join(dir, 'SKILL.md'), '# Mock skill');
+    writeFileSync(mock, `const fs=require('fs'); const role=process.argv[2]; fs.appendFileSync(process.env.CALL_LOG, JSON.stringify({role,cwd:process.cwd(),sandbox:process.env.WORKFLOW_SANDBOX_ROOT})+'\\n'); if(role==='judge') console.log('score: 5'); else if(process.env.MOCK_CRASH) process.exit(1); else process.stdout.write(fs.readFileSync(process.env.MOCK_OUTPUT,'utf8'));`);
+    writeFileSync(pipeline, `pipeline:\n  agents:\n    target:\n      command: node\n      args: [${JSON.stringify(mock)}, target]\n    judge:\n      command: node\n      args: [${JSON.stringify(mock)}, judge]\n`);
+    writeFileSync(join(tests, 'rubrics', 'default.md'), '# rubric\nscore ≥ 4');
+    writeFileSync(join(tests, 'rubrics', 'calibration', 'default-good.md'), 'good');
+    writeFileSync(join(tests, 'rubrics', 'calibration', 'default-bad.md'), 'bad');
+  });
+  async function checkCase(assertions, text, { layer = 'deterministic', crash = false, targets = true, rubric = false } = {}) {
+    writeFileSync(output, text);
+    writeFileSync(log, '');
+    writeFileSync(join(tests, 'index.yaml'), `cases:\n  - id: TC-ONLY\n    file: case.yaml\nexecution:\n  target_agents: ${targets ? '[target]' : '[]'}\n  judge_agent: judge\n`);
+    writeFileSync(join(tests, 'case.yaml'), `prompt: test\nassertions:\n  deterministic: ${JSON.stringify(assertions)}\n  rubric: ${rubric ? '[{rubric_file: rubrics/default.md}]' : '[]'}\n`);
+    const result = await runRunner(['--skill', skill, '--pipeline', pipeline, '--skip-secret-scan', '--fast', '--yes', ...(layer ? ['--layer', layer] : [])], { CALL_LOG: log, MOCK_OUTPUT: output, MOCK_CRASH: crash ? '1' : '' });
+    const calls = readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+    const meta = JSON.parse(readFileSync(join(tests, 'cases', 'TC-ONLY', 'current', 'meta.json'), 'utf8'));
+    return { ...result, calls, meta };
+  }
+  it('executes L1 without rubric, judge or calibration and clears stale scores', async () => {
+    const current = join(tests, 'cases', 'TC-ONLY', 'current');
+    mkdirSync(current, { recursive: true });
+    writeFileSync(join(current, 'meta.json'), JSON.stringify({status:'passed',per_model:{target:{passed:true}},rubric_scores:[{agentId:'target',score:5}]}));
+    const r = await checkCase([{kind:'output_contains_all',values:['good']}], 'good');
+    assert.match(r.stdout, /status: passed/);
+    assert.strictEqual(r.calls.length, 1);
+    assert.strictEqual(r.calls[0].role, 'target');
+    assert.strictEqual(r.calls[0].cwd, r.calls[0].sandbox);
+    assert.match(r.stdout, /target: 1, judge: 0/);
+    assert.strictEqual(r.meta.rubric_scores, undefined);
+  });
+  it('bad, empty and crashed executor outputs cannot pass', async () => {
+    for (const [text, crash] of [['bad',false],['',false],['good',true]]) {
+      const r = await checkCase([{kind:'output_contains_all',values:['good']}], text, {crash});
+      assert.match(r.stdout, /status: failed/);
+      assert.strictEqual(r.meta.status, 'failed');
+    }
+  });
+  it('no executor remains authoritative no_coverage and static makes no calls', async () => {
+    const r = await checkCase([{kind:'output_contains_all',values:['good']}], 'good', {targets:false});
+    assert.match(r.stdout, /status: no_coverage/);
+    assert.strictEqual(r.meta.status, 'no_coverage');
+    assert.strictEqual(r.calls.length, 0);
+    const s = await checkCase([{kind:'output_contains_all',values:['good']}], 'good', {layer:'static'});
+    assert.strictEqual(s.calls.length, 0);
+  });
+  it('full L1+L2 executes one target and one judge, reusing target output', async () => {
+    rmSync(join(tests, 'rubrics', 'calibration'), { recursive: true, force: true });
+    const r = await checkCase([{kind:'output_contains_all',values:['good']}], 'good', {layer:null,rubric:true});
+    assert.match(r.stdout, /status: passed/);
+    assert.strictEqual(r.calls.filter(c => c.role === 'target').length, 1);
+    assert.strictEqual(r.calls.filter(c => c.role === 'judge').length, 1);
+  });
+  it('per-case-only targets execute both deterministic and L2-only paths', async () => {
+    for (const layer of ['deterministic', 'l2']) {
+      await checkCase([], 'good', {targets:false,layer:'static'});
+      writeFileSync(join(tests, 'case.yaml'), 'prompt: test\nexecution:\n  target_agents: [target]\nassertions:\n  deterministic: [{kind: output_contains_all, values: [good]}]\n  rubric: [{rubric_file: rubrics/default.md}]\n');
+      writeFileSync(log, '');
+      const r = await runRunner(['--skill',skill,'--layer',layer,'--pipeline',pipeline,'--fast','--yes','--skip-secret-scan'], {CALL_LOG:log,MOCK_OUTPUT:output});
+      assert.match(r.stdout, /status: passed/);
+      const calls = readFileSync(log,'utf8').trim().split('\n').map(JSON.parse);
+      assert.strictEqual(calls.filter(c => c.role === 'target').length,1);
+      const meta = JSON.parse(readFileSync(join(tests,'cases','TC-ONLY','current','meta.json'),'utf8'));
+      assert.strictEqual(meta.per_model.target.passed,true);
+    }
+  });
+  it('uncovered case does not leak l1_skipped into covered sibling', async () => {
+    writeFileSync(output,'good'); writeFileSync(log,'');
+    writeFileSync(join(tests,'index.yaml'),'cases:\n  - id: TC-MISSING\n    file: missing.yaml\n  - id: TC-COVERED\n    file: covered.yaml\nexecution:\n  target_agents: []\n  judge_agent: judge\n');
+    const assertions = 'assertions:\n  deterministic: [{kind: output_contains_all, values: [good]}]\n';
+    writeFileSync(join(tests,'missing.yaml'),'prompt: test\n'+assertions);
+    writeFileSync(join(tests,'covered.yaml'),'prompt: test\nexecution:\n  target_agents: [target]\n'+assertions);
+    const r = await runRunner(['--skill',skill,'--layer','deterministic','--pipeline',pipeline,'--fast','--yes','--skip-secret-scan'],{CALL_LOG:log,MOCK_OUTPUT:output});
+    assert.match(r.stdout,/current_run.no_coverage: 1/);
+    assert.match(r.stdout,/current_run.passed: 1/);
+    const missing = JSON.parse(readFileSync(join(tests,'cases','TC-MISSING','current','meta.json'),'utf8'));
+    const covered = JSON.parse(readFileSync(join(tests,'cases','TC-COVERED','current','meta.json'),'utf8'));
+    assert.strictEqual(missing.l1_skipped,true);
+    assert.strictEqual(covered.l1_skipped,undefined);
+  });
+  it('real 013/015 assertions accept complete records and reject lost criterion or record', async () => {
+    const samples = [
+      ['TC-DECOMPOSE-PLAN-013-criterion-several-records.yaml', 'тесты проходят и падают, если из набора по умолчанию убрать любой домен', ['check: `node --test test/site-list.test.mjs`','check: `git grep -q --untracked "rutube.ru" -- test`','prose: `записи плана доказывают не весь критерий`'], '- [ ] CLI печатает номер версии пакета\n  - check: `node bin/cli.js --version`\n- [ ] справка CLI объясняет флаг версии без чтения кода\n  - prose: `понятность справки командой не проверить`'],
+      ['TC-DECOMPOSE-PLAN-015-split-task-criterion-text.yaml', 'в `spikes/injection/` есть расширение с обоими путями внедрения и инструкция установки', ['check: `git grep -q --untracked "registerContentScripts" -- spikes/injection`','check: `git grep -q --untracked "document_start" -- spikes/injection/manifest.json`','prose: `различимость меток двух путей и полнота инструкции оцениваются по диффу`'], '']
+    ];
+    for (const [file, criterion, records, extra] of samples) {
+      const source = readFileSync(join(CANON_SKILLS_DIR,'decompose-plan','tests','cases',file),'utf8');
+      const { default: YAML } = await import('../lib/js-yaml.mjs');
+      const assertions = YAML.load(source).assertions.deterministic;
+      const good = records.map(record => `- [ ] ${criterion}\n  - ${record}`).join('\n')+'\n'+extra;
+      assert.match((await checkCase(assertions,good)).stdout, /status: passed/);
+      assert.match((await checkCase(assertions,good.replace(criterion,'lost criterion'))).stdout, /status: failed/);
+      assert.match((await checkCase(assertions,good.replace(records[0],'lost record'))).stdout, /status: failed/);
+    }
+  });
+});
+
 describe('L1 по фактическому выводу агента', () => {
   const SKILL_L1 = `__test-l1-live-${Date.now()}`;
   const DIR_L1 = join(SKILLS_DIR, SKILL_L1);
@@ -2530,6 +2635,19 @@ describe('Скил на рельсах: рельсы не зацепились �
 
     const trialOut = readFileSync(join(skillDir, 'tests', 'cases', CASE_ID, 'current', 'agent-rails-silent', 'trial-1.md'), 'utf8');
     assert.match(trialOut, new RegExp(`SAW_START_VERDICT node \\.workflow/src/rails/cli\\.mjs start ${RAILS_SKILL}`), 'повтор получил вердикт с командой start');
+  });
+
+  it('executor-only L1 cannot pass when rails procedure failed', async () => {
+    useAgent('agent-rails-silent');
+    const casePath = join(skillDir, 'tests', `${CASE_ID}.yaml`);
+    const previousCase = readFileSync(casePath, 'utf8');
+    writeFileSync(casePath, 'prompt: Rails probe\nassertions:\n  deterministic: [{kind: output_does_not_contain, values: [NEVER_PRESENT]}]\n');
+    const { stdout } = await runRunner(['--skill', RAILS_SKILL, '--layer', 'deterministic', '--skip-secret-scan', '--fast', '--yes', '--pipeline', TEST_PIPELINE_PATH], {WORKFLOW_SKILLS_DIR: RAILS_SKILLS_DIR});
+    assert.match(stdout, /status: failed/);
+    assert.match(stdout, /rails: procedure failed/);
+    assert.strictEqual(readMeta().per_model['agent-rails-silent'].passed, false);
+    assert.strictEqual(readMeta().rubric_scores, undefined);
+    writeFileSync(casePath, previousCase);
   });
 
   it('режим --all — строка rails_warnings с именем скила в итоговом RESULT', async () => {
