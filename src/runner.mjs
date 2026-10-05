@@ -553,7 +553,7 @@ class Logger {
   /**
    * Записывает итоговый summary
    */
-  writeSummary() {
+  writeSummary(outcome = null) {
     this.stats.endTime = new Date();
     const duration = this.stats.endTime - this.stats.startTime;
 
@@ -565,6 +565,7 @@ class Logger {
       '',
       `Duration: ${(duration / 1000).toFixed(2)}s`,
       '',
+      ...(outcome ? [`Outcome: ${outcome}`, ''] : []),
       '┌─────────────────────────────────────────────────────────┐',
       '│ LOG STATISTICS                                          │',
       '├─────────────────────────────────────────────────────────┤',
@@ -4378,10 +4379,11 @@ class PipelineRunner {
         }
 
       } catch (err) {
-        this.logger.error(`Error at stage "${this.currentStage}": ${err.message}`, 'PipelineRunner');
+        const failedStage = this.currentStage;
+        this.logger.error(`Error at stage "${failedStage}": ${err.message}`, 'PipelineRunner');
 
         // Пытаемся получить fallback transition
-        const stage = this.pipeline.stages[this.currentStage];
+        const stage = this.pipeline.stages[failedStage];
         if (stage?.goto?.error) {
           const errorTarget = typeof stage.goto.error === 'string' ? stage.goto.error : stage.goto.error.stage;
           this.logger.info(`Transitioning to error handler: ${errorTarget}`, 'PipelineRunner');
@@ -4390,6 +4392,13 @@ class PipelineRunner {
           // Обновляем контекст параметрами из error transition
           if (typeof stage.goto.error === 'object' && stage.goto.error.params) {
             this.updateContext(stage.goto.error.params, { error: err.message });
+          }
+
+          // Прогон, дошедший до end через обработчик ошибки, не завершён
+          // успешно: без endedBy итог читался бы как «Pipeline completed»
+          // (2026-10-04, ревью человеческого маршрута).
+          if (errorTarget === 'end') {
+            this.endedBy = { stage: failedStage, status: 'error', data: { error: err.message } };
           }
         } else {
           this.logger.error('No error handler defined. Stopping.', 'PipelineRunner');
@@ -4407,17 +4416,42 @@ class PipelineRunner {
     this.logger.info(`Tasks executed: ${this.tasksExecuted}`, 'PipelineRunner');
     this.logger.info(`Final context: ${JSON.stringify(this.context)}`, 'PipelineRunner');
 
-    // Записываем итоговый summary
-    this.logger.writeSummary();
+    // Ожидание человека и ошибка маршрута не являются успехом плана.
+    const stoppedOutcome = this.stuckEnd();
+    const outcome = stoppedOutcome || (
+      this.currentStage === 'end'
+        ? 'Pipeline completed'
+        : 'Pipeline stopped before completion'
+    );
+    this.logger.writeSummary(outcome);
 
     return {
       steps: this.stepCount,
       tasksExecuted: this.tasksExecuted,
       context: this.context,
-      failed: !this.running && this.stepCount < maxSteps,
+      failed: (!this.running && this.stepCount < maxSteps) ||
+        this.isHumanRouteError() ||
+        this.endedBy?.status === 'error',
+      humanActionRequired:
+        this.endedBy?.status === 'human_action_required',
       // План стоит (STUCK_END_STATUSES): прогон не упал, но и успехом не кончился.
       stuck: this.currentStage === 'end' && Boolean(this.stuckEnd()),
     };
+  }
+
+  /**
+   * Ошибка маршрута human: stage human-gate-route/review-failure-route закончился
+   * диагностикой (human_route_error или неожиданный статус), либо запуск скрипта
+   * сбоил — прогон не должен выглядеть успешным.
+   */
+  isHumanRouteError() {
+    const ended = this.endedBy;
+    if (!ended) return false;
+    if (ended.status === 'human_route_error') return true;
+
+    // Неожиданный результат или сбой запуска скрипта тоже не означает успех.
+    return ['human-gate-route', 'review-failure-route'].includes(ended.stage) &&
+      ended.status !== 'human_action_required';
   }
 
   /**
@@ -4427,10 +4461,34 @@ class PipelineRunner {
    */
   stuckEnd() {
     const ended = this.endedBy;
-    if (!ended || !STUCK_END_STATUSES.has(ended.status)) return null;
+    if (!ended) return null;
+
+    if (ended.status === 'human_action_required') {
+      const ticket = ended.data.ticket_id || this.context.ticket_id || 'unknown';
+      const message = ended.data.message || 'Требуется действие человека';
+      return `Pipeline waiting for human action: ${ticket} — ${message}`;
+    }
+
+    if (this.isHumanRouteError()) {
+      const ticket = ended.data.ticket_id || this.context.ticket_id || 'unknown';
+      const message = ended.data.message ||
+        `Сбой маршрута ${ended.stage}: ${ended.status}` +
+        (ended.data.error ? ` — ${ended.data.error}` : '');
+      return `Pipeline stopped: human routing error for ${ticket} — ${message}`;
+    }
+
+    if (ended.status === 'error') {
+      const reason = ended.data?.error || 'Ошибка стадии';
+      return `Pipeline stopped: stage ${ended.stage} failed — ${reason}`;
+    }
+
+    if (!STUCK_END_STATUSES.has(ended.status)) return null;
     const plan = ended.data.plan_id ? `plan ${ended.data.plan_id}` : 'plan';
-    const blocked = ended.data.blocked_tickets ? `, blocked: ${ended.data.blocked_tickets}` : '';
-    return `Pipeline stopped: ${plan} is stuck (${ended.stage}: ${ended.status}${blocked}) — needs a human decision`;
+    const blocked = ended.data.blocked_tickets
+      ? `, blocked: ${ended.data.blocked_tickets}`
+      : '';
+    return `Pipeline stopped: ${plan} is stuck ` +
+      `(${ended.stage}: ${ended.status}${blocked}) — needs a human decision`;
   }
 
   /**

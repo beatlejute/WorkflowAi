@@ -301,6 +301,20 @@ pipeline:
       workdir: "."
       description: "Скрипт для выбора следующего тикета из ready/"
 
+    script-human-gate-route:
+      command: "node"
+      args: [".workflow/src/scripts/human-gate-route.js"]
+      workdir: "."
+      prompt_stdin: true
+      description: "Проверить состояние human-тикета после открытия gate"
+
+    script-review-failure-route:
+      command: "node"
+      args: [".workflow/src/scripts/review-failure-route.js"]
+      workdir: "."
+      prompt_stdin: true
+      description: "Развести отказ ревью human и агентских тикетов"
+
     script-move-ready:
       command: "node"
       args: [".workflow/src/scripts/move-to-ready.js"]
@@ -928,7 +942,10 @@ pipeline:
       poll_interval_ms: 2000
       timeout_seconds: 86400
       goto:
-        approved: pick-first-task
+        # Одобрение — только «продолжить»: скрипт проверяет, передан ли результат
+        # (тикет в review/done/archive), иначе ветка заканчивается ожиданием человека
+        # вместо холостого цикла pick → gate (дефект 2026-10-04, ~1360 переходов).
+        approved: human-gate-route
         rejected:
           stage: mark-human-rejected
           params:
@@ -939,6 +956,37 @@ pipeline:
             ticket_id: "$context.ticket_id"
             reason: "human_gate_timeout"
         aborted: end
+
+    # -------------------------------------------------------------------------
+    # 2e. human-gate-route / review-failure-route
+    # Детерминированные маршруты после human-ворот и после отказа ревью:
+    # human-тикет не возвращается молча в ready/ и не отдаётся агентской
+    # переделке — решает человек (дефект 2026-10-04: цикл ~1360 переходов).
+    # -------------------------------------------------------------------------
+    human-gate-route:
+      description: "Проверить передачу human-результата после открытия gate"
+      agent: script-human-gate-route
+      timeout: 30
+      goto:
+        continue: pick-first-task
+        human_action_required: end
+        human_route_error: end
+        default: end
+        error: end
+
+    review-failure-route:
+      description: "Отказ human-ревью требует человека, агентского — новой попытки"
+      agent: script-review-failure-route
+      timeout: 30
+      goto:
+        agent_failed:
+          stage: increment-task-attempts
+          params:
+            ticket_id: "$context.ticket_id"
+        human_action_required: end
+        human_route_error: end
+        default: end
+        error: end
 
     # -------------------------------------------------------------------------
     # 3b. mark-blocked
@@ -1030,7 +1078,7 @@ pipeline:
             attempt: "$counter.task_attempts"
             evidence_file: ""
         failed:
-          stage: increment-task-attempts
+          stage: review-failure-route
           params:
             ticket_id: "$context.ticket_id"
         default:
@@ -1083,7 +1131,7 @@ pipeline:
             ticket_id: "$context.ticket_id"
             target: done
         failed:
-          stage: increment-task-attempts
+          stage: review-failure-route
           params:
             ticket_id: "$context.ticket_id"
         default:
@@ -1116,7 +1164,7 @@ pipeline:
             ticket_id: "$context.ticket_id"
             target: done
         failed:
-          stage: increment-task-attempts
+          stage: review-failure-route
           params:
             ticket_id: "$context.ticket_id"
         default:
@@ -1125,7 +1173,7 @@ pipeline:
             ticket_id: "$context.ticket_id"
             target: backlog
         error:
-          stage: increment-task-attempts
+          stage: increment-legacy-review-errors
           params:
             ticket_id: "$context.ticket_id"
 
@@ -1151,6 +1199,28 @@ pipeline:
             ticket_id: "$context.ticket_id"
             attempts: "$counter.task_attempts"
             reason: "max_review_attempts"
+
+    # Сбой legacy-ревью повторяет именно legacy-ревью (без evidence-стадии
+    # review-result) и не расходует попытку исполнения. Три сбоя — блокировка
+    # с причиной review_error, как у основного increment-review-errors.
+    increment-legacy-review-errors:
+      description: "Повторить legacy-ревью после сбоя без попытки исполнения"
+      type: update-counter
+      counter: review_error_attempts
+      max: 3
+      goto:
+        default:
+          stage: review-result-legacy
+          params:
+            ticket_id: "$context.ticket_id"
+            attempt: "$counter.task_attempts"
+            evidence_file: ""
+        max_reached:
+          stage: mark-blocked
+          params:
+            ticket_id: "$context.ticket_id"
+            attempts: "$counter.review_error_attempts"
+            reason: "review_error"
 
     # -------------------------------------------------------------------------
     # 4c. increment-review-errors

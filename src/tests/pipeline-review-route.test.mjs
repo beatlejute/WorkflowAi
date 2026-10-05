@@ -99,7 +99,9 @@ function verifyArtifactsProblems(config) {
     ...check('default', { stage: 'review-result', params: { ...ATTEMPT, ...EVIDENCE } }),
     ...check('legacy', { stage: 'review-result-legacy', params: { ...ATTEMPT, evidence_file: '' } }),
     ...check('error', { stage: 'review-result-legacy', params: { ...ATTEMPT, evidence_file: '', required_capabilities: '' } }),
-    ...check('failed', { stage: 'increment-task-attempts', params: TICKET }),
+    // 2026-10-04: failed ведёт в общий маршрутизатор отказа — human-тикет не
+    // возвращается молча в ready/, агентский уходит в счётчик попыток.
+    ...check('failed', { stage: 'review-failure-route', params: TICKET }),
   ];
 }
 
@@ -125,9 +127,9 @@ function legacyStageProblems(config) {
   return [
     ...problems,
     ...check('passed', { stage: 'move-ticket', params: { ...TICKET, target: 'done' } }),
-    ...check('failed', { stage: 'increment-task-attempts', params: TICKET }),
+    ...check('failed', { stage: 'review-failure-route', params: TICKET }),
     ...check('default', { stage: 'move-ticket', params: { ...TICKET, target: 'backlog' } }),
-    ...check('error', { stage: 'increment-task-attempts', params: TICKET }),
+    ...check('error', { stage: 'increment-legacy-review-errors', params: TICKET }),
   ];
 }
 
@@ -199,12 +201,14 @@ describe('pipeline-review-route: маршрут ревью в configs/pipeline.y
   // PulseProxy QA-160, 2026-09-28: судья ревью пять раз упал «Too many images», ветка error
   // вела в increment-task-attempts, и готовую работу пять раз исполняли заново, пока тикет
   // не встал в blocked/. Сбой ревью — не отказ в работе: попытку исполнения он не тратит.
-  it('review-result: failed тратит попытку исполнения, error — повтор ревью со своим счётчиком', () => {
+  // 2026-10-04: failed ведёт в review-failure-route — human-тикет блокируется с решением
+  // владельца, агентский уходит в счётчик попыток (дефект цикла human-тикетов).
+  it('review-result: failed — общий маршрутизатор отказа, error — повтор ревью со своим счётчиком', () => {
     const config = loadConfig();
     const check = (stageId, status, expected) => transitionProblems(config, stageId, status, expected);
     const retry = findStage(config, 'increment-review-errors');
     assert.deepEqual([
-      ...check('review-result', 'failed', { stage: 'increment-task-attempts', params: TICKET }),
+      ...check('review-result', 'failed', { stage: 'review-failure-route', params: TICKET }),
       ...check('review-result', 'error', { stage: 'increment-review-errors', params: TICKET }),
       ...check('increment-review-errors', 'default', {
         stage: 'review-result',
