@@ -16,8 +16,8 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { join, basename } from 'node:path';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
 import { run } from '../rails/cli.mjs';
@@ -91,17 +91,17 @@ function makeState(root, node) {
   return sessionId;
 }
 
-/** Снимок состояния без поля `session`: читается, но saveState() на нём бросает. */
+/** Валидное состояние, которое saveState() записать не может: файл read-only. */
 function writeUnsaveableState(root, node) {
   const sessionId = uuid();
   const dir = join(root, '.workflow', 'state', 'rails');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(
-    join(dir, `${sessionId}.json`),
-    JSON.stringify({ skill: 'clifall', node, counters: {}, denials: {}, history: [] }),
-    'utf8'
-  );
-  return sessionId;
+  const state = startState({ root, sessionId, skill: 'clifall', entry: 'P4E1' });
+  state.node = node;
+  saveState(root, state);
+  const file = join(dir, `${sessionId}.json`);
+  chmodSync(file, 0o444);
+  return file;
 }
 
 /** Журнал рельсов занят каталогом — дозапись строки в него бросает EISDIR. */
@@ -281,16 +281,22 @@ test('goto при битом rails.yaml: code 1 с текстом разбора
 
 test('goto: состояние не записывается -> отказ всё равно доходит до агента', () => {
   withProject({}, ({ root }) => {
-    const sessionId = writeUnsaveableState(root, 'P4S1');
+    const file = writeUnsaveableState(root, 'P4S1');
+    const sessionId = basename(file, '.json');
 
-    const r = run(['goto', 'P5S1', '--session', sessionId], { cwd: root, env: {} });
+    try {
+      const r = run(['goto', 'P5S1', '--session', sessionId], { cwd: root, env: {} });
+      console.error('PROBE-STDOUT:', JSON.stringify(r.stdout));
 
-    assert.equal(r.code, 2, 'битый файл состояния не повод отвечать стектрейсом вместо отказа');
-    assert.match(r.stdout, /Отклонено: goto P5S1/);
-    assert.match(r.stdout, /Доступно:/);
-    const denials = readJournal(root, {}).filter((e) => e.type === 'denial');
-    assert.equal(denials.length, 1, 'отказ обязан попасть в журнал даже когда состояние записать не удалось');
-    assert.deepEqual(loadState(root, sessionId).denials, {}, 'цена: счётчик отказов на диск не лёг');
+      assert.equal(r.code, 2, 'битый файл состояния не повод отвечать стектрейсом вместо отказа');
+      assert.match(r.stdout, /Отклонено: goto P5S1/);
+      assert.match(r.stdout, /Доступно:/);
+      const denials = readJournal(root, {}).filter((e) => e.type === 'denial');
+      assert.equal(denials.length, 1, 'отказ обязан попасть в журнал даже когда состояние записать не удалось');
+      assert.deepEqual(loadState(root, sessionId).denials, {}, 'цена: счётчик отказов на диск не лёг');
+    } finally {
+      chmodSync(file, 0o666);
+    }
   });
 });
 

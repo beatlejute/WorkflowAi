@@ -24,11 +24,14 @@ test('H1: отчёт по пути из тикета и секция Result ти
 test('H1: отчёт в каталог скила — отказ на любом узле (прогон 2026-09-25)', () => {
   withProject(({ root, link }) => {
     const inSkill = join(link, 'reports', 'chrome-mv3-formats_2026-09-25.md');
-    const otherSkill = join(root, '.workflow', 'src', 'skills', 'other-skill', 'notes.md');
+    // 2026-10-05, write-policy: чужой скил закрыт и в канонической ссылке (инцидент
+    // 2026-09-25), и независимой локальной копией — правит скилы только коуч.
+    const otherIndependent = join(root, '.workflow', 'src', 'skills', 'other-skill', 'notes.md');
     for (const node of ['P3S2', 'P5S2', 'P9S1']) {
       const s = atNode(root, node);
       assert.equal(decide({ action: claude('Write', { file_path: inSkill }), ctx: ctx(root, s) }).decision, 'deny', `свой скил ${node}`);
-      assert.equal(decide({ action: claude('Write', { file_path: otherSkill }), ctx: ctx(root, s) }).decision, 'deny', `чужой скил ${node}`);
+      assert.equal(decide({ action: claude('Write', { file_path: join(link, 'reports', 'via-canon.md') }), ctx: ctx(root, s) }).decision, 'deny', `чужой скил канон ${node}`);
+      assert.equal(decide({ action: claude('Write', { file_path: otherIndependent }), ctx: ctx(root, s) }).decision, 'deny', `независимая копия ${node}`);
     }
   });
 });
@@ -56,9 +59,11 @@ test('H1: запись в rails.yaml через shell-редирект — то�
   });
 });
 
-test('H1: делегат (role executor) — молчание даже на запись rails.yaml', () => {
+// 2026-10-05: write-policy закрывает канон fail-closed и для роли executor; прежде делегат был
+// освобождён полностью, и правка rails.yaml по ссылке на канон проходила молча.
+test('H1: делегат (role executor) — канон закрыт и для него', () => {
   withProject(({ root, link }) => {
     const r = decide({ action: claude('Edit', { file_path: join(link, 'rails.yaml') }), ctx: ctx(root, atNode(root, 'P3S2'), { role: 'executor' }) });
-    assert.equal(r.decision, 'allow');
+    assert.equal(r.decision, 'deny');
   });
 });

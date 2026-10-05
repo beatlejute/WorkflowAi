@@ -243,7 +243,7 @@ function foreignSkillRefusal({ root, skill, runSkill, sessionId, explicitSession
     let graph = null;
     let config = null;
     try {
-      ({ config, graph } = loadSkillRuntime(root, runSkill));
+      ({ config, graph } = loadSkillRuntime(root, runSkill, existing));
     } catch {
       // граф может быть битым — отказ всё равно называет узел
     }
@@ -286,11 +286,44 @@ function cmdStart(root, positional, flags, env) {
     return foreignSkillRefusal({ root, skill, runSkill, sessionId, explicitSession, existing, env });
   }
   // §5: «уже есть состояние для другого скила → отказ, если не --force».
-  if (existing && existing.skill !== skill && !flags.force) {
-    return {
-      code: 2,
-      stdout: `Ошибка: сессия ${sessionId} уже привязана к скилу "${existing.skill}". Используй --force для перезаписи.\n`,
-    };
+  if (existing && existing.skill !== skill) {
+    // Правки исходников скила активирует новый запуск владельца, а не --force
+    // поверх закреплённого запуска: иначе правка + force-start заменяла бы
+    // полномочия текущего запуска.
+    if (existing.runtime) {
+      return {
+        code: 2,
+        stdout: `Ошибка: сессия ${sessionId} идёт по "${existing.skill}" с закреплённым runtime; перезапись другим скилом запрещена. Новый запуск открывает владелец.\n`,
+      };
+    }
+    if (!flags.force) {
+      return {
+        code: 2,
+        stdout: `Ошибка: сессия ${sessionId} уже привязана к скилу "${existing.skill}". Используй --force для перезаписи.\n`,
+      };
+    }
+  }
+
+  // Один и тот же скил — идемпотентный resume: узел, история, счётчики и привязка
+  // runtime сохраняются; правки исходников скила это не активирует.
+  if (existing && existing.skill === skill) {
+    let runtime;
+    try {
+      runtime = loadSkillRuntime(root, skill, existing);
+    } catch (err) {
+      return { code: 1, stdout: `Ошибка: сессия уже идёт по "${skill}", но runtime не закреплён: ${err && err.message ? err.message : err}\n` };
+    }
+    try {
+      saveState(root, existing); // закреплённая привязка runtime — на диск
+    } catch {
+      // сохранение не должно ронять CLI
+    }
+    const label = runtime.graph.node(existing.node)?.label ?? '';
+    const lines = [
+      `Числишься: скил "${skill}", сессия ${sessionId}, узел ${existing.node} «${label}» — продолжай оттуда.`,
+      ...nodeFooter(existing, runtime.graph, runtime.config, guardContext(root, env, existing)),
+    ];
+    return { code: 0, stdout: `Старт: скил "${skill}", сессия ${sessionId} — уже идёт.\n${lines.join('\n')}\n` };
   }
 
   let config;
@@ -308,6 +341,12 @@ function cmdStart(root, positional, flags, env) {
   // перезапись состояния: иначе `start` заменял бы его тикетом из окружения CLI (runTicket).
   const ticket = runTicket(existing, env);
   const state = startState({ root, sessionId, skill, entry: config.entry, run: (env && env.WORKFLOW_RAILS_RUN) || null, ticket });
+  try {
+    loadSkillRuntime(root, skill, state); // закрепить runtime нового запуска сразу
+    saveState(root, state);               // и сохранить привязку на диске
+  } catch (err) {
+    return { code: 1, stdout: `Ошибка: runtime нового запуска не закреплён: ${err && err.message ? err.message : err}\n` };
+  }
   const entryNode = graph.node(config.entry);
   const label = entryNode ? entryNode.label : '';
 
@@ -342,7 +381,7 @@ function cmdGoto(root, positional, flags, env) {
   let config;
   let graph;
   try {
-    ({ config, graph } = loadSkillRuntime(root, state.skill));
+    ({ config, graph } = loadSkillRuntime(root, state.skill, state));
   } catch (err) {
     return { code: 1, stdout: `Ошибка загрузки скила "${state.skill}": ${err && err.message ? err.message : err}\n` };
   }
@@ -394,7 +433,7 @@ function cmdStatus(root, positional, flags, env) {
   let graph = null;
   let config = null;
   try {
-    ({ config, graph } = loadSkillRuntime(root, state.skill));
+    ({ config, graph } = loadSkillRuntime(root, state.skill, state));
   } catch {
     // граф может быть битым — статус всё равно печатаем по состоянию
   }
@@ -428,6 +467,25 @@ function cmdReset(root, positional, flags, env) {
   if (!sessionId) return { code: 1, stdout: 'Ошибка: нет активной сессии.\n' };
 
   const state = loadState(root, sessionId);
+  // Сброс закреплённого запуска — не путь активации правок исходников: его
+  // открывает владелец через внешнюю политику, а не команда агента.
+  if (state?.runtime) {
+    try {
+      appendDenial(root, {
+        session: sessionId,
+        skill: state.skill,
+        node: state.node,
+        reason: 'reset закреплённого запуска отклонён: правки исходников активирует новый запуск владельца',
+        command: 'reset',
+      });
+    } catch {
+      // журнал не должен ронять CLI
+    }
+    return {
+      code: 2,
+      stdout: `Ошибка: сессия ${sessionId} идёт по "${state.skill}" с закреплённым runtime — reset отклонён: правки исходников активирует новый запуск владельца, не сброс состояния.\n`,
+    };
+  }
   deleteState(root, sessionId);
   try {
     appendEvent(root, {

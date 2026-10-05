@@ -1,22 +1,36 @@
-// H3: действие только на своём этапе — правка скила (П4, П10, П70), бэклог (П6),
-// get-next-test-id и прогон runner (П5, потолок 3). E-узел этапа прозрачен.
+// H3: действие только на своём этапе — shared (П4/П5/П10/П70), бэклог (П6),
+// get-next-test-id и прогон runner (П5, потолок 3). Правка независимой локальной
+// копии скила этапами не связана (2026-10-05, устранение дедлока); скил через
+// junction в канон отклоняется целиком на любом этапе.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { withCoachProject, atNode, ctx, claude, decide } from './_project.mjs';
+import { withCoachProject, atNode, ctx, claude, decide, CANON } from './_project.mjs';
 
 const RUNNER = 'node .workflow/src/scripts/run-skill-tests.js --skill coach --relevant TC-COACH-005';
 const NEXT_ID = 'node .workflow/src/scripts/get-next-test-id.js --skill coach';
 
-test('H3: Edit файла скила на этапе evidence (П1) — отказ, на правке (П4S2) — молчание', () => {
+test('H3: скил через junction в канон — отказ и на evidence (П1), и на правке (П4)', () => {
   withCoachProject(({ root, link }) => {
     const file = join(link, 'knowledge', 'rails-concept.md');
-    const deny = decide({ action: claude('Edit', { file_path: file }), ctx: ctx(root, atNode(root, 'P1S1')) });
-    assert.equal(deny.decision, 'deny');
-    assert.match(deny.reason, /этап/);
-    const allow = decide({ action: claude('Edit', { file_path: file }), ctx: ctx(root, atNode(root, 'P4S2')) });
-    assert.equal(allow.decision, 'allow');
+    for (const node of ['P1S1', 'P4S2']) {
+      const r = decide({ action: claude('Edit', { file_path: file }), ctx: ctx(root, atNode(root, node)) });
+      assert.equal(r.decision, 'deny', node);
+      assert.match(r.reason, /каноническая цель защищена/, node);
+    }
   });
+});
+
+test('H3: независимая копия правится на любом этапе и в E-узле', () => {
+  withCoachProject(({ root, link }) => {
+    const file = join(link, 'knowledge', 'rails-concept.md');
+    for (const node of ['P1S1', 'P4E1', 'P4S2', 'P10S5', 'P70S5']) {
+      const r = decide({ action: claude('Edit', { file_path: file }), ctx: ctx(root, atNode(root, node)) });
+      assert.equal(r.decision, 'allow', `${node} — ${r.reason ?? ''}`);
+    }
+    const fresh = decide({ action: claude('Write', { file_path: join(link, 'workflows', 'probe.md') }), ctx: ctx(root, atNode(root, 'P10S5')) });
+    assert.equal(fresh.decision, 'allow');
+  }, { independent: true });
 });
 
 test('H3: Write в shared knowledge проекта на этапе evidence (П1) — отказ, на правке (П4S2) — молчание', () => {
@@ -27,22 +41,6 @@ test('H3: Write в shared knowledge проекта на этапе evidence (П1
     assert.match(deny.reason, /этап/);
     const allow = decide({ action: claude('Write', { file_path: file }), ctx: ctx(root, atNode(root, 'P4S2')) });
     assert.equal(allow.decision, 'allow');
-  });
-});
-
-test('H3: E-узел этапа прозрачен — Edit скила в P4E1 отказ, пока агент не прошёл в S-узел', () => {
-  withCoachProject(({ root, link }) => {
-    const r = decide({ action: claude('Edit', { file_path: join(link, 'README.md') }), ctx: ctx(root, atNode(root, 'P4E1')) });
-    assert.equal(r.decision, 'deny');
-  });
-});
-
-test('H3: запись файлов скила разрешена в ветках CREATE (П10S5) и CONVERT (П70S5)', () => {
-  withCoachProject(({ root, link }) => {
-    for (const node of ['P10S5', 'P70S5']) {
-      const r = decide({ action: claude('Write', { file_path: join(link, 'workflows', 'probe.md') }), ctx: ctx(root, atNode(root, node)) });
-      assert.equal(r.decision, 'allow', node);
-    }
   });
 });
 
@@ -78,8 +76,8 @@ test('H3/H4: прогон runner на П5S5 — три раза молчание
 });
 
 test('H3: отказ называет разрешённое — переходы из текущего узла и действия этапа', () => {
-  withCoachProject(({ root, link }) => {
-    const r = decide({ action: claude('Edit', { file_path: join(link, 'README.md') }), ctx: ctx(root, atNode(root, 'P1S1')) });
+  withCoachProject(({ root }) => {
+    const r = decide({ action: claude('Write', { file_path: join(root, '.workflow', 'shared', 'README.md') }), ctx: ctx(root, atNode(root, 'P1S1')) });
     assert.equal(r.decision, 'deny');
     assert.match(r.reason, /Отклонено/);
     assert.match(r.reason, /Почему/);

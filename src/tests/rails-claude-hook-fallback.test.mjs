@@ -14,8 +14,8 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join, basename } from 'node:path';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
 import { handleHookInput } from '../rails/claude-hook.mjs';
@@ -104,20 +104,19 @@ function makeState(root, node) {
 }
 
 /**
- * Состояние, которое читается, но не записывается: в файле нет поля `session`,
- * из которого saveState() строит путь. Так выглядит обрезанный или правленный
- * руками снимок состояния. loadState() его отдаёт, saveState() на нём бросает.
+ * Валидное состояние, которое читается, но не записывается: файл read-only.
+ * loadState() его отдаёт, saveState() на нём бросает (EPERM).
  */
 function writeUnsaveableState(root, node) {
   const sessionId = uuid();
   const dir = join(root, '.workflow', 'state', 'rails');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(
-    join(dir, `${sessionId}.json`),
-    JSON.stringify({ skill: 'hookfall', node, counters: {}, history: [] }),
-    'utf8'
-  );
-  return sessionId;
+  const state = startState({ root, sessionId, skill: 'hookfall', entry: 'P4E1' });
+  state.node = node;
+  saveState(root, state);
+  const file = join(dir, `${sessionId}.json`);
+  chmodSync(file, 0o444);
+  return file;
 }
 
 /** Журнал рельсов занят каталогом — дозапись строки в него бросает EISDIR. */
@@ -272,7 +271,7 @@ test('PostToolUse при битом rails.yaml: тишина вместо пад
   });
 });
 
-test('Stop при битом rails.yaml: агенту дают завершить ответ', () => {
+test('Stop при битом rails.yaml: блок с объяснением — правка локального скила починит закрепление', () => {
   withProject({ broken: true }, ({ root, base }) => {
     const sessionId = makeState(root, 'P4S1');
     const { result, stderr } = callHook({
@@ -281,7 +280,10 @@ test('Stop при битом rails.yaml: агенту дают завершит�
       cwd: root,
       transcript_path: join(base, 'нет-такого.jsonl'),
     });
-    assert.equal(result, null, 'иначе битый конфиг запирает сессию: ответ не выпускают, а починить нечем');
+    // Битый конфиг активной сессии — не повод выпускать ответ без проверки:
+    // правки независимого локального скила разрешены, чинится без замка.
+    assert.equal(result?.decision, 'block');
+    assert.match(result.reason, /RAILS: действие отклонено/);
     assert.equal(stderr, '');
   });
 });
@@ -353,30 +355,34 @@ function stopUntilPass(root, base, sessionId) {
 
 test('Stop: состояние не записывается -> один блок, остановки сразу после него проходят, в журнале unsaved', () => {
   withProject({}, ({ root, base }) => {
-    const sessionId = writeUnsaveableState(root, 'P4S1');
+    const file = writeUnsaveableState(root, 'P4S1');
+    const sessionId = basename(file, '.json');
+    try {
+      const { first, next } = stopUntilPass(root, base, sessionId);
 
-    const { first, next } = stopUntilPass(root, base, sessionId);
-
-    assert.equal(first.result.decision, 'block', 'битый файл состояния не должен ронять завершение сессии');
-    assert.equal(first.stderr, '');
-    for (const [i, r] of next.entries()) {
-      assert.equal(r.result, null, `остановка ${i + 2} сразу после блока: без сохранённого счётчика блок повторялся бы вечно`);
-      assert.equal(r.stderr, '');
+      assert.equal(first.result.decision, 'block', 'файл состояния, который нельзя записать, не должен ронять завершение сессии');
+      assert.equal(first.stderr, '');
+      for (const [i, r] of next.entries()) {
+        assert.equal(r.result, null, `остановка ${i + 2} сразу после блока: без сохранённого счётчика блок повторялся бы вечно`);
+        assert.equal(r.stderr, '');
+      }
+      // Счётчик не сохранился — на диске его нет.
+      assert.equal(loadState(root, sessionId).counters['stop_blocks:P4S1'], undefined);
+      // Каждая остановка с нарушением — запись в журнал; пропущенные — exhausted.
+      const stopBlocks = readJournal(root, {}).filter((e) => e.type === 'stop_block');
+      assert.deepEqual(stopBlocks.map((e) => [e.node, e.exhausted, e.unsaved]), [
+        ['P4S1', false, true],
+        ['P4S1', true, true],
+        ['P4S1', true, true],
+        ['P4S1', true, true],
+      ]);
+    } finally {
+      chmodSync(file, 0o666);
     }
-    // Счётчик не сохранился — на диске его нет.
-    assert.equal(loadState(root, sessionId).counters['stop_blocks:P4S1'], undefined);
-    // Каждая остановка с нарушением — запись в журнал; пропущенные — exhausted.
-    const stopBlocks = readJournal(root, {}).filter((e) => e.type === 'stop_block');
-    assert.deepEqual(stopBlocks.map((e) => [e.node, e.exhausted, e.unsaved]), [
-      ['P4S1', false, true],
-      ['P4S1', true, true],
-      ['P4S1', true, true],
-      ['P4S1', true, true],
-    ]);
   });
 });
 
-test('Stop: поле session в файле состояния чужое -> запись уходит в другой файл, счётчик сессии не растёт, цикла нет', () => {
+test('Stop: поле session в файле состояния чужое -> состояние повреждено, блок с объяснением без записи счётчика', () => {
   withProject({}, ({ root, base }) => {
     const sessionId = uuid();
     const other = uuid();
@@ -390,29 +396,35 @@ test('Stop: поле session в файле состояния чужое -> за
 
     const { first, next } = stopUntilPass(root, base, sessionId);
 
+    // Строгая проверка состояния ловит расхождение session/файл ещё на чтении:
+    // fail closed с объяснением, а не запись счётчика в чужой файл.
     assert.equal(first.result.decision, 'block');
-    assert.deepEqual(next.map((r) => r.result), [null, null, null]);
-    assert.equal(loadState(root, sessionId).counters['stop_blocks:P4S1'], undefined);
+    assert.match(first.result.reason, /RAILS: действие отклонено/);
+    assert.ok(next.every((r) => r.result?.decision === 'block'), 'состояние по-прежнему повреждено — выпуск молча вернул бы проверку');
     const stopBlocks = readJournal(root, {}).filter((e) => e.type === 'stop_block');
-    assert.ok(stopBlocks.every((e) => e.unsaved === true), 'счётчик в чужом файле не сохранён для этой сессии');
+    assert.deepEqual(stopBlocks, [], 'счётчик stop_block на повреждённом состоянии не тратится');
   });
 });
 
 test('UserPromptSubmit: состояние не записывается -> подсказка с узлом всё равно приходит', () => {
   withProject({}, ({ root }) => {
-    const sessionId = writeUnsaveableState(root, 'P4S1');
+    const file = writeUnsaveableState(root, 'P4S1');
+    const sessionId = basename(file, '.json');
+    try {
+      const { result, stderr } = callHook({
+        hook_event_name: 'UserPromptSubmit',
+        session_id: sessionId,
+        cwd: root,
+        prompt: 'нет, не туда',
+      });
 
-    const { result, stderr } = callHook({
-      hook_event_name: 'UserPromptSubmit',
-      session_id: sessionId,
-      cwd: root,
-      prompt: 'нет, не туда',
-    });
-
-    assert.match(result.hookSpecificOutput.additionalContext, /узла P4S1 «П4 ШАГ/);
-    assert.equal(stderr, '');
-    // Цена: флаг correction_pending на диск не лёг — рельсы забудут о коррекции.
-    assert.equal(loadState(root, sessionId).flags, undefined);
+      assert.match(result.hookSpecificOutput.additionalContext, /узла P4S1 «П4 ШАГ/);
+      assert.equal(stderr, '');
+      // Цена: флаг correction_pending на диск не лёг — рельсы забудут о коррекции.
+      assert.equal(loadState(root, sessionId).flags.correction_pending, false);
+    } finally {
+      chmodSync(file, 0o666);
+    }
   });
 });
 

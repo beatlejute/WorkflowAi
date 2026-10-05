@@ -303,6 +303,38 @@ describe('junction-manager module', () => {
       assert.strictEqual(existsSync(join(skillPath, 'SKILL.md')), true);
     });
 
+    test('eject copies content and leaves the shared target intact', () => {
+      const projectSkillsDir = join(projectDir, 'skills');
+      createSkillJunctions(globalDir, projectSkillsDir);
+      ejectSkill('skill1', globalDir, projectSkillsDir);
+      const skillPath = join(projectSkillsDir, 'skill1');
+
+      // Копия независима: правка копии канон не трогает, правка канона копию тоже.
+      const custom = '# Ejected copy';
+      writeFileSync(join(skillPath, 'SKILL.md'), custom);
+      assert.strictEqual(readFileSync(join(globalDir, 'skills', 'skill1', 'SKILL.md'), 'utf-8'), '# Skill 1');
+      writeFileSync(join(globalDir, 'skills', 'skill1', 'SKILL.md'), '# Skill 1 updated');
+      assert.strictEqual(readFileSync(join(skillPath, 'SKILL.md'), 'utf-8'), custom);
+
+      // Вложенные каталоги копируются рекурсивно, ссылок в копии нет.
+      mkdirSync(join(globalDir, 'skills', 'skill1', 'nested'));
+      writeFileSync(join(globalDir, 'skills', 'skill1', 'nested', 'file.md'), 'x');
+      ejectSkill('skill2', globalDir, projectSkillsDir);
+      assert.strictEqual(existsSync(join(projectSkillsDir, 'skill2', 'SKILL.md')), true);
+    });
+
+    test('refuses to overwrite an already ejected copy', () => {
+      const projectSkillsDir = join(projectDir, 'skills');
+      createSkillJunctions(globalDir, projectSkillsDir);
+      ejectSkill('skill1', globalDir, projectSkillsDir);
+      const before = readFileSync(join(projectSkillsDir, 'skill1', 'SKILL.md'), 'utf-8');
+
+      assert.throws(() => ejectSkill('skill1', globalDir, projectSkillsDir));
+      assert.strictEqual(readFileSync(join(projectSkillsDir, 'skill1', 'SKILL.md'), 'utf-8'), before, 'копия не перезаписана');
+      // И целевой канон остался нетронутым.
+      assert.strictEqual(existsSync(join(globalDir, 'skills', 'skill1', 'SKILL.md')), true);
+    });
+
     test('throws when skill does not exist in global dir', () => {
       const projectSkillsDir = join(projectDir, 'skills');
       assert.throws(() => {

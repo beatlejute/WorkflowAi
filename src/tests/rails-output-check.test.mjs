@@ -58,6 +58,24 @@ test('check: отсутствующий output.final_requires не падает'
   assert.deepEqual(r.missing, []);
 });
 
+test('check: suspension from any node preserves state and is not PASS', () => {
+  const state = { node: 'P0E1', history: [], counters: { actions: 4 }, denials: { P0E1: 1 } };
+  const before = structuredClone(state);
+  for (const outcome of ['blocked', 'needs_user']) {
+    const text = `RAILS_OUTCOME: ${outcome}\nACTION: owner permission\nREASON: write denied\nDONE: inspected sources\nREMAINING: apply fix`;
+    assert.deepEqual(check(text, CONFIG, state), { ok: true, missing: [], outcome });
+    assert.deepEqual(state, before);
+  }
+});
+
+test('check: suspension needs every nonempty report field and rejects PASS', () => {
+  const text = 'RAILS_OUTCOME: needs_user\nACTION: permission\nREASON: denied\nDONE: inspected\nREMAINING: ';
+  assert.equal(check(text, CONFIG, { node: 'P0R3' }).ok, false);
+  const complete = text + 'fix';
+  assert.equal(check(complete + '\nverdict=pass', CONFIG, { node: 'P0R3' }).ok, false);
+  assert.equal(check('quoted ' + complete, CONFIG, { node: 'P0R3' }).ok, false);
+});
+
 // --- lastAssistantText -------------------------------------------------------
 
 function withTmpDir(fn) {
@@ -219,4 +237,16 @@ test('lastAssistantText: нет assistant-записей -> пустая стр�
     );
     assert.equal(lastAssistantText(file), '');
   });
+});
+
+test('приостановка: дописанный RESULT со status: pass не превращает её в успех (ревью 2026-10-05)', () => {
+  const base = 'RAILS_OUTCOME: needs_user\nACTION: решение владельца\nREASON: жду разрешения\nDONE: правки внесены\nREMAINING: выбор варианта\n';
+  const ok = check(base, null, { node: 'P3S5' });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.outcome, 'needs_user');
+  const forged = check(base + '---RESULT---\nstatus: pass\n---RESULT---\n', null, { node: 'P3S5' });
+  assert.equal(forged.ok, false);
+  assert.ok(forged.missing.includes('suspension:result-pass'));
+  const withPassVerdict = check(base + 'verdict = pass\n', null, { node: 'P3S5' });
+  assert.equal(withPassVerdict.ok, false);
 });

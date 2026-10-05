@@ -19,11 +19,58 @@ write_scope:
   - ".workflow/src/skills/**"
   - ".workflow/shared/**"
   - ".workflow/coach-backlog.yaml"
+  - 'C:\Users\Denis\.claude\plans\keen-forging-comet.md'
+  - 'D:\Dev\workflowAi\src\rails\paths.mjs'
+  - 'D:\Dev\workflowAi\src\rails\core.mjs'
+  - 'D:\Dev\workflowAi\src\rails\rails-config.mjs'
+  - 'D:\Dev\workflowAi\src\rails\cli.mjs'
+  - 'D:\Dev\workflowAi\src\rails\claude-hook.mjs'
+  - 'D:\Dev\workflowAi\src\rails\kilo-plugin.mjs'
+  - 'D:\Dev\workflowAi\src\rails\output-check.mjs'
+  - 'D:\Dev\workflowAi\src\rails\state.mjs'
+  - 'D:\Dev\workflowAi\src\rails\journal.mjs'
+  - 'D:\Dev\workflowAi\src\rails\graph.mjs'
+  - 'D:\Dev\workflowAi\src\rails\write-policy.mjs'
+  - 'D:\Dev\workflowAi\src\rails\runtime-snapshot.mjs'
+  - 'D:\Dev\workflowAi\src\rails\README.md'
+  - 'D:\Dev\workflowAi\src\scripts\run-skill-tests.js'
+  - 'D:\Dev\workflowAi\src\junction-manager.mjs'
+  - 'D:\Dev\workflowAi\src\lib\operations\skills.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-paths.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-core.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-config.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-state.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-journal.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-graph.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-output-check.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-cli.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-cli-journal-and-errors.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-claude-hook.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-claude-hook-fallback.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-kilo-plugin.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-kilo-plugin-fallback.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-integration.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-write-policy.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\rails-runtime-snapshot.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\junction-manager.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\operations-skills.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\run-skill-tests.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\run-skill-tests-pool-target.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\runner-rails-retry.test.mjs'
+  - 'D:\Dev\workflowAi\src\tests\_rails-home.mjs'
+  - 'D:\Dev\workflowAi\src\skills\coach\SKILL.md'
+  - 'D:\Dev\workflowAi\src\skills\coach\rails.yaml'
+  - 'D:\Dev\workflowAi\src\skills\coach\tests\rails\_project.mjs'
+  - 'D:\Dev\workflowAi\src\skills\coach\tests\rails\h1-write-scope.test.mjs'
+  - 'D:\Dev\workflowAi\src\skills\coach\tests\rails\h3-stage-actions.test.mjs'
 allow_temp: true
 write_deny:
   - ".workflow/src/skills/coach/rails.yaml"
   - ".workflow/src/skills/coach/tests/rails/**"
-  - ".workflow/src/rails/**"
+  - 'D:\Dev\workflowAi\src\rails\actions.mjs'
+  - 'D:\Dev\workflowAi\src\rails\coverage.mjs'
+  - 'D:\Dev\workflowAi\src\rails\session-memo.mjs'
+  - 'D:\Dev\workflowAi\src\rails\shell-scan.mjs'
 
 # H2 — git и регистрация хуков.
 deny_shell:

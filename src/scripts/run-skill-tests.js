@@ -10,6 +10,7 @@ import { findProjectRoot } from '../lib/find-root.mjs';
 import { spawnAgent } from '../lib/agent-spawner.mjs';
 import { writeClaudeHooks, writeKiloPluginLoader, userHasRailsHooks } from '../init.mjs';
 import { loadRailsConfig } from '../rails/rails-config.mjs';
+import { loadSkillRuntime } from '../rails/core.mjs';
 import { check as checkRailsOutput } from '../rails/output-check.mjs';
 import {
   railsEngagement,
@@ -167,10 +168,11 @@ async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, ro
   const result = await spawnAgent(agentConfig, prompt, { ...spawnOpts, ...railsOpts });
   if (!hasRails) return result;
 
-  let config;
-  try {
-    config = loadRailsConfig(path.join(root, '.workflow', 'src', 'skills', skill));
-  } catch {
+  // Приостановка не даёт PASS и не запускает другого исполнителя.
+  const suspension = checkRailsOutput(result.output || '', {}, null);
+  if (suspension.outcome) {
+    result.rails = { failed: true, outcome: suspension.outcome };
+    result.railsVerdict = suspension;
     return result;
   }
 
@@ -180,6 +182,19 @@ async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, ro
   const hooks = Boolean(host) && railsHooksPresent(host, path.resolve(root, agentConfig.workdir || '.'));
   const { state, engaged, escaped } = railsEngagement({ sandboxRoot: root, projectRoot, run: runId });
   result.rails = { engaged, escaped };
+  let config;
+  try {
+    // Состояние чужого проекта (escaped) привязано к запуску в его корне — здесь его не закреплять.
+    // Состояние без привязки runtime — legacy до внедрения: живой конфиг, как раньше.
+    config = state && !escaped && state.runtime
+      ? loadSkillRuntime(root, skill, state).config
+      : loadRailsConfig(path.join(root, '.workflow', 'src', 'skills', skill));
+  } catch (error) {
+    result.rails.failed = true;
+    result.rails.outcome = 'blocked';
+    result.railsVerdict = { ok: false, missing: [error.message], outcome: 'blocked' };
+    return result;
+  }
   let verdict;
   let verdictText;
   if (!state) {
@@ -190,6 +205,13 @@ async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, ro
     console.log(`[Runner] rails: ${who} — хуки рельс (${host}) на месте, а вызовов инструментов под рельсами нет: повтор с вердиктом`);
   } else {
     verdict = checkRailsOutput(result.output || '', config, state);
+    if (verdict.outcome) {
+      // Приостановка и при зацепившихся рельсах — не PASS и не повтор.
+      result.rails.failed = true;
+      result.rails.outcome = verdict.outcome;
+      result.railsVerdict = verdict;
+      return result;
+    }
     if (verdict.ok) return result;
     verdictText = outputCheckVerdict({ verdict, state, config, skillDir: path.join(root, '.workflow', 'src', 'skills', skill) });
     console.log(`[Runner] rails: output-check нарушен для ${skill}, повтор с вердиктом — отсутствует: ${verdict.missing.join('; ')}`);
@@ -204,6 +226,12 @@ async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, ro
   });
   retryResult.railsRetried = true;
   retryResult.railsVerdict = verdict;
+  const retrySuspension = checkRailsOutput(retryResult.output || '', {}, null);
+  if (retrySuspension.outcome) {
+    retryResult.rails = { failed: true, outcome: retrySuspension.outcome };
+    retryResult.railsRetryVerdict = retrySuspension;
+    return retryResult;
+  }
   const retry = railsEngagement({ sandboxRoot: root, projectRoot, run: retryRunId });
   retryResult.rails = { engaged: retry.engaged, escaped: retry.escaped };
   if (!retry.state) {

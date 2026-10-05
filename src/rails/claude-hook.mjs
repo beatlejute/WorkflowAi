@@ -120,7 +120,7 @@ function buildPostToolContext(input, env) {
 
   let graph;
   try {
-    ({ graph } = loadSkillRuntime(root, state.skill));
+    ({ graph } = loadSkillRuntime(root, state.skill, state));
   } catch {
     return null;
   }
@@ -174,9 +174,19 @@ function handleStop(input, env) {
 
   let config;
   try {
-    ({ config } = loadSkillRuntime(root, state.skill));
-  } catch {
-    return null;
+    ({ config } = loadSkillRuntime(root, state.skill, state));
+  } catch (err) {
+    if (!err?.railsFailClosed) return null; // иного рода сбой — §7, не наша забота
+    // Закрепление повреждено: инструменты закрыты fail-closed, но честная
+    // приостановка обязана работать и здесь — иначе сессия не может ни
+    // продолжать работу, ни остановиться (ревью 2026-10-05).
+    const text = lastAssistantText((input && input.transcript_path) || '');
+    const suspension = outputCheck(text, null, state);
+    if (suspension.ok) return null;
+    return {
+      decision: 'block',
+      reason: `RAILS: действие отклонено: ${err.message}`,
+    };
   }
 
   const text = lastAssistantText((input && input.transcript_path) || '');
@@ -282,7 +292,7 @@ function handleUserPromptSubmit(input, env) {
       }
       node = state.node;
       try {
-        const { graph } = loadSkillRuntime(root, state.skill);
+        const { graph } = loadSkillRuntime(root, state.skill, state);
         label = graph.node(node)?.label ?? '';
       } catch {
         // граф может быть недоступен — подсказка обойдётся без лейбла
@@ -363,7 +373,7 @@ function handleSessionStart(input, env) {
 
   let label = '';
   try {
-    const { graph } = loadSkillRuntime(root, state.skill);
+    const { graph } = loadSkillRuntime(root, state.skill, state);
     label = graph.node(state.node)?.label ?? '';
   } catch {
     // граф может быть недоступен — подсказка обойдётся без лейбла
@@ -402,6 +412,25 @@ export function handleHookInput(input, env = {}) {
         return null;
     }
   } catch (err) {
+    // Закрепление runtime повреждено при PreToolUse — deny, а не молчаливый allow:
+    // неизвестно, по какому конфигу шла сессия.
+    if (err?.railsFailClosed && input?.hook_event_name === 'PreToolUse') {
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: `RAILS: действие отклонено: ${err.message}`,
+        },
+      };
+    }
+    // Повреждённое состояние при Stop — блок с объяснением, не выпуск молча:
+    // выходной слой не может проверить ответ по неизвестному состоянию.
+    if (err?.railsFailClosed && input?.hook_event_name === 'Stop') {
+      return {
+        decision: 'block',
+        reason: `RAILS: действие отклонено: ${err.message}`,
+      };
+    }
     try {
       process.stderr.write(
         `rails: claude-hook упал на событии, снимаю рельсы: ${err && err.stack ? err.stack : err}\n`

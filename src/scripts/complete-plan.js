@@ -37,9 +37,9 @@ import path from 'path';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, checkAndClosePlan } from 'workflow-ai/lib/utils.mjs';
 
-const PROJECT_DIR = findProjectRoot();
-const WORKFLOW_DIR = path.join(PROJECT_DIR, '.workflow');
-const PLANS_DIR = path.join(WORKFLOW_DIR, 'plans', 'current');
+// Корень проекта ищется в вызываемых функциях, а не при импорте: тест импортирует
+// скрипт из каталога без .workflow (чистый checkout CI), и вызов при импорте падал
+// «Could not find .workflow/ directory» до выполнения самих проверок (CI 1.25.2/1.25.3).
 
 /**
  * Находит активный план в plans/current/ (status: active).
@@ -47,7 +47,8 @@ const PLANS_DIR = path.join(WORKFLOW_DIR, 'plans', 'current');
  *
  * Экспортируется для теста (src/tests/complete-plan.test.mjs).
  */
-export function findActivePlan() {
+export function findActivePlan(projectRoot = null) {
+  const PLANS_DIR = path.join(projectRoot ?? findProjectRoot(), '.workflow', 'plans', 'current');
   if (!fs.existsSync(PLANS_DIR)) return null;
 
   const files = fs.readdirSync(PLANS_DIR).filter(f => f.endsWith('.md'));
@@ -122,6 +123,7 @@ function main() {
 
   console.log(`[INFO] Completing plan: ${planId}`);
 
+  const WORKFLOW_DIR = path.join(findProjectRoot(), '.workflow');
   const result = checkAndClosePlan(WORKFLOW_DIR, planId);
 
   if (result.closed) {

@@ -5,16 +5,19 @@ import {
   rmSync,
   readdirSync,
   lstatSync,
+  statSync,
   symlinkSync,
   linkSync,
   cpSync,
   readFileSync,
+  readlinkSync,
   writeFileSync,
   unlinkSync,
   renameSync,
   rmdirSync
 } from 'node:fs';
-import { join, basename } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { join, basename, dirname } from 'node:path';
 
 const isWindows = process.platform === 'win32';
 
@@ -215,8 +218,7 @@ export function ejectConfigs(globalDir, projectConfigDir) {
     throw new Error('Configs do not exist in global dir');
   }
 
-  removeJunction(projectConfigDir);
-  cpSync(globalConfigDir, projectConfigDir, { recursive: true });
+  safeReplaceJunctionWithCopy(globalConfigDir, projectConfigDir, 'configs');
 }
 
 export function ejectScripts(globalDir, projectScriptsDir) {
@@ -226,8 +228,7 @@ export function ejectScripts(globalDir, projectScriptsDir) {
     throw new Error('Scripts do not exist in global dir');
   }
 
-  removeJunction(projectScriptsDir);
-  cpSync(globalScriptsDir, projectScriptsDir, { recursive: true });
+  safeReplaceJunctionWithCopy(globalScriptsDir, projectScriptsDir, 'scripts');
 }
 
 /** @deprecated Use createScriptJunction instead */
@@ -243,8 +244,108 @@ export function ejectSkill(skillName, globalDir, projectSkillsDir) {
     throw new Error(`Skill does not exist in global dir: ${skillName}`);
   }
 
-  removeJunction(projectSkillPath);
-  cpSync(globalSkillPath, projectSkillPath, { recursive: true });
+  safeReplaceJunctionWithCopy(globalSkillPath, projectSkillPath, `скил «${skillName}»`);
+}
+
+// --- безопасное отделение копии от общей установки -------------------------------
+//
+// До 2026-10-05 ejectSkill/ejectConfigs/ejectScripts снимали ссылку ДО копирования:
+// падение копирования оставляло проект без ссылки и без копии, а rmSync по пути
+// ссылки стирал бы содержимое цели (инцидент 2026-09-21 — потерян workflowAi).
+// Теперь: полная копия в соседнем temp-каталоге, сверка (счёт файлов и байт,
+// отсутствие ссылок и общих файлов), и только затем замена объекта ссылки на
+// копию; при сбое переключения копия убирается, исходная ссылка остаётся.
+
+function assertPlainDir(path, what) {
+  const st = lstatSync(path);
+  if (st.isSymbolicLink()) throw new Error(`${what} является ссылкой: ${path}`);
+  if (!st.isDirectory()) throw new Error(`${what} не каталог: ${path}`);
+}
+
+// Счёт файлов и байт; у назначения ссылки и общие файлы запрещены.
+function treeStats(root, { dest = false } = {}) {
+  let files = 0;
+  let bytes = 0;
+  const visit = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isSymbolicLink()) throw new Error(`дерево содержит ссылку: ${full}`);
+      if (entry.isDirectory()) {
+        visit(full);
+        continue;
+      }
+      const st = dest ? lstatSync(full) : statSync(full);
+      if (!st.isFile()) throw new Error(`дерево содержит не файл: ${full}`);
+      if (dest && st.nlink > 1) throw new Error(`файл копии разделяется с источником: ${full}`);
+      files += 1;
+      bytes += st.size;
+    }
+  };
+  visit(root);
+  return { files, bytes };
+}
+
+/**
+ * Готовит полную независимую копию источника в `<родитель цели>/.eject-<имя>-<случай>`:
+ * ссылку не снимает, при любой ошибке подготовки убирает temp-каталог. Возвращает
+ * путь копии.
+ */
+function prepareIndependentCopy(source, linkPath, what) {
+  assertPlainDir(source, what);
+  // Цель должна быть ссылкой: уже отделённую копию не перезаписываем.
+  // Цель должна быть ссылкой: уже отделённую копию не перезаписываем.
+  const linkStat = lstatSync(linkPath);
+  if (!linkStat.isSymbolicLink()) {
+    throw new Error(`цель не является ссылкой — копия уже отделена: ${linkPath}`);
+  }
+  const parent = dirname(linkPath);
+  mkdirSync(parent, { recursive: true });
+  const temp = join(parent, `.eject-${basename(linkPath)}-${randomBytes(6).toString('hex')}`);
+  try {
+    cpSync(source, temp, { recursive: true, dereference: true });
+    const from = treeStats(source);
+    const to = treeStats(temp, { dest: true });
+    if (from.files !== to.files || from.bytes !== to.bytes) {
+      throw new Error(`копия не совпала с источником: файлов ${from.files}→${to.files}, байт ${from.bytes}→${to.bytes}`);
+    }
+  } catch (error) {
+    rmSync(temp, { recursive: true, force: true });
+    throw error;
+  }
+  return temp;
+}
+
+/**
+ * Заменяет объект ссылки подготовленной копией. Только unlink самой ссылки —
+ * рекурсивного удаления цели нет.
+ */
+function switchLinkToCopy(linkPath, temp) {
+  let linkTarget = null;
+  try {
+    linkTarget = readlinkSync(linkPath);
+  } catch {
+    // Цель не читается — восстановить ссылку по ней не получится.
+  }
+  unlinkSync(linkPath);
+  try {
+    renameSync(temp, linkPath);
+  } catch (error) {
+    // Ссылка снята, копия не встала: исходное подключение восстанавливаем,
+    // подготовленную копию НЕ стираем — она остаётся владельцу для повтора
+    // (ревью 2026-10-05: прежде temp удалялся и проект оставался без всего).
+    try {
+      if (linkTarget) symlinkSync(linkTarget, linkPath, 'junction');
+    } catch {
+      // Ссылка не восстановилась — копия в temp на месте, путь восстановления виден.
+    }
+    throw error;
+  }
+}
+
+/** Отделение configs/scripts/скила: копия → сверка → замена ссылки. */
+function safeReplaceJunctionWithCopy(source, linkPath, what) {
+  const temp = prepareIndependentCopy(source, linkPath, what);
+  switchLinkToCopy(linkPath, temp);
 }
 
 export function listSkillsWithStatus(globalDir, projectSkillsDir) {

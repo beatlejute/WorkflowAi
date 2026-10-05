@@ -311,10 +311,30 @@ function humanScopeEntries(frontmatter, dodItems) {
   return entries;
 }
 
-// Путь от корня проекта через `/`: абсолютный путь внутри проекта приводится к нему.
+// Обе стороны сравнения — от физического корня; маски и отсутствующий хвост
+// восстанавливаются после разрешения существующего предка. Внешний путь — null.
 function normalizeScopePath(p) {
-  const raw = path.isAbsolute(String(p)) ? path.relative(PROJECT_DIR, String(p)) : String(p);
-  const normalized = raw.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '').replace(/\/+$/, '');
+  const raw = String(p).replace(/\\/g, '/').replace(/^(?:\.\/)+/, '').replace(/\/+$/, '');
+  if (raw === '' || raw === '.') return raw;
+  let current = path.resolve(PROJECT_DIR, raw);
+  const tail = [];
+  while (true) {
+    if (!/[*?]/.test(current)) {
+      try {
+        current = fs.realpathSync.native(current);
+        break;
+      } catch (error) {
+        if (!['ENOENT', 'ENOTDIR', 'EINVAL'].includes(error.code)) return null;
+      }
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    tail.unshift(path.basename(current));
+    current = parent;
+  }
+  const relative = path.relative(fs.realpathSync.native(PROJECT_DIR), path.join(current, ...tail));
+  if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) return null;
+  const normalized = relative.split(path.sep).join('/');
   return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
@@ -324,11 +344,36 @@ function normalizeScopePath(p) {
  * после — ноль и больше каталогов). `.` и пустая запись областью не считаются: иначе
  * проверка `-- .` покрыла бы весь репозиторий.
  */
+// Лексическая форма пути — как он записан относительно корня проекта, без раскрытия
+// ссылок. Для маски в имени каталога-ссылки (`linked-*` при junction `linked-src`)
+// канонизация обеих сторон невозможна: файл уходит в физическое дерево, маска
+// остаётся. Совпадение в исходных координатах честно, пока запись внутри проекта
+// (внешний путь normalizeScopePath уже отвергла — лексическая пара ему не выдаётся).
+function lexicalProjectPath(p) {
+  const raw = String(p).replace(/\\/g, '/').replace(/^(?:\.\/)+/, '').replace(/\/+$/, '');
+  if (raw === '' || raw === '.') return raw;
+  const relative = path.relative(PROJECT_DIR, path.resolve(PROJECT_DIR, raw));
+  if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) return null;
+  const normalized = relative.split(path.sep).join('/');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
 function inHumanScope(filePath, entries) {
   const file = normalizeScopePath(filePath);
+  if (file === null) return false;
+  // Маска в имени ссылки не раскрывается в физическое дерево, а файл через эту
+  // ссылку — раскрывается (2026-10-05 ревью: разрешённая правка получала legacy),
+  // поэтому маска сверяется и в исходных координатах записи.
+  const lexical = lexicalProjectPath(filePath);
   return entries.some((entry) => {
     const scope = normalizeScopePath(entry);
-    if (scope === '' || scope === '.') return false;
+    if (scope === null || scope === '' || scope === '.') return false;
+    // Вторая пара координат: запись области тоже в исходном виде — при вложенных
+    // ссылках (`linked-src/linked-*` при `linked-src → src`, `src/linked-inner →
+    // src/deep`) физическая маска не совпадает ни с одной стороной (ревью 2026-10-05).
+    const scopeLexical = lexicalProjectPath(entry);
+    if (scopeLexical !== null && /[*?]/.test(scopeLexical) && lexical !== null
+      && maskOf(scopeLexical).test(lexical)) return true;
     if (/[*?]/.test(scope)) {
       const source = scope
         .replace(/[.+^${}()|[\]\\]/g, '\\$&')
@@ -338,10 +383,25 @@ function inHumanScope(filePath, entries) {
         .replace(/\?/g, '[^/]')
         .replace(/\u0001/g, '(?:.*/)?')
         .replace(/\u0000/g, '.*');
-      return new RegExp(`^${source}$`).test(file);
+      const mask = new RegExp(`^${source}$`);
+      return mask.test(file) || (lexical !== null && mask.test(lexical));
     }
     return file === scope || file.startsWith(`${scope}/`);
   });
+}
+
+// Маска области в регулярное выражение (дубль цепочки внутри inHumanScope — там
+// построение не вынести без касания строк с управляющими символами).
+function maskOf(scope) {
+  const source = scope
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*\//g, '\u0001')
+    .replace(/\*\*/g, '\u0000')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]')
+    .replace(/\u0001/g, '(?:.*/)?')
+    .replace(/\u0000/g, '.*');
+  return new RegExp(`^${source}$`);
 }
 
 function parseDoDCompletion(body) {
@@ -941,9 +1001,12 @@ function verifyTicket(ticketPath) {
   // человеку не положена (workflows/review.md, узел P4R2). Пустая область — любой файл
   // вне её: лишнее ревью агентом безопаснее, чем правка без ревью.
   const humanScope = frontmatter.executor_type === 'human' ? humanScopeEntries(frontmatter, dodItems) : null;
+  // Лексическое попадание удерживает ссылки наружу под ревью; физическое
+  // учитывает абсолютные адреса через другое имя корня проекта.
   const humanOutOfScope = humanScope
     ? [...new Set([...filePaths, ...unparsedPaths])].filter(
-      (filePath) => isInsideProject(path.resolve(PROJECT_DIR, filePath)) && !inHumanScope(filePath, humanScope)
+      (filePath) => (isInsideProject(path.resolve(PROJECT_DIR, filePath)) || normalizeScopePath(filePath) !== null)
+        && !inHumanScope(filePath, humanScope)
     )
     : [];
   if (humanOutOfScope.length > 0) {

@@ -553,10 +553,10 @@ describe('runner.mjs — StageExecutor.callAgent и rails output-check', () => {
       "const calls = prev + 1;",
       "fs.writeFileSync(counterPath, String(calls));",
       "if (calls === 1) {",
-      "  fs.writeFileSync(path.join(stateDir, `${run}.json`), JSON.stringify({ run, node: 'P1E1', skill }));",
+      "  fs.writeFileSync(path.join(stateDir, `${run}.json`), JSON.stringify({ version: 1, session: `ses_${run}`, run, node: 'P1E1', skill, started: new Date().toISOString() }));",
       "  process.stdout.write('---RESULT---\\nstatus: passed\\n---RESULT---\\n');",
       "} else {",
-      "  fs.writeFileSync(path.join(stateDir, `${run}.json`), JSON.stringify({ run, node: 'P1S1', skill }));",
+      "  fs.writeFileSync(path.join(stateDir, `${run}.json`), JSON.stringify({ version: 1, session: `ses_${run}`, run, node: 'P1S1', skill, started: new Date().toISOString() }));",
       "  process.stdout.write('RAILS: P1S1\\n---RESULT---\\nstatus: passed\\n---RESULT---\\n');",
       "}"
     ].join('\n'));
@@ -616,7 +616,7 @@ describe('runner.mjs — StageExecutor.callAgent и rails output-check', () => {
         "const counterPath = path.join(cwd, 'call-count.txt');",
         "const prev = fs.existsSync(counterPath) ? parseInt(fs.readFileSync(counterPath, 'utf8'), 10) : 0;",
         "fs.writeFileSync(counterPath, String(prev + 1));",
-        "fs.writeFileSync(path.join(stateDir, `${run}.json`), JSON.stringify({ run, node: 'P1S1', skill }));",
+        "fs.writeFileSync(path.join(stateDir, `${run}.json`), JSON.stringify({ version: 1, session: `ses_${run}`, run, node: 'P1S1', skill, started: new Date().toISOString() }));",
         "process.stdout.write('RAILS: P1S1\\n---RESULT---\\nstatus: passed\\n---RESULT---\\n');"
       ].join('\n'));
 
@@ -829,10 +829,10 @@ describe('run-skill-tests.js — rails в изолированном test workdi
       "fs.writeFileSync(counterPath, String(calls));",
       `fs.appendFileSync(${JSON.stringify(retryTicketsPath)}, (process.env.WORKFLOW_RAILS_TICKET || '-') + '\\n');`,
       "if (calls === 1) {",
-      "  fs.writeFileSync(path.join(stateDir, `${run}.json`), JSON.stringify({ run, node: 'P1E1', skill }));",
+      "  fs.writeFileSync(path.join(stateDir, `${run}.json`), JSON.stringify({ version: 1, session: `ses_${run}`, run, node: 'P1E1', skill, started: new Date().toISOString() }));",
       "  process.stdout.write('---RESULT---\\nstatus: passed\\n---RESULT---\\nfirst attempt, no marker\\n');",
       "} else {",
-      "  fs.writeFileSync(path.join(stateDir, `${run}.json`), JSON.stringify({ run, node: 'P1S1', skill }));",
+      "  fs.writeFileSync(path.join(stateDir, `${run}.json`), JSON.stringify({ version: 1, session: `ses_${run}`, run, node: 'P1S1', skill, started: new Date().toISOString() }));",
       "  process.stdout.write('RAILS: P1S1\\n---RESULT---\\nstatus: passed\\n---RESULT---\\n');",
       "}"
     ].join('\n'));

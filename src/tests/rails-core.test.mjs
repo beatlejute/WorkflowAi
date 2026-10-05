@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve as resolvePathAbs } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   existsSync,
   mkdtempSync,
@@ -1207,6 +1208,66 @@ test('decide: stage_actions — разрешённое действие на с�
   });
 });
 
+// --- Свободная правка независимого локального скила (устранение дедлока) -----------
+
+test('decide: независимый локальный скил правится коучем на чужом этапе, в E-узле и новыми файлами; смесь с каноном отклоняется', () => {
+  withProject(({ root }) => {
+    // 2026-10-05, второй раунд ревью: свободная правка — только авторизованному
+    // скилу (коучу), остальные сессии правки скилов не получают.
+    const skillDir = join(root, '.workflow', 'src', 'skills', 'coach');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, 'SKILL.md'), SKILL_MD, 'utf8');
+    writeFileSync(join(skillDir, 'rails.yaml'), railsYaml().replace('skill: coretest', 'skill: coach'), 'utf8');
+    const ctxOf = (node) => {
+      const sessionId = uuid();
+      const state = startState({ root, sessionId, skill: 'coach', entry: 'P4E1' });
+      state.node = node;
+      saveState(root, state);
+      return { cwd: root, sessionId };
+    };
+
+    for (const node of ['P5S1', 'P4E1', 'P4S1']) {
+      const r1 = decide({
+        action: { tool: 'Edit', kind: 'edit', path: join(skillDir, 'SKILL.md') },
+        ctx: ctxOf(node),
+      });
+      assert.equal(r1.decision, 'allow', `${node}: правка существующего файла скила`);
+      const r2 = decide({
+        action: { tool: 'Write', kind: 'write', path: join(skillDir, 'workflows', 'new.md') },
+        ctx: ctxOf(node),
+      });
+      assert.equal(r2.decision, 'allow', `${node}: новый файл скила`);
+      const r3 = decide({
+        action: { tool: 'Write', kind: 'write', path: join(skillDir, 'tests', 'rails', 'new.test.mjs') },
+        ctx: ctxOf(node),
+      });
+      assert.equal(r3.decision, 'allow', `${node}: новый rails-тест скила`);
+    }
+
+    // Смешанная операция: локальная правка + цель в каноне установки — отклоняется целиком.
+    const canonical = fileURLToPath(new URL('../skills/coach/SKILL.md', import.meta.url));
+    const mixed = decide({
+      action: { tool: 'Edit', kind: 'edit', paths: [join(skillDir, 'SKILL.md'), canonical] },
+      ctx: ctxOf('P4S1'),
+    });
+    assert.equal(mixed.decision, 'deny');
+    assert.match(mixed.reason, /каноническая цель защищена/);
+  });
+});
+
+test('decide: роль executor не открывает канон — классификация отказывает до разрешения роли', () => {
+  withProject(({ root }) => {
+    const canonical = fileURLToPath(new URL('../skills/coach/SKILL.md', import.meta.url));
+    const { sessionId } = makeState(root, 'P4S1');
+    const r = decide({
+      action: { tool: 'Edit', kind: 'edit', path: canonical },
+      ctx: { cwd: root, sessionId, role: 'executor' },
+    });
+    assert.equal(r.decision, 'deny');
+    assert.match(r.reason, /каноническая цель защищена/);
+  });
+});
+
 // --- §7.8: allow с context (терминальный узел, никаких stage_actions) -------------
 
 test('decide: allow на этапе без совпавших stage_actions -> context "RAILS: числится ..."', () => {
@@ -1278,7 +1339,7 @@ test('buildDenyReason: allowed-массив соединяется через ";
 
 // --- §7, последний абзац: хук никогда не падает -------------------------------------
 
-test('decide: битый rails.yaml -> allow, ошибка в журнал (type=error), не бросает исключение', () => {
+test('decide: активная сессия с битым rails.yaml — fail closed, отказ в журнал, не снимает рельсы', () => {
   withProject(({ root }) => {
     const brokenSkillDir = join(root, '.workflow', 'src', 'skills', 'broken');
     mkdirSync(brokenSkillDir, { recursive: true });
@@ -1307,13 +1368,15 @@ test('decide: битый rails.yaml -> allow, ошибка в журнал (type
       process.stderr.write = origWrite;
     }
 
-    assert.deepEqual(r, { decision: 'allow' });
-    assert.match(stderrText, /rails:/);
+    // Сломанный конфиг активной сессии — не повод открывать всё: отказ, а не «снимаю рельсы».
+    assert.equal(r.decision, 'deny');
+    assert.match(r.reason, /RAILS: действие отклонено/);
+    assert.doesNotMatch(stderrText, /снимаю рельсы/);
 
     const entries = readJournal(root, {});
     const errors = entries.filter((e) => e.type === 'error');
-    assert.equal(errors.length, 1);
-    assert.equal(errors[0].session, sessionId);
+    assert.equal(errors.length, 0);
+    assert.ok(entries.some((e) => e.type === 'denial' && e.session === sessionId && /RAILS: действие отклонено/.test(e.reason ?? '')));
   });
 });
 
@@ -3017,3 +3080,18 @@ test('decide (2026-10-01): Kilo с двумя диалектами — сове�
     assert.doesNotMatch(nested.reason, /bash: bash:/);
   });
 });
+
+test('executor: shell-редирект в канонический файл — отказ (ревью 2026-10-05)', () => withProject(({ root }) => {
+  const canon = join(root, 'canon');
+  mkdirSync(canon);
+  writeFileSync(join(canon, 'SKILL.md'), '# canonical');
+  writeFileSync(join(root, '.workflow', 'rails-policy.yaml'),
+    JSON.stringify({ version: 1, canonical_skill_roots: [canon] }));
+  const command = `echo x > ${join(canon, 'SKILL.md').split('\\').join('/')}`;
+  const r = decide({
+    action: { tool: 'Bash', kind: 'shell', command },
+    ctx: { cwd: root, sessionId: uuid(), role: 'executor' },
+  });
+  assert.equal(r.decision, 'deny');
+  assert.match(r.reason, /каноническая цель защищена/);
+}));

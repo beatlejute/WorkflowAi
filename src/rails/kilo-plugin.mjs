@@ -71,33 +71,38 @@ export function createHooks(directory, env = {}) {
     // уже принято в `before` — `after` только читает текущее состояние
     // сессии и показывает узел, без единого побочного эффекта.
     'tool.execute.after': async (input, output) => {
-      const role = env && typeof env.WORKFLOW_RAILS_ROLE === 'string' ? env.WORKFLOW_RAILS_ROLE : undefined;
-      if (role === 'executor') return;
-
-      const sessionId = input && input.sessionID;
-      if (!sessionId) return;
-
-      let root;
       try {
-        root = findProjectRoot(directory);
+        const role = env && typeof env.WORKFLOW_RAILS_ROLE === 'string' ? env.WORKFLOW_RAILS_ROLE : undefined;
+        if (role === 'executor') return;
+
+        const sessionId = input && input.sessionID;
+        if (!sessionId) return;
+
+        let root;
+        try {
+          root = findProjectRoot(directory);
+        } catch {
+          return;
+        }
+
+        const state = loadState(root, sessionId);
+        if (!state || !state.skill) return;
+
+        let graph;
+        try {
+          ({ graph } = loadSkillRuntime(root, state.skill, state));
+        } catch {
+          return;
+        }
+
+        const label = graph.node(state.node)?.label ?? '';
+        const context = `RAILS: числится ${state.node} «${truncate(label, 80)}»`;
+        if (output) {
+          output.output = `${output.output ?? ''}\n\n${context}`;
+        }
       } catch {
-        return;
-      }
-
-      const state = loadState(root, sessionId);
-      if (!state || !state.skill) return;
-
-      let graph;
-      try {
-        ({ graph } = loadSkillRuntime(root, state.skill));
-      } catch {
-        return;
-      }
-
-      const label = graph.node(state.node)?.label ?? '';
-      const context = `RAILS: числится ${state.node} «${truncate(label, 80)}»`;
-      if (output) {
-        output.output = `${output.output ?? ''}\n\n${context}`;
+        // after — только подсказка: повреждённое состояние или сбой чтения
+        // не роняют вызов инструмента; защиту держит before (decide fail-closed).
       }
     },
   };

@@ -54,31 +54,33 @@ test('parsePlanArg: контекст стадии, полный ID и корот
 test('findActivePlan: активный план найден по статусу', () => {
   clearPlans();
   putPlan('PLAN-007', 'active');
-  assert.equal(findActivePlan(), 'PLAN-007');
+  // 2026-10-05: корень передаётся явно — вызов без аргумента ищет от cwd
+  // запуска теста (канон), а не от каталога фикстуры.
+  assert.equal(findActivePlan(ROOT), 'PLAN-007');
 });
 
 test('findActivePlan: план в другом статусе активным не считается', () => {
   clearPlans();
   putPlan('PLAN-008', 'approved');
   putPlan('PLAN-009', 'completed');
-  assert.equal(findActivePlan(), null);
+  assert.equal(findActivePlan(ROOT), null);
 });
 
 test('findActivePlan: битый файл плана пропускается, активный рядом находится', () => {
   clearPlans();
   fs.writeFileSync(path.join(PLANS, 'PLAN-010.md'), '---\nid: "PLAN-010"\n  status: [сломано\n---\n\nтело\n', 'utf8');
   putPlan('PLAN-011', 'active');
-  assert.equal(findActivePlan(), 'PLAN-011');
+  assert.equal(findActivePlan(ROOT), 'PLAN-011');
 });
 
 test('findActivePlan: в каталоге только не-md файлы — null', () => {
   clearPlans();
   fs.writeFileSync(path.join(PLANS, 'notes.txt'), 'не план\n', 'utf8');
-  assert.equal(findActivePlan(), null);
+  assert.equal(findActivePlan(ROOT), null);
   clearPlans();
 });
 
 test('findActivePlan: пустой каталог планов — null, стадия отвечает no_plan', () => {
   clearPlans();
-  assert.equal(findActivePlan(), null);
+  assert.equal(findActivePlan(ROOT), null);
 });

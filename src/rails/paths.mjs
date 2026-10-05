@@ -308,7 +308,7 @@ function globSegmentToRegExpSource(seg) {
  * @returns {boolean}
  */
 export function matchesGlob(realpath, glob, root) {
-  const patternPath = isAbsolute(glob) ? glob : join(root, glob);
+  const patternPath = isAbsolute(glob) ? resolve(glob) : join(root, glob);
   const normRealpath = normalizeForCompare(realpath);
   for (const candidate of expandGlobToFsRoots(patternPath)) {
     let realCandidate;

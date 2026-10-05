@@ -536,12 +536,39 @@ test('loadState: нет файла -> null', () => {
   });
 });
 
-test('loadState: битый JSON -> null', () => {
+test('loadState: битый JSON -> StateError (fail closed)', () => {
   withRoot((root) => {
-    const state = startState({ root, sessionId: 'sess-1', skill: 'coach', entry: 'P4E1' });
+    startState({ root, sessionId: 'sess-1', skill: 'coach', entry: 'P4E1' });
     const path = join(root, '.workflow', 'state', 'rails', 'sess-1.json');
     writeFileSync(path, '{ не json', 'utf8');
-    assert.equal(loadState(root, 'sess-1'), null);
+    assert.throws(() => loadState(root, 'sess-1'), (e) => e.railsFailClosed === true);
+  });
+});
+
+test('loadState: повреждённая форма состояния -> StateError', () => {
+  withRoot((root) => {
+    const path = join(root, '.workflow', 'state', 'rails', 'sess-1.json');
+    const base = startState({ root, sessionId: 'sess-1', skill: 'coach', entry: 'P4E1' });
+    const cases = [
+      null, 5, 'x', [],
+      { ...base, version: 2 },
+      { ...base, session: 'other' },
+      { ...base, skill: '' },
+      { ...base, node: 7 },
+      { ...base, started: 'not-a-time' },
+      { ...base, history: 'x' },
+      { ...base, counters: { a: -1 } },
+      { ...base, counters: null },
+      { ...base, denials: 'x' },
+      { ...base, runtime: { version: 1, id: 'zz', hash: 'a'.repeat(64) } },
+      { ...base, runtime: { version: 1, id: 'a'.repeat(64) } },
+    ];
+    for (const broken of cases) {
+      writeFileSync(path, JSON.stringify(broken), 'utf8');
+      assert.throws(() => loadState(root, 'sess-1'), (e) => e.railsFailClosed === true, JSON.stringify(broken)?.slice(0, 60));
+    }
+    writeFileSync(path, JSON.stringify(base), 'utf8');
+    assert.ok(loadState(root, 'sess-1'), 'валидная форма из startState читается');
   });
 });
 
@@ -587,12 +614,11 @@ test('startState: sessionId с разделителем пути -> ошибка
   });
 });
 
-test('loadState: sessionId с разделителем пути -> null (не бросает наружу)', () => {
-  // loadState по конвенции этого файла (как pause-request.mjs) любую
-  // проблему с чтением, включая некорректный sessionId, превращает в
-  // null, а не бросает исключение.
+test('loadState: sessionId с разделителем пути -> StateError (fail closed)', () => {
+  // Некорректный sessionId — не «сессии нет», а отказ: путь файла строится
+  // по нему, тихий null открыл бы сессию без рельс.
   withRoot((root) => {
-    assert.equal(loadState(root, '../evil'), null);
+    assert.throws(() => loadState(root, '../evil'), (e) => e.railsFailClosed === true);
   });
 });
 

@@ -54,6 +54,7 @@ const KILO_FINAL_READ_RETRIES = 3;
 const KILO_FINAL_READ_DELAY_MS = 300;
 import { loadRailsConfig } from './rails/rails-config.mjs';
 import { check as checkRailsOutput } from './rails/output-check.mjs';
+import { loadSkillRuntime } from './rails/core.mjs';
 import { evaluate as evaluateWithModel, validateInput } from './lib/model-evaluate.mjs';
 import { ModelClientError, assertModelUrl, redactNetworkDetail, imageBatches } from './lib/model-client.mjs';
 import { buildCliJudgePrompt, parseJudgeScore, parseJudgeExtras } from './lib/skill-judge.mjs';
@@ -2378,8 +2379,9 @@ class StageExecutor {
           status = 'aborted';
         } else if (banned) {
           status = 'model_banned';
-        } else if (err.code === 'RAILS_INCOMPLETE') {
-          // Скил брошен без итога (callAgent), хост вышел с кодом 0. stderr kilo — лог его
+        } else if (err.code === 'RAILS_INCOMPLETE' || err.code === 'RAILS_SUSPENDED' || err.code === 'RAILS_RUNTIME_LOST') {
+          // Скил брошен без итога или приостановлен владельцем, либо потеряно закрепление
+          // рантайма (callAgent), хост вышел с кодом 0. stderr kilo — лог его
           // инструментов: «403» и «network» там — текст проекта, и ни класс
           // classifyAgentResult, ни правила health по нему не строятся — это не отказ хоста.
           status = 'error';
@@ -2417,6 +2419,13 @@ class StageExecutor {
         const after = snapshotEnabled ? await snapshot(this.projectRoot, snapshotOpts) : null;
         const diffResult = snapshotEnabled ? diff(before, after) : null;
         const diffEmpty = snapshotEnabled && isEmpty(diffResult);
+
+        if (err.code === 'RAILS_SUSPENDED' || err.code === 'RAILS_RUNTIME_LOST') {
+          // Приостановка владельцем или потеря закреплённого рантайма — не отказ
+          // агента: ни повтор, ни передача другому исполнителю (дизайн 2026-10-05).
+          if (this.logger) this.logger.warn(`rails: ${err.code} — без fallback на другого агента`, stageId);
+          throw err;
+        }
 
         if (classification) {
           markUnhealthy(this.projectRoot, agentId, classification);
@@ -3437,18 +3446,37 @@ class StageExecutor {
 
     const result = await this._callAgentTracked(agent, prompt, stageId, skillId, agentId, railsEnv, { bannedCheck });
 
-    if (!railsYamlExists(this.projectRoot, skillId)) return result;
-
-    let config;
-    try {
-      config = loadRailsConfig(path.join(this.projectRoot, '.workflow', 'src', 'skills', skillId));
-    } catch (err) {
-      if (this.logger) this.logger.warn(`rails: rails.yaml скила «${skillId}» не читается: ${err.message}`, stageId);
-      return result;
-    }
+    // Состояние ищется до проверки живого rails.yaml: удаление живого файла не
+    // отключает проверку закреплённого рантайма запуска (ревью 2026-10-05).
+    const state = findRailsStateByRun(this.projectRoot, runId);
+    if (!state && !railsYamlExists(this.projectRoot, skillId)) return result;
 
     const skillDir = path.join(this.projectRoot, '.workflow', 'src', 'skills', skillId);
-    const state = findRailsStateByRun(this.projectRoot, runId);
+    let config;
+    if (state) {
+      // Конфиг — из закреплённого рантайма запуска: живой rails.yaml могли изменить
+      // во время работы агента, а полномочия хуков остались прежними — итог обязан
+      // проверяться тем же набором правил (ревью 2026-10-05). Повреждённое
+      // закрепление — не «пропустить проверку»: остановка с кодом, как RAILS_INCOMPLETE.
+      try {
+        ({ config } = loadSkillRuntime(this.projectRoot, skillId, state));
+      } catch (err) {
+        const error = new Error(`Agent "${agentId}" run lost its pinned rails runtime for skill "${skillId}": ${err.message}`);
+        error.code = 'RAILS_RUNTIME_LOST';
+        error.exitCode = -1;
+        error.stdout = result.output || '';
+        error.stderr = result.stderr || '';
+        throw error;
+      }
+    } else {
+      // Состояния нет — закреплять нечего; живой конфиг нужен только тексту повтора.
+      try {
+        config = loadRailsConfig(skillDir);
+      } catch (err) {
+        if (this.logger) this.logger.warn(`rails: rails.yaml скила «${skillId}» не читается: ${err.message}`, stageId);
+        config = null;
+      }
+    }
     let verdict;
     if (!state) {
       const host = railsHost(agent);
@@ -3463,7 +3491,25 @@ class StageExecutor {
       verdict = { ok: false, missing: ['ни одного вызова инструмента под рельсами'] };
     } else {
       verdict = checkRailsOutput(result.output || '', config, state);
-      if (verdict.ok) return result;
+      if (verdict.ok && !verdict.outcome) return result;
+      if (verdict.ok && verdict.outcome) {
+        // Приостановка RAILS_OUTCOME (blocked/needs_user) — не успех и не повод для
+        // повтора или передачи другому исполнителю: работа ждёт владельца
+        // (дизайн 2026-10-05, ревью: прежде возвращалась стадии как успешный ответ).
+        if (this.logger) {
+          this.logger.warn(`rails: агент приостановил работу (${verdict.outcome}) — без повтора, стадия завершается ошибкой ожидания`, stageId);
+        }
+        result.railsSuspended = verdict.outcome;
+        result.railsVerdict = verdict;
+        const error = new Error(`Agent "${agentId}" suspended skill "${skillId}": ${verdict.outcome} — waiting for owner`);
+        error.code = 'RAILS_SUSPENDED';
+        error.exitCode = 0;
+        error.stdout = result.output || '';
+        error.stderr = result.stderr || '';
+        if (result.agentLabel) error.agentLabel = result.agentLabel;
+        if (result.kiloModels) error.kiloModels = result.kiloModels;
+        throw error;
+      }
     }
 
     // Та же сессия — если её id однозначен (одно состояние у запуска) и хост умеет её продолжить.
@@ -3520,7 +3566,20 @@ class StageExecutor {
       ? checkRailsOutput(retryResult.output || '', config, retryState)
       : { ok: false, missing: ['ни одного вызова инструмента под рельсами'] };
     retryResult.railsRetryVerdict = retryVerdict;
-    if (retryVerdict.ok) return retryResult;
+    if (retryVerdict.ok && !retryVerdict.outcome) return retryResult;
+    if (retryVerdict.ok && retryVerdict.outcome) {
+      // Приостановка и в ответе повтора — не успех (ревью 2026-10-05, второй раунд).
+      retryResult.railsSuspended = retryVerdict.outcome;
+      if (this.logger) {
+        this.logger.warn(`rails: повтор приостановил работу (${retryVerdict.outcome}) — без новых запусков`, stageId);
+      }
+      const error = new Error(`Agent "${agentId}" suspended skill "${skillId}" on retry: ${retryVerdict.outcome} — waiting for owner`);
+      error.code = 'RAILS_SUSPENDED';
+      error.exitCode = 0;
+      error.stdout = retryResult.output || '';
+      error.stderr = retryResult.stderr || '';
+      throw error;
+    }
     const what = retryState
       ? `повтор тоже нарушил output-check — отсутствует: ${retryVerdict.missing.join('; ')}`
       : 'повтор без единого вызова инструмента под рельсами';

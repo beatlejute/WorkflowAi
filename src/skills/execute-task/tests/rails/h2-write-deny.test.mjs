@@ -46,13 +46,17 @@ test('H2: шаблон плана в .workflow/plans/templates/ — пишетс
 
 // 2026-09-27: исполнитель тикета тестирования правил SKILL.md и rails.yaml другого скила через
 // .workflow/src/skills/ — в общей копии скилов всех проектов; рельсы не отклонили.
-test('H2: чужой скил в .workflow/src/skills/ — отказ', () => {
-  withProject(({ root }) => {
-    const other = join(root, '.workflow', 'src', 'skills', 'other-skill');
-    mkdirSync(other, { recursive: true });
+// 2026-10-05: write-policy — чужие скилы закрыты всем, кроме коуча: и ссылка на
+// канон, и независимая локальная копия (второй раунд ревью: исключение сужено).
+test('H2: чужой скил — отказ и канонической ссылкой, и локальной копией', () => {
+  withProject(({ root, link }) => {
     const s = atNode(root, 'P3S1');
+    const independent = join(root, '.workflow', 'src', 'skills', 'other-skill');
+    mkdirSync(independent, { recursive: true });
     for (const name of ['SKILL.md', 'rails.yaml']) {
-      assert.equal(decide({ action: claude('Edit', { file_path: join(other, name) }), ctx: ctx(root, s) }).decision, 'deny', name);
+      // link — junction на канон скила: для execute-task это чужой файл канона.
+      assert.equal(decide({ action: claude('Edit', { file_path: join(link, name) }), ctx: ctx(root, s) }).decision, 'deny', `канон ${name}`);
+      assert.equal(decide({ action: claude('Edit', { file_path: join(independent, name) }), ctx: ctx(root, s) }).decision, 'deny', `независимая копия ${name}`);
     }
   });
 });

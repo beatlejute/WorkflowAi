@@ -81,7 +81,10 @@ fs.mkdirSync(dir, { recursive: true });
 const write = (id, node) => {
   const file = path.join(dir, id + '.json');
   const prev = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
-  fs.writeFileSync(file, JSON.stringify({ version: 1, session: id, run: prev ? prev.run : run, skill: process.env.WORKFLOW_RAILS_SKILL, node }));
+  // started постоянен для сессии: он входит в идентичность закреплённого рантайма
+  // (runtime-snapshot.mjs) — новая метка на каждом вызове ломала бы snapshot.
+  const nowIso = new Date().toISOString();
+  fs.writeFileSync(file, JSON.stringify({ version: 1, session: id, run: prev ? prev.run : run, skill: process.env.WORKFLOW_RAILS_SKILL, node, started: prev?.started ?? nowIso, updated: nowIso }));
 };
 if (!step.noState) write(session, step.node);
 if (step.extraSession) write(session + '-sub', 'P1E1');

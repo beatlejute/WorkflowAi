@@ -123,12 +123,21 @@ test('run start: сессия занята другим скилом без --fo
     const r1 = run(['start', 'clitest', '--session', sessionId], { cwd: root, env: {} });
     assert.equal(r1.code, 0);
 
+    // Старт закрепляет runtime: перезапись другим скилом запрещена даже с --force.
     const r2 = run(['start', 'othertest', '--session', sessionId], { cwd: root, env: {} });
     assert.equal(r2.code, 2);
-    assert.match(r2.stdout, /--force/);
+    assert.match(r2.stdout, /закреплённым runtime/);
 
     const r3 = run(['start', 'othertest', '--session', sessionId, '--force'], { cwd: root, env: {} });
-    assert.equal(r3.code, 0);
+    assert.equal(r3.code, 2);
+    assert.match(r3.stdout, /закреплённым runtime/);
+
+    // Состояние без привязки (legacy) ведёт себя по-старому: подсказка --force.
+    const legacyId = randomUUID();
+    startState({ root, sessionId: legacyId, skill: 'clitest', entry: 'P4E1' });
+    const r4 = run(['start', 'othertest', '--session', legacyId], { cwd: root, env: {} });
+    assert.equal(r4.code, 2);
+    assert.match(r4.stdout, /--force/);
   });
 });
 
@@ -498,15 +507,24 @@ test('run: две сессии проекта, сессия задана явн�
   });
 });
 
-test('run reset: удаляет состояние и пишет событие "reset" в журнал', () => {
+test('run reset: закреплённый запуск отклонён, без привязки — удаляет состояние и пишет событие "reset" в журнал', () => {
   withProject(({ root }) => {
+    // Старт закрепляет runtime — reset такого запуска запрещён.
     const sessionId = randomUUID();
     run(['start', 'clitest', '--session', sessionId], { cwd: root, env: {} });
     const r = run(['reset', '--session', sessionId], { cwd: root, env: {} });
-    assert.equal(r.code, 0);
-
+    assert.equal(r.code, 2);
+    assert.match(r.stdout, /reset отклонён/);
     const statusR = run(['status', '--session', sessionId], { cwd: root, env: {} });
-    assert.equal(statusR.code, 1);
+    assert.equal(statusR.code, 0, 'состояние закреплённого запуска на месте');
+
+    // Состояние без привязки runtime (legacy) сбрасывается как раньше.
+    const legacyId = randomUUID();
+    startState({ root, sessionId: legacyId, skill: 'clitest', entry: 'P4E1' });
+    const r2 = run(['reset', '--session', legacyId], { cwd: root, env: {} });
+    assert.equal(r2.code, 0);
+    const statusR2 = run(['status', '--session', legacyId], { cwd: root, env: {} });
+    assert.equal(statusR2.code, 1);
   });
 });
 

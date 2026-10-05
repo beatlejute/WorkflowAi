@@ -1,8 +1,10 @@
-// Общая фикстура тестов гардов коуча: временный проект, в котором
-// `.workflow/src/skills/coach` — junction на канонический каталог коуча
-// (как в реальной раскладке, §2 спецификации rails). Состояние сессии
+// Общая фикстура тестов гардов коуча. Два режима (2026-10-05, разделение
+// канона и независимой копии): по умолчанию `.workflow/src/skills/coach` —
+// junction на канонический каталог (правка канона запрещена физической
+// политикой); `{ independent: true }` — полная локальная копия канона в
+// проекте, правки такого дерева не связаны с этапами. Состояние сессии
 // ставится в нужный узел графа напрямую.
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, lstatSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, lstatSync, unlinkSync, cpSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
@@ -26,7 +28,7 @@ function removeLink(link) {
   }
 }
 
-export function withCoachProject(fn) {
+export function withCoachProject(fn, { independent = false } = {}) {
   const base = mkdtempSync(join(tmpdir(), 'coach-rails-'));
   const root = join(base, 'root');
   const skillsDir = join(root, '.workflow', 'src', 'skills');
@@ -37,15 +39,23 @@ export function withCoachProject(fn) {
   mkdirSync(join(root, '.workflow', 'src', 'rails'), { recursive: true });
   writeFileSync(join(root, '.workflow', 'coach-backlog.yaml'), 'version: 1\nanalyzed_tickets: []\naudited_skills: []\n', 'utf8');
   const link = join(skillsDir, 'coach');
-  createJunction(CANON, link);
+  if (independent) {
+    cpSync(CANON, link, { recursive: true });
+  } else {
+    createJunction(CANON, link);
+  }
   try {
     fn({ root, link, base });
   } finally {
-    removeLink(link);
-    // Страховка: если ссылка почему-то осталась, каталог не трогаем — иначе
-    // rmSync ушёл бы по ней в канонический скил.
-    if (!existsSync(link) || !lstatSync(link).isSymbolicLink()) {
+    if (independent) {
       rmSync(base, { recursive: true, force: true });
+    } else {
+      removeLink(link);
+      // Страховка: если ссылка почему-то осталась, каталог не трогаем — иначе
+      // rmSync ушёл бы по ней в канонический скил.
+      if (!existsSync(link) || !lstatSync(link).isSymbolicLink()) {
+        rmSync(base, { recursive: true, force: true });
+      }
     }
   }
 }

@@ -137,6 +137,30 @@ test('matchesGlob: write_deny — абсолютный паттерн', () => {
   });
 });
 
+test('matchesGlob: абсолютный Windows-паттерн с прямыми слешами разрешает только указанный файл', { skip: !IS_WIN32 }, () => {
+  withFixture(({ root, railsDir }) => {
+    const file = join(railsDir, 'core.mjs');
+    const target = realpathDeep(file);
+    const adjacent = realpathDeep(join(railsDir, 'core.mjs.backup'));
+    for (const pattern of [file, file.split(PATH_SEP).join('/')]) {
+      assert.equal(matchesGlob(target, pattern, root), true, pattern);
+      assert.equal(matchesGlob(adjacent, pattern, root), false, pattern);
+    }
+  });
+});
+
+test('matchesGlob: абсолютный Windows-glob с прямыми слешами не расширяет область записи', { skip: !IS_WIN32 }, () => {
+  withFixture(({ root, railsDir, canonCoach }) => {
+    const nativePattern = join(railsDir, '**');
+    const target = realpathDeep(join(railsDir, 'core.mjs'));
+    const outside = realpathDeep(join(canonCoach, 'SKILL.md'));
+    for (const pattern of [nativePattern, nativePattern.split(PATH_SEP).join('/')]) {
+      assert.equal(matchesGlob(target, pattern, root), true, pattern);
+      assert.equal(matchesGlob(outside, pattern, root), false, pattern);
+    }
+  });
+});
+
 test('matchesGlob: "**" в середине паттерна', () => {
   withFixture(({ root }) => {
     const deep = join(root, '.workflow', 'a', 'b', 'target.yaml');

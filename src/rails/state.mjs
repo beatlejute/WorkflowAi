@@ -88,7 +88,7 @@ function normalizeState(state) {
 function sanitizeSessionId(sessionId) {
   const s = String(sessionId ?? '');
   if (!s || s === '.' || s === '..' || /[\\/]/.test(s)) {
-    throw new Error(`rails: некорректный sessionId: ${JSON.stringify(sessionId)}`);
+    throw new StateError(`rails: некорректный sessionId: ${JSON.stringify(sessionId)}`);
   }
   return s;
 }
@@ -102,19 +102,75 @@ function statePath(root, sessionId) {
 }
 
 /**
- * Состояние сессии с диска, или `null`, если файла нет / он повреждён.
+ * Повреждённое состояние — не «сессии нет», а fail closed: refuse-ошибка с
+ * `railsFailClosed`, которую границы хуков/CLI не глотают в allow.
+ */
+export class StateError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'StateError';
+    this.railsFailClosed = true;
+  }
+}
+
+// Состояние нового ядра обязано быть целостным: версия, идентификаторы, счётчики.
+// Состояние без привязки runtime (до внедрения) принимается — это не признак порчи.
+function validateState(state, sessionId) {
+  const bad = (why) => { throw new StateError(`состояние сессии повреждено: ${why}`); };
+  if (!state || typeof state !== 'object' || Array.isArray(state)) bad('не объект');
+  if (state.version !== 1) bad('неизвестная версия');
+  if (state.session !== sessionId) bad('session не совпадает с именем файла');
+  for (const field of ['skill', 'node']) {
+    if (typeof state[field] !== 'string' || !state[field]) bad(`поле ${field}`);
+  }
+  for (const field of ['started', 'updated']) {
+    if (typeof state[field] !== 'string' || Number.isNaN(Date.parse(state[field]))) bad(`время ${field}`);
+  }
+  if (!Array.isArray(state.history)) bad('история не массив');
+  for (const field of ['counters', 'denials']) {
+    const obj = state[field];
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) bad(`поле ${field} не объект`);
+    for (const v of Object.values(obj)) {
+      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) bad(`счётчик ${field}`);
+    }
+  }
+  for (const field of ['run', 'ticket']) {
+    if (state[field] != null && typeof state[field] !== 'string') bad(`поле ${field}`);
+  }
+  if (state.flags !== undefined && (!state.flags || typeof state.flags !== 'object' || Array.isArray(state.flags))) bad('flags не объект');
+  if (state.dedupe !== undefined && (!state.dedupe || typeof state.dedupe !== 'object' || Array.isArray(state.dedupe))) bad('dedupe не объект');
+  if (state.runtime !== undefined) {
+    const r = state.runtime;
+    if (!r || typeof r !== 'object' || Array.isArray(r)
+      || r.version !== 1 || typeof r.id !== 'string' || !/^[a-f0-9]{64}$/.test(r.id)
+      || typeof r.hash !== 'string' || !/^[a-f0-9]{64}$/.test(r.hash)) bad('привязка runtime');
+  }
+}
+
+/**
+ * Состояние сессии с диска: файл отсутствует — `null`; прочитано, но повреждено —
+ * StateError (fail closed).
  *
  * @param {string} root
  * @param {string} sessionId
  * @returns {object|null}
  */
 export function loadState(root, sessionId) {
+  let raw;
   try {
-    const raw = fs.readFileSync(statePath(root, sessionId), 'utf8');
-    return JSON.parse(raw);
-  } catch {
-    return null;
+    raw = fs.readFileSync(statePath(root, sessionId), 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return null;
+    throw new StateError(`состояние сессии не прочитано: ${err.message}`);
   }
+  let state;
+  try {
+    state = JSON.parse(raw);
+  } catch {
+    throw new StateError('состояние сессии повреждено: не JSON');
+  }
+  validateState(state, sessionId);
+  return state;
 }
 
 /**

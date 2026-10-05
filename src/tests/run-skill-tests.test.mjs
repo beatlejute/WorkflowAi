@@ -13,8 +13,8 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
-import { join, dirname, resolve } from 'node:path';
-import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, rmdirSync, readdirSync, lstatSync } from 'node:fs';
+import { join, dirname, resolve, basename, sep } from 'node:path';
+import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, rmdirSync, readdirSync, lstatSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -2074,7 +2074,25 @@ describe('Executor-only deterministic regressions', () => {
     assert.match(r.stdout, /status: passed/);
     assert.strictEqual(r.calls.length, 1);
     assert.strictEqual(r.calls[0].role, 'target');
-    assert.strictEqual(r.calls[0].cwd, r.calls[0].sandbox);
+    // macOS: адрес песочницы из окружения — /var/..., фактический cwd процесса —
+    // /private/var/... — это один каталог; сверяем физические адреса (CI 1.25.2/1.25.3).
+    // Песочница могла быть уже удалена: тогда физический адрес берётся по глубочайшему
+    // существующему предку, а отсутствующий хвост дописывается как есть (ревью 2026-10-06).
+    const toPhysical = (p) => {
+      let current = resolve(p);
+      const tail = [];
+      for (;;) {
+        try {
+          return realpathSync.native(current) + (tail.length ? sep + tail.join(sep) : '');
+        } catch {
+          tail.unshift(basename(current));
+          const parent = dirname(current);
+          if (parent === current) return p;
+          current = parent;
+        }
+      }
+    };
+    assert.strictEqual(toPhysical(r.calls[0].cwd), toPhysical(r.calls[0].sandbox));
     assert.match(r.stdout, /target: 1, judge: 0/);
     assert.strictEqual(r.meta.rubric_scores, undefined);
   });
@@ -2655,6 +2673,58 @@ describe('Скил на рельсах: рельсы не зацепились �
     const { stdout } = await runRunner(['--all', ...RUN_ARGS], { WORKFLOW_SKILLS_DIR: RAILS_SKILLS_DIR });
 
     assert.match(lastResultBlock(stdout), new RegExp(`^rails_warnings: ${RAILS_SKILL} ${CASE_ID} agent-a: рельсы не зацепились 1/1$`, 'm'), stdout);
+  });
+
+  // Честная приостановка: отчёт needs_user — не PASS и не повтор, попытка провалена.
+  it('suspension report fails the attempt without a retry', async () => {
+    // Исполнитель печатает отчёт приостановки; фикстуры/ канона не трогаем — скрипт в temp-каталоге скилов.
+    const agentScript = join(RAILS_SKILLS_DIR, 'suspender-agent.js');
+    writeFileSync(agentScript, [
+      "console.log(['RAILS_OUTCOME: needs_user',",
+      "  'ACTION: owner permission',",
+      "  'REASON: write denied',",
+      "  'DONE: inspected sources',",
+      "  'REMAINING: apply approved fix'].join('\\n'));",
+      ''
+    ].join('\n'));
+    const pipelinePath = join(RAILS_SKILLS_DIR, 'suspender-pipeline.yaml');
+    writeFileSync(pipelinePath, [
+      'pipeline:',
+      '  name: "suspender-pipeline"',
+      '  version: "1.0"',
+      '  agents:',
+      '    agent-suspender:',
+      '      command: "node"',
+      `      args: ${JSON.stringify([agentScript])}`,
+      '      workdir: "."',
+      '      capabilities: [text]',
+      '      description: "Mock agent — честная приостановка вместо исхода"',
+      '    mock-judge:',
+      '      command: "node"',
+      '      args: ["src/tests/fixtures/mock-judge.js"]',
+      '      workdir: "."',
+      '      capabilities: [text]',
+      '      description: "Mock judge — детерминированный по маркерам в промпте"',
+      '  default_agents: [agent-suspender]',
+      ''
+    ].join('\n'));
+    useAgent('agent-suspender');
+    // Без deterministic-ассерта слой deterministic не исполняет кейс вовсе — как в executor-only тесте.
+    const casePath = join(skillDir, 'tests', `${CASE_ID}.yaml`);
+    const previousCase = readFileSync(casePath, 'utf8');
+    writeFileSync(casePath, 'prompt: Rails probe\nassertions:\n  deterministic: [{kind: output_does_not_contain, values: [NEVER_PRESENT]}]\n');
+    const { stdout } = await runRunner(
+      ['--skill', RAILS_SKILL, '--layer', 'deterministic', '--skip-secret-scan', '--fast', '--yes', '--pipeline', pipelinePath],
+      { WORKFLOW_SKILLS_DIR: RAILS_SKILLS_DIR }
+    );
+    writeFileSync(casePath, previousCase);
+
+    assert.match(stdout, /status: failed/);
+    assert.match(stdout, /rails: procedure failed/);
+    assert.doesNotMatch(stdout, /output-check нарушен/, 'приостановка не уходит в повтор по вердикту');
+    const meta = readMeta();
+    assert.equal(meta.per_model['agent-suspender'].passed, false);
+    assert.equal(meta.per_model['agent-suspender'].rails_failed, 1);
   });
 });
 

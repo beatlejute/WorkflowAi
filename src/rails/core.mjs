@@ -33,6 +33,8 @@ import { appendDenial, appendEvent } from './journal.mjs';
 import { realpathDeep, isInside, matchesGlob } from './paths.mjs';
 import { explainShellWrites, shellAbsolutePath } from './actions.mjs';
 import { nestedScripts, scanCommand, toSingleQuoted } from './shell-scan.mjs';
+import { classifyWrites } from './write-policy.mjs';
+import { pinnedRuntime } from './runtime-snapshot.mjs';
 
 // --- cli.mjs: узнаём вызов служебной команды (§7.4.1) -----------------------
 //
@@ -583,7 +585,24 @@ function mtimeOf(p) {
  * @param {string} skill
  * @returns {{config: object, graph: import('./graph.mjs').Graph}}
  */
-export function loadSkillRuntime(root, skill) {
+export function loadSkillRuntime(root, skill, state = null) {
+  if (state) {
+    if (state.skill !== skill) throw new Error('runtime skill does not match session');
+    const binding = state.runtime;
+    const runtime = pinnedRuntime(root, state, () => {
+      const skillDir = join(root, '.workflow', 'src', 'skills', skill);
+      const config = loadRailsConfig(skillDir);
+      return { config, graph: loadSkillGraph(skillDir, config) };
+    });
+    if (!binding) {
+      try {
+        saveState(root, state); // привязка на диск; snapshot уже сохранён — идентификатор восстановим
+      } catch {
+        // Отказ записи состояния (read-only, гонка) не ломает закрепление.
+      }
+    }
+    return runtime;
+  }
   const skillDir = join(root, '.workflow', 'src', 'skills', skill);
   const configMtime = mtimeOf(join(skillDir, 'rails.yaml'));
   const skillMdMtime = mtimeOf(join(skillDir, 'SKILL.md'));
@@ -1045,7 +1064,7 @@ function gotoInCompound(text, dialect, nested = 0) {
 
 // --- режим скила (§7.4) --------------------------------------------------------
 
-function decideSkillMode({ root, action, ctx, state, config, graph }) {
+function decideSkillMode({ root, action, ctx, state, config, graph, unrestricted = new Set() }) {
   // Тикет запуска для `{ticket}` в стражах рёбер — как у `goto` (cli.mjs runTicket): из
   // состояния сессии, без него — хоста.
   const guardCtx = { root, ticket: state?.ticket || hostTicket(ctx) };
@@ -1122,7 +1141,7 @@ function decideSkillMode({ root, action, ctx, state, config, graph }) {
   // 5. write_deny.
   if (Array.isArray(config.write_deny) && config.write_deny.length > 0) {
     for (const t of targets) {
-      if (t.marker) continue; // маркер "?" разбирается на шаге 6, не здесь.
+      if (t.marker || unrestricted.has(t.real)) continue; // маркер "?" разбирается на шаге 6.
       for (const pattern of config.write_deny) {
         if (matchesGlob(t.real, pattern, root)) {
           return deny(describeWhat(action), `путь «${t.display}» запрещён явным правилом write_deny`);
@@ -1139,7 +1158,8 @@ function decideSkillMode({ root, action, ctx, state, config, graph }) {
         `команда похожа на запись, но путь не удалось определить${markerDetail(t)} — используй Edit/Write или укажи путь явно`
       );
     }
-    const inScope = (config.write_scope || []).some((pattern) => matchesGlob(t.real, pattern, root));
+    const inScope = unrestricted.has(t.real)
+      || (config.write_scope || []).some((pattern) => matchesGlob(t.real, pattern, root));
     // followLinks: false — ссылки внутри os.tmpdir() не нужны, а обход %TEMP% стоил до 9 с (2026-09-22).
     // Внутри корня проекта allow_temp не действует: изолированные workdir тестов живут в %TEMP%,
     // и без этого исключения вся песочница (тикеты, планы) становилась бы записываемой.
@@ -1155,9 +1175,9 @@ function decideSkillMode({ root, action, ctx, state, config, graph }) {
   // Все цели правки: apply_patch Kilo меняет несколько файлов, правило этапа срабатывает,
   // если под него попадает любой из них (ревью 2026-09-24; прежде смотрели только первый).
   const editRealPaths = (action?.kind === 'edit' || action?.kind === 'write')
-    ? targets.filter((t) => !t.marker).map((t) => t.real)
+    ? targets.filter((t) => !t.marker && !unrestricted.has(t.real)).map((t) => t.real)
     : [];
-  const matchesRule = (rule) => (editRealPaths.length > 0
+  const matchesRule = (rule) => (action?.kind === 'edit' || action?.kind === 'write'
     ? editRealPaths.some((real) => ruleMatches(action, rule, root, real))
     : ruleMatches(action, rule, root, null));
   const info = currentNodeInfo(state);
@@ -1233,8 +1253,25 @@ function hostTicket(ctx) {
 }
 
 function decideInProject(root, action, ctx) {
+  // Штатный CLI сам пишет состояние; его аргументы-цитаты не являются shell-записями.
+  const cli = action?.kind === 'shell'
+    ? analyzeCliCommand(action.command, action.shell, ctx?.sessionId, { root, cwd: shellCwd(action, ctx) })
+    : null;
+  const targets = cli?.isCli ? [] : collectWriteTargets(action, ctx);
+  // Физическая классификация целей edit/write и shell-записей (редирект, cat > …):
+  // канон/protected — fail-closed и для роли executor, и в режиме скила. Без этого
+  // shell-редирект в канонический файл обходил бы защиту (ревью 2026-10-05). В G0
+  // (сессии рельс нет) правки скилов ведёт сам G0-гард «только через коуча» —
+  // классификация там не нужна.
+  const editWrite = action?.kind === 'edit' || action?.kind === 'write';
+  const classify = (callerSkill = null) => ((editWrite || (action?.kind === 'shell' && targets.length > 0)) && !cli?.isCli
+    ? classifyWrites(root, targets, action.kind, ctx?.cwd ?? root, callerSkill)
+    : { unrestricted: new Set() });
   const role = ctx?.role ?? process.env.WORKFLOW_RAILS_ROLE;
-  if (role === 'executor') return { decision: 'allow' };
+  if (role === 'executor') {
+    classify(); // канон/protected отказывает и делегату — до разрешения роли
+    return { decision: 'allow' };
+  }
 
   const sessionId = ctx?.sessionId;
   let state = sessionId ? loadState(root, sessionId) : null;
@@ -1271,7 +1308,10 @@ function decideInProject(root, action, ctx) {
     state = startState({ root, sessionId, skill: skillEnv, entry: config.entry, run: ctx?.run ?? null, ticket: hostTicket(ctx) });
   }
 
-  const { config, graph } = loadSkillRuntime(root, state.skill);
+  // Независимые локальные скилы открывает только авторизованный скил (коуч) —
+  // имя скила сессии передаётся в физическую классификацию (ревью 2026-10-05).
+  const { unrestricted } = classify(state.skill);
+  const { config, graph } = loadSkillRuntime(root, state.skill, state);
 
   // Дедупликация по идентификатору вызова инструмента (Claude tool_use_id, Kilo callID):
   // хуки могут быть зарегистрированы и у пользователя, и в проекте — один вызов
@@ -1280,7 +1320,7 @@ function decideInProject(root, action, ctx) {
   if (dedupeKey && state.dedupe && state.dedupe[dedupeKey]) {
     return { ...state.dedupe[dedupeKey], deduped: true };
   }
-  const result = decideSkillMode({ root, action, ctx, state, config, graph });
+  const result = decideSkillMode({ root, action, ctx, state, config, graph, unrestricted });
   if (dedupeKey) {
     try {
       const fresh = loadState(root, state.session || ctx?.sessionId) || state;
@@ -1469,6 +1509,15 @@ export function decide({ action, ctx } = {}) {
   try {
     return decideInProject(root, action, ctx);
   } catch (err) {
+    if (err?.railsFailClosed) {
+      const reason = `RAILS: действие отклонено: ${err.message}`;
+      try {
+        appendDenial(root, { session: ctx?.sessionId ?? null, reason, tool: action?.tool, path: action?.path, command: action?.command });
+      } catch {
+        // Недоступный журнал не снимает защиту.
+      }
+      return { decision: 'deny', reason };
+    }
     try {
       process.stderr.write(`rails: decide() поймала исключение, снимаю рельсы: ${err && err.stack ? err.stack : err}\n`);
     } catch {

@@ -32,6 +32,19 @@ const FORBIDDEN_MISSING_PREFIX = 'forbidden:';
  * @returns {{ok: boolean, missing: string[]}}
  */
 export function check(text, config, state) {
+  const value = String(text ?? '');
+  // Приостановка — отдельный исход, не успешный терминал. Поля описывают
+  // необходимое разрешение и незавершённую работу без изменения состояния.
+  const outcome = /^RAILS_OUTCOME: (blocked|needs_user)\r?\n/.exec(value);
+  if (outcome) {
+    const missing = ['ACTION', 'REASON', 'DONE', 'REMAINING']
+      .filter((field) => !new RegExp(`^${field}: [^\\r\\n\\s][^\\r\\n]*$`, 'm').test(value))
+      .map((field) => `suspension:${field}`);
+    if (/\bverdict\s*=\s*pass\b/i.test(value)) missing.push('suspension:verdict=pass');
+    // Приписанный RESULT «status: pass» не превращает приостановку в успех (ревью 2026-10-05).
+    if (/^status:\s*pass\b/m.test(value)) missing.push('suspension:result-pass');
+    return { ok: missing.length === 0, missing, outcome: outcome[1] };
+  }
   const missing = [];
   const output = config?.output ?? {};
   const terminalList = Array.isArray(config?.terminal) ? config.terminal : [];
@@ -46,7 +59,6 @@ export function check(text, config, state) {
   const forbids = atPause
     ? (Array.isArray(output.pause_forbids) ? output.pause_forbids : [])
     : (Array.isArray(output.final_forbids) ? output.final_forbids : []);
-  const value = String(text ?? '');
 
   for (const pattern of requires) {
     let re;

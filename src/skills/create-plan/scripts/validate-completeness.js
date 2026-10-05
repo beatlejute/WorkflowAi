@@ -95,7 +95,7 @@ function parseArgs() {
 }
 
 function parseFrontmatter(content) {
-  const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+  const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!fmMatch) {
     return { raw: null, data: null };
   }
