@@ -725,7 +725,37 @@ test('transcriptFinalAnswer: обезличенный transcript без отве
     writeFileSync(p, `${JSON.stringify({ type: 'user', message: {} })}\n`, 'utf8');
     const r = transcriptFinalAnswer(p, sessionId);
     assert.equal(r.ok, false);
-    assert.match(r.reason, /ответов ассистента/);
+    assert.match(r.reason, /принадлежность сессии не доказана/);
+    // и cli complete по такому файлу отказывает
+    const sessionId2 = pinnedSession(root, 'P5S1');
+    const p2 = join(base, `${sessionId2}.jsonl`);
+    writeFileSync(p2, `${JSON.stringify({ type: 'assistant', message: { id: 'm', content: [{ type: 'text', text: PASS_ANSWER }] } })}\n`, 'utf8');
+    const cli = cliRun(['complete', '--transcript', p2, '--session', sessionId2], { cwd: root, env: {} });
+    assert.equal(cli.code, 2);
+    assert.match(cli.stdout, /принадлежность сессии не доказана/);
+  });
+});
+
+test('пустое последнее сообщение ассистента снимает прежнее подтверждение', () => {
+  withProject(({ base, root }) => {
+    const sessionId = pinnedSession(root, 'P5S1');
+    assert.equal(recordCompletion({ root, state: readSession(root, sessionId), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
+    const state = readSession(root, sessionId);
+    state.counters['stop_blocks:P5S1'] = 2; // потолок исчерпан — счётчики не растут
+    saveState(root, state);
+    // последнее сообщение без текста — это новый исход, не записанный ответ
+    handleHookInput(
+      {
+        hook_event_name: 'Stop',
+        session_id: sessionId,
+        cwd: root,
+        transcript_path: writeTranscript(base, sessionId, [
+          { type: 'assistant', message: { id: 'm1', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] } },
+        ]),
+      },
+      {}
+    );
+    assert.equal(readSession(root, sessionId).completion, undefined);
   });
 });
 

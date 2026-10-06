@@ -79,11 +79,12 @@ function makeState(root, node) {
   return sessionId;
 }
 
-// Transcript сессии: имя — <sessionId>.jsonl, как у настоящего Claude Code
-// (stop-хук проверяет принадлежность transcript сессии, 2026-10-06).
+// Transcript сессии: имя — <sessionId>.jsonl и sessionId в каждой записи, как
+// у настоящего Claude Code (stop-хук проверяет принадлежность transcript
+// сессии, 2026-10-06).
 function writeTranscript(base, sessionId, entries) {
   const p = join(base, `${sessionId}.jsonl`);
-  writeFileSync(p, entries.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+  writeFileSync(p, entries.map((e) => JSON.stringify({ sessionId, ...e })).join('\n') + '\n', 'utf8');
   return p;
 }
 

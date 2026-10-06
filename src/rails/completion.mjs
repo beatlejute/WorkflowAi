@@ -23,7 +23,7 @@
 // честности, не криптография — см. README §16.
 
 import { createHash } from 'node:crypto';
-import { readFileSync, renameSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmdirSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 import { loadSkillRuntime } from './core.mjs';
@@ -210,7 +210,8 @@ export function recordCompletion({ root, state, source, answer = null, transcrip
  * проверен (приостановка RAILS_OUTCOME или ответ мимо выходного слоя).
  * Подтверждение другого ответа недействительно, даже если существенное
  * состояние не изменилось (исчерпанный Stop-лимит счётчиков не растит).
- * Без подтверждения — ничего не делает.
+ * Без подтверждения — ничего не делает. Сбой сохранения виден в журнале
+ * (type: "error"): молча «снятое» подтверждение осталось бы на диске.
  *
  * @param {{root: string, state: object, cause: string}} args
  * @returns {boolean} было ли что снимать
@@ -219,11 +220,20 @@ export function invalidateCompletion({ root, state, cause }) {
   if (!state || !state.session || !state.completion || state.completed) return false;
   delete state.completion;
   state.updated = new Date().toISOString();
+  let saved = true;
   try {
     saveState(root, state);
-  } catch {
-    // снять из памяти сняли; несохранённое подтверждение остаётся на диске —
-    // повторная остановка с тем же исходом снимет его снова
+  } catch (err) {
+    saved = false;
+    try {
+      appendEvent(root, {
+        type: 'error',
+        session: state.session,
+        message: `invalidation: подтверждение не снято на диске (${err && err.message ? err.message : err}) — повторная остановка с тем же исходом снимет снова`,
+      });
+    } catch {
+      // журнал недоступен — повтор попытается снова
+    }
   }
   try {
     appendEvent(root, {
@@ -233,6 +243,7 @@ export function invalidateCompletion({ root, state, cause }) {
       node: state.node,
       run: state.run ?? null,
       invalidated: true,
+      saved,
       cause,
     });
   } catch {
@@ -333,6 +344,43 @@ export function performExit({ root, session, now = Date.now() }) {
   const path = grantPath(root, session);
   const failWithTemplate = (reason) => ({ ok: false, reason, grantPath: path, grantTemplate: grantTemplate(completion) });
 
+  // Блокировка выхода: сериализует потребление разрешения и отметку против
+  // второго параллельного exit (имя-точка, mkdir атомарен; протухший замок —
+  // старше 10 с — снимается, живой возвращает «повтори команду»).
+  const lockDir = join(root, '.workflow', 'state', 'rails');
+  const lock = join(lockDir, `.exit-lock-${session}`);
+  let held = false;
+  for (let attempt = 0; attempt < 2 && !held; attempt += 1) {
+    try {
+      mkdirSync(lock, { recursive: true });
+      held = true;
+    } catch (err) {
+      if (err.code !== 'EEXIST') return failWithTemplate(`замок выхода не создан: ${err.message}`);
+      let stale = false;
+      try {
+        stale = now - statSync(lock).mtimeMs > 10000;
+        if (stale) rmdirSync(lock);
+      } catch {
+        // исчез между проверкой и удалением — следующая попытка создаст заново
+      }
+      if (!stale) return failWithTemplate('другой выход этой сессии выполняется — повтори команду');
+    }
+  }
+  try {
+    return exitLocked({ root, session, completion, path, failWithTemplate, now });
+  } finally {
+    try {
+      rmdirSync(lock);
+    } catch {
+      // протухнет и снимется следующим выходом
+    }
+  }
+}
+
+// Шаги выхода под замком: потребление разрешения, перечитывание состояния,
+// отметка и пост-проверка записи.
+function exitLocked({ root, session, completion, path, failWithTemplate, now }) {
+
   let raw;
   try {
     raw = readFileSync(path, 'utf8');
@@ -410,6 +458,26 @@ export function performExit({ root, session, now = Date.now() }) {
     }
     return failWithTemplate('отметка завершения не сохранена — разрешение потреблено, владелец перевыпускает');
   }
+  // Пост-проверка: отметка действительно на диске. Конкурирующая запись,
+  // стёршая отметку, видна сразу и сообщается владельцу, а не теряется молча.
+  let persisted = null;
+  try {
+    persisted = loadState(root, session);
+  } catch {
+    persisted = null;
+  }
+  if (!persisted?.completed || persisted.completed.completion_sha256 !== expected.completion_sha256) {
+    try {
+      appendEvent(root, {
+        type: 'error',
+        session,
+        message: 'exit: отметка не сохранилась после записи (конкурирующая запись) — разрешение потреблено, владелец перевыпускает',
+      });
+    } catch {
+      // журнал недоступен — отказ всё равно возвращён
+    }
+    return failWithTemplate('отметка завершения не сохранилась после записи — разрешение потреблено, владелец перевыпускает');
+  }
   try {
     appendEvent(root, {
       type: 'exit',
@@ -428,27 +496,35 @@ export function performExit({ root, session, now = Date.now() }) {
 /**
  * Transcript принадлежит сессии, и последний ответ ассистента извлекается из
  * ОДНОГО чтения (ревью 2026-10-06, major): имя файла — `<sessionId>.jsonl`,
- * каждая запись с полем `sessionId` несёт тот же id, а ответ — последний
- * ассистентский текст этого же файла. Чужая запись в середине, подмена файла
- * между проверкой и чтением, обезличенный ответ — отказ.
+ * хотя бы одна запись несёт `sessionId` сессии (отсутствие доказательства —
+ * отказ, а не пропуск), каждая запись с полем `sessionId` несёт тот же id,
+ * а ответ — последний ассистентский текст этого же файла.
+ *
+ * `integrity` различает исходы для снимающего подтверждение: 'ok' — ответ
+ * прочитан и принадлежит сессии; 'empty' — файл свой, но последнее сообщение
+ * ассистента без текста (это тоже новый исход, не записанный ответ);
+ * 'foreign'/'unreadable'/'no-session-id'/'no-assistant' — доказательства
+ * нет, о последнем исходе сказать нечего.
  *
  * @param {string} transcriptPath
  * @param {string} sessionId
- * @returns {{ok: boolean, reason?: string, text?: string}}
+ * @returns {{ok: boolean, reason?: string, text?: string,
+ *            integrity: 'ok'|'empty'|'foreign'|'unreadable'|'no-session-id'|'no-assistant'}}
  */
 export function transcriptFinalAnswer(transcriptPath, sessionId) {
   const name = basename(String(transcriptPath ?? ''));
   const stem = name.replace(/\.jsonl$/i, '');
   if (stem !== String(sessionId)) {
-    return { ok: false, reason: `имя transcript «${name}» не совпадает с сессией ${sessionId} (ожидается <sessionId>.jsonl)` };
+    return { ok: false, reason: `имя transcript «${name}» не совпадает с сессией ${sessionId} (ожидается <sessionId>.jsonl)`, integrity: 'foreign' };
   }
   let raw;
   try {
     raw = readFileSync(transcriptPath, 'utf8');
   } catch (err) {
-    return { ok: false, reason: `transcript не прочитан: ${err && err.code === 'ENOENT' ? 'файла нет' : err.message}` };
+    return { ok: false, reason: `transcript не прочитан: ${err && err.code === 'ENOENT' ? 'файла нет' : err.message}`, integrity: 'unreadable' };
   }
   const entries = [];
+  let sawOwnId = false;
   for (const line of raw.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -459,10 +535,16 @@ export function transcriptFinalAnswer(transcriptPath, sessionId) {
       continue;
     }
     if (!entry || typeof entry !== 'object') continue;
-    if (typeof entry.sessionId === 'string' && entry.sessionId !== sessionId) {
-      return { ok: false, reason: `transcript принадлежит другой сессии (${entry.sessionId})` };
+    if (typeof entry.sessionId === 'string') {
+      if (entry.sessionId !== sessionId) {
+        return { ok: false, reason: `transcript принадлежит другой сессии (${entry.sessionId})`, integrity: 'foreign' };
+      }
+      sawOwnId = true;
     }
     entries.push(entry);
+  }
+  if (!sawOwnId) {
+    return { ok: false, reason: 'в transcript нет ни одной записи с sessionId — принадлежность сессии не доказана', integrity: 'no-session-id' };
   }
   let lastIdx = -1;
   for (let i = entries.length - 1; i >= 0; i -= 1) {
@@ -472,7 +554,7 @@ export function transcriptFinalAnswer(transcriptPath, sessionId) {
     }
   }
   if (lastIdx === -1) {
-    return { ok: false, reason: 'в transcript нет ответов ассистента' };
+    return { ok: false, reason: 'в transcript нет ответов ассистента', integrity: 'no-assistant' };
   }
   // Склейка хвостовых строк одного сообщения — как в output-check.lastAssistantText.
   const lastId = entries[lastIdx]?.message?.id;
@@ -494,7 +576,7 @@ export function transcriptFinalAnswer(transcriptPath, sessionId) {
   }
   const text = texts.join('');
   if (!text.trim()) {
-    return { ok: false, reason: 'последнее сообщение ассистента без текста' };
+    return { ok: false, reason: 'последнее сообщение ассистента без текста', integrity: 'empty' };
   }
-  return { ok: true, text };
+  return { ok: true, text, integrity: 'ok' };
 }
