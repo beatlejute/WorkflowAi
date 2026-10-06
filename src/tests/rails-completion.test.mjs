@@ -536,22 +536,19 @@ test('замок выхода: живой владелец — «повтори 
     const sessionId = pinnedSession(root, 'P5S1');
     assert.equal(recordCompletion({ root, state: readSession(root, sessionId), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
     writeGrant(root, sessionId, grantTemplate(readSession(root, sessionId).completion, 1));
-    const lock = join(root, '.workflow', 'state', 'rails', `.exit-lock-${sessionId}`);
-    mkdirSync(lock, { recursive: true });
+    const lockFile = join(root, '.workflow', 'state', 'rails', `.exit-lock-${sessionId}`);
     // живой владелец (наш pid) — отказ без потребления разрешения
-    writeFileSync(join(lock, `${process.pid}.abcdef01.token`), String(process.pid), 'utf8');
+    writeFileSync(lockFile, String(process.pid), 'utf8');
     let r = performExit({ root, session: sessionId });
     assert.equal(r.ok, false);
     assert.match(r.reason, /другой выход/);
     assert.equal(existsSync(grantPath(root, sessionId)), true);
     // мёртвый владелец — замок похищается, выход проходит
     const dead = spawnSync(process.execPath, ['-e', '']);
-    const deadPid = dead.pid;
-    rmSync(join(lock, `${process.pid}.abcdef01.token`));
-    writeFileSync(join(lock, `${deadPid}.abcdef02.token`), String(deadPid), 'utf8');
+    writeFileSync(lockFile, String(dead.pid), 'utf8');
     r = performExit({ root, session: sessionId });
     assert.equal(r.ok, true, r.reason);
-    assert.equal(existsSync(lock), false);
+    assert.equal(existsSync(lockFile), false);
   });
 });
 
@@ -1006,12 +1003,10 @@ test('invalidateCompletion: без подтверждения, на заверш
     // подтверждение завершённой сессии не тронуто
     assert.ok(readSession(root, sessionId).completion);
 
-    // чужой живой замок (токен живого pid) — снимающий уходит, следующий Stop повторит
+    // чужой живой замок (клейм живого pid) — снимающий уходит, следующий Stop повторит
     const sessionId2 = pinnedSession(root, 'P5S1');
     assert.equal(recordCompletion({ root, state: readSession(root, sessionId2), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
-    const foreignLock = join(root, '.workflow', 'state', 'rails', `.exit-lock-${sessionId2}`);
-    mkdirSync(foreignLock, { recursive: true });
-    writeFileSync(join(foreignLock, `${process.pid}.abcdef03.token`), String(process.pid), 'utf8');
+    writeFileSync(join(root, '.workflow', 'state', 'rails', `.exit-lock-${sessionId2}`), String(process.pid), 'utf8');
     const inv = invalidateCompletion({ root, state: readSession(root, sessionId2), cause: 'тест' });
     assert.equal(inv.removed, false);
     assert.equal(inv.busy, true);

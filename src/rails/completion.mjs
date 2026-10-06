@@ -23,7 +23,7 @@
 // честности, не криптография — см. README §16.
 
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 import { loadSkillRuntime } from './core.mjs';
@@ -277,8 +277,12 @@ export function invalidateCompletion({ root, state, cause, now = Date.now() }) {
     return { removed: false, busy: true };
   }
   try {
-    // Замок мог быть похищен, пока брали (наш токен исчез).
-    if (!existsSync(lock.token)) return { removed: false, attempted: true, traced: false };
+    // Замок мог быть похищен, пока брали (наш клейм исчез или сменился).
+    try {
+      if (readFileSync(lock.token, 'utf8') !== String(process.pid)) return { removed: false, attempted: true, traced: false };
+    } catch {
+      return { removed: false, attempted: true, traced: false };
+    }
     // Маркер мог появиться, пока брали замок.
     if (readCompletedMarker(root, state.session)) return { removed: false };
     const completion = state.completion;
@@ -287,7 +291,7 @@ export function invalidateCompletion({ root, state, cause, now = Date.now() }) {
     // замка сохранение запрещено, подтверждение в памяти восстанавливается —
     // иначе выход, похитивший замок мёртвого владельца, встал бы на неснятое
     // подтверждение (ревью 2026-10-06, девятый круг).
-    if (!existsSync(lock.token)) {
+    if (!existsSync(lock.token) || readFileSync(lock.token, 'utf8') !== String(process.pid)) {
       state.completion = completion;
       return { removed: false, stolen: true };
     }
@@ -434,7 +438,7 @@ export function verifyExit({ root, session }) {
   return { ok: true, state, completion };
 }
 
-// Жив ли процесс-владелец токена. process.kill(pid, 0): ESRCH — мёртв,
+// Жив ли процесс-владелец замка. process.kill(pid, 0): ESRCH — мёртв,
 // EPERM — жив (существование при чужих правах).
 function pidAlive(pid) {
   try {
@@ -445,105 +449,74 @@ function pidAlive(pid) {
   }
 }
 
-// Замок выхода: mkdir без recursive (существующий каталог — EEXIST), внутри —
-// файл-токен владельца с его pid. Пока владелец ЖИВ, замок не похищается
-// вовсе: пауза процесса (своп, отладчик, нагрузка) не открывает чужой замок —
-// вся гонка пауз между выходом и инвалидацией упирается в чистые busy/отказы
-// (ревью 2026-10-06, девятый и десятый круги). Замок мёртвого
-// владельца похищается атомарным переименованием; у двух похитителей успех
-// ровно у одного. Снятие удаляет токен и каталог только у СВОЕГО замка.
-// Возвращает {busy: true, stealFailed?} либо {lock, token, release}.
+// Замок выхода — ОДИН ФАЙЛ с атомарным эксклюзивным созданием ('wx'):
+// в каждый момент времени путь занимает ровно один клейм, двойного захвата
+// не существует. В файле — pid владельца: пока владелец жив, замок не
+// похищается вовсе (пауза процесса — своп, отладчик, нагрузка — не открывает
+// чужой замок, все чередования пауз выхода и инвалидации упираются в чистые
+// busy или отказы); замок МЁРТВОГО владельца похищается атомарным
+// переименованием файла в сторону, после чего новый клейм снова проходит
+// через 'wx' — у двух похитителей успех ровно у одного. Пид переиспользован
+// посторонним живым процессом (или файл не читается) — консервативный busy
+// до ручного удаления файла (README §16). Возвращает {busy: true,
+// stealFailed?} либо {lockFile, token, release}.
 function acquireExitLock(root, session) {
   const lockDir = join(root, '.workflow', 'state', 'rails');
-  const lock = join(lockDir, `.exit-lock-${session}`);
+  const lockFile = join(lockDir, `.exit-lock-${session}`);
   mkdirSync(lockDir, { recursive: true });
-  let created = false;
-  try {
-    mkdirSync(lock);
-    created = true;
-  } catch (err) {
-    if (err.code !== 'EEXIST') throw err;
-    // Живой владелец (любой токен с живым pid) — занято; без токенов или с
-    // мёртвым владельцем — похищение. Проверка и переименование раздельны,
-    // поэтому решение принимается ПО ПЕРЕИМЕНОВАННОЙ КОПИИ: если в ней живой
-    // владелец (пауза между проверкой и rename), замок возвращается на место,
-    // и похититель уходит в busy — поверх живого замка не работает никто
-    // (ревью 2026-10-06, десятый круг). Пид переиспользован посторонним
-    // процессом — консервативный вечный busy, замок снимается вручную
-    // (README §16).
-    const aside = `${lock}.${process.pid}.${randomBytes(4).toString('hex')}.stale`;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let fd;
     try {
-      renameSync(lock, aside);
-    } catch {
-      return { busy: true, stealFailed: true };
+      fd = openSync(lockFile, 'wx');
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
     }
-    let stoleLive = false;
-    try {
-      for (const name of readdirSync(aside)) {
-        const m = /^(\d+)\.[0-9a-f]+\.token$/.exec(name);
-        if (m && pidAlive(Number(m[1]))) {
-          stoleLive = true;
-          break;
-        }
-      }
-    } catch {
-      // каталог исчез между похитителями — наш замок кто-то уже забрал
-      return { busy: true };
-    }
-    if (stoleLive) {
+    if (fd !== undefined) {
       try {
-        renameSync(aside, lock);
-      } catch {
-        try {
-          rmSync(aside, { recursive: true, force: true });
-        } catch {
-          // владелец заметит потерю токена своими перепроверками
-        }
+        writeSync(fd, String(process.pid), 0, 'utf8');
+      } finally {
+        closeSync(fd);
       }
-      return { busy: true };
+      const token = lockFile;
+      const release = () => {
+        try {
+          // наш клейм неотличим от нашего же файла: пока мы живы, похищения
+          // не было; снимаем по совпадению pid
+          if (readFileSync(token, 'utf8') === String(process.pid)) unlinkSync(token);
+        } catch {
+          // файла нет или уже чужой — не наш
+        }
+      };
+      return { busy: false, lockFile, token, release };
     }
+    // Файл занят: читаем владельца. Не читается или pid не распознан —
+    // консервативно «занято» (ручное удаление описано в README §16).
+    let owner = null;
     try {
-      rmSync(aside, { recursive: true, force: true });
+      const raw = readFileSync(lockFile, 'utf8').trim();
+      const pid = Number(raw);
+      if (Number.isInteger(pid) && pid > 0) owner = pid;
     } catch {
-      // заброшенный замок уберёт следующее похищение
+      owner = null;
     }
+    if (owner === null || pidAlive(owner)) return { busy: true };
+    // Владелец мёртв: похищение атомарным переименованием файла. У двух
+    // похитителей успех ровно у одного — у второго ENOENT; новый клейм после
+    // этого снова проходит через 'wx' (ревью 2026-10-06, одиннадцатый круг).
+    const aside = `${lockFile}.${process.pid}.${randomBytes(4).toString('hex')}.stale`;
     try {
-      mkdirSync(lock);
-      created = true;
+      renameSync(lockFile, aside);
     } catch {
       return { busy: true, stealFailed: true };
     }
+    try {
+      rmSync(aside, { force: true });
+    } catch {
+      // заброшенный клейм уберёт следующее похищение
+    }
+    // следующий виток цикла — 'wx' по свободному пути
   }
-  if (!created) return { busy: true };
-  const token = join(lock, `${process.pid}.${randomBytes(4).toString('hex')}.token`);
-  try {
-    writeFileSync(token, String(process.pid), 'utf8');
-  } catch (err) {
-    try {
-      unlinkSync(token);
-    } catch {
-      // файла и не было
-    }
-    try {
-      rmdirSync(lock);
-    } catch {
-      // оставшийся пустой каталог уберёт следующее похищение
-    }
-    throw err;
-  }
-  const release = () => {
-    try {
-      unlinkSync(token);
-    } catch {
-      // токена нет — каталог не наш, не трогаем
-    }
-    try {
-      rmdirSync(lock);
-    } catch {
-      // не пуст (токен другого) или уже снят — не наш
-    }
-  };
-  return { busy: false, lock, token, release };
+  return { busy: true, stealFailed: true };
 }
 
 /**
@@ -596,7 +569,15 @@ export function performExit({ root, session, now = Date.now() }) {
 // маркера ограничивают последствия (ревью 2026-10-06).
 function exitLocked({ root, session, completion, path, token, failWithTemplate, now }) {
 
-  const lostLock = () => !existsSync(token);
+  // Наш клейм на месте (файл с нашим pid)? Похищение мёртвого возможно
+  // только после нашей смерти — живому выходу потеря означает отказ.
+  const lostLock = () => {
+    try {
+      return readFileSync(token, 'utf8') !== String(process.pid);
+    } catch {
+      return true;
+    }
+  };
   if (lostLock()) return failWithTemplate('замок выхода потерян — повтори команду');
 
   let raw;
