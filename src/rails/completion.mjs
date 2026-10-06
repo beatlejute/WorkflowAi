@@ -297,11 +297,11 @@ export function invalidateCompletion({ root, state, cause, now = Date.now() }) {
         return { removed: false, stolen: true };
       }
     } catch {
-      // клейм не прочитался — своего владения доказать нельзя, сохранение
-      // запрещено: подтверждение в памяти восстанавливается, следующий Stop
-      // с тем же исходом повторит
+      // клейм не прочитался — своего владения доказать нельзя: сбой видимый
+      // (attempted без traced), Stop блокирует остановку, иначе выход встал бы
+      // на неснятое подтверждение
       state.completion = completion;
-      return { removed: false, stolen: true };
+      return { removed: false, attempted: true, traced: false };
     }
     delete state.completion;
     state.updated = new Date().toISOString();
@@ -510,10 +510,12 @@ function acquireExitLock(root, session) {
     if (owner === null || pidAlive(owner)) return { busy: true };
     // Владелец мёртв: похищение атомарным переименованием файла, решение —
     // ПО ПЕРЕИМЕНОВАННОЙ КОПИИ: пока мы спали, путь мог сменить владельца.
-    // Живой клейм в копии — вернуть на место (не выйдет — владелец заметит
-    // потерю содержания своими перепроверками) и уйти в busy; мёртвый —
-    // убрать и претендовать через 'wx' (у двух похитителей успех ровно у
-    // одного; ревью 2026-10-06, одиннадцатый и двенадцатый круги).
+    // РЕСТОРА НЕТ: возвращение копии rename-ом затёрло бы чужой свежий клейм
+    // (ревью 2026-10-06, тринадцатый круг). Живой владелец в копии — копия
+    // стирается, у нас busy; сам владелец обнаружит потерю клейма своей
+    // перепроверкой содержания и откажется. Мёртвый — копия стирается,
+    // претендуем через 'wx' на следующем витке (у двух похитителей успех
+    // ровно у одного).
     const aside = `${lockFile}.${process.pid}.${randomBytes(4).toString('hex')}.stale`;
     try {
       renameSync(lockFile, aside);
@@ -528,23 +530,12 @@ function acquireExitLock(root, session) {
     } catch {
       asideOwner = null;
     }
-    if (asideOwner !== null && pidAlive(asideOwner)) {
-      try {
-        renameSync(aside, lockFile);
-      } catch {
-        try {
-          rmSync(aside, { force: true });
-        } catch {
-          // владелец заметит потерю содержания своими перепроверками
-        }
-      }
-      return { busy: true };
-    }
     try {
       rmSync(aside, { force: true });
     } catch {
       // заброшенный клейм уберёт следующее похищение
     }
+    if (asideOwner !== null && pidAlive(asideOwner)) return { busy: true };
     // следующий виток цикла — 'wx' по свободному пути
   }
   return { busy: true, stealFailed: true };
