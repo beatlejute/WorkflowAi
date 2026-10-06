@@ -219,12 +219,11 @@ function invalidationPath(root, session) {
   return join(root, '.workflow', 'state', 'rails', `.invalid-${String(session)}.json`);
 }
 
-// Надгробие или журнальный след неснятого подтверждения ИМЕННО ЭТОГО
-// подтверждения. Журнальная ошибка несёт completion_sha256; след другого
-// (например, уже перевыпущенного) подтверждения exit не блокирует
-// (ревью 2026-10-06: историческая запись не должна блокировать вечно).
-function existsInvalidation(root, session, completion) {
-  const digest = completionDigest(completion);
+// Надгробие или журнальный след неснятого подтверждения с ИМЕННО ЭТИМ хешем.
+// Журнальная ошибка несёт completion_sha256; след другого (например, уже
+// перевыпущенного) подтверждения exit не блокирует (ревью 2026-10-06:
+// историческая запись не должна блокировать вечно).
+function existsInvalidation(root, session, digest) {
   try {
     const raw = readFileSync(invalidationPath(root, session), 'utf8');
     const t = JSON.parse(raw);
@@ -392,7 +391,7 @@ export function verifyExit({ root, session }) {
   // Неснятое подтверждение ИМЕННО ЭТОГО подтверждения (надгробие или
   // журнальная ошибка) — раньше маркера: оставшийся от неудачного отката
   // маркер не должен маскировать сбой инвалидации (ревью 2026-10-06).
-  if (existsInvalidation(root, session, completion)) {
+  if (existsInvalidation(root, session, completionDigest(completion))) {
     return fail('есть неснятое подтверждение (сбой инвалидации) — повтори Stop с непроходным ответом или приостановкой');
   }
   let marker;
@@ -609,7 +608,7 @@ function exitLocked({ root, session, completion, path, token, failWithTemplate, 
     return failWithTemplate(`состояние не перечитано: ${err && err.message ? err.message : err}`);
   }
   if (!fresh || !fresh.completion
-    || existsInvalidation(root, session, fresh.completion)
+    || existsInvalidation(root, session, expected.completion_sha256)
     || completionDigest(fresh.completion) !== expected.completion_sha256
     || essentialStateDigest(fresh) !== fresh.completion.state_sha256) {
     return failWithTemplate('состояние изменилось в процессе выхода — подтверждение устарело, повтори верификацию и выпуск разрешения');
@@ -639,8 +638,9 @@ function exitLocked({ root, session, completion, path, token, failWithTemplate, 
     return failWithTemplate('маркер завершения не создан — разрешение потреблено, владелец перевыпускает');
   }
 
-  // Инвалидация, вклинившаяся между перечитыванием и маркером, делает
-  // подтверждение неснятым: маркер снимается обратно, выход не состоялся.
+  // Инвалидация, вклинившаяся между перечитыванием и маркером (в том числе
+  // во время паузы процесса), делает подтверждение неснятым: маркер снимается
+  // обратно, выход не состоялся (ревью 2026-10-06, седьмой круг).
   let after;
   try {
     after = loadState(root, session);
@@ -648,6 +648,7 @@ function exitLocked({ root, session, completion, path, token, failWithTemplate, 
     after = null;
   }
   if (!after || !after.completion
+    || existsInvalidation(root, session, expected.completion_sha256)
     || completionDigest(after.completion) !== expected.completion_sha256
     || essentialStateDigest(after) !== after.completion.state_sha256) {
     let reverted = true;
