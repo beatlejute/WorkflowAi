@@ -183,6 +183,16 @@ export function saveState(root, state) {
   const dir = stateDir(root);
   fs.mkdirSync(dir, { recursive: true });
   const target = statePath(root, state.session);
+  // Предзапись: доступный только для чтения файл обязан отказывать и на POSIX,
+  // где rename поверх такого файла проходит молча (CI 2026-10-06, Linux/macOS:
+  // счётчик отказов «несохраняемого» состояния попадал на диск). Файла ещё нет
+  // (ENOENT) — записи ничего не мешает.
+  try {
+    const probe = fs.openSync(target, 'r+');
+    fs.closeSync(probe);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
   const tmp = path.join(dir, `.${state.session}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
   fs.renameSync(tmp, target);
