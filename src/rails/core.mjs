@@ -67,7 +67,7 @@ import { pinnedRuntime } from './runtime-snapshot.mjs';
 // файл. Теперь CR под PowerShell — разделитель, под bash — символ слова, и любой токен
 // с CR/LF вне кавычек не инертен (см. tokenIsInert).
 
-const CLI_SUBCOMMANDS = ['start', 'goto', 'status', 'reset', 'report', 'check', 'coverage', 'selfcheck'];
+const CLI_SUBCOMMANDS = ['start', 'goto', 'status', 'reset', 'report', 'check', 'coverage', 'selfcheck', 'complete', 'exit'];
 // Якорь — `rails/cli.mjs` (`rails\cli.mjs` на Windows), а не любой `cli.mjs`: в
 // репозитории есть свой `src/cli.mjs`, не имеющий отношения к рельсам.
 const CLI_PATH_RE = /(?:^|[\\/])rails[\\/]cli\.mjs$/;
@@ -1275,6 +1275,14 @@ function decideInProject(root, action, ctx) {
 
   const sessionId = ctx?.sessionId;
   let state = sessionId ? loadState(root, sessionId) : null;
+
+  // Штатный выход (completion.mjs): рельсы сессию больше не ведут. Окружение
+  // старого запуска роль не возвращает и состояние не пересоздаёт — сессия
+  // остаётся в режиме без скила (G0), правки скилов по-прежнему только через
+  // коуча.
+  if (state?.completed) {
+    return decideNoSkillMode(root, action, ctx);
+  }
 
   if (!state) {
     const skillEnv = process.env.WORKFLOW_RAILS_SKILL;

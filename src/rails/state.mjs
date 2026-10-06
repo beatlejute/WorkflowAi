@@ -145,6 +145,31 @@ function validateState(state, sessionId) {
       || r.version !== 1 || typeof r.id !== 'string' || !/^[a-f0-9]{64}$/.test(r.id)
       || typeof r.hash !== 'string' || !/^[a-f0-9]{64}$/.test(r.hash)) bad('привязка runtime');
   }
+  // Подтверждение завершения и отметка штатного выхода (completion.mjs):
+  // поля опциональные, но присутствовать обязаны целыми — иначе состояние
+  // с «полуразбитым» подтверждением молча выглядело бы неподтверждённым.
+  if (state.completion !== undefined) {
+    const c = state.completion;
+    if (!c || typeof c !== 'object' || Array.isArray(c) || c.version !== 1) bad('подтверждение завершения');
+    if (typeof c.t !== 'string' || Number.isNaN(Date.parse(c.t))) bad('время подтверждения');
+    if (typeof c.source !== 'string' || !c.source) bad('источник подтверждения');
+    if (!c.identity || typeof c.identity !== 'object' || Array.isArray(c.identity)
+      || typeof c.identity.session !== 'string' || typeof c.identity.root !== 'string') bad('личность запуска в подтверждении');
+    if (!c.runtime || c.runtime.version !== 1 || typeof c.runtime.id !== 'string' || !/^[a-f0-9]{64}$/.test(c.runtime.id)
+      || typeof c.runtime.hash !== 'string' || !/^[a-f0-9]{64}$/.test(c.runtime.hash)) bad('runtime в подтверждении');
+    if (typeof c.node !== 'string' || !c.node) bad('узел подтверждения');
+    for (const field of ['answer_sha256', 'state_sha256']) {
+      if (typeof c[field] !== 'string' || !/^[a-f0-9]{64}$/.test(c[field])) bad(`хеш ${field} подтверждения`);
+    }
+    if (c.verdict !== null && typeof c.verdict !== 'string') bad('verdict подтверждения');
+  }
+  if (state.completed !== undefined) {
+    const m = state.completed;
+    if (!m || typeof m !== 'object' || Array.isArray(m) || m.version !== 1) bad('отметка завершения');
+    if (typeof m.t !== 'string' || Number.isNaN(Date.parse(m.t))) bad('время завершения');
+    if (typeof m.completion_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(m.completion_sha256)) bad('хеш подтверждения в отметке');
+    if (m.grant_expires_at !== undefined && (typeof m.grant_expires_at !== 'string' || Number.isNaN(Date.parse(m.grant_expires_at)))) bad('срок разрешения в отметке');
+  }
 }
 
 /**

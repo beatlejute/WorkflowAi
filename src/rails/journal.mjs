@@ -12,7 +12,9 @@
  * `appendEvent`, иначе `summarize()` не сможет их сгруппировать. Здесь
  * зафиксирован минимальный набор: `"denial"` (пишет `appendDenial`),
  * `"reset"`, `"error"`, `"stop_block"`, `"cycle_limit"`, `"action_limit"`,
- * `"canary"` (срабатывание канарейки живости — не отказ, с 2026-10-01).
+ * `"canary"` (срабатывание канарейки живости — не отказ, с 2026-10-01),
+ * `"completion"` и `"exit"` (подтверждение завершения и штатный выход
+ * из роли, completion.mjs, 2026-10-06).
  */
 
 import fs from 'node:fs';
@@ -144,6 +146,8 @@ function isCanary(e) {
  *   cycleLimitHits: Record<string, number>,
  *   actionLimitHits: Record<string, number>,
  *   resets: number,
+ *   completions: number,
+ *   exits: number,
  *   stopBlocks: {total: number, byNode: Record<string, number>},
  *   errors: number
  * }}
@@ -165,6 +169,8 @@ export function summarize(entries) {
   let resets = 0;
   let errors = 0;
   let stopBlocksTotal = 0;
+  let completions = 0;
+  let exits = 0;
   let total = 0;
 
   for (const e of list) {
@@ -207,6 +213,12 @@ export function summarize(entries) {
       case 'action_limit':
         if (e.key) actionLimitHits[e.key] = (actionLimitHits[e.key] || 0) + 1;
         break;
+      case 'completion':
+        completions++;
+        break;
+      case 'exit':
+        exits++;
+        break;
       default:
         break;
     }
@@ -228,6 +240,8 @@ export function summarize(entries) {
     cycleLimitHits,
     actionLimitHits,
     resets,
+    completions,
+    exits,
     stopBlocks: { total: stopBlocksTotal, byNode: stopBlocksByNode },
     errors,
   };

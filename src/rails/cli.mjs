@@ -1,6 +1,6 @@
 /**
  * Rails — CLI (спецификация §10): `rails start | goto | status | reset |
- * report | check | coverage | selfcheck`.
+ * report | check | coverage | selfcheck | complete | exit`.
  *
  * `run(argv, {cwd, env})` — чистая точка входа для тестов: не читает
  * `process.argv`/`process.env`/`process.cwd()` напрямую, возвращает
@@ -33,6 +33,13 @@ import {
 import { appendDenial, appendEvent, readJournal, readJournalFile, summarize } from './journal.mjs';
 import { checkCoverage } from './coverage.mjs';
 import { rememberSessionRoot } from './session-memo.mjs';
+import {
+  recordCompletion,
+  performExit,
+  grantPath,
+  grantTemplate,
+  verifyTranscriptOwnership,
+} from './completion.mjs';
 
 // --- разбор аргументов -------------------------------------------------------------
 
@@ -281,6 +288,26 @@ function cmdStart(root, positional, flags, env) {
   // хук сессии из каталога-зонтика находил корень для shell-команд (session-memo.mjs).
   if (explicitSession) rememberSessionRoot(sessionId, root);
   const existing = loadState(root, sessionId);
+  // Штатный выход: старый запуск не перезаписывается — новый (тем же скилом
+  // или другим, даже с --force) открывает владелец новой сессией.
+  if (existing?.completed) {
+    try {
+      appendDenial(root, {
+        session: sessionId,
+        skill: existing.skill,
+        node: existing.node,
+        run: (env && env.WORKFLOW_RAILS_RUN) || null,
+        reason: `start поверх завершённой сессии отклонён: выход выполнен ${existing.completed.t}, состояние и история сохраняются`,
+        command: `start ${skill}`,
+      });
+    } catch {
+      // журнал не должен ронять CLI
+    }
+    return {
+      code: 2,
+      stdout: `Ошибка: сессия ${sessionId} завершена штатным выходом (${existing.completed.t}); перезапуск скила "${skill}" в ней не выполняется, --force этого не меняет. Новый запуск открывает владелец новой сессией.\n`,
+    };
+  }
   const runSkill = foreignRunSkill(root, env, existing, skill);
   if (runSkill) {
     return foreignSkillRefusal({ root, skill, runSkill, sessionId, explicitSession, existing, env });
@@ -377,6 +404,23 @@ function cmdGoto(root, positional, flags, env) {
   if (!state) {
     return { code: 1, stdout: `Ошибка: состояние сессии ${sessionId} не найдено. Сначала start.\n` };
   }
+  if (state.completed) {
+    try {
+      appendDenial(root, {
+        session: sessionId,
+        skill: state.skill,
+        node: state.node,
+        reason: `goto в завершённой сессии отклонён: выход выполнен ${state.completed.t}`,
+        command: `goto ${node}`,
+      });
+    } catch {
+      // журнал не должен ронять CLI
+    }
+    return {
+      code: 2,
+      stdout: `Ошибка: сессия ${sessionId} завершена штатным выходом (${state.completed.t}); переходы закрыты, состояние и история сохраняются.\n`,
+    };
+  }
 
   let config;
   let graph;
@@ -449,6 +493,11 @@ function cmdStatus(root, positional, flags, env) {
     `Сессия: ${sessionId}`,
     `Скил: ${state.skill}`,
     `Узел: ${state.node} «${label}» (этап ${info.stage ?? '?'}, тип ${info.type ?? '?'})`,
+    ...(state.completed
+      ? [`Состояние: завершена штатным выходом ${state.completed.t} — рельсы сессию не ведут`]
+      : state.completion
+        ? [`Подтверждение завершения: есть (${state.completion.t}), выход — после разрешения владельца (rails exit)`]
+        : []),
     `Счётчики: ${JSON.stringify(state.counters || {})}`,
     `Отказы по узлам: ${JSON.stringify(state.denials || {})}`,
     `Последние переходы:${historyTail ? `\n${historyTail}` : ' нет'}`,
@@ -467,6 +516,25 @@ function cmdReset(root, positional, flags, env) {
   if (!sessionId) return { code: 1, stdout: 'Ошибка: нет активной сессии.\n' };
 
   const state = loadState(root, sessionId);
+  // Завершённая сессия хранится целиком (состояние, история, журнал) — сброс
+  // и после штатного выхода запрещён.
+  if (state?.completed) {
+    try {
+      appendDenial(root, {
+        session: sessionId,
+        skill: state.skill,
+        node: state.node,
+        reason: `reset завершённой сессии отклонён: выход выполнен ${state.completed.t}, состояние и история сохраняются`,
+        command: 'reset',
+      });
+    } catch {
+      // журнал не должен ронять CLI
+    }
+    return {
+      code: 2,
+      stdout: `Ошибка: сессия ${sessionId} завершена штатным выходом (${state.completed.t}) — reset отклонён: состояние и история сохраняются.\n`,
+    };
+  }
   // Сброс закреплённого запуска — не путь активации правок исходников: его
   // открывает владелец через внешнюю политику, а не команда агента.
   if (state?.runtime) {
@@ -499,6 +567,88 @@ function cmdReset(root, positional, flags, env) {
     // журнал не должен ронять CLI
   }
   return { code: 0, stdout: `Сброшено: сессия ${sessionId}\n` };
+}
+
+// --- complete / exit (штатный выход, README §16) ---------------------------------------
+
+// `complete --transcript <файл>` — доверенная проверка исторического финального
+// ответа закреплённого запуска (последнее сообщение ассистента из transcript)
+// и запись подтверждения завершения. Transcript обязан принадлежать сессии
+// (имя файла и записи); приостановка, не-терминальный узел, чужой/пустой
+// ответ подтверждения не создают.
+function cmdComplete(root, positional, flags, env, cwd = process.cwd()) {
+  if (typeof flags.transcript !== 'string' || !flags.transcript) {
+    return { code: 1, stdout: 'Ошибка: нужен --transcript <файл> (jsonl transcript сессии).\n' };
+  }
+  const { sessionId, sessions } = resolveSessionId(root, flags, env);
+  if (!sessionId && sessions.length > 1) return ambiguousSessionError(sessions);
+  if (!sessionId) return { code: 1, stdout: 'Ошибка: нет активной сессии.\n' };
+
+  let state;
+  try {
+    state = loadState(root, sessionId);
+  } catch (err) {
+    return { code: 1, stdout: `Ошибка: ${err && err.message ? err.message : err}\n` };
+  }
+  if (!state) return { code: 1, stdout: `Ошибка: состояние сессии ${sessionId} не найдено.\n` };
+  if (state.completed) {
+    return { code: 2, stdout: `Сессия ${sessionId} уже завершена штатным выходом (${state.completed.t}) — подтверждение не требуется.\n` };
+  }
+
+  const transcriptPath = resolvePath(cwd, flags.transcript);
+  const ownership = verifyTranscriptOwnership(transcriptPath, sessionId);
+  if (!ownership.ok) {
+    return { code: 2, stdout: `Ошибка: transcript не принят: ${ownership.reason}\n` };
+  }
+
+  const result = recordCompletion({ root, state, source: 'cli-transcript', transcriptPath });
+  if (!result.ok) {
+    const missing = Array.isArray(result.missing) && result.missing.length > 0 ? `\nНе выполнено: ${result.missing.join('; ')}` : '';
+    return { code: 2, stdout: `Подтверждение не создано: ${result.reason}.${missing}\n` };
+  }
+
+  const c = result.completion;
+  const lines = [
+    `Подтверждение завершения записано: сессия ${sessionId}, узел ${c.node}, ответ ${c.answer_sha256.slice(0, 12)}…`,
+    `verdict: ${c.verdict ?? 'не указан в ответе'}`,
+    'Выход — после одноразового разрешения владельца: rails exit',
+  ];
+  return { code: 0, stdout: `${lines.join('\n')}\n` };
+}
+
+// `exit` — штатный выход из роли: подтверждение + одноразовое разрешение
+// владельца (файл в защищённом каталоге состояний, шаблон печатается при
+// отказе). Состояние, история, счётчики, runtime и журнал сохраняются; хуки
+// и CLI сессию больше не ведут, роль из окружения не возвращается.
+function cmdExit(root, positional, flags, env) {
+  const { sessionId, sessions } = resolveSessionId(root, flags, env);
+  if (!sessionId && sessions.length > 1) return ambiguousSessionError(sessions);
+  if (!sessionId) return { code: 1, stdout: 'Ошибка: нет активной сессии.\n' };
+
+  const state = loadState(root, sessionId);
+  if (!state) return { code: 1, stdout: `Ошибка: состояние сессии ${sessionId} не найдено.\n` };
+
+  const result = performExit({ root, session: sessionId });
+  if (!result.ok) {
+    const lines = [`Выход не выполнен: ${result.reason}`];
+    if (result.grantPath && result.grantTemplate) {
+      lines.push(
+        'Разрешение владельца: создай файл своими руками (не средствами агента) —',
+        `  ${result.grantPath}`,
+        '  с содержимым:',
+        JSON.stringify(result.grantTemplate),
+        'и повтори: node .workflow/src/rails/cli.mjs exit'
+      );
+    }
+    return { code: 2, stdout: `${lines.join('\n')}\n` };
+  }
+
+  const lines = [
+    `Выход выполнен: сессия ${sessionId}, скил "${result.state.skill}" завершён (${result.state.completed.t}).`,
+    'Состояние, история, счётчики, привязка runtime и журнал сохранены; хуки и CLI сессию больше не ведут.',
+    'Роль из окружения хоста не возвращается: перезапуск скила в этой сессии закрыт, новый запуск открывает владелец новой сессией.',
+  ];
+  return { code: 0, stdout: `${lines.join('\n')}\n` };
 }
 
 // --- report ----------------------------------------------------------------------------
@@ -565,6 +715,7 @@ function cmdReport(root, positional, flags, cwd = process.cwd()) {
   lines.push(`Срабатывания потолков циклов: ${JSON.stringify(summary.cycleLimitHits)}`);
   lines.push(`Срабатывания потолков действий: ${JSON.stringify(summary.actionLimitHits)}`);
   lines.push(`Сбросы: ${summary.resets}`);
+  lines.push(`Подтверждения завершения: ${summary.completions}; штатные выходы: ${summary.exits}`);
   lines.push(`Stop-блоки: ${summary.stopBlocks.total} (${JSON.stringify(summary.stopBlocks.byNode)})`);
   // Канарейка — проверка живости, а не отказ: summarize() не кладёт её в «Отказы по узлу» и в
   // узлы с повторами (журнал 2026-09-30: четверть–треть записей «отказов»), число — здесь.
@@ -822,6 +973,10 @@ export function run(argv, { cwd = process.cwd(), env = process.env } = {}) {
         return cmdStatus(root, rest, flags, env);
       case 'reset':
         return cmdReset(root, rest, flags, env);
+      case 'complete':
+        return cmdComplete(root, rest, flags, env, cwd);
+      case 'exit':
+        return cmdExit(root, rest, flags, env);
       case 'report':
         return cmdReport(root, rest, flags, cwd);
       case 'check':
@@ -833,7 +988,7 @@ export function run(argv, { cwd = process.cwd(), env = process.env } = {}) {
       default:
         return {
           code: 1,
-          stdout: `Неизвестная команда: ${command ?? '(нет)'}\nДоступно: start | goto | status | reset | report | check | coverage | selfcheck\n`,
+          stdout: `Неизвестная команда: ${command ?? '(нет)'}\nДоступно: start | goto | status | reset | report | check | coverage | selfcheck | complete | exit\n`,
         };
     }
   } catch (err) {

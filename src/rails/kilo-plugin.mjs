@@ -86,7 +86,7 @@ export function createHooks(directory, env = {}) {
         }
 
         const state = loadState(root, sessionId);
-        if (!state || !state.skill) return;
+        if (!state || !state.skill || state.completed) return;
 
         let graph;
         try {

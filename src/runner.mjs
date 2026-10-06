@@ -55,6 +55,7 @@ const KILO_FINAL_READ_DELAY_MS = 300;
 import { loadRailsConfig } from './rails/rails-config.mjs';
 import { check as checkRailsOutput } from './rails/output-check.mjs';
 import { loadSkillRuntime } from './rails/core.mjs';
+import { recordCompletion } from './rails/completion.mjs';
 import { evaluate as evaluateWithModel, validateInput } from './lib/model-evaluate.mjs';
 import { ModelClientError, assertModelUrl, redactNetworkDetail, imageBatches } from './lib/model-client.mjs';
 import { buildCliJudgePrompt, parseJudgeScore, parseJudgeExtras } from './lib/skill-judge.mjs';
@@ -3491,7 +3492,18 @@ class StageExecutor {
       verdict = { ok: false, missing: ['ни одного вызова инструмента под рельсами'] };
     } else {
       verdict = checkRailsOutput(result.output || '', config, state);
-      if (verdict.ok && !verdict.outcome) return result;
+      if (verdict.ok && !verdict.outcome) {
+        // Проверенный финальный ответ в терминале — подтверждение завершения
+        // (дефект 2026-10-06: положительный результат проверки не сохранялся,
+        // и завершённая сессия не могла выйти из роли штатно). recordCompletion
+        // сам проверяет терминал/приостановку/целостность runtime и не бросает.
+        try {
+          recordCompletion({ root: this.projectRoot, state, source: 'runner', answer: result.output || '' });
+        } catch {
+          // подтверждение не должно ломать успешный ответ стадии
+        }
+        return result;
+      }
       if (verdict.ok && verdict.outcome) {
         // Приостановка RAILS_OUTCOME (blocked/needs_user) — не успех и не повод для
         // повтора или передачи другому исполнителю: работа ждёт владельца

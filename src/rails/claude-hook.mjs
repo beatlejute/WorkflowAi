@@ -18,6 +18,7 @@ import { findProjectRoot } from '../lib/find-root.mjs';
 import { decide, loadSkillRuntime } from './core.mjs';
 import { fromClaude } from './actions.mjs';
 import { loadState, saveState } from './state.mjs';
+import { recordCompletion } from './completion.mjs';
 import { realpathDeep } from './paths.mjs';
 import { appendEvent } from './journal.mjs';
 import { check as outputCheck, lastAssistantText } from './output-check.mjs';
@@ -116,7 +117,7 @@ function buildPostToolContext(input, env) {
   if (!sessionId) return null;
 
   const state = loadState(root, sessionId);
-  if (!state || !state.skill) return null;
+  if (!state || !state.skill || state.completed) return null;
 
   let graph;
   try {
@@ -171,6 +172,8 @@ function handleStop(input, env) {
 
   const state = loadState(root, sessionId);
   if (!state || !state.skill) return null;
+  // Штатный выход: остановки завершённой сессии не проверяются и не блокируются.
+  if (state.completed) return null;
 
   let config;
   try {
@@ -191,7 +194,20 @@ function handleStop(input, env) {
 
   const text = lastAssistantText((input && input.transcript_path) || '');
   const result = outputCheck(text, config, state);
-  if (result.ok) return null;
+  if (result.ok) {
+    // Положительная проверка в терминале — единственное доказательство завершения:
+    // сохранить сразу (дефект 2026-10-06: «pass» не сохранялся, и завершённая
+    // сессия оставалась под рельсами без штатного выхода). Приостановка
+    // RAILS_OUTCOME — не завершение, подтверждения она не создаёт.
+    if (!result.outcome) {
+      try {
+        recordCompletion({ root, state, source: 'stop-hook', answer: text });
+      } catch {
+        // подтверждение не должно ломать разрешённую остановку
+      }
+    }
+    return null;
+  }
 
   const node = state.node;
   const key = `stop_blocks:${node}`;
@@ -281,6 +297,8 @@ function handleUserPromptSubmit(input, env) {
   let label = '';
   if (root && sessionId) {
     const state = loadState(root, sessionId);
+    // Штатный выход: рельсы завершённую сессию не комментируют.
+    if (state?.completed) return null;
     if (state && state.skill) {
       state.flags ??= {};
       state.flags.correction_pending = true;
@@ -369,6 +387,12 @@ function handleSessionStart(input, env) {
   if (!state || !state.skill) {
     const hint = runSkill ? runSkillHint(root, runSkill, sessionId) : null;
     return reply(hint || `RAILS: сессия ${sessionId}, проект ${root}; скил не запущен — node .workflow/src/rails/cli.mjs start <skill> --session ${sessionId}`);
+  }
+
+  // Штатный выход: подсказок старой роли нет и из окружения она не
+  // возвращается — сессия завершилась, состояние и история сохранены.
+  if (state.completed) {
+    return reply(`RAILS: сессия ${sessionId}; скил ${state.skill} завершён штатным выходом (${state.completed.t}) — рельсы не активны`);
   }
 
   let label = '';
