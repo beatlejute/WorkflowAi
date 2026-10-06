@@ -14,12 +14,51 @@ tags: [metrics, review, rework, consistency, regression-guard]
 severity: high
 
 scenario:
-  system_prompt_file: "../../SKILL.md"
+  system_prompt_file: "../fixtures/TC-ANALYZE-REPORT-011-decision-context.md"
   extra_instructions: |
-    (L0-only тест: scenario не запускает агентов, проверяются только static
-    assertions над содержимым рабочих файлов скила.)
+    Проанализируй качество ревью PLAN-S011 по полному inline-входу.
+    Это синтетический регрессионный сценарий, не исторические документы.
+    Скрипт уже выполнен: используй его значения, не пересчитывай метрики
+    собственным кодом. Не ищи реальные проекты, не запускай команды/агентов
+    и не меняй файлы. В финальном ответе укажи метрики с источником,
+    разбери каждый reworked_ticket и его возвраты по строкам лога.
+    При отсутствии evidence явно ограничь атрибуцию и уверенность.
+    Отделяй число тикетов с возвратами от числа failed-ревью.
+  inputs:
+    - kind: inline
+      as: synthetic_regression_fixture
+      content: |
+        calc-plan-metrics.js PLAN-S011, успешный JSON из ---RESULT---:
+        {"total_tickets":6,"distribution":{"done":5,"review":1},
+         "reviewed":4,"passed_first":2,"first_pass_rate":50,
+         "rework_count":2,"rework_rate":50,"failed_reviews_total":3,
+         "reworked_tickets":[
+          {"id":"IMPL-S011-A","failed_reviews":2,
+           "summaries":["нет evidence DoD","неверный RESULT"]},
+          {"id":"IMPL-S011-B","failed_reviews":1,
+           "summaries":["замечание ревью"]}]}
+        Источник метрик — таблицы «## Ревью»:
+        IMPL-S011-A, done: failed; failed; passed.
+        IMPL-S011-B, review: failed; повторного вердикта ещё нет.
+        QA-S011-C и QA-S011-D, done: passed.
+        DOCS-S011-E и DOCS-S011-F, done: строк passed/failed нет.
+        pipeline_synthetic.log:101 ticket_id=IMPL-S011-A
+        stage=review-result decision=failed reason=dod_evidence_missing
+        pipeline_synthetic.log:142 ticket_id=IMPL-S011-A
+        stage=review-result decision=failed reason=result_block_invalid
+        По IMPL-S011-B предоставленный лог записей не содержит.
+        REPORT-S011, предыдущий отчёт:
+        «First-Pass 100%; rework_count 0. Возвраты IMPL-S011-A вызвал
+        check-conditions; IMPL-S011-B — дефект execute-task, confidence HIGH».
 
 assertions:
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/review-rework-metrics.md"
+      criterion: "Верно ли использованы метрики скрипта и атрибутирован каждый возврат по источникам?"
+      pass_threshold: 5
+      trials: 3
+      aggregate: majority
   static:
     - kind: skill_contains
       file: "scripts/calc-plan-metrics.js"
@@ -103,4 +142,4 @@ assertions:
       reason: "Ретроспектива берёт те же метрики из скрипта."
 
 execution:
-  timeout_s: 60
+  timeout_s: 1200

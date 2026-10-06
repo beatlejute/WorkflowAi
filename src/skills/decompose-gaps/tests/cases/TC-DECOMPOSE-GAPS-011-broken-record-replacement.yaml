@@ -12,12 +12,48 @@ tags: [scope-check, recheck, supersedes, check-record, regression-guard]
 severity: high
 
 scenario:
-  system_prompt_file: "../../SKILL.md"
+  system_prompt_file: "../fixtures/TC-DECOMPOSE-GAPS-011-decision-context.md"
   extra_instructions: |
-    (L0-only тест: scenario не запускает агентов, проверяются только static
-    assertions над содержимым рабочих файлов скила.)
+    По полному inline-входу дай текстовую декомпозицию U1–U4: необходимые
+    работы, поля frontmatter, критерии DoD и прежние/новые записи проверок.
+    Это синтетический регрессионный сценарий, не исторические документы.
+    Не ищи реальные проекты, не запускай команды/агентов, не меняй файлы.
+    Имена новых работ символические. Не выдавай их за выделенные ID.
+    Не пиши, что тикеты созданы или старые записи уже изменены.
+  inputs:
+    - kind: inline
+      as: synthetic_regression_fixture
+      content: |
+        PLAN status: in_progress, не completed. Все часы — одного дня.
+        REPORT содержит перечисленные U в находках текущего прогона, не в рекомендациях.
+        PLAN-S011: QA-A в blocked/, dod_format: 2. Исправление найденных
+        дефектов и повторная проверка в scope; исключений нет.
+        U1: критерий DoD 1 дословно «Сценарий проверен, фактический итог записан».
+        check: npm test; expect: stdout matches /0 failed/.
+        blocked_reason: dod_check_failed: stdout expectation mismatch.
+        evidence: exit_code 1; stdout «12 failed; title mismatch; popup fails».
+        Артефакт старой проверки: qa/QA-A/result.json.
+        Требуется предложить новую запись, не запускать её сейчас.
+        U2: остальные критерии дословно:
+        DoD 2 «Полный npm test зелёный»: check npm test, expect exit 0.
+        DoD 3 «Снимок popup записан»: visual qa/QA-A/popup-*.png.
+        Эти записи перенесены из плана. После исправлений npm test может
+        стать зелёным ещё до работы новой QA. Новая QA обозначается QA-NEW.
+        U3: дефекты title и popup подтверждены stdout DoD 1. FIX-OPEN в ready/
+        исправляет title и содержит unblocks: [QA-A]; исправления popup нет.
+        Существующие тикеты редактировать нельзя. Других исправлений нет.
+        U4: отдельный QA-B в blocked/ из-за собственной записи проверки;
+        QA-B-RETRY в ready/ уже содержит supersedes: [QA-B].
+        Gap QA-B повторно поступил в разбор; причин править retry не дано.
 
 assertions:
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/broken-record-replacement.md"
+      criterion: "Построена ли замена сломанной проверки без потери критериев, продуктовых провалов и существующих зависимостей?"
+      pass_threshold: 5
+      trials: 3
+      aggregate: majority
   static:
     # P10R4 — распознавание
     - kind: skill_contains
@@ -211,4 +247,4 @@ assertions:
       reason: "Запрет процессных gaps не отсекает сломанную запись."
 
 execution:
-  timeout_s: 60
+  timeout_s: 1200

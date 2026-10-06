@@ -10,12 +10,39 @@ tags: [scope-check, success-criteria, regression-guard]
 severity: high
 
 scenario:
-  system_prompt_file: "../../SKILL.md"
+  system_prompt_file: "../fixtures/TC-DECOMPOSE-GAPS-010-decision-context.md"
   extra_instructions: |
-    (L0-only тест: scenario не запускает агентов, проверяется только static
-    assertion над содержимым рабочих файлов скила.)
+    Дай текстовую декомпозицию U1–U4 по полному inline-входу:
+    scope, источник gap, вид необходимой работы и проверяемый DoD.
+    Это синтетический регрессионный сценарий, не исторические документы.
+    Не ищи реальные проекты, не запускай команды/агентов, не меняй файлы.
+    Новые имена символические, не выделенные ID и не созданные тикеты.
+  inputs:
+    - kind: inline
+      as: synthetic_regression_fixture
+      content: |
+        PLAN status: in_progress, не completed. Все часы — одного дня.
+        REPORT содержит перечисленные U в находках текущего прогона, не в рекомендациях.
+        PLAN-S010: все тикеты в done/. Исправления и проверки критериев
+        в scope, кроме явно исключённого исправления цвета значка.
+        U1: критерий S1 «Полный npm test зелёный». Отдельной задачи нет.
+        Последний записанный прогон: exit 1, 12 failed, 1464 passed.
+        Исполнитель: «pre-existing, not blocking». Исправлений нет.
+        U2: критерий S2 «Ручная проверка открытия модалки подтверждена».
+        Отдельной задачи нет. Ни один результат проверки не записан.
+        U3: критерий S3 «Значок синего цвета». Последний снимок показывает
+        серый значок. «Исключено из scope»: исправление цвета значка.
+        U4: запрос добавить новый режим темы. Такого функционала нет
+        ни в задачах, ни в критериях успеха плана.
 
 assertions:
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/success-criterion-gap.md"
+      criterion: "Различены ли опровергнутый и неподтверждённый критерии с сохранением исключений scope?"
+      pass_threshold: 5
+      trials: 3
+      aggregate: majority
   static:
     - kind: skill_contains
       file: "algorithms/scope-check.md"
@@ -61,3 +88,6 @@ assertions:
       file: "workflows/decompose.md"
       pattern: "P10S3\\[\"[^\"]*секцию «Критерии успеха» \\(gap о её пункте, который записанные данные опровергают или не подтверждают, принадлежит плану и без отдельной задачи\\)"
       reason: "Шаг чтения плана извлекает «Критерии успеха» — без неё проверка шага 2 не найдёт пункт."
+
+execution:
+  timeout_s: 1200

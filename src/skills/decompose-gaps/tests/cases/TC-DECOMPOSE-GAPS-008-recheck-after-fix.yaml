@@ -10,12 +10,41 @@ tags: [scope-check, recheck, regression-guard]
 severity: high
 
 scenario:
-  system_prompt_file: "../../SKILL.md"
+  system_prompt_file: "../fixtures/TC-DECOMPOSE-GAPS-008-decision-context.md"
   extra_instructions: |
-    (L0-only тест: scenario не запускает агентов, проверяется только static
-    assertion над содержимым рабочих файлов скила.)
+    По полному inline-входу дай текстовую декомпозицию U1–U4.
+    Это синтетический регрессионный сценарий, не исторический факт.
+    Не ищи реальные проекты, не запускай команды/агентов, не меняй файлы.
+    Для каждого случая реши, остался ли gap и какие работы нужны;
+    покажи dependencies/tasks_completed проверки. Новые имена символические,
+    не выдавай их за выделенные ID или реально созданные тикеты.
+  inputs:
+    - kind: inline
+      as: synthetic_regression_fixture
+      content: |
+        PLAN status: in_progress, не completed. Все часы — одного дня.
+        REPORT содержит перечисленные U в находках текущего прогона, не в рекомендациях.
+        PLAN-S008: T1 — корректный значок вкладки; исправления и проверка
+        в scope. QA-A/B/C/D закрыты в done/; каждый записал дефект
+        «значок вкладки не обновляется».
+        U1: QA-A записал дефект в 03:46; FIX-A готов в 07:32.
+        Gap: после FIX-A сценарий не перепроверен. Иных проверок нет.
+        U2: QA-B записал дефект в 03:46; FIX-B готов в 07:32;
+        QA-B2 записал проверку того же значка PASS в 08:10.
+        Gap: после FIX-B сценарий не перепроверен.
+        U3: QA-C записал дефект в 03:46; QA-C2 записал PASS в 04:10;
+        FIX-C готов в 07:32. Gap: после FIX-C сценарий не перепроверен.
+        U4: QA-D записал дефект в 03:46; исправления нет.
+        Gap: исправить найденный дефект значка и проверить сценарий.
 
 assertions:
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/recheck-after-fix.md"
+      criterion: "Верно ли учтена хронология исправления и повторной проверки во всех четырёх случаях?"
+      pass_threshold: 5
+      trials: 3
+      aggregate: majority
   static:
     - kind: skill_contains
       file: "workflows/decompose.md"
@@ -33,3 +62,6 @@ assertions:
       file: "algorithms/scope-check.md"
       pattern: "IF gap — deliverable другого тикета \\(создан как часть DoD\\) AND результат того тикета записан после события, от которого возник gap"
       reason: "Алгоритм проверки scope 2 не противоречит узлу P10R1: отказ «deliverable другого тикета» требует более позднего результата."
+
+execution:
+  timeout_s: 1200

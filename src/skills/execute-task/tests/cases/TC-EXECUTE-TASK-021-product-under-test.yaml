@@ -13,12 +13,57 @@ tags: [verification, qa, placeholder, regression-guard]
 severity: critical
 
 scenario:
-  system_prompt_file: "../../SKILL.md"
+  system_prompt_file: "../fixtures/TC-EXECUTE-TASK-021-decision-context.md"
   extra_instructions: |
-    (L0-only тест: scenario не запускает агентов, проверяются только static
-    assertions над содержимым рабочих файлов скила.)
+    По полному inline-входу оцени U1–U4 и подготовь текстовую таблицу
+    «случай → проверка, evidence, pass/fail/не проверено» и необходимые
+    исправления проверки. Это синтетический регрессионный сценарий.
+    Не ищи реальные проекты, не запускай команды/агентов, не меняй файлы.
+    Не выдавай предложенные проверки за выполненные.
+  inputs:
+    - kind: inline
+      as: input_ticket
+      content: |
+        Context:
+          ticket_id: IMPL-S021-CONTRACT
+        
+        ---
+        id: IMPL-S021-CONTRACT
+        status: in-progress
+        parent_plan: PLAN-S021
+        scope: text-only
+        ---
+        # Задание
+        Подготовить текстовое решение U1–U4 по доставленным фактам.
+        ## Definition of Done
+        - [ ] Разобраны U1–U4 с источниками, ограничениями и предлагаемым результатом.
+        - [ ] Предложения не выданы за выполненные проверки или правки.
+        ## Context
+        Полный контекст — следующий synthetic_regression_fixture. Команды и запись файлов запрещены.
+    - kind: inline
+      as: synthetic_regression_fixture
+      content: |
+        U1: критерий — реальный PAC возвращает прокси в порядке A,B,DIRECT.
+        Тест объявляет копию builder, не импортирует продукт, не исполняет
+        реальный PAC и проверяет только copiedBuilder().length > 0.
+        U2: критерий — смена настройки вызывает ровно один reload.
+        Тест: const reloadCount = 1; expect(reloadCount).toBe(1).
+        Наблюдений за продуктом нет. Требуется предложить измерение.
+        U3: в среде из плана реальный продукт запускали: загрузка FAIL.
+        Заведомо рабочий эталон той же попыткой в той же среде: PASS.
+        Исполнитель предлагает списать сбой на ограничение окружения.
+        U4: в среде из плана реальный продукт и заведомо рабочий эталон
+        при одинаковой попытке запуска получили launch denied до загрузки.
+        Критерий тикета — успешная загрузка продукта. Иных evidence нет.
 
 assertions:
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/product-under-test.md"
+      criterion: "Отличена ли проверка продукта от заглушек и доказанного ограничения среды?"
+      pass_threshold: 5
+      trials: 3
+      aggregate: majority
   static:
     - kind: skill_contains
       file: "workflows/execute.md"
@@ -94,4 +139,4 @@ assertions:
       reason: "Стратегия не противоречит P4R3 и P3R2."
 
 execution:
-  timeout_s: 60
+  timeout_s: 1200

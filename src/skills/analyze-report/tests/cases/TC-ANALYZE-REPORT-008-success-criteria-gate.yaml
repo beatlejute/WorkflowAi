@@ -10,12 +10,41 @@ tags: [gaps, completion, success-criteria, regression-guard]
 severity: high
 
 scenario:
-  system_prompt_file: "../../SKILL.md"
+  system_prompt_file: "../fixtures/TC-ANALYZE-REPORT-008-decision-context.md"
   extra_instructions: |
-    (L0-only тест: scenario не запускает агентов, проверяется только static
-    assertion над содержимым рабочих файлов скила.)
+    Проанализируй завершённость PLAN-S008 в режиме PROGRESS.
+    Это синтетический регрессионный сценарий по мотивам указанного инцидента,
+    не исторические документы. Inline-данные — полный вход проверки.
+    Не ищи реальные проекты, не запускай команды или агентов, не меняй файлы.
+    В финальном ответе разбери каждый критерий с источником и заверши
+    блоком ---RESULT--- с status и gaps по формату скила.
+    В gaps описывай пробелы, не решения о создании тикетов.
+  inputs:
+    - kind: inline
+      as: synthetic_regression_fixture
+      content: |
+        PLAN-S008: все четыре тикета в done/, открытых тикетов нет.
+        Критерии успеха:
+        S1. Полный npm test зелёный.
+        S2. Сборка npm run build успешна.
+        S3. Итоговый отчёт подтверждает ручную проверку открытия модалки.
+        Записи в хронологическом порядке:
+        IMPL-S008-A, 2026-09-25: npm test: 0 failed, 1476 passed.
+        IMPL-S008-B, 2026-09-26: модалка переключена на общий загрузчик.
+        FIX-S008, 2026-09-28: npm test: 12 failed, 1464 passed;
+        падения не связаны с задачей. Исправление падений не записано.
+        DOCS-S008, 2026-09-29: npm test: 12 failed, 1464 passed,
+        not blocking PLAN-S008; npm run build: exit 0.
+        Ни один результат не записал ручную проверку открытия модалки.
 
 assertions:
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/success-criteria-gate.md"
+      criterion: "Верно ли определена завершённость по последнему записанному результату каждого критерия?"
+      pass_threshold: 5
+      trials: 3
+      aggregate: majority
   static:
     - kind: skill_contains
       file: "workflows/progress.md"
@@ -41,3 +70,6 @@ assertions:
       file: "SKILL.md"
       pattern: "P6Q1\\{\"[^\"]*has_gaps \\([^)]*пункт «Критерии успеха» плана опровергнут или не подтверждён"
       reason: "Выбор итогового статуса называет невыполненный критерий успеха плана признаком has_gaps."
+
+execution:
+  timeout_s: 1200

@@ -12,12 +12,44 @@ tags: [gaps, blocked, check-record, regression-guard]
 severity: high
 
 scenario:
-  system_prompt_file: "../../SKILL.md"
+  system_prompt_file: "../fixtures/TC-ANALYZE-REPORT-009-decision-context.md"
   extra_instructions: |
-    (L0-only тест: scenario не запускает агентов, проверяются только static
-    assertions над содержимым рабочих файлов скила.)
+    Проанализируй PLAN-S009 в режиме PROGRESS по полному inline-входу.
+    Это синтетический регрессионный сценарий, не исторические документы.
+    Не ищи реальные проекты, не запускай команды, проверки или агентов,
+    не меняй файлы. Разбери каждый пункт DoD по evidence: блокировка
+    собственной записью или продуктовый дефект. Привяжи вывод к тикету,
+    пункту, ожиданию, blocked_reason и выводу evidence. Заверши финальный
+    ответ блоком ---RESULT--- с status/gaps. В gaps — пробелы, не решения.
+  inputs:
+    - kind: inline
+      as: synthetic_regression_fixture
+      content: |
+        PLAN-S009, T1: проверить тестовый прогон и отсутствие запрещённого
+        предупреждения. Три QA-тикета в blocked/, у каждого DoD 1.
+        QA-S009-A: check npm test, expect stdout matches /0 failed/.
+        blocked_reason: dod_check_failed: stdout expectation mismatch.
+        evidence QA-S009-A.md.json: status failed; exit_code 0;
+        stdout: «✓ suite A passed; ✓ suite B passed; Tests: 20 passed».
+        QA-S009-B: check npm test, expect exit 0.
+        blocked_reason: dod_check_failed: expected exit 0, got 1.
+        evidence QA-S009-B.md.json: status failed; exit_code 1;
+        stdout: «Tests: 12 failed, 1464 passed».
+        Исполнитель: «Падения посторонние, не связаны с задачей».
+        QA-S009-C: check check-warning, expect stdout not contains UNSAFE_WARNING.
+        blocked_reason: dod_check_failed: stdout expectation mismatch.
+        evidence QA-S009-C.md.json: status failed; exit_code 0;
+        stdout: «UNSAFE_WARNING». DoD запрещает UNSAFE_WARNING в продукте.
+        Исправлений и решений стейкхолдера нет.
 
 assertions:
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/blocked-by-own-record.md"
+      criterion: "Верно ли различены блокировка записью проверки и продуктовые провалы по evidence DoD?"
+      pass_threshold: 5
+      trials: 3
+      aggregate: majority
   static:
     - kind: skill_contains
       file: "SKILL.md"
@@ -65,4 +97,4 @@ assertions:
       reason: "Справочник полей отчёта называет данные и их источник."
 
 execution:
-  timeout_s: 60
+  timeout_s: 1200

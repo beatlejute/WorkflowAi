@@ -11,13 +11,45 @@ tags: [evidence-review, dod-evidence-scale, judge]
 severity: medium
 
 scenario:
-  system_prompt_file: "../../SKILL.md"
+  system_prompt_file: "../fixtures/TC-REVIEW-RESULT-014-decision-context.md"
   extra_instructions: |
-    (L0-only тест: scenario не запускает агентов, проверяются только static
-    assertions над строками таблицы шкалы — модель ревью получает только их,
-    проза вокруг таблицы балл не назначает.)
+    Оцени каждый пункт U1–U4 только по полному inline-evidence: назови
+    уровень шкалы DoD для prose либо precheck для visual, pass/fail (порог 4) и обоснование границы доказанности.
+    Это синтетический регрессионный сценарий, не исторические документы.
+    Не ищи реальные проекты, не запускай команды/агентов, не меняй файлы.
+    Шкала DoD оценивает доказательства пункта, а не качество этого ответа.
+  inputs:
+    - kind: inline
+      as: synthetic_regression_fixture
+      content: |
+        U1: visual «Изображение магазина имеет размеры 1280×800».
+        Evidence: README, добавленный этим же тикетом: «Измерено: 1280×800»;
+        код теста assert.equal(width, 1280); assert.equal(height, 800).
+        Изображения, его байтов и вывода запуска теста нет.
+        verify-artifacts: visual image_missing, status image_missing;
+        prepare-review: evidence_failed_items, вопрос модели не создаётся.
+        U2: prose «Политика описывает всё, что расширение хранит».
+        Evidence: дифф политики «Настройки хранятся локально».
+        Реальный код хранилища и результаты его проверки не представлены.
+        U3: prose «Очистка маршрутизации удаляет обе карты кэша».
+        Evidence кода: onReset вызывает clearRoutingCache();
+        clearRoutingCache вызывает clearAll();
+        clearAll вызывает routes.clear() и decisions.clear().
+        routes и decisions — две карты кэша; иных путей или карт нет.
+        Запуска не было. Вывод следует из полной цепочки кода.
+        U4: prose «Политика верно описывает место хранения настроек».
+        Evidence политики: «Настройки хранятся локально, синхронизации нет».
+        Evidence всей операции хранения: browser.storage.local.set({settings});
+        иных операций хранения или синхронизации в данном сценарии нет.
 
 assertions:
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/scale-self-written-fact.md"
+      criterion: "Ограничены ли оценки пунктов реально доставленным evidence без подмены объекта самоописанием?"
+      pass_threshold: 5
+      trials: 3
+      aggregate: majority
   static:
     - kind: skill_contains
       file: "knowledge/dod-evidence-scale.md"
@@ -45,4 +77,4 @@ assertions:
       reason: "Строка уровня 5: у пункта о соответствии уровень 5 — только когда в evidence прямо видны обе стороны сравнения."
 
 execution:
-  timeout_s: 60
+  timeout_s: 1200

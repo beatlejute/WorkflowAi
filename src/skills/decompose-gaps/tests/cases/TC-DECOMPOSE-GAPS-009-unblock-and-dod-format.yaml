@@ -12,12 +12,40 @@ tags: [recheck, unblocks, dod-format, regression-guard]
 severity: high
 
 scenario:
-  system_prompt_file: "../../SKILL.md"
+  system_prompt_file: "../fixtures/TC-DECOMPOSE-GAPS-009-decision-context.md"
   extra_instructions: |
-    (L0-only тест: scenario не запускает агентов, проверяется только static
-    assertion над содержимым рабочих файлов скила.)
+    По полному inline-входу дай текстовую декомпозицию U1–U4 с причиной
+    каждой выбранной ветки, новыми работами и полями frontmatter.
+    Это синтетический регрессионный сценарий, не исторические документы.
+    Не ищи реальные проекты, не запускай команды/агентов, не меняй файлы.
+    Новые имена символические, не выделенные ID и не созданные тикеты.
+    Для каждой новой проверки укажи dependencies и tasks_completed.
+  inputs:
+    - kind: inline
+      as: synthetic_regression_fixture
+      content: |
+        PLAN status: in_progress, не completed. Все часы — одного дня.
+        REPORT содержит перечисленные U в находках текущего прогона, не в рекомендациях.
+        PLAN-S009: исправления всех перечисленных дефектов и проверки
+        в scope. Собственные записи QA корректны. Новые работы имеют
+        проверки DoD, но старый шаблон не содержит поля dod_format.
+        U1: QA-A в blocked/ из-за D1 и D2. FIX-A1 для D1 в done/;
+        для D2 исправления нет. Перепроверки нет.
+        U2: QA-B в blocked/ из-за D3. FIX-B в done/. QA-B2 в done/
+        записал PASS после FIX-B, но supersedes отсутствует.
+        U3: QA-C в blocked/ из-за D4. FIX-C в ready/ уже содержит
+        unblocks: [QA-C]; иных препятствий нет.
+        U4: QA-D в blocked/ из-за D5. FIX-D в blocked/ содержит
+        unblocks: [QA-D]; замены FIX-D нет.
 
 assertions:
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/unblock-and-dod-format.md"
+      criterion: "Выбрана ли единая корректная ветка для каждого заблокированного тикета без дублирования работ?"
+      pass_threshold: 5
+      trials: 3
+      aggregate: majority
   static:
     - kind: skill_contains
       file: "workflows/decompose.md"
@@ -147,3 +175,6 @@ assertions:
       file: "algorithms/scope-check.md"
       pattern: "\\| Тикет тестирования в blocked/ уже назван в `supersedes` повторной проверки, которая сама не готова \\(blocked/ или открыта\\) \\| В scope, новый тикет для него не нужен"
       reason: "Граничный случай цепочки согласован с P10R2."
+
+execution:
+  timeout_s: 1200
