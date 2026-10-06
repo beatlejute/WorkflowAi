@@ -23,7 +23,7 @@
 // честности, не криптография — см. README §16.
 
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 import { loadSkillRuntime } from './core.mjs';
@@ -265,7 +265,7 @@ export function invalidateCompletion({ root, state, cause, now = Date.now() }) {
   // а видимый неудавшийся след: вызывающий блокирует остановку.
   let lock;
   try {
-    lock = acquireExitLock(root, state.session, { now });
+    lock = acquireExitLock(root, state.session);
   } catch (err) {
     return { removed: false, attempted: true, traced: false, error: err };
   }
@@ -434,12 +434,26 @@ export function verifyExit({ root, session }) {
   return { ok: true, state, completion };
 }
 
+// Жив ли процесс-владелец токена. process.kill(pid, 0): ESRCH — мёртв,
+// EPERM — жив (существование при чужих правах).
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
 // Замок выхода: mkdir без recursive (существующий каталог — EEXIST), внутри —
-// файл-токен владельца. Снятие удаляет токен и каталог только у СВОЕГО замка:
-// каталог с чужим токеном rmdir не берёт (не пуст), поэтому при гонке двух
-// «похитителей» протухшего замка владение остаётся ровно у одного
-// (ревью 2026-10-06). Возвращает {busy: true} либо {lock, token, release}.
-function acquireExitLock(root, session, { now = Date.now() } = {}) {
+// файл-токен владельца с его pid. Пока владелец ЖИВ, замок не похищается
+// вовсе: пауза процесса (своп, отладчик, нагрузка) не делает чужой замок
+// «протухшим» — вся гонка пауз между выходом и инвалидацией упирается в
+// чистые busy/отказы (ревью 2026-10-06, девятый круг). Замок мёртвого
+// владельца похищается атомарным переименованием; у двух похитителей успех
+// ровно у одного. Снятие удаляет токен и каталог только у СВОЕГО замка.
+// Возвращает {busy: true, stealFailed?} либо {lock, token, release}.
+function acquireExitLock(root, session) {
   const lockDir = join(root, '.workflow', 'state', 'rails');
   const lock = join(lockDir, `.exit-lock-${session}`);
   mkdirSync(lockDir, { recursive: true });
@@ -449,16 +463,24 @@ function acquireExitLock(root, session, { now = Date.now() } = {}) {
     created = true;
   } catch (err) {
     if (err.code !== 'EEXIST') throw err;
-    let stale = false;
+    // Живой владелец (любой токен с живым pid) — занято; без токенов или с
+    // мёртвым владельцем — похищение.
+    let ownerAlive = false;
     try {
-      stale = now - statSync(lock).mtimeMs > 10000;
+      for (const name of readdirSync(lock)) {
+        const m = /^(\d+)\.[0-9a-f]+\.token$/.exec(name);
+        if (m && pidAlive(Number(m[1]))) {
+          ownerAlive = true;
+          break;
+        }
+      }
     } catch {
       return { busy: true };
     }
-    if (!stale) return { busy: true };
+    if (ownerAlive) return { busy: true };
     // Похищение атомарно переименованием: у двух похитителей успех ровно у
     // одного, второй получает ENOENT или видит свежий каталог. Сбой самого
-    // переименования (доступ) — не «занято», а_fault окружения: вызывающий
+    // переименования (доступ) — не «занято», а fault окружения: вызывающий
     // делает его видимым (ревью 2026-10-06).
     const aside = `${lock}.${process.pid}.${randomBytes(4).toString('hex')}.stale`;
     try {
@@ -481,7 +503,7 @@ function acquireExitLock(root, session, { now = Date.now() } = {}) {
   if (!created) return { busy: true };
   const token = join(lock, `${process.pid}.${randomBytes(4).toString('hex')}.token`);
   try {
-    writeFileSync(token, String(now), 'utf8');
+    writeFileSync(token, String(process.pid), 'utf8');
   } catch (err) {
     try {
       unlinkSync(token);
@@ -537,7 +559,7 @@ export function performExit({ root, session, now = Date.now() }) {
   // владение остаётся ровно у одного (ревью 2026-10-06).
   let lock;
   try {
-    lock = acquireExitLock(root, session, { now });
+    lock = acquireExitLock(root, session);
   } catch (err) {
     return failWithTemplate(`замок выхода не создан: ${err && err.message ? err.message : err}`);
   }

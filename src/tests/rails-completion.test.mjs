@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readdirSync, copyFileSync, utimesSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readdirSync, copyFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 // Изоляция памяти «сессия → корень» — как в rails-claude-hook.test.mjs.
@@ -530,21 +531,24 @@ test('cli exit: повторный выход и параллельный кон
   });
 });
 
-test('замок выхода: чужой живой замок — «повтори команду», протухший — снимается', () => {
+test('замок выхода: живой владелец — «повтори команду», мёртвый — похищается', () => {
   withProject(({ root }) => {
     const sessionId = pinnedSession(root, 'P5S1');
     assert.equal(recordCompletion({ root, state: readSession(root, sessionId), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
     writeGrant(root, sessionId, grantTemplate(readSession(root, sessionId).completion, 1));
     const lock = join(root, '.workflow', 'state', 'rails', `.exit-lock-${sessionId}`);
     mkdirSync(lock, { recursive: true });
-    // живой замок другого выхода — отказ без потребления разрешения
+    // живой владелец (наш pid) — отказ без потребления разрешения
+    writeFileSync(join(lock, `${process.pid}.abcdef01.token`), String(process.pid), 'utf8');
     let r = performExit({ root, session: sessionId });
     assert.equal(r.ok, false);
     assert.match(r.reason, /другой выход/);
     assert.equal(existsSync(grantPath(root, sessionId)), true);
-    // протухший (старше 10 с) — снимается, выход проходит
-    const stale = new Date(Date.now() - 20000);
-    utimesSync(lock, stale, stale);
+    // мёртвый владелец — замок похищается, выход проходит
+    const dead = spawnSync(process.execPath, ['-e', '']);
+    const deadPid = dead.pid;
+    rmSync(join(lock, `${process.pid}.abcdef01.token`));
+    writeFileSync(join(lock, `${deadPid}.abcdef02.token`), String(deadPid), 'utf8');
     r = performExit({ root, session: sessionId });
     assert.equal(r.ok, true, r.reason);
     assert.equal(existsSync(lock), false);
@@ -1002,10 +1006,12 @@ test('invalidateCompletion: без подтверждения, на заверш
     // подтверждение завершённой сессии не тронуто
     assert.ok(readSession(root, sessionId).completion);
 
-    // чужой живой замок — снимающий уходит, следующий Stop повторит
+    // чужой живой замок (токен живого pid) — снимающий уходит, следующий Stop повторит
     const sessionId2 = pinnedSession(root, 'P5S1');
     assert.equal(recordCompletion({ root, state: readSession(root, sessionId2), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
-    mkdirSync(join(root, '.workflow', 'state', 'rails', `.exit-lock-${sessionId2}`), { recursive: true });
+    const foreignLock = join(root, '.workflow', 'state', 'rails', `.exit-lock-${sessionId2}`);
+    mkdirSync(foreignLock, { recursive: true });
+    writeFileSync(join(foreignLock, `${process.pid}.abcdef03.token`), String(process.pid), 'utf8');
     const inv = invalidateCompletion({ root, state: readSession(root, sessionId2), cause: 'тест' });
     assert.equal(inv.removed, false);
     assert.equal(inv.busy, true);
