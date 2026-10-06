@@ -541,7 +541,7 @@ test('замок выхода: живой владелец — «повтори 
     writeFileSync(lockFile, String(process.pid), 'utf8');
     let r = performExit({ root, session: sessionId });
     assert.equal(r.ok, false);
-    assert.match(r.reason, /другой выход/);
+    assert.match(r.reason, /выполняются — повтори команду/);
     assert.equal(existsSync(grantPath(root, sessionId)), true);
     // мёртвый владелец — замок похищается, выход проходит
     const dead = spawnSync(process.execPath, ['-e', '']);

@@ -23,7 +23,7 @@
 // честности, не криптография — см. README §16.
 
 import { createHash, randomBytes } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 import { loadSkillRuntime } from './core.mjs';
@@ -291,7 +291,15 @@ export function invalidateCompletion({ root, state, cause, now = Date.now() }) {
     // замка сохранение запрещено, подтверждение в памяти восстанавливается —
     // иначе выход, похитивший замок мёртвого владельца, встал бы на неснятое
     // подтверждение (ревью 2026-10-06, девятый круг).
-    if (!existsSync(lock.token) || readFileSync(lock.token, 'utf8') !== String(process.pid)) {
+    try {
+      if (!existsSync(lock.token) || readFileSync(lock.token, 'utf8') !== String(process.pid)) {
+        state.completion = completion;
+        return { removed: false, stolen: true };
+      }
+    } catch {
+      // клейм не прочитался — своего владения доказать нельзя, сохранение
+      // запрещено: подтверждение в памяти восстанавливается, следующий Stop
+      // с тем же исходом повторит
       state.completion = completion;
       return { removed: false, stolen: true };
     }
@@ -500,14 +508,37 @@ function acquireExitLock(root, session) {
       owner = null;
     }
     if (owner === null || pidAlive(owner)) return { busy: true };
-    // Владелец мёртв: похищение атомарным переименованием файла. У двух
-    // похитителей успех ровно у одного — у второго ENOENT; новый клейм после
-    // этого снова проходит через 'wx' (ревью 2026-10-06, одиннадцатый круг).
+    // Владелец мёртв: похищение атомарным переименованием файла, решение —
+    // ПО ПЕРЕИМЕНОВАННОЙ КОПИИ: пока мы спали, путь мог сменить владельца.
+    // Живой клейм в копии — вернуть на место (не выйдет — владелец заметит
+    // потерю содержания своими перепроверками) и уйти в busy; мёртвый —
+    // убрать и претендовать через 'wx' (у двух похитителей успех ровно у
+    // одного; ревью 2026-10-06, одиннадцатый и двенадцатый круги).
     const aside = `${lockFile}.${process.pid}.${randomBytes(4).toString('hex')}.stale`;
     try {
       renameSync(lockFile, aside);
     } catch {
       return { busy: true, stealFailed: true };
+    }
+    let asideOwner = null;
+    try {
+      const raw = readFileSync(aside, 'utf8').trim();
+      const pid = Number(raw);
+      if (Number.isInteger(pid) && pid > 0) asideOwner = pid;
+    } catch {
+      asideOwner = null;
+    }
+    if (asideOwner !== null && pidAlive(asideOwner)) {
+      try {
+        renameSync(aside, lockFile);
+      } catch {
+        try {
+          rmSync(aside, { force: true });
+        } catch {
+          // владелец заметит потерю содержания своими перепроверками
+        }
+      }
+      return { busy: true };
     }
     try {
       rmSync(aside, { force: true });
@@ -552,8 +583,8 @@ export function performExit({ root, session, now = Date.now() }) {
   }
   if (lock.busy) {
     return failWithTemplate(lock.stealFailed
-      ? 'замок выхода повреждён (сбой доступа к .workflow/state) — устраните доступ и повтори команду'
-      : 'другой выход этой сессии выполняется — повтори команду');
+      ? 'замок выхода не захвачен (гонка похищения или сбой доступа) — повтори команду'
+      : 'выход или снятие подтверждения этой сессии выполняются — повтори команду');
   }
   try {
     return exitLocked({ root, session, completion, path, token: lock.token, failWithTemplate, now });
