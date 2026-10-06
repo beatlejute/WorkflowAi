@@ -962,16 +962,22 @@ test('неснятое подтверждение: надгробие и жур�
   withProject(({ root }) => {
     const sessionId = pinnedSession(root, 'P5S1');
     assert.equal(recordCompletion({ root, state: readSession(root, sessionId), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
+    const digest = completionDigest(readSession(root, sessionId).completion);
+    const tomb = join(root, '.workflow', 'state', 'rails', `.invalid-${sessionId}.json`);
 
-    // надгробие: exit отказывает, пока инвалидация не сохранится
-    writeFileSync(join(root, '.workflow', 'state', 'rails', `.invalid-${sessionId}.json`), JSON.stringify({ version: 1, session: sessionId }), 'utf8');
+    // надгробие ДРУГОГО подтверждения exit не блокирует
+    writeFileSync(tomb, JSON.stringify({ version: 1, session: sessionId, completion_sha256: 'c'.repeat(64) }), 'utf8');
+    assert.equal(verifyExit({ root, session: sessionId }).ok, true);
+
+    // надгробие этого подтверждения — отказ
+    writeFileSync(tomb, JSON.stringify({ version: 1, session: sessionId, completion_sha256: digest }), 'utf8');
     let v = verifyExit({ root, session: sessionId });
     assert.equal(v.ok, false);
     assert.match(v.reason, /неснятое подтверждение/);
 
-    // журнальный след без надгробия — тоже отказ
-    rmSync(join(root, '.workflow', 'state', 'rails', `.invalid-${sessionId}.json`));
-    appendEvent(root, { type: 'error', session: sessionId, message: 'invalidation: подтверждение не снято на диске (тест) — повторная остановка с тем же исходом снимет снова' });
+    // журнальный след без надгробия — тоже отказ (по хешу подтверждения)
+    rmSync(tomb);
+    appendEvent(root, { type: 'error', session: sessionId, completion_sha256: digest, message: 'invalidation: подтверждение не снято на диске (тест) — повторная остановка с тем же исходом снимет снова' });
     v = verifyExit({ root, session: sessionId });
     assert.equal(v.ok, false);
     assert.match(v.reason, /неснятое подтверждение/);

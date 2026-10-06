@@ -216,7 +216,7 @@ function handleStop(input, env) {
         const inv = invalidateCompletion({ root, state, cause: `приостановка RAILS_OUTCOME: ${result.outcome}` });
         // снятие не сохранилось и следа нет нигде: остановка блокируется —
         // иначе сбой невидим, и exit позже примет неснятое подтверждение
-        if (inv?.removed && inv.traced === false) {
+        if ((inv?.removed || inv?.attempted) && inv.traced === false) {
           return {
             decision: 'block',
             reason: 'RAILS: подтверждение завершения не снято и след не записан — устраните доступ к .workflow/state и повторите остановку',
@@ -240,7 +240,7 @@ function handleStop(input, env) {
         state,
         cause: answer.integrity === 'empty' ? 'последнее сообщение ассистента без текста' : 'ответ не прошёл выходной слой',
       });
-      if (inv?.removed && inv.traced === false) {
+      if ((inv?.removed || inv?.attempted) && inv.traced === false) {
         return {
           decision: 'block',
           reason: 'RAILS: подтверждение завершения не снято и след не записан — устраните доступ к .workflow/state и повторите остановку',

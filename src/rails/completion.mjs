@@ -23,7 +23,7 @@
 // честности, не криптография — см. README §16.
 
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 import { loadSkillRuntime } from './core.mjs';
@@ -212,34 +212,36 @@ export function recordCompletion({ root, state, source, answer = null, transcrip
 }
 
 // Надгробие неснятого подтверждения: инвалидация не сохранилась — пока оно
-// живёт, exit отказывает даже при исчезновении причины сбоя. Снимается
-// удавшейся инвалидацией (повторная остановка с тем же исходом).
+// живёт и привязано к ТЕКУЩЕМУ подтверждению, exit отказывает. Снимается
+// удавшейся инвалидацией (повторная остановка с тем же исходом); надгробие
+// другого подтверждения (новая верификация после сбоя) не учитывается.
 function invalidationPath(root, session) {
   return join(root, '.workflow', 'state', 'rails', `.invalid-${String(session)}.json`);
 }
 
-// Надгробие или журнальный след неснятого подтверждения у сессии. Журнал
-// читается по последнему событию: сбой инвалидации закрывает exit, последовавшая
-// УДАВШАЯСЯ инвалидация (запись completion с invalidated и saved) — снимает
-// след (ревью 2026-10-06: историческая запись не должна блокировать вечно).
-function existsInvalidation(root, session) {
+// Надгробие или журнальный след неснятого подтверждения ИМЕННО ЭТОГО
+// подтверждения. Журнальная ошибка несёт completion_sha256; след другого
+// (например, уже перевыпущенного) подтверждения exit не блокирует
+// (ревью 2026-10-06: историческая запись не должна блокировать вечно).
+function existsInvalidation(root, session, completion) {
+  const digest = completionDigest(completion);
   try {
-    if (statSync(invalidationPath(root, session)).isFile()) return true;
+    const raw = readFileSync(invalidationPath(root, session), 'utf8');
+    const t = JSON.parse(raw);
+    if (t && typeof t === 'object' && t.completion_sha256 === digest) return true;
   } catch {
-    // надгробия нет
+    // надгробия нет (или не о том подтверждении)
   }
   try {
-    let failed = false;
     for (const e of readJournal(root)) {
       if ((e.session ?? null) !== session) continue;
-      if (e.type === 'completion' && e.invalidated === true && e.saved === true) failed = false;
-      else if (e.type === 'error' && typeof e.message === 'string' && e.message.startsWith('invalidation:')) failed = true;
+      if (e.type === 'error' && e.completion_sha256 === digest
+        && typeof e.message === 'string' && e.message.startsWith('invalidation:')) return true;
     }
-    return failed;
   } catch {
     // журнал недоступен — решают надгробие и диск
-    return false;
   }
+  return false;
 }
 
 /**
@@ -258,12 +260,19 @@ export function invalidateCompletion({ root, state, cause, now = Date.now() }) {
   // Под тем же замком, что и выход, но без ожидания: замок занят выходом —
   // снимающий уходит, следующий Stop с тем же исходом повторит. Без замка
   // инвалидация вклинивалась бы между перечитыванием и маркером выхода
-  // (ревью 2026-10-06).
-  const lock = acquireExitLock(root, state.session, { now });
+  // (ревью 2026-10-06). Сбой захвата (диск недоступен) — не «нет работы»,
+  // а видимый неудавшийся след: вызывающий блокирует остановку.
+  let lock;
+  try {
+    lock = acquireExitLock(root, state.session, { now });
+  } catch (err) {
+    return { removed: false, attempted: true, traced: false, error: err };
+  }
   if (lock.busy) return { removed: false, busy: true };
   try {
     // Маркер мог появиться, пока брали замок.
     if (readCompletedMarker(root, state.session)) return { removed: false };
+    const digest = completionDigest(state.completion);
     delete state.completion;
     state.updated = new Date().toISOString();
     let saved = true;
@@ -280,7 +289,7 @@ export function invalidateCompletion({ root, state, cause, now = Date.now() }) {
       try {
         writeFileSync(
           invalidationPath(root, state.session),
-          JSON.stringify({ version: 1, session: state.session, t: new Date().toISOString(), cause: String(cause ?? '') }),
+          JSON.stringify({ version: 1, session: state.session, completion_sha256: digest, t: new Date().toISOString(), cause: String(cause ?? '') }),
           'utf8'
         );
       } catch {
@@ -290,6 +299,7 @@ export function invalidateCompletion({ root, state, cause, now = Date.now() }) {
         appendEvent(root, {
           type: 'error',
           session: state.session,
+          completion_sha256: digest,
           message: `invalidation: подтверждение не снято на диске (${err && err.message ? err.message : err}) — повторная остановка с тем же исходом снимет снова`,
         });
       } catch {
@@ -358,18 +368,6 @@ export function grantTemplate(completion, ttlHours = 24) {
  */
 export function verifyExit({ root, session }) {
   const fail = (reason) => ({ ok: false, reason });
-  // Неснятое подтверждение — раньше «уже завершена»: маркер, оставшийся при
-  // неудачном откате, не должен маскировать сбой инвалидации.
-  if (existsInvalidation(root, session)) {
-    return fail('есть неснятое подтверждение (сбой инвалидации) — повтори Stop с непроходным ответом или приостановкой');
-  }
-  let marker;
-  try {
-    marker = readCompletedMarker(root, session);
-  } catch (err) {
-    return fail(err && err.message ? err.message : String(err));
-  }
-  if (marker) return fail(`сессия уже завершена штатным выходом (${marker.t}) — повторный exit не нужен`);
   let state;
   try {
     state = loadState(root, session);
@@ -380,6 +378,24 @@ export function verifyExit({ root, session }) {
   const completion = state.completion;
   if (!completion || completion.version !== 1) {
     return fail('подтверждения завершения нет — сначала верификация финального ответа (complete или Stop в терминале)');
+  }
+  // Неснятое подтверждение ИМЕННО ЭТОГО подтверждения (надгробие или
+  // журнальная ошибка) — раньше маркера: оставшийся от неудачного отката
+  // маркер не должен маскировать сбой инвалидации (ревью 2026-10-06).
+  if (existsInvalidation(root, session, completion)) {
+    return fail('есть неснятое подтверждение (сбой инвалидации) — повтори Stop с непроходным ответом или приостановкой');
+  }
+  let marker;
+  try {
+    marker = readCompletedMarker(root, session);
+  } catch (err) {
+    return fail(err && err.message ? err.message : String(err));
+  }
+  if (marker) {
+    if (marker.completion_sha256 !== completionDigest(completion)) {
+      return fail('маркер завершения не совпадает с подтверждением (повреждение жизненного цикла) — нужен ручной разбор');
+    }
+    return fail(`сессия уже завершена штатным выходом (${marker.t}) — повторный exit не нужен`);
   }
   if (!state.runtime || state.runtime.id !== completion.runtime?.id || state.runtime.hash !== completion.runtime?.hash) {
     return fail('runtime изменился после подтверждения — подтверждение недействительно');
@@ -422,8 +438,21 @@ function acquireExitLock(root, session, { now = Date.now() } = {}) {
       return { busy: true };
     }
     if (!stale) return { busy: true };
+    // Похищение атомарно переименованием: у двух похитителей успех ровно у
+    // одного, второй получает ENOENT или видит свежий каталог (ревью
+    // 2026-10-06: окно между rmdir и записью токена).
+    const aside = `${lock}.${process.pid}.${randomBytes(4).toString('hex')}.stale`;
     try {
-      rmdirSync(lock); // пустой каталог снимается; с чужим токеном — ENOTEMPTY
+      renameSync(lock, aside);
+    } catch {
+      return { busy: true };
+    }
+    try {
+      rmSync(aside, { recursive: true, force: true });
+    } catch {
+      // заброшенный замок уберёт следующее похищение
+    }
+    try {
       mkdirSync(lock);
       created = true;
     } catch {
@@ -432,7 +461,17 @@ function acquireExitLock(root, session, { now = Date.now() } = {}) {
   }
   if (!created) return { busy: true };
   const token = join(lock, `${process.pid}.${randomBytes(4).toString('hex')}.token`);
-  writeFileSync(token, String(now), 'utf8');
+  try {
+    writeFileSync(token, String(now), 'utf8');
+  } catch (err) {
+    try {
+      unlinkSync(token);
+      rmdirSync(lock);
+    } catch {
+      // оставшийся пустой каталог уберёт следующее похищение
+    }
+    throw err;
+  }
   const release = () => {
     try {
       unlinkSync(token);
@@ -473,7 +512,12 @@ export function performExit({ root, session, now = Date.now() }) {
   // даёт EEXIST; протухший замок (старше 10 с) похищается, но у владельца
   // внутри файл-токен — чужой rmdir не берёт (каталог не пуст), поэтому
   // владение остаётся ровно у одного (ревью 2026-10-06).
-  const lock = acquireExitLock(root, session, { now });
+  let lock;
+  try {
+    lock = acquireExitLock(root, session, { now });
+  } catch (err) {
+    return failWithTemplate(`замок выхода не создан: ${err && err.message ? err.message : err}`);
+  }
   if (lock.busy) return failWithTemplate('другой выход этой сессии выполняется — повтори команду');
   try {
     return exitLocked({ root, session, completion, path, failWithTemplate, now });
@@ -539,7 +583,7 @@ function exitLocked({ root, session, completion, path, failWithTemplate, now }) 
     return failWithTemplate(`состояние не перечитано: ${err && err.message ? err.message : err}`);
   }
   if (!fresh || !fresh.completion
-    || existsInvalidation(root, session)
+    || existsInvalidation(root, session, fresh.completion)
     || completionDigest(fresh.completion) !== expected.completion_sha256
     || essentialStateDigest(fresh) !== fresh.completion.state_sha256) {
     return failWithTemplate('состояние изменилось в процессе выхода — подтверждение устарело, повтори верификацию и выпуск разрешения');
@@ -584,11 +628,22 @@ function exitLocked({ root, session, completion, path, failWithTemplate, now }) 
       unlinkSync(completedMarkerPath(root, session));
     } catch {
       reverted = false; // маркер остался — сессия числится завершённой при снятом подтверждении
+      // след неснятого подтверждения: verifyExit обязан отказаться раньше «уже завершена»
+      try {
+        writeFileSync(
+          invalidationPath(root, session),
+          JSON.stringify({ version: 1, session, completion_sha256: expected.completion_sha256, t: new Date().toISOString(), cause: 'exit: неудачный откат маркера' }),
+          'utf8'
+        );
+      } catch {
+        // и надгробие не записалось — остаётся журнальная запись ниже
+      }
     }
     try {
       appendEvent(root, {
         type: 'error',
         session,
+        completion_sha256: expected.completion_sha256,
         message: `exit: подтверждение изменилось в момент выхода — маркер ${reverted ? 'снят' : 'НЕ снят (удалите .completed-<session>.json вручную)'}, разрешение потреблено, требуется перевыпуск`,
       });
     } catch {
