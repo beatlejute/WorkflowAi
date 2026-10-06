@@ -637,6 +637,36 @@ function exitLocked({ root, session, completion, path, token, failWithTemplate, 
     }
     return failWithTemplate('маркер завершения не создан — разрешение потреблено, владелец перевыпускает');
   }
+  // Запоздавшее похищение: замок украли, пока шла запись маркера — шаги после
+  // паузы ненадёжны, маркер снимается обратно, выход не состоялся (ревью
+  // 2026-10-06, восьмой круг).
+  if (lostLock()) {
+    try {
+      unlinkSync(completedMarkerPath(root, session));
+    } catch {
+      // не снялся — след неснятого подтверждения (ниже) не даст выйти повторно
+      try {
+        writeFileSync(
+          invalidationPath(root, session),
+          JSON.stringify({ version: 1, session, completion_sha256: expected.completion_sha256, t: new Date().toISOString(), cause: 'exit: маркер при потерянном замке не снят' }),
+          'utf8'
+        );
+      } catch {
+        // остаётся журнальная запись ниже
+      }
+    }
+    try {
+      appendEvent(root, {
+        type: 'error',
+        session,
+        completion_sha256: expected.completion_sha256,
+        message: 'exit: замок потерян в момент выхода — маркер снят, разрешение потреблено, требуется перевыпуск',
+      });
+    } catch {
+      // журнал недоступен — отказ всё равно возвращён
+    }
+    return failWithTemplate('замок выхода потерян в момент выхода — разрешение потреблено, владелец перевыпускает');
+  }
 
   // Инвалидация, вклинившаяся между перечитыванием и маркером (в том числе
   // во время паузы процесса), делает подтверждение неснятым: маркер снимается
