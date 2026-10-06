@@ -23,7 +23,7 @@
 // честности, не криптография — см. README §16.
 
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 import { loadSkillRuntime } from './core.mjs';
@@ -235,8 +235,10 @@ function existsInvalidation(root, session, completion) {
   try {
     for (const e of readJournal(root)) {
       if ((e.session ?? null) !== session) continue;
-      if (e.type === 'error' && e.completion_sha256 === digest
-        && typeof e.message === 'string' && e.message.startsWith('invalidation:')) return true;
+      // ошибка с хешем этого подтверждения — след сбоя инвалидации или
+      // неудачного отката; сообщения не фильтруются по префиксу: хеш —
+      // самодостаточный признак (ревью 2026-10-06)
+      if (e.type === 'error' && e.completion_sha256 === digest) return true;
     }
   } catch {
     // журнал недоступен — решают надгробие и диск
@@ -268,8 +270,16 @@ export function invalidateCompletion({ root, state, cause, now = Date.now() }) {
   } catch (err) {
     return { removed: false, attempted: true, traced: false, error: err };
   }
-  if (lock.busy) return { removed: false, busy: true };
+  if (lock.busy) {
+    // Сбой похищения протухшего замка — fault окружения, а не «занято»:
+    // возвращается как неудавшийся след, Stop блокирует остановку
+    // (ревью 2026-10-06).
+    if (lock.stealFailed) return { removed: false, attempted: true, traced: false };
+    return { removed: false, busy: true };
+  }
   try {
+    // Замок мог быть похищен, пока брали (наш токен исчез).
+    if (!existsSync(lock.token)) return { removed: false, attempted: true, traced: false };
     // Маркер мог появиться, пока брали замок.
     if (readCompletedMarker(root, state.session)) return { removed: false };
     const digest = completionDigest(state.completion);
@@ -439,13 +449,14 @@ function acquireExitLock(root, session, { now = Date.now() } = {}) {
     }
     if (!stale) return { busy: true };
     // Похищение атомарно переименованием: у двух похитителей успех ровно у
-    // одного, второй получает ENOENT или видит свежий каталог (ревью
-    // 2026-10-06: окно между rmdir и записью токена).
+    // одного, второй получает ENOENT или видит свежий каталог. Сбой самого
+    // переименования (доступ) — не «занято», а_fault окружения: вызывающий
+    // делает его видимым (ревью 2026-10-06).
     const aside = `${lock}.${process.pid}.${randomBytes(4).toString('hex')}.stale`;
     try {
       renameSync(lock, aside);
     } catch {
-      return { busy: true };
+      return { busy: true, stealFailed: true };
     }
     try {
       rmSync(aside, { recursive: true, force: true });
@@ -456,7 +467,7 @@ function acquireExitLock(root, session, { now = Date.now() } = {}) {
       mkdirSync(lock);
       created = true;
     } catch {
-      return { busy: true };
+      return { busy: true, stealFailed: true };
     }
   }
   if (!created) return { busy: true };
@@ -466,6 +477,10 @@ function acquireExitLock(root, session, { now = Date.now() } = {}) {
   } catch (err) {
     try {
       unlinkSync(token);
+    } catch {
+      // файла и не было
+    }
+    try {
       rmdirSync(lock);
     } catch {
       // оставшийся пустой каталог уберёт следующее похищение
@@ -518,17 +533,27 @@ export function performExit({ root, session, now = Date.now() }) {
   } catch (err) {
     return failWithTemplate(`замок выхода не создан: ${err && err.message ? err.message : err}`);
   }
-  if (lock.busy) return failWithTemplate('другой выход этой сессии выполняется — повтори команду');
+  if (lock.busy) {
+    return failWithTemplate(lock.stealFailed
+      ? 'замок выхода повреждён (сбой доступа к .workflow/state) — устраните доступ и повтори команду'
+      : 'другой выход этой сессии выполняется — повтори команду');
+  }
   try {
-    return exitLocked({ root, session, completion, path, failWithTemplate, now });
+    return exitLocked({ root, session, completion, path, token: lock.token, failWithTemplate, now });
   } finally {
     lock.release();
   }
 }
 
 // Шаги выхода под замком: потребление разрешения, перечитывание состояния,
-// отметка и пост-проверка записи.
-function exitLocked({ root, session, completion, path, failWithTemplate, now }) {
+// отметка и пост-проверка записи. Владение замком перепроверяется по токену
+// перед потреблением разрешения и перед маркером: похищение (наш каталог
+// переименовал другой процесс) отменяет шаги — атомарность потребления и 'wx'
+// маркера ограничивают последствия (ревью 2026-10-06).
+function exitLocked({ root, session, completion, path, token, failWithTemplate, now }) {
+
+  const lostLock = () => !existsSync(token);
+  if (lostLock()) return failWithTemplate('замок выхода потерян — повтори команду');
 
   let raw;
   try {
@@ -565,6 +590,7 @@ function exitLocked({ root, session, completion, path, failWithTemplate, now }) 
   // разрешение потреблённым — владелец перевыпускает, это дешевле повторного
   // использования.
   const consumed = `${path}.${process.pid}.${now}.used`;
+  if (lostLock()) return failWithTemplate('замок выхода потерян — повтори команду');
   try {
     renameSync(path, consumed);
   } catch (err) {
@@ -592,6 +618,7 @@ function exitLocked({ root, session, completion, path, failWithTemplate, now }) 
   // Маркер завершения — отдельный файл с одним писателем: конкурирующая запись
   // состояния не может его стереть. 'wx': второй выход (или гонка двух)
   // отклоняется.
+  if (lostLock()) return failWithTemplate('замок выхода потерян — повтори команду');
   let marker;
   try {
     marker = writeCompletedMarker(root, session, {
