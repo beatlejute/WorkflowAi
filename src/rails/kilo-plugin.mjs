@@ -17,7 +17,7 @@
 import { findProjectRoot } from '../lib/find-root.mjs';
 import { decide, loadSkillRuntime } from './core.mjs';
 import { fromKilo } from './actions.mjs';
-import { loadState } from './state.mjs';
+import { loadState, readCompletedMarker } from './state.mjs';
 
 function truncate(s, max) {
   const t = String(s ?? '');
@@ -86,7 +86,7 @@ export function createHooks(directory, env = {}) {
         }
 
         const state = loadState(root, sessionId);
-        if (!state || !state.skill || state.completed) return;
+        if (!state || !state.skill || readCompletedMarker(root, sessionId)) return;
 
         let graph;
         try {

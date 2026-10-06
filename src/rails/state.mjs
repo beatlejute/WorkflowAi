@@ -15,7 +15,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { normalizeLabel } from './graph.mjs';
 import { isEdgeGuardPath, TICKET_PLACEHOLDER } from './rails-config.mjs';
 
@@ -145,9 +145,12 @@ function validateState(state, sessionId) {
       || r.version !== 1 || typeof r.id !== 'string' || !/^[a-f0-9]{64}$/.test(r.id)
       || typeof r.hash !== 'string' || !/^[a-f0-9]{64}$/.test(r.hash)) bad('привязка runtime');
   }
-  // Подтверждение завершения и отметка штатного выхода (completion.mjs):
-  // поля опциональные, но присутствовать обязаны целыми — иначе состояние
-  // с «полуразбитым» подтверждением молча выглядело бы неподтверждённым.
+  // Подтверждение завершения (completion.mjs): поле опциональное, но
+  // присутствовать обязано целым — иначе состояние с «полуразбитым»
+  // подтверждением молча выглядело бы неподтверждённым. Отметка завершения
+  // живёт ОТДЕЛЬНЫМ файлом-маркером (completedMarkerPath): у состояния много
+  // писателей (хуки, CLI), у маркера один — exit, поэтому конкурирующая
+  // запись не может её стереть.
   if (state.completion !== undefined) {
     const c = state.completion;
     if (!c || typeof c !== 'object' || Array.isArray(c) || c.version !== 1) bad('подтверждение завершения');
@@ -162,19 +165,6 @@ function validateState(state, sessionId) {
       if (typeof c[field] !== 'string' || !/^[a-f0-9]{64}$/.test(c[field])) bad(`хеш ${field} подтверждения`);
     }
     if (c.verdict !== null && typeof c.verdict !== 'string') bad('verdict подтверждения');
-  }
-  if (state.completed !== undefined) {
-    const m = state.completed;
-    if (!m || typeof m !== 'object' || Array.isArray(m) || m.version !== 1) bad('отметка завершения');
-    if (typeof m.t !== 'string' || Number.isNaN(Date.parse(m.t))) bad('время завершения');
-    if (typeof m.completion_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(m.completion_sha256)) bad('хеш подтверждения в отметке');
-    if (m.grant_expires_at !== undefined && (typeof m.grant_expires_at !== 'string' || Number.isNaN(Date.parse(m.grant_expires_at)))) bad('срок разрешения в отметке');
-    // Отметка без целого подтверждения или с чужим хешем — не «завершённая
-    // сессия», а повреждение: нейтральный режим по ней не включается (ревью
-    // 2026-10-06, major — fail closed, как и остальные формы состояния).
-    if (state.completion === undefined) bad('отметка завершения без подтверждения');
-    const digest = createHash('sha256').update(JSON.stringify(state.completion)).digest('hex');
-    if (digest !== m.completion_sha256) bad('отметка завершения не совпадает с подтверждением');
   }
 }
 
@@ -214,19 +204,6 @@ export function saveState(root, state) {
   const dir = stateDir(root);
   fs.mkdirSync(dir, { recursive: true });
   const target = statePath(root, state.session);
-  // Сессия с отметкой штатного выхода не перезаписывается объектом без отметки:
-  // писатель, прочитавший состояние до выхода и сохраняющий после, стёр бы
-  // `completed` (ревью 2026-10-06, major). Легитимные писатели завершённой
-  // сессии несут отметку в объекте; остальные — устарели и обязаны перечитать.
-  try {
-    const disk = JSON.parse(fs.readFileSync(target, 'utf8'));
-    if (disk && typeof disk === 'object' && disk.completed && !state.completed) {
-      throw new StateError('состояние завершённой сессии не перезаписывается (в объекте нет отметки выхода)');
-    }
-  } catch (err) {
-    if (err instanceof StateError) throw err;
-    // файла нет или он не прочитан — обычная запись (повреждённый файл ловит loadState)
-  }
   // Предзапись: доступный только для чтения файл обязан отказывать и на POSIX,
   // где rename поверх такого файла проходит молча (CI 2026-10-06, Linux/macOS:
   // счётчик отказов «несохраняемого» состояния попадал на диск). Файла ещё нет
@@ -800,4 +777,77 @@ export function listSessionIds(root) {
   }
   found.sort((a, b) => b.mtimeMs - a.mtimeMs || a.sessionId.localeCompare(b.sessionId));
   return found.map((x) => x.sessionId);
+}
+
+// --- отметка штатного выхода (маркер) ------------------------------------------------
+//
+// Отметка живёт отдельным файлом-маркером, а не полем состояния: у состояния
+// много писателей (хуки, CLI, раннер), и конкурирующая запись стёрла бы поле
+// (ревью 2026-10-06). У маркера один писатель — exit; создаётся исключительно
+// ('wx'), не перезаписывается и не удаляется никем. Имя с точкой: перечень
+// сессий проекта его не подбирает.
+
+/**
+ * Путь маркера завершения сессии.
+ *
+ * @param {string} root
+ * @param {string} session
+ * @returns {string}
+ */
+export function completedMarkerPath(root, session) {
+  return path.join(stateDir(root), `.completed-${sanitizeSessionId(session)}.json`);
+}
+
+/**
+ * Прочитанный маркер завершения или `null`. Повреждённый маркер —
+ * `StateError` (fail closed): неизвестно, завершена ли сессия.
+ *
+ * @param {string} root
+ * @param {string} session
+ * @returns {{version: number, session: string, t: string, completion_sha256: string,
+ *            grant_expires_at?: string}|null}
+ */
+export function readCompletedMarker(root, session) {
+  let raw;
+  try {
+    raw = fs.readFileSync(completedMarkerPath(root, session), 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return null;
+    throw new StateError(`маркер завершения не прочитан: ${err.message}`);
+  }
+  let marker;
+  try {
+    marker = JSON.parse(raw);
+  } catch {
+    throw new StateError('маркер завершения повреждён: не JSON');
+  }
+  if (!marker || typeof marker !== 'object' || Array.isArray(marker) || marker.version !== 1
+    || marker.session !== sanitizeSessionId(session)
+    || typeof marker.t !== 'string' || Number.isNaN(Date.parse(marker.t))
+    || typeof marker.completion_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(marker.completion_sha256)) {
+    throw new StateError('маркер завершения повреждён');
+  }
+  return marker;
+}
+
+/**
+ * Создаёт маркер завершения. Существующий маркер — `StateError` «уже
+ * завершена»: выход одноразовый.
+ *
+ * @param {string} root
+ * @param {string} session
+ * @param {{t: string, completion_sha256: string, grant_expires_at?: string}} info
+ * @returns {{version: number, session: string, t: string, completion_sha256: string,
+ *            grant_expires_at?: string}}
+ */
+export function writeCompletedMarker(root, session, { t, completion_sha256, grant_expires_at }) {
+  const marker = { version: 1, session: sanitizeSessionId(session), t, completion_sha256, grant_expires_at };
+  fs.mkdirSync(stateDir(root), { recursive: true });
+  try {
+    fs.writeFileSync(completedMarkerPath(root, session), JSON.stringify(marker, null, 2), { encoding: 'utf8', flag: 'wx' });
+  } catch (err) {
+    if (err && err.code === 'EEXIST') throw new StateError('маркер завершения уже есть — сессия уже завершена');
+    throw err;
+  }
+  return marker;
 }

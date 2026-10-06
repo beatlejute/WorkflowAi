@@ -28,6 +28,7 @@ import {
   currentNodeInfo,
   checkActionLimit,
   describeTransitions,
+  readCompletedMarker,
 } from './state.mjs';
 import { appendDenial, appendEvent } from './journal.mjs';
 import { realpathDeep, isInside, matchesGlob } from './paths.mjs';
@@ -1280,7 +1281,7 @@ function decideInProject(root, action, ctx) {
   // старого запуска роль не возвращает и состояние не пересоздаёт — сессия
   // остаётся в режиме без скила (G0), правки скилов по-прежнему только через
   // коуча.
-  if (state?.completed) {
+  if (state && readCompletedMarker(root, sessionId)) {
     const base = decideNoSkillMode(root, action, ctx);
     if (base.decision === 'deny') return base;
     // Остальное — через физическую классификацию: защищённое состояние (в том

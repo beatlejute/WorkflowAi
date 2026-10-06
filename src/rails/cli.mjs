@@ -28,6 +28,7 @@ import {
   currentNodeInfo,
   newestSessionId,
   listSessionIds,
+  readCompletedMarker,
   RAILS_CLI,
 } from './state.mjs';
 import { appendDenial, appendEvent, readJournal, readJournalFile, summarize } from './journal.mjs';
@@ -287,16 +288,17 @@ function cmdStart(root, positional, flags, env) {
   // хук сессии из каталога-зонтика находил корень для shell-команд (session-memo.mjs).
   if (explicitSession) rememberSessionRoot(sessionId, root);
   const existing = loadState(root, sessionId);
+  const existingCompleted = existing ? readCompletedMarker(root, sessionId) : null;
   // Штатный выход: старый запуск не перезаписывается — новый (тем же скилом
   // или другим, даже с --force) открывает владелец новой сессией.
-  if (existing?.completed) {
+  if (existingCompleted) {
     try {
       appendDenial(root, {
         session: sessionId,
         skill: existing.skill,
         node: existing.node,
         run: (env && env.WORKFLOW_RAILS_RUN) || null,
-        reason: `start поверх завершённой сессии отклонён: выход выполнен ${existing.completed.t}, состояние и история сохраняются`,
+        reason: `start поверх завершённой сессии отклонён: выход выполнен ${existingCompleted.t}, состояние и история сохраняются`,
         command: `start ${skill}`,
       });
     } catch {
@@ -304,7 +306,7 @@ function cmdStart(root, positional, flags, env) {
     }
     return {
       code: 2,
-      stdout: `Ошибка: сессия ${sessionId} завершена штатным выходом (${existing.completed.t}); перезапуск скила "${skill}" в ней не выполняется, --force этого не меняет. Новый запуск открывает владелец новой сессией.\n`,
+      stdout: `Ошибка: сессия ${sessionId} завершена штатным выходом (${existingCompleted.t}); перезапуск скила "${skill}" в ней не выполняется, --force этого не меняет. Новый запуск открывает владелец новой сессией.\n`,
     };
   }
   const runSkill = foreignRunSkill(root, env, existing, skill);
@@ -403,13 +405,14 @@ function cmdGoto(root, positional, flags, env) {
   if (!state) {
     return { code: 1, stdout: `Ошибка: состояние сессии ${sessionId} не найдено. Сначала start.\n` };
   }
-  if (state.completed) {
+  const gotoCompleted = readCompletedMarker(root, sessionId);
+  if (gotoCompleted) {
     try {
       appendDenial(root, {
         session: sessionId,
         skill: state.skill,
         node: state.node,
-        reason: `goto в завершённой сессии отклонён: выход выполнен ${state.completed.t}`,
+        reason: `goto в завершённой сессии отклонён: выход выполнен ${gotoCompleted.t}`,
         command: `goto ${node}`,
       });
     } catch {
@@ -417,7 +420,7 @@ function cmdGoto(root, positional, flags, env) {
     }
     return {
       code: 2,
-      stdout: `Ошибка: сессия ${sessionId} завершена штатным выходом (${state.completed.t}); переходы закрыты, состояние и история сохраняются.\n`,
+      stdout: `Ошибка: сессия ${sessionId} завершена штатным выходом (${gotoCompleted.t}); переходы закрыты, состояние и история сохраняются.\n`,
     };
   }
 
@@ -492,8 +495,8 @@ function cmdStatus(root, positional, flags, env) {
     `Сессия: ${sessionId}`,
     `Скил: ${state.skill}`,
     `Узел: ${state.node} «${label}» (этап ${info.stage ?? '?'}, тип ${info.type ?? '?'})`,
-    ...(state.completed
-      ? [`Состояние: завершена штатным выходом ${state.completed.t} — рельсы сессию не ведут`]
+    ...(readCompletedMarker(root, sessionId)
+      ? [`Состояние: завершена штатным выходом ${readCompletedMarker(root, sessionId).t} — рельсы сессию не ведут`]
       : state.completion
         ? [`Подтверждение завершения: есть (${state.completion.t}), выход — после разрешения владельца (rails exit)`]
         : []),
@@ -515,15 +518,16 @@ function cmdReset(root, positional, flags, env) {
   if (!sessionId) return { code: 1, stdout: 'Ошибка: нет активной сессии.\n' };
 
   const state = loadState(root, sessionId);
+  const resetCompleted = state ? readCompletedMarker(root, sessionId) : null;
   // Завершённая сессия хранится целиком (состояние, история, журнал) — сброс
   // и после штатного выхода запрещён.
-  if (state?.completed) {
+  if (resetCompleted) {
     try {
       appendDenial(root, {
         session: sessionId,
         skill: state.skill,
         node: state.node,
-        reason: `reset завершённой сессии отклонён: выход выполнен ${state.completed.t}, состояние и история сохраняются`,
+        reason: `reset завершённой сессии отклонён: выход выполнен ${resetCompleted.t}, состояние и история сохраняются`,
         command: 'reset',
       });
     } catch {
@@ -531,7 +535,7 @@ function cmdReset(root, positional, flags, env) {
     }
     return {
       code: 2,
-      stdout: `Ошибка: сессия ${sessionId} завершена штатным выходом (${state.completed.t}) — reset отклонён: состояние и история сохраняются.\n`,
+      stdout: `Ошибка: сессия ${sessionId} завершена штатным выходом (${resetCompleted.t}) — reset отклонён: состояние и история сохраняются.\n`,
     };
   }
   // Сброс закреплённого запуска — не путь активации правок исходников: его
@@ -590,8 +594,9 @@ function cmdComplete(root, positional, flags, env, cwd = process.cwd()) {
     return { code: 1, stdout: `Ошибка: ${err && err.message ? err.message : err}\n` };
   }
   if (!state) return { code: 1, stdout: `Ошибка: состояние сессии ${sessionId} не найдено.\n` };
-  if (state.completed) {
-    return { code: 2, stdout: `Сессия ${sessionId} уже завершена штатным выходом (${state.completed.t}) — подтверждение не требуется.\n` };
+  const done = readCompletedMarker(root, sessionId);
+  if (done) {
+    return { code: 2, stdout: `Сессия ${sessionId} уже завершена штатным выходом (${done.t}) — подтверждение не требуется.\n` };
   }
 
   const transcriptPath = resolvePath(cwd, flags.transcript);
@@ -641,7 +646,7 @@ function cmdExit(root, positional, flags, env) {
   }
 
   const lines = [
-    `Выход выполнен: сессия ${sessionId}, скил "${result.state.skill}" завершён (${result.state.completed.t}).`,
+    `Выход выполнен: сессия ${sessionId}, скил "${result.state.skill}" завершён (${result.marker.t}).`,
     'Состояние, история, счётчики, привязка runtime и журнал сохранены; хуки и CLI сессию больше не ведут.',
     'Роль из окружения хоста не возвращается: перезапуск скила в этой сессии закрыт, новый запуск открывает владелец новой сессией.',
   ];

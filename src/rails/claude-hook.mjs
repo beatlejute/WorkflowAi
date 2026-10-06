@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { findProjectRoot } from '../lib/find-root.mjs';
 import { decide, loadSkillRuntime } from './core.mjs';
 import { fromClaude } from './actions.mjs';
-import { loadState, saveState } from './state.mjs';
+import { loadState, saveState, readCompletedMarker } from './state.mjs';
 import { recordCompletion, invalidateCompletion, transcriptFinalAnswer } from './completion.mjs';
 import { realpathDeep } from './paths.mjs';
 import { appendEvent } from './journal.mjs';
@@ -117,7 +117,7 @@ function buildPostToolContext(input, env) {
   if (!sessionId) return null;
 
   const state = loadState(root, sessionId);
-  if (!state || !state.skill || state.completed) return null;
+  if (!state || !state.skill || readCompletedMarker(root, sessionId)) return null;
 
   let graph;
   try {
@@ -173,7 +173,7 @@ function handleStop(input, env) {
   const state = loadState(root, sessionId);
   if (!state || !state.skill) return null;
   // Штатный выход: остановки завершённой сессии не проверяются и не блокируются.
-  if (state.completed) return null;
+  if (readCompletedMarker(root, sessionId)) return null;
 
   let config;
   try {
@@ -326,7 +326,7 @@ function handleUserPromptSubmit(input, env) {
   if (root && sessionId) {
     const state = loadState(root, sessionId);
     // Штатный выход: рельсы завершённую сессию не комментируют.
-    if (state?.completed) return null;
+    if (state && readCompletedMarker(root, sessionId)) return null;
     if (state && state.skill) {
       state.flags ??= {};
       state.flags.correction_pending = true;
@@ -419,8 +419,9 @@ function handleSessionStart(input, env) {
 
   // Штатный выход: подсказок старой роли нет и из окружения она не
   // возвращается — сессия завершилась, состояние и история сохранены.
-  if (state.completed) {
-    return reply(`RAILS: сессия ${sessionId}; скил ${state.skill} завершён штатным выходом (${state.completed.t}) — рельсы не активны`);
+  const completed = readCompletedMarker(root, sessionId);
+  if (completed) {
+    return reply(`RAILS: сессия ${sessionId}; скил ${state.skill} завершён штатным выходом (${completed.t}) — рельсы не активны`);
   }
 
   let label = '';
