@@ -23,11 +23,12 @@ import {
   recordCompletion,
   performExit,
   verifyExit,
+  invalidateCompletion,
   essentialStateDigest,
   completionDigest,
   grantPath,
   grantTemplate,
-  verifyTranscriptOwnership,
+  transcriptFinalAnswer,
 } from '../rails/completion.mjs';
 import { classifyWrites, WritePolicyError } from '../rails/write-policy.mjs';
 import { appendEvent, readJournal, summarize } from '../rails/journal.mjs';
@@ -715,15 +716,203 @@ test('журнал: summarize считает completion и exit', () => {
   });
 });
 
-// --- verifyTranscriptOwnership: детально ---------------------------------------------------
+// --- transcriptFinalAnswer: принадлежность и ответ одним чтением ---------------------------
 
-test('verifyTranscriptOwnership: обезличенный transcript — отказ', () => {
+test('transcriptFinalAnswer: обезличенный transcript без ответов — отказ', () => {
   withProject(({ base, root }) => {
     const sessionId = uuid();
     const p = join(base, `${sessionId}.jsonl`);
     writeFileSync(p, `${JSON.stringify({ type: 'user', message: {} })}\n`, 'utf8');
-    const r = verifyTranscriptOwnership(p, sessionId);
+    const r = transcriptFinalAnswer(p, sessionId);
     assert.equal(r.ok, false);
-    assert.match(r.reason, /sessionId/);
+    assert.match(r.reason, /ответов ассистента/);
+  });
+});
+
+// --- регрессии ревью 2026-10-06 -------------------------------------------------------------
+
+test('blocker: завершённая сессия не пишет в защищённое состояние (Write и shell-редирект)', () => {
+  withProject(({ root }) => {
+    const sessionId = pinnedSession(root, 'P5S1');
+    assert.equal(recordCompletion({ root, state: readSession(root, sessionId), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
+    writeGrant(root, sessionId, grantTemplate(readSession(root, sessionId).completion, 1));
+    assert.equal(cliRun(['exit', '--session', sessionId], { cwd: root, env: {} }).code, 0);
+    const target = grantPath(root, sessionId);
+
+    const stateWrite = handleHookInput(
+      {
+        hook_event_name: 'PreToolUse',
+        session_id: sessionId,
+        cwd: root,
+        tool_name: 'Write',
+        tool_input: { file_path: target, content: '{}' },
+      },
+      {}
+    );
+    assert.equal(stateWrite.hookSpecificOutput.permissionDecision, 'deny');
+    assert.match(stateWrite.hookSpecificOutput.permissionDecisionReason, /защищённая|действие отклонено/);
+
+    const shellWrite = handleHookInput(
+      {
+        hook_event_name: 'PreToolUse',
+        session_id: sessionId,
+        cwd: root,
+        tool_name: 'Bash',
+        tool_input: { command: `echo x > .workflow/state/rails/.exit-grant-${sessionId}.json` },
+      },
+      {}
+    );
+    assert.equal(shellWrite.hookSpecificOutput.permissionDecision, 'deny');
+
+    // чужая отметка и чужое разрешение не записаны, состояние не тронуто
+    const state = readSession(root, sessionId);
+    assert.equal(state.completed.version, 1);
+    assert.equal(existsSync(target), false);
+  });
+});
+
+test('major: cli-вызов завершённой сессии получает --session, и start отказывает', () => {
+  withProject(({ root }) => {
+    const sessionId = pinnedSession(root, 'P5S1');
+    assert.equal(recordCompletion({ root, state: readSession(root, sessionId), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
+    writeGrant(root, sessionId, grantTemplate(readSession(root, sessionId).completion, 1));
+    assert.equal(cliRun(['exit', '--session', sessionId], { cwd: root, env: {} }).code, 0);
+
+    const r = handleHookInput(
+      {
+        hook_event_name: 'PreToolUse',
+        session_id: sessionId,
+        cwd: root,
+        tool_name: 'Bash',
+        tool_input: { command: 'node .workflow/src/rails/cli.mjs start completetest' },
+      },
+      {}
+    );
+    // хук не пустил команду без --session: идентификатор подставлен
+    const injected = r.hookSpecificOutput.updatedInput.command;
+    assert.match(injected, new RegExp(`--session ${sessionId}`));
+    // с подставленным идентификатором CLI отказывает поверх завершённой сессии
+    const started = cliRun(['start', SKILL, '--session', sessionId], { cwd: root, env: {} });
+    assert.equal(started.code, 2);
+    assert.match(started.stdout, /завершена штатным выходом/);
+  });
+});
+
+test('major: приостановка и непроходной ответ снимают прежнее подтверждение', () => {
+  withProject(({ base, root }) => {
+    const sessionId = pinnedSession(root, 'P5S1');
+    const stopWith = (text) => handleHookInput(
+      { hook_event_name: 'Stop', session_id: sessionId, cwd: root, transcript_path: writeTranscript(base, sessionId, text) },
+      {}
+    );
+
+    assert.equal(recordCompletion({ root, state: readSession(root, sessionId), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
+    // приостановка — последний исход: подтверждение снято
+    assert.equal(stopWith(SUSPENSION_ANSWER), null);
+    assert.equal(readSession(root, sessionId).completion, undefined);
+    assert.equal(readJournal(root).some((e) => e.type === 'completion' && e.invalidated), true);
+
+    // непроходной ответ при исчерпанном потолке (счётчики не растут) — тоже снимает
+    assert.equal(recordCompletion({ root, state: readSession(root, sessionId), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
+    const state = readSession(root, sessionId);
+    state.counters['stop_blocks:P5S1'] = 2; // max_stop_blocks: 2 — потолок исчерпан
+    saveState(root, state);
+    // подтверждение связано со старым состоянием; после бампа оно бы устарело,
+    // поэтому проверяем снятие на свежем подтверждении
+    assert.equal(verifyExit({ root, session: sessionId }).ok, false);
+    assert.equal(recordCompletion({ root, state: readSession(root, sessionId), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
+    assert.equal(stopWith(FAIL_ANSWER), null);
+    assert.equal(readSession(root, sessionId).completion, undefined);
+  });
+});
+
+test('major: чужая запись в середине transcript — отказ', () => {
+  withProject(({ base, root }) => {
+    const sessionId = pinnedSession(root, 'P5S1');
+    const p = join(base, `${sessionId}.jsonl`);
+    const lines = [
+      JSON.stringify({ type: 'assistant', sessionId, message: { id: 'm1', content: [{ type: 'text', text: PASS_ANSWER }] } }),
+      JSON.stringify({ type: 'assistant', sessionId: uuid(), message: { id: 'm2', content: [{ type: 'text', text: PASS_ANSWER }] } }),
+    ];
+    writeFileSync(p, lines.join('\n') + '\n', 'utf8');
+    const r = transcriptFinalAnswer(p, sessionId);
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /другой сессии/);
+    // и cli complete по такому файлу отказывает
+    const cli = cliRun(['complete', '--transcript', p, '--session', sessionId], { cwd: root, env: {} });
+    assert.equal(cli.code, 2);
+    assert.equal(readSession(root, sessionId).completion, undefined);
+  });
+});
+
+test('minor: повторная верификация того же ответа не меняет подтверждение и грант', () => {
+  withProject(({ base, root }) => {
+    const sessionId = pinnedSession(root, 'P5S1');
+    const transcript = writeTranscript(base, sessionId, PASS_ANSWER);
+    assert.equal(cliRun(['complete', '--transcript', transcript, '--session', sessionId], { cwd: root, env: {} }).code, 0);
+    const before = readSession(root, sessionId).completion;
+    const template = grantTemplate(before);
+
+    // повторный complete того же ответа и тот же ответ через Stop
+    assert.equal(cliRun(['complete', '--transcript', transcript, '--session', sessionId], { cwd: root, env: {} }).code, 0);
+    handleHookInput(
+      { hook_event_name: 'Stop', session_id: sessionId, cwd: root, transcript_path: transcript },
+      {}
+    );
+    const after = readSession(root, sessionId).completion;
+    assert.deepEqual(after, before);
+    assert.equal(completionDigest(after), template.completion_sha256);
+  });
+});
+
+test('major: отметка без подтверждения или с чужим хешем — StateError', () => {
+  withProject(({ root }) => {
+    const stateFileOf = (id) => join(root, '.workflow', 'state', 'rails', `${id}.json`);
+    const sessionId = pinnedSession(root, 'P5S1');
+    assert.equal(recordCompletion({ root, state: readSession(root, sessionId), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
+    // отметка осталась, подтверждение «потеряно» — файл пишется как есть
+    const orphan = readSession(root, sessionId);
+    orphan.completed = { version: 1, t: new Date().toISOString(), completion_sha256: completionDigest(orphan.completion) };
+    delete orphan.completion;
+    writeFileSync(stateFileOf(sessionId), JSON.stringify(orphan), 'utf8');
+    assert.throws(() => readSession(root, sessionId), StateError);
+
+    const sessionId2 = pinnedSession(root, 'P5S1');
+    assert.equal(recordCompletion({ root, state: readSession(root, sessionId2), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
+    const s2 = readSession(root, sessionId2);
+    s2.completed = { ...s2.completed, completion_sha256: 'b'.repeat(64) };
+    writeFileSync(stateFileOf(sessionId2), JSON.stringify(s2), 'utf8');
+    assert.throws(() => readSession(root, sessionId2), StateError);
+  });
+});
+
+test('major: состояние завершённой сессии не перезаписывается объектом без отметки', () => {
+  withProject(({ root }) => {
+    const sessionId = pinnedSession(root, 'P5S1');
+    assert.equal(recordCompletion({ root, state: readSession(root, sessionId), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
+    writeGrant(root, sessionId, grantTemplate(readSession(root, sessionId).completion, 1));
+    assert.equal(cliRun(['exit', '--session', sessionId], { cwd: root, env: {} }).code, 0);
+
+    // «писатель, прочитавший состояние до выхода»: объект без completed
+    const stale = structuredClone(readSession(root, sessionId));
+    delete stale.completed;
+    assert.throws(() => saveState(root, stale), StateError);
+    // на диске отметка цела
+    assert.equal(readSession(root, sessionId).completed.version, 1);
+    // легитимный писатель (с отметкой) сохраняет без препятствий
+    const legit = readSession(root, sessionId);
+    legit.updated = new Date().toISOString();
+    saveState(root, legit);
+  });
+});
+
+test('invalidateCompletion: без подтверждения и на завершённой — ничего не делает', () => {
+  withProject(({ root }) => {
+    const sessionId = pinnedSession(root, 'P5S1');
+    assert.equal(invalidateCompletion({ root, state: readSession(root, sessionId), cause: 'тест' }), false);
+    assert.equal(recordCompletion({ root, state: readSession(root, sessionId), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
+    const state = readSession(root, sessionId);
+    state.completed = { version: 1, t: new Date().toISOString(), completion_sha256: completionDigest(state.completion) };
+    assert.equal(invalidateCompletion({ root, state, cause: 'тест' }), false);
   });
 });

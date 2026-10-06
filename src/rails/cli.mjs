@@ -38,7 +38,6 @@ import {
   performExit,
   grantPath,
   grantTemplate,
-  verifyTranscriptOwnership,
 } from './completion.mjs';
 
 // --- разбор аргументов -------------------------------------------------------------
@@ -596,11 +595,9 @@ function cmdComplete(root, positional, flags, env, cwd = process.cwd()) {
   }
 
   const transcriptPath = resolvePath(cwd, flags.transcript);
-  const ownership = verifyTranscriptOwnership(transcriptPath, sessionId);
-  if (!ownership.ok) {
-    return { code: 2, stdout: `Ошибка: transcript не принят: ${ownership.reason}\n` };
-  }
-
+  // Принадлежность transcript и извлечение ответа — внутри recordCompletion,
+  // одним чтением: чужие записи в середине файла и подмена содержимого между
+  // проверкой и чтением дают отказ.
   const result = recordCompletion({ root, state, source: 'cli-transcript', transcriptPath });
   if (!result.ok) {
     const missing = Array.isArray(result.missing) && result.missing.length > 0 ? `\nНе выполнено: ${result.missing.join('; ')}` : '';

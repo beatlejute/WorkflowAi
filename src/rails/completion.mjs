@@ -30,7 +30,7 @@ import { loadSkillRuntime } from './core.mjs';
 import { loadState, saveState } from './state.mjs';
 import { realpathDeep } from './paths.mjs';
 import { appendEvent } from './journal.mjs';
-import { check as outputCheck, lastAssistantText } from './output-check.mjs';
+import { check as outputCheck } from './output-check.mjs';
 
 function digest(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -137,10 +137,27 @@ export function recordCompletion({ root, state, source, answer = null, transcrip
 
   let text = answer;
   if (typeof text !== 'string') {
-    text = lastAssistantText(transcriptPath ?? '');
+    const fromTranscript = transcriptFinalAnswer(transcriptPath ?? '', state.session);
+    if (!fromTranscript.ok) return refuse(`transcript не принят: ${fromTranscript.reason}`);
+    text = fromTranscript.text;
   }
   if (!String(text).trim()) {
     return refuse('финальный ответ не прочитан (transcript пуст или недоступен)');
+  }
+
+  // Повторная верификация того же доказательства не создаёт новое
+  // подтверждение: у подтверждения тот же ответ, узел, runtime и состояние —
+  // объект не трогается, иначе новой меткой инвалидалось бы уже выданное
+  // разрешение владельца (ревью 2026-10-06, minor).
+  const prev = state.completion;
+  if (prev && prev.version === 1
+    && prev.answer_sha256 === digest(String(text))
+    && prev.node === state.node
+    && prev.runtime?.id === state.runtime.id
+    && prev.runtime?.hash === state.runtime.hash
+    && prev.state_sha256 === essentialStateDigest(state)
+    && prev.identity?.session === state.session) {
+    return { ok: true, completion: prev, verdict: prev.verdict, unchanged: true };
   }
 
   const result = outputCheck(text, runtime.config, state);
@@ -186,6 +203,42 @@ export function recordCompletion({ root, state, source, answer = null, transcrip
     // журнал не должен ронять подтверждение
   }
   return { ok: true, completion, verdict: completion.verdict };
+}
+
+/**
+ * Снятие подтверждения: последний исход сессии — не тот ответ, который был
+ * проверен (приостановка RAILS_OUTCOME или ответ мимо выходного слоя).
+ * Подтверждение другого ответа недействительно, даже если существенное
+ * состояние не изменилось (исчерпанный Stop-лимит счётчиков не растит).
+ * Без подтверждения — ничего не делает.
+ *
+ * @param {{root: string, state: object, cause: string}} args
+ * @returns {boolean} было ли что снимать
+ */
+export function invalidateCompletion({ root, state, cause }) {
+  if (!state || !state.session || !state.completion || state.completed) return false;
+  delete state.completion;
+  state.updated = new Date().toISOString();
+  try {
+    saveState(root, state);
+  } catch {
+    // снять из памяти сняли; несохранённое подтверждение остаётся на диске —
+    // повторная остановка с тем же исходом снимет его снова
+  }
+  try {
+    appendEvent(root, {
+      type: 'completion',
+      session: state.session,
+      skill: state.skill,
+      node: state.node,
+      run: state.run ?? null,
+      invalidated: true,
+      cause,
+    });
+  } catch {
+    // журнал не должен ронять снимающего
+  }
+  return true;
 }
 
 // Файл разрешения — в защищённом каталоге состояний, имя с точкой: его не
@@ -321,15 +374,30 @@ export function performExit({ root, session, now = Date.now() }) {
     return failWithTemplate(`разрешение не потреблено: ${err && err.message ? err.message : err}`);
   }
 
-  state.completed = {
+  // Между проверкой и отметкой состояние могли изменить (хук, другая команда):
+  // отметка ставится на перечитанное состояние и только при действительном
+  // подтверждении — иначе выход исполнялся бы по устаревшему доказательству
+  // (ревью 2026-10-06, major).
+  let fresh;
+  try {
+    fresh = loadState(root, session);
+  } catch (err) {
+    return failWithTemplate(`состояние не перечитано: ${err && err.message ? err.message : err}`);
+  }
+  if (!fresh || !fresh.completion || fresh.completed
+    || completionDigest(fresh.completion) !== expected.completion_sha256
+    || essentialStateDigest(fresh) !== fresh.completion.state_sha256) {
+    return failWithTemplate('состояние изменилось в процессе выхода — подтверждение устарело, повтори верификацию и выпуск разрешения');
+  }
+  fresh.completed = {
     version: 1,
     t: new Date().toISOString(),
     completion_sha256: expected.completion_sha256,
     grant_expires_at: grant.expires_at,
   };
-  state.updated = state.completed.t;
+  fresh.updated = fresh.completed.t;
   try {
-    saveState(root, state);
+    saveState(root, fresh);
   } catch (err) {
     try {
       appendEvent(root, {
@@ -346,27 +414,29 @@ export function performExit({ root, session, now = Date.now() }) {
     appendEvent(root, {
       type: 'exit',
       session,
-      skill: state.skill,
-      node: state.node,
-      run: state.run ?? null,
+      skill: fresh.skill,
+      node: fresh.node,
+      run: fresh.run ?? null,
       completion_sha256: expected.completion_sha256,
     });
   } catch {
     // журнал не должен ронять выполненный выход
   }
-  return { ok: true, state, completion };
+  return { ok: true, state: fresh, completion: fresh.completion };
 }
 
 /**
- * Transcript принадлежит сессии: имя файла — `<sessionId>.jsonl`, и первый
- * разобранный объект несёт тот же `sessionId`. Чужой или обезличенный файл —
- * отказ: подтверждение строится только по своему историческому ответу.
+ * Transcript принадлежит сессии, и последний ответ ассистента извлекается из
+ * ОДНОГО чтения (ревью 2026-10-06, major): имя файла — `<sessionId>.jsonl`,
+ * каждая запись с полем `sessionId` несёт тот же id, а ответ — последний
+ * ассистентский текст этого же файла. Чужая запись в середине, подмена файла
+ * между проверкой и чтением, обезличенный ответ — отказ.
  *
  * @param {string} transcriptPath
  * @param {string} sessionId
- * @returns {{ok: boolean, reason?: string}}
+ * @returns {{ok: boolean, reason?: string, text?: string}}
  */
-export function verifyTranscriptOwnership(transcriptPath, sessionId) {
+export function transcriptFinalAnswer(transcriptPath, sessionId) {
   const name = basename(String(transcriptPath ?? ''));
   const stem = name.replace(/\.jsonl$/i, '');
   if (stem !== String(sessionId)) {
@@ -378,6 +448,7 @@ export function verifyTranscriptOwnership(transcriptPath, sessionId) {
   } catch (err) {
     return { ok: false, reason: `transcript не прочитан: ${err && err.code === 'ENOENT' ? 'файла нет' : err.message}` };
   }
+  const entries = [];
   for (const line of raw.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -387,10 +458,43 @@ export function verifyTranscriptOwnership(transcriptPath, sessionId) {
     } catch {
       continue;
     }
-    if (entry && typeof entry === 'object' && typeof entry.sessionId === 'string') {
-      if (entry.sessionId === sessionId) return { ok: true };
+    if (!entry || typeof entry !== 'object') continue;
+    if (typeof entry.sessionId === 'string' && entry.sessionId !== sessionId) {
       return { ok: false, reason: `transcript принадлежит другой сессии (${entry.sessionId})` };
     }
+    entries.push(entry);
   }
-  return { ok: false, reason: 'в transcript нет ни одной записи с sessionId — принадлежность сессии не доказана' };
+  let lastIdx = -1;
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    if (entries[i]?.type === 'assistant') {
+      lastIdx = i;
+      break;
+    }
+  }
+  if (lastIdx === -1) {
+    return { ok: false, reason: 'в transcript нет ответов ассистента' };
+  }
+  // Склейка хвостовых строк одного сообщения — как в output-check.lastAssistantText.
+  const lastId = entries[lastIdx]?.message?.id;
+  let startIdx = lastIdx;
+  if (typeof lastId === 'string' && lastId.length > 0) {
+    let i = lastIdx - 1;
+    while (i >= 0 && entries[i]?.type === 'assistant' && entries[i]?.message?.id === lastId) {
+      startIdx = i;
+      i -= 1;
+    }
+  }
+  const texts = [];
+  for (let i = startIdx; i <= lastIdx; i += 1) {
+    const content = entries[i]?.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (block && block.type === 'text' && typeof block.text === 'string') texts.push(block.text);
+    }
+  }
+  const text = texts.join('');
+  if (!text.trim()) {
+    return { ok: false, reason: 'последнее сообщение ассистента без текста' };
+  }
+  return { ok: true, text };
 }

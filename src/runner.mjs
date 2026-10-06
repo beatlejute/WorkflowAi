@@ -3578,7 +3578,19 @@ class StageExecutor {
       ? checkRailsOutput(retryResult.output || '', config, retryState)
       : { ok: false, missing: ['ни одного вызова инструмента под рельсами'] };
     retryResult.railsRetryVerdict = retryVerdict;
-    if (retryVerdict.ok && !retryVerdict.outcome) return retryResult;
+    if (retryVerdict.ok && !retryVerdict.outcome) {
+      // Проверенный ответ повтора в терминале — подтверждение завершения, как и
+      // у первого ответа: без него штатный выход этой сессии недоступен
+      // (ревью 2026-10-06, major; kilo-плагин Stop-пути не имеет).
+      if (retryState) {
+        try {
+          recordCompletion({ root: this.projectRoot, state: retryState, source: 'runner', answer: retryResult.output || '' });
+        } catch {
+          // подтверждение не должно ломать успешный ответ стадии
+        }
+      }
+      return retryResult;
+    }
     if (retryVerdict.ok && retryVerdict.outcome) {
       // Приостановка и в ответе повтора — не успех (ревью 2026-10-05, второй раунд).
       retryResult.railsSuspended = retryVerdict.outcome;

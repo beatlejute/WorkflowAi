@@ -15,7 +15,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { normalizeLabel } from './graph.mjs';
 import { isEdgeGuardPath, TICKET_PLACEHOLDER } from './rails-config.mjs';
 
@@ -169,6 +169,12 @@ function validateState(state, sessionId) {
     if (typeof m.t !== 'string' || Number.isNaN(Date.parse(m.t))) bad('время завершения');
     if (typeof m.completion_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(m.completion_sha256)) bad('хеш подтверждения в отметке');
     if (m.grant_expires_at !== undefined && (typeof m.grant_expires_at !== 'string' || Number.isNaN(Date.parse(m.grant_expires_at)))) bad('срок разрешения в отметке');
+    // Отметка без целого подтверждения или с чужим хешем — не «завершённая
+    // сессия», а повреждение: нейтральный режим по ней не включается (ревью
+    // 2026-10-06, major — fail closed, как и остальные формы состояния).
+    if (state.completion === undefined) bad('отметка завершения без подтверждения');
+    const digest = createHash('sha256').update(JSON.stringify(state.completion)).digest('hex');
+    if (digest !== m.completion_sha256) bad('отметка завершения не совпадает с подтверждением');
   }
 }
 
@@ -208,6 +214,19 @@ export function saveState(root, state) {
   const dir = stateDir(root);
   fs.mkdirSync(dir, { recursive: true });
   const target = statePath(root, state.session);
+  // Сессия с отметкой штатного выхода не перезаписывается объектом без отметки:
+  // писатель, прочитавший состояние до выхода и сохраняющий после, стёр бы
+  // `completed` (ревью 2026-10-06, major). Легитимные писатели завершённой
+  // сессии несут отметку в объекте; остальные — устарели и обязаны перечитать.
+  try {
+    const disk = JSON.parse(fs.readFileSync(target, 'utf8'));
+    if (disk && typeof disk === 'object' && disk.completed && !state.completed) {
+      throw new StateError('состояние завершённой сессии не перезаписывается (в объекте нет отметки выхода)');
+    }
+  } catch (err) {
+    if (err instanceof StateError) throw err;
+    // файла нет или он не прочитан — обычная запись (повреждённый файл ловит loadState)
+  }
   // Предзапись: доступный только для чтения файл обязан отказывать и на POSIX,
   // где rename поверх такого файла проходит молча (CI 2026-10-06, Linux/macOS:
   // счётчик отказов «несохраняемого» состояния попадал на диск). Файла ещё нет

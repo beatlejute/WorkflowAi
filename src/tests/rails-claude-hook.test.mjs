@@ -79,8 +79,10 @@ function makeState(root, node) {
   return sessionId;
 }
 
-function writeTranscript(base, entries) {
-  const p = join(base, 'transcript.jsonl');
+// Transcript сессии: имя — <sessionId>.jsonl, как у настоящего Claude Code
+// (stop-хук проверяет принадлежность transcript сессии, 2026-10-06).
+function writeTranscript(base, sessionId, entries) {
+  const p = join(base, `${sessionId}.jsonl`);
   writeFileSync(p, entries.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8');
   return p;
 }
@@ -371,7 +373,7 @@ test('handleHookInput: необработанное исключение вне 
 test('Stop: stop_hook_active=true не снимает блок — max_stop_blocks: 2 даёт два блока подряд, третья остановка проходит', () => {
   withProject(({ root, base }) => {
     const sessionId = makeState(root, 'P4S1'); // не terminal
-    const transcriptPath = writeTranscript(base, [
+    const transcriptPath = writeTranscript(base, sessionId, [
       { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'ничего не подготовлено' }] } },
     ]);
     const input = { hook_event_name: 'Stop', session_id: sessionId, cwd: root, transcript_path: transcriptPath };
@@ -390,7 +392,7 @@ test('Stop: stop_hook_active=true не снимает блок — max_stop_bloc
 test('Stop: stop_hook_active=true и ответ по rails.yaml в terminal -> null', () => {
   withProject(({ root, base }) => {
     const sessionId = makeState(root, 'P5S1');
-    const transcriptPath = writeTranscript(base, [
+    const transcriptPath = writeTranscript(base, sessionId, [
       { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'Готово. RAILS: P5S1 завершено.' }] } },
     ]);
     const r = handleHookInput(
@@ -408,7 +410,7 @@ test('Stop: stop_hook_active=true и ответ по rails.yaml в terminal -> n
 test('Stop: счётчик блоков по узлу — новый узел даёт новые блоки, исчерпанный узел при возврате пропускает', () => {
   withProject(({ root, base }) => {
     const sessionId = makeState(root, 'P4S1');
-    const transcriptPath = writeTranscript(base, [
+    const transcriptPath = writeTranscript(base, sessionId, [
       { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'ничего не подготовлено' }] } },
     ]);
     const input = { hook_event_name: 'Stop', session_id: sessionId, cwd: root, transcript_path: transcriptPath, stop_hook_active: true };
@@ -438,7 +440,7 @@ test('Stop: max_stop_blocks: 0 -> нарушение не блокирует н�
   withProject(({ root, base, skillDir }) => {
     writeFileSync(join(skillDir, 'rails.yaml'), RAILS_YAML.replace('max_stop_blocks: 2', 'max_stop_blocks: 0'), 'utf8');
     const sessionId = makeState(root, 'P4S1');
-    const transcriptPath = writeTranscript(base, [
+    const transcriptPath = writeTranscript(base, sessionId, [
       { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'ничего не подготовлено' }] } },
     ]);
     const r = handleHookInput(
@@ -454,7 +456,7 @@ test('Stop: max_stop_blocks: 0 -> нарушение не блокирует н�
 test('Stop: финальный ответ соответствует output.final_requires и находится в terminal -> null', () => {
   withProject(({ root, base }) => {
     const sessionId = makeState(root, 'P5S1'); // terminal-узел
-    const transcriptPath = writeTranscript(base, [
+    const transcriptPath = writeTranscript(base, sessionId, [
       { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'Готово. RAILS: P5S1 завершено.' }] } },
     ]);
     const r = handleHookInput(
@@ -468,7 +470,7 @@ test('Stop: финальный ответ соответствует output.fina
 test('Stop: нарушение -> block, счётчик stop_blocks растёт, после исчерпания max_stop_blocks -> null', () => {
   withProject(({ root, base }) => {
     const sessionId = makeState(root, 'P4S1'); // не terminal и без нужного текста
-    const transcriptPath = writeTranscript(base, [
+    const transcriptPath = writeTranscript(base, sessionId, [
       { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'ничего не подготовлено' }] } },
     ]);
     const input = { hook_event_name: 'Stop', session_id: sessionId, cwd: root, transcript_path: transcriptPath };
@@ -497,11 +499,12 @@ test('Stop: нарушение -> block, счётчик stop_blocks растёт
 
 test('Stop: без активной сессии/состояния -> null', () => {
   withProject(({ root, base }) => {
-    const transcriptPath = writeTranscript(base, [
+    const stranger = uuid();
+    const transcriptPath = writeTranscript(base, stranger, [
       { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'x' }] } },
     ]);
     const r = handleHookInput(
-      { hook_event_name: 'Stop', session_id: uuid(), cwd: root, transcript_path: transcriptPath },
+      { hook_event_name: 'Stop', session_id: stranger, cwd: root, transcript_path: transcriptPath },
       {}
     );
     assert.equal(r, null);

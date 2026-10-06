@@ -1281,7 +1281,20 @@ function decideInProject(root, action, ctx) {
   // остаётся в режиме без скила (G0), правки скилов по-прежнему только через
   // коуча.
   if (state?.completed) {
-    return decideNoSkillMode(root, action, ctx);
+    const base = decideNoSkillMode(root, action, ctx);
+    if (base.decision === 'deny') return base;
+    // Остальное — через физическую классификацию: защищённое состояние (в том
+    // числе файлы разрешений), канон и общий inode закрыты и у завершённой
+    // сессии — иначе нейтральный режим открывал бы запись в защищённый каталог
+    // (ревью 2026-10-06, blocker).
+    classify();
+    // cli-вызов — с подставленным --session: без него `start` поверх
+    // завершённой host-сессии создал бы случайную новую сессию вместо отказа
+    // cmdStart (ревью 2026-10-06, major).
+    if (cli?.isCli && cli.command !== action.command) {
+      return { decision: 'allow', updatedCommand: cli.command };
+    }
+    return base;
   }
 
   if (!state) {

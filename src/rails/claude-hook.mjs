@@ -18,7 +18,7 @@ import { findProjectRoot } from '../lib/find-root.mjs';
 import { decide, loadSkillRuntime } from './core.mjs';
 import { fromClaude } from './actions.mjs';
 import { loadState, saveState } from './state.mjs';
-import { recordCompletion } from './completion.mjs';
+import { recordCompletion, invalidateCompletion, transcriptFinalAnswer } from './completion.mjs';
 import { realpathDeep } from './paths.mjs';
 import { appendEvent } from './journal.mjs';
 import { check as outputCheck, lastAssistantText } from './output-check.mjs';
@@ -192,21 +192,44 @@ function handleStop(input, env) {
     };
   }
 
-  const text = lastAssistantText((input && input.transcript_path) || '');
+  // Ответ читается одним чтением вместе с проверкой принадлежности transcript
+  // сессии (ревью 2026-10-06): чужие записи или чужой файл — ответ пуст,
+  // выходной слой его не пропустит. Не прочиталось — как и раньше, отказ.
+  const answer = transcriptFinalAnswer((input && input.transcript_path) || '', sessionId);
+  const text = answer.ok ? answer.text : '';
   const result = outputCheck(text, config, state);
   if (result.ok) {
     // Положительная проверка в терминале — единственное доказательство завершения:
     // сохранить сразу (дефект 2026-10-06: «pass» не сохранялся, и завершённая
     // сессия оставалась под рельсами без штатного выхода). Приостановка
-    // RAILS_OUTCOME — не завершение, подтверждения она не создаёт.
+    // RAILS_OUTCOME — не завершение: подтверждение прежнего ответа снимается,
+    // иначе выход закрывал бы сессию, чей последний исход — ожидание владельца
+    // (ревью 2026-10-06, major).
     if (!result.outcome) {
       try {
         recordCompletion({ root, state, source: 'stop-hook', answer: text });
       } catch {
         // подтверждение не должно ломать разрешённую остановку
       }
+    } else {
+      try {
+        invalidateCompletion({ root, state, cause: `приостановка RAILS_OUTCOME: ${result.outcome}` });
+      } catch {
+        // снятие не должно ломать разрешённую остановку
+      }
     }
     return null;
+  }
+  // Ответ мимо выходного слоя: подтверждение прежнего ответа больше не отражает
+  // последний исход — даже при исчерпанном потолке, когда счётчики не растут и
+  // устаревание по хешу состояния не видно. Непрочитанный transcript ничего не
+  // снимает: снимать нечего без прочитанного доказательства.
+  if (answer.ok) {
+    try {
+      invalidateCompletion({ root, state, cause: 'ответ не прошёл выходной слой' });
+    } catch {
+      // снятие не должно ломать блокировку
+    }
   }
 
   const node = state.node;
