@@ -296,10 +296,10 @@ export function invalidateCompletion({ root, state, cause }) {
     if (readCompletedMarker(root, state.session)) return { removed: false };
     const completion = state.completion;
     const digest = completionDigest(completion);
-    // Замок могли похитить, пока инвалидация спала перед сохранением: без
-    // замка сохранение запрещено, подтверждение в памяти восстанавливается —
-    // иначе выход, похитивший замок мёртвого владельца, встал бы на неснятое
-    // подтверждение (ревью 2026-10-06, девятый круг).
+    // Клейм могли снять (владелец умер/файл удалён руками) после последней
+    // перепроверки: без замка сохранение запрещено, подтверждение в памяти
+    // восстанавливается — иначе exit встал бы на неснятое подтверждение
+    // (ревью 2026-10-06, девятый круг).
     try {
       if (!existsSync(lock.token) || readFileSync(lock.token, 'utf8') !== String(process.pid)) {
         state.completion = completion;
@@ -536,10 +536,9 @@ export function performExit({ root, session, now = Date.now() }) {
   const failWithTemplate = (reason) => ({ ok: false, reason, grantPath: path, grantTemplate: grantTemplate(completion) });
 
   // Блокировка выхода: сериализует потребление разрешения и отметку против
-  // второго параллельного exit. mkdir без recursive: существующий каталог
-  // даёт EEXIST. Замок с живым владельцем не похищается вовсе (токен несёт
-  // pid), замок мёртвого — переименовывается в сторону с проверкой содержимого
-  // (ревью 2026-10-06).
+  // второго параллельного exit и против инвалидации. Клейм ('wx') никто,
+  // кроме владельца, не снимает; мёртвый/зависший владелец виден в busy с
+  // подсказкой ручного удаления (ревью 2026-10-06, круги 14–15).
   let lock;
   try {
     lock = acquireExitLock(root, session);
@@ -570,8 +569,8 @@ export function performExit({ root, session, now = Date.now() }) {
 // 'wx' маркера ограничивают последствия (ревью 2026-10-06).
 function exitLocked({ root, session, completion, path, token, failWithTemplate, now }) {
 
-  // Наш клейм на месте (файл с нашим pid)? Похищение мёртвого возможно
-  // только после нашей смерти — живому выходу потеря означает отказ.
+  // Наш клейм на месте (файл с нашим pid)? Чужой код его не снимает;
+  // потеря — ручное вмешательство или сбой, и означает отказ.
   const lostLock = () => {
     try {
       return readFileSync(token, 'utf8') !== String(process.pid);
