@@ -23,7 +23,7 @@
 // честности, не криптография — см. README §16.
 
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 import { loadSkillRuntime } from './core.mjs';
@@ -270,7 +270,7 @@ export function invalidateCompletion({ root, state, cause, now = Date.now() }) {
     return { removed: false, attempted: true, traced: false, error: err };
   }
   if (lock.busy) {
-    // Сбой похищения протухшего замка — fault окружения, а не «занято»:
+    // Сбой похищения замка мёртвого владельца — fault окружения, а не «занято»:
     // возвращается как неудавшийся след, Stop блокирует остановку
     // (ревью 2026-10-06).
     if (lock.stealFailed) return { removed: false, attempted: true, traced: false };
@@ -285,7 +285,7 @@ export function invalidateCompletion({ root, state, cause, now = Date.now() }) {
     const digest = completionDigest(completion);
     // Замок могли похитить, пока инвалидация спала перед сохранением: без
     // замка сохранение запрещено, подтверждение в памяти восстанавливается —
-    // иначе выход, похитивший протухший замок, встал бы на неснятое
+    // иначе выход, похитивший замок мёртвого владельца, встал бы на неснятое
     // подтверждение (ревью 2026-10-06, девятый круг).
     if (!existsSync(lock.token)) {
       state.completion = completion;
@@ -447,9 +447,9 @@ function pidAlive(pid) {
 
 // Замок выхода: mkdir без recursive (существующий каталог — EEXIST), внутри —
 // файл-токен владельца с его pid. Пока владелец ЖИВ, замок не похищается
-// вовсе: пауза процесса (своп, отладчик, нагрузка) не делает чужой замок
-// «протухшим» — вся гонка пауз между выходом и инвалидацией упирается в
-// чистые busy/отказы (ревью 2026-10-06, девятый круг). Замок мёртвого
+// вовсе: пауза процесса (своп, отладчик, нагрузка) не открывает чужой замок —
+// вся гонка пауз между выходом и инвалидацией упирается в чистые busy/отказы
+// (ревью 2026-10-06, девятый и десятый круги). Замок мёртвого
 // владельца похищается атомарным переименованием; у двух похитителей успех
 // ровно у одного. Снятие удаляет токен и каталог только у СВОЕГО замка.
 // Возвращает {busy: true, stealFailed?} либо {lock, token, release}.
@@ -464,29 +464,43 @@ function acquireExitLock(root, session) {
   } catch (err) {
     if (err.code !== 'EEXIST') throw err;
     // Живой владелец (любой токен с живым pid) — занято; без токенов или с
-    // мёртвым владельцем — похищение.
-    let ownerAlive = false;
-    try {
-      for (const name of readdirSync(lock)) {
-        const m = /^(\d+)\.[0-9a-f]+\.token$/.exec(name);
-        if (m && pidAlive(Number(m[1]))) {
-          ownerAlive = true;
-          break;
-        }
-      }
-    } catch {
-      return { busy: true };
-    }
-    if (ownerAlive) return { busy: true };
-    // Похищение атомарно переименованием: у двух похитителей успех ровно у
-    // одного, второй получает ENOENT или видит свежий каталог. Сбой самого
-    // переименования (доступ) — не «занято», а fault окружения: вызывающий
-    // делает его видимым (ревью 2026-10-06).
+    // мёртвым владельцем — похищение. Проверка и переименование раздельны,
+    // поэтому решение принимается ПО ПЕРЕИМЕНОВАННОЙ КОПИИ: если в ней живой
+    // владелец (пауза между проверкой и rename), замок возвращается на место,
+    // и похититель уходит в busy — поверх живого замка не работает никто
+    // (ревью 2026-10-06, десятый круг). Пид переиспользован посторонним
+    // процессом — консервативный вечный busy, замок снимается вручную
+    // (README §16).
     const aside = `${lock}.${process.pid}.${randomBytes(4).toString('hex')}.stale`;
     try {
       renameSync(lock, aside);
     } catch {
       return { busy: true, stealFailed: true };
+    }
+    let stoleLive = false;
+    try {
+      for (const name of readdirSync(aside)) {
+        const m = /^(\d+)\.[0-9a-f]+\.token$/.exec(name);
+        if (m && pidAlive(Number(m[1]))) {
+          stoleLive = true;
+          break;
+        }
+      }
+    } catch {
+      // каталог исчез между похитителями — наш замок кто-то уже забрал
+      return { busy: true };
+    }
+    if (stoleLive) {
+      try {
+        renameSync(aside, lock);
+      } catch {
+        try {
+          rmSync(aside, { recursive: true, force: true });
+        } catch {
+          // владелец заметит потерю токена своими перепроверками
+        }
+      }
+      return { busy: true };
     }
     try {
       rmSync(aside, { recursive: true, force: true });
@@ -554,9 +568,9 @@ export function performExit({ root, session, now = Date.now() }) {
 
   // Блокировка выхода: сериализует потребление разрешения и отметку против
   // второго параллельного exit. mkdir без recursive: существующий каталог
-  // даёт EEXIST; протухший замок (старше 10 с) похищается, но у владельца
-  // внутри файл-токен — чужой rmdir не берёт (каталог не пуст), поэтому
-  // владение остаётся ровно у одного (ревью 2026-10-06).
+  // даёт EEXIST. Замок с живым владельцем не похищается вовсе (токен несёт
+  // pid), замок мёртвого — переименовывается в сторону с проверкой содержимого
+  // (ревью 2026-10-06).
   let lock;
   try {
     lock = acquireExitLock(root, session);
