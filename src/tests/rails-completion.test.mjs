@@ -978,22 +978,31 @@ test('неснятое подтверждение: надгробие и жур�
 
     // удавшаяся инвалидация снимает след: подтверждение снято с диска, и
     // следующий отказ — уже «подтверждения нет», а не «неснятое»
-    assert.equal(invalidateCompletion({ root, state: readSession(root, sessionId), cause: 'тест' }), true);
+    assert.equal(invalidateCompletion({ root, state: readSession(root, sessionId), cause: 'тест' }).removed, true);
     v = verifyExit({ root, session: sessionId });
     assert.equal(v.ok, false);
     assert.match(v.reason, /подтверждения завершения нет/);
   });
 });
 
-test('invalidateCompletion: без подтверждения и на завершённой — ничего не делает', () => {
+test('invalidateCompletion: без подтверждения, на завершённой и под чужим замком — ничего не делает', () => {
   withProject(({ root }) => {
     const sessionId = pinnedSession(root, 'P5S1');
-    assert.equal(invalidateCompletion({ root, state: readSession(root, sessionId), cause: 'тест' }), false);
+    assert.equal(invalidateCompletion({ root, state: readSession(root, sessionId), cause: 'тест' }).removed, false);
     assert.equal(recordCompletion({ root, state: readSession(root, sessionId), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
     const state = readSession(root, sessionId);
     writeCompletedMarker(root, sessionId, { t: new Date().toISOString(), completion_sha256: completionDigest(state.completion) });
-    assert.equal(invalidateCompletion({ root, state, cause: 'тест' }), false);
+    assert.equal(invalidateCompletion({ root, state, cause: 'тест' }).removed, false);
     // подтверждение завершённой сессии не тронуто
     assert.ok(readSession(root, sessionId).completion);
+
+    // чужой живой замок — снимающий уходит, следующий Stop повторит
+    const sessionId2 = pinnedSession(root, 'P5S1');
+    assert.equal(recordCompletion({ root, state: readSession(root, sessionId2), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
+    mkdirSync(join(root, '.workflow', 'state', 'rails', `.exit-lock-${sessionId2}`), { recursive: true });
+    const inv = invalidateCompletion({ root, state: readSession(root, sessionId2), cause: 'тест' });
+    assert.equal(inv.removed, false);
+    assert.equal(inv.busy, true);
+    assert.ok(readSession(root, sessionId2).completion);
   });
 });

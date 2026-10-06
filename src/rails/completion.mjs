@@ -22,7 +22,7 @@
 // shell-записям (write-policy.mjs), шаблон печатает отказ `exit`. Это граница
 // честности, не криптография — см. README §16.
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
@@ -218,7 +218,10 @@ function invalidationPath(root, session) {
   return join(root, '.workflow', 'state', 'rails', `.invalid-${String(session)}.json`);
 }
 
-// Надгробие или журнальный след неснятого подтверждения у сессии.
+// Надгробие или журнальный след неснятого подтверждения у сессии. Журнал
+// читается по последнему событию: сбой инвалидации закрывает exit, последовавшая
+// УДАВШАЯСЯ инвалидация (запись completion с invalidated и saved) — снимает
+// след (ревью 2026-10-06: историческая запись не должна блокировать вечно).
 function existsInvalidation(root, session) {
   try {
     if (statSync(invalidationPath(root, session)).isFile()) return true;
@@ -226,10 +229,13 @@ function existsInvalidation(root, session) {
     // надгробия нет
   }
   try {
-    return readJournal(root).some((e) => e.type === 'error'
-      && (e.session ?? null) === session
-      && typeof e.message === 'string'
-      && e.message.startsWith('invalidation:'));
+    let failed = false;
+    for (const e of readJournal(root)) {
+      if ((e.session ?? null) !== session) continue;
+      if (e.type === 'completion' && e.invalidated === true && e.saved === true) failed = false;
+      else if (e.type === 'error' && typeof e.message === 'string' && e.message.startsWith('invalidation:')) failed = true;
+    }
+    return failed;
   } catch {
     // журнал недоступен — решают надгробие и диск
     return false;
@@ -247,55 +253,67 @@ function existsInvalidation(root, session) {
  * @param {{root: string, state: object, cause: string}} args
  * @returns {boolean} было ли что снимать
  */
-export function invalidateCompletion({ root, state, cause }) {
-  if (!state || !state.session || !state.completion) return false;
-  if (readCompletedMarker(root, state.session)) return false;
-  delete state.completion;
-  state.updated = new Date().toISOString();
-  let saved = true;
+export function invalidateCompletion({ root, state, cause, now = Date.now() }) {
+  if (!state || !state.session || !state.completion) return { removed: false };
+  // Под тем же замком, что и выход, но без ожидания: замок занят выходом —
+  // снимающий уходит, следующий Stop с тем же исходом повторит. Без замка
+  // инвалидация вклинивалась бы между перечитыванием и маркером выхода
+  // (ревью 2026-10-06).
+  const lock = acquireExitLock(root, state.session, { now });
+  if (lock.busy) return { removed: false, busy: true };
   try {
-    saveState(root, state);
+    // Маркер мог появиться, пока брали замок.
+    if (readCompletedMarker(root, state.session)) return { removed: false };
+    delete state.completion;
+    state.updated = new Date().toISOString();
+    let saved = true;
+    let traced = true;
     try {
-      unlinkSync(invalidationPath(root, state.session));
+      saveState(root, state);
+      try {
+        unlinkSync(invalidationPath(root, state.session));
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+      }
     } catch (err) {
-      if (err.code !== 'ENOENT') throw err;
-    }
-  } catch (err) {
-    saved = false;
-    try {
-      writeFileSync(
-        invalidationPath(root, state.session),
-        JSON.stringify({ version: 1, session: state.session, t: new Date().toISOString(), cause: String(cause ?? '') }),
-        'utf8'
-      );
-    } catch {
-      // и надгробие не записалось — остаётся запись error в журнале (ниже)
+      saved = false;
+      try {
+        writeFileSync(
+          invalidationPath(root, state.session),
+          JSON.stringify({ version: 1, session: state.session, t: new Date().toISOString(), cause: String(cause ?? '') }),
+          'utf8'
+        );
+      } catch {
+        traced = false; // и надгробие не записалось
+      }
+      try {
+        appendEvent(root, {
+          type: 'error',
+          session: state.session,
+          message: `invalidation: подтверждение не снято на диске (${err && err.message ? err.message : err}) — повторная остановка с тем же исходом снимет снова`,
+        });
+      } catch {
+        traced = false; // и журнального следа нет — вызывающий обязан сделать сбой видимым
+      }
     }
     try {
       appendEvent(root, {
-        type: 'error',
+        type: 'completion',
         session: state.session,
-        message: `invalidation: подтверждение не снято на диске (${err && err.message ? err.message : err}) — повторная остановка с тем же исходом снимет снова`,
+        skill: state.skill,
+        node: state.node,
+        run: state.run ?? null,
+        invalidated: true,
+        saved,
+        cause,
       });
     } catch {
-      // журнал недоступен — повтор попытается снова
+      // журнал не должен ронять снимающего
     }
+    return { removed: true, saved, traced };
+  } finally {
+    lock.release();
   }
-  try {
-    appendEvent(root, {
-      type: 'completion',
-      session: state.session,
-      skill: state.skill,
-      node: state.node,
-      run: state.run ?? null,
-      invalidated: true,
-      saved,
-      cause,
-    });
-  } catch {
-    // журнал не должен ронять снимающего
-  }
-  return true;
 }
 
 // Файл разрешения — в защищённом каталоге состояний, имя с точкой: его не
@@ -340,6 +358,11 @@ export function grantTemplate(completion, ttlHours = 24) {
  */
 export function verifyExit({ root, session }) {
   const fail = (reason) => ({ ok: false, reason });
+  // Неснятое подтверждение — раньше «уже завершена»: маркер, оставшийся при
+  // неудачном откате, не должен маскировать сбой инвалидации.
+  if (existsInvalidation(root, session)) {
+    return fail('есть неснятое подтверждение (сбой инвалидации) — повтори Stop с непроходным ответом или приостановкой');
+  }
   let marker;
   try {
     marker = readCompletedMarker(root, session);
@@ -364,12 +387,6 @@ export function verifyExit({ root, session }) {
   if (essentialStateDigest(state) !== completion.state_sha256) {
     return fail('состояние изменилось после подтверждения — подтверждение устарело, повтори верификацию (complete или Stop в терминале)');
   }
-  // Неснятое подтверждение: инвалидация не сохранилась (надгробие или запись
-  // error в журнале) — пока она не повторится успешно, выход по такому
-  // подтверждению закрыт (ревью 2026-10-06, major).
-  if (existsInvalidation(root, session)) {
-    return fail('есть неснятое подтверждение (сбой инвалидации) — повтори Stop с непроходным ответом или приостановкой');
-  }
   let runtime;
   try {
     runtime = loadSkillRuntime(root, state.skill, state);
@@ -381,6 +398,54 @@ export function verifyExit({ root, session }) {
     return fail(`узел ${state.node} больше не терминальный — подтверждение недействительно`);
   }
   return { ok: true, state, completion };
+}
+
+// Замок выхода: mkdir без recursive (существующий каталог — EEXIST), внутри —
+// файл-токен владельца. Снятие удаляет токен и каталог только у СВОЕГО замка:
+// каталог с чужим токеном rmdir не берёт (не пуст), поэтому при гонке двух
+// «похитителей» протухшего замка владение остаётся ровно у одного
+// (ревью 2026-10-06). Возвращает {busy: true} либо {lock, token, release}.
+function acquireExitLock(root, session, { now = Date.now() } = {}) {
+  const lockDir = join(root, '.workflow', 'state', 'rails');
+  const lock = join(lockDir, `.exit-lock-${session}`);
+  mkdirSync(lockDir, { recursive: true });
+  let created = false;
+  try {
+    mkdirSync(lock);
+    created = true;
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+    let stale = false;
+    try {
+      stale = now - statSync(lock).mtimeMs > 10000;
+    } catch {
+      return { busy: true };
+    }
+    if (!stale) return { busy: true };
+    try {
+      rmdirSync(lock); // пустой каталог снимается; с чужим токеном — ENOTEMPTY
+      mkdirSync(lock);
+      created = true;
+    } catch {
+      return { busy: true };
+    }
+  }
+  if (!created) return { busy: true };
+  const token = join(lock, `${process.pid}.${randomBytes(4).toString('hex')}.token`);
+  writeFileSync(token, String(now), 'utf8');
+  const release = () => {
+    try {
+      unlinkSync(token);
+    } catch {
+      // токена нет — каталог не наш, не трогаем
+    }
+    try {
+      rmdirSync(lock);
+    } catch {
+      // не пуст (токен другого) или уже снят — не наш
+    }
+  };
+  return { busy: false, lock, token, release };
 }
 
 /**
@@ -404,43 +469,16 @@ export function performExit({ root, session, now = Date.now() }) {
   const failWithTemplate = (reason) => ({ ok: false, reason, grantPath: path, grantTemplate: grantTemplate(completion) });
 
   // Блокировка выхода: сериализует потребление разрешения и отметку против
-  // второго параллельного exit (mkdir без recursive: существующий каталог
-  // даёт EEXIST; протухший замок — старше 10 с — снимается, живой возвращает
-  // «повтори команду»).
-  const lockDir = join(root, '.workflow', 'state', 'rails');
-  const lock = join(lockDir, `.exit-lock-${session}`);
-  mkdirSync(lockDir, { recursive: true });
-  let held = false;
-  try {
-    mkdirSync(lock);
-    held = true;
-  } catch (err) {
-    if (err.code !== 'EEXIST') return failWithTemplate(`замок выхода не создан: ${err.message}`);
-    let stale = false;
-    try {
-      stale = now - statSync(lock).mtimeMs > 10000;
-    } catch {
-      return failWithTemplate('другой выход этой сессии выполняется — повтори команду');
-    }
-    if (!stale) return failWithTemplate('другой выход этой сессии выполняется — повтори команду');
-    try {
-      rmdirSync(lock);
-      mkdirSync(lock);
-      held = true;
-    } catch {
-      return failWithTemplate('другой выход этой сессии выполняется — повтори команду');
-    }
-  }
+  // второго параллельного exit. mkdir без recursive: существующий каталог
+  // даёт EEXIST; протухший замок (старше 10 с) похищается, но у владельца
+  // внутри файл-токен — чужой rmdir не берёт (каталог не пуст), поэтому
+  // владение остаётся ровно у одного (ревью 2026-10-06).
+  const lock = acquireExitLock(root, session, { now });
+  if (lock.busy) return failWithTemplate('другой выход этой сессии выполняется — повтори команду');
   try {
     return exitLocked({ root, session, completion, path, failWithTemplate, now });
   } finally {
-    if (held) {
-      try {
-        rmdirSync(lock);
-      } catch {
-        // протухнет и снимется следующим выходом
-      }
-    }
+    lock.release();
   }
 }
 
@@ -492,7 +530,8 @@ function exitLocked({ root, session, completion, path, failWithTemplate, now }) 
   // Между проверкой и отметкой состояние могли изменить (хук, другая команда):
   // отметка ставится на перечитанное состояние и только при действительном
   // подтверждении — иначе выход исполнялся бы по устаревшему доказательству
-  // (ревью 2026-10-06, major).
+  // (ревью 2026-10-06, major). След неснятого подтверждения (неудачная
+  // инвалидация после первой проверки) здесь тоже перечитывается.
   let fresh;
   try {
     fresh = loadState(root, session);
@@ -500,6 +539,7 @@ function exitLocked({ root, session, completion, path, failWithTemplate, now }) 
     return failWithTemplate(`состояние не перечитано: ${err && err.message ? err.message : err}`);
   }
   if (!fresh || !fresh.completion
+    || existsInvalidation(root, session)
     || completionDigest(fresh.completion) !== expected.completion_sha256
     || essentialStateDigest(fresh) !== fresh.completion.state_sha256) {
     return failWithTemplate('состояние изменилось в процессе выхода — подтверждение устарело, повтори верификацию и выпуск разрешения');
@@ -539,22 +579,24 @@ function exitLocked({ root, session, completion, path, failWithTemplate, now }) 
   if (!after || !after.completion
     || completionDigest(after.completion) !== expected.completion_sha256
     || essentialStateDigest(after) !== after.completion.state_sha256) {
+    let reverted = true;
     try {
       unlinkSync(completedMarkerPath(root, session));
     } catch {
-      // не снялся — останется маркер при неснятой инвалидации; его заметит
-      // existsInvalidation-порядок при следующей попытке и ручной разбор
+      reverted = false; // маркер остался — сессия числится завершённой при снятом подтверждении
     }
     try {
       appendEvent(root, {
         type: 'error',
         session,
-        message: 'exit: подтверждение изменилось в момент выхода — маркер снят, разрешение потреблено, требуется перевыпуск',
+        message: `exit: подтверждение изменилось в момент выхода — маркер ${reverted ? 'снят' : 'НЕ снят (удалите .completed-<session>.json вручную)'}, разрешение потреблено, требуется перевыпуск`,
       });
     } catch {
       // журнал недоступен — отказ всё равно возвращён
     }
-    return failWithTemplate('подтверждение изменилось в момент выхода — разрешение потреблено, владелец перевыпускает');
+    return failWithTemplate(reverted
+      ? 'подтверждение изменилось в момент выхода — разрешение потреблено, владелец перевыпускает'
+      : 'подтверждение изменилось в момент выхода, маркер снять не удалось — устраните доступ к .workflow/state и разберите вручную');
   }
 
   // Пост-проверка: маркер действительно на диске.

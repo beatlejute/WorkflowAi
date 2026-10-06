@@ -213,7 +213,15 @@ function handleStop(input, env) {
       }
     } else {
       try {
-        invalidateCompletion({ root, state, cause: `приостановка RAILS_OUTCOME: ${result.outcome}` });
+        const inv = invalidateCompletion({ root, state, cause: `приостановка RAILS_OUTCOME: ${result.outcome}` });
+        // снятие не сохранилось и следа нет нигде: остановка блокируется —
+        // иначе сбой невидим, и exit позже примет неснятое подтверждение
+        if (inv?.removed && inv.traced === false) {
+          return {
+            decision: 'block',
+            reason: 'RAILS: подтверждение завершения не снято и след не записан — устраните доступ к .workflow/state и повторите остановку',
+          };
+        }
       } catch {
         // снятие не должно ломать разрешённую остановку
       }
@@ -227,11 +235,17 @@ function handleStop(input, env) {
   // нового исхода нет.
   if (answer.integrity === 'ok' || answer.integrity === 'empty') {
     try {
-      invalidateCompletion({
+      const inv = invalidateCompletion({
         root,
         state,
         cause: answer.integrity === 'empty' ? 'последнее сообщение ассистента без текста' : 'ответ не прошёл выходной слой',
       });
+      if (inv?.removed && inv.traced === false) {
+        return {
+          decision: 'block',
+          reason: 'RAILS: подтверждение завершения не снято и след не записан — устраните доступ к .workflow/state и повторите остановку',
+        };
+      }
     } catch {
       // снятие не должно ломать блокировку
     }
