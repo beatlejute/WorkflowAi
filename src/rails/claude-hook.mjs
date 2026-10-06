@@ -219,7 +219,7 @@ function handleStop(input, env) {
         if ((inv?.removed || inv?.attempted) && inv.traced === false) {
           return {
             decision: 'block',
-            reason: 'RAILS: подтверждение завершения не снято и след не записан — устраните доступ к .workflow/state и повторите остановку',
+            reason: inv.blockReason ?? 'RAILS: подтверждение завершения не снято и след не записан — устраните доступ к .workflow/state и повторите остановку',
           };
         }
       } catch {
@@ -243,7 +243,7 @@ function handleStop(input, env) {
       if ((inv?.removed || inv?.attempted) && inv.traced === false) {
         return {
           decision: 'block',
-          reason: 'RAILS: подтверждение завершения не снято и след не записан — устраните доступ к .workflow/state и повторите остановку',
+          reason: inv.blockReason ?? 'RAILS: подтверждение завершения не снято и след не записан — устраните доступ к .workflow/state и повторите остановку',
         };
       }
     } catch {

@@ -541,7 +541,7 @@ test('замок выхода: живой владелец — busy, мёртв�
     writeFileSync(lockFile, String(process.pid), 'utf8');
     let r = performExit({ root, session: sessionId });
     assert.equal(r.ok, false);
-    assert.match(r.reason, /выполняются — повтори команду/);
+    assert.match(r.reason, /выполняются \(pid \d+\) — повтори команду/);
     assert.equal(existsSync(grantPath(root, sessionId)), true);
     // мёртвый владелец — клейм не похищается: отказ называет pid и путь
     const dead = spawnSync(process.execPath, ['-e', '']);

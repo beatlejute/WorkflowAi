@@ -270,13 +270,23 @@ export function invalidateCompletion({ root, state, cause }) {
     return { removed: false, attempted: true, traced: false, error: err };
   }
   if (lock.busy) {
-    // Клейм мёртвого владельца — видимый сбой: Stop блокирует остановку,
-    // человек снимает файл замка и повторяет (ревью 2026-10-06).
-    if (lock.owner !== undefined && !pidAlive(lock.owner)) return { removed: false, attempted: true, traced: false };
+    // Клейм мёртвого владельца или нечитаемый файл — видимый сбой: Stop
+    // блокирует остановку с конкретикой (pid, путь), человек разрешает.
+    if (lock.owner === undefined || !pidAlive(lock.owner)) {
+      const what = lock.owner === undefined
+        ? 'файл замка не читается'
+        : `замок остался от завершившегося процесса (pid ${lock.owner})`;
+      return {
+        removed: false,
+        attempted: true,
+        traced: false,
+        blockReason: `RAILS: подтверждение не снято: ${what} — удали файл ${join(root, '.workflow', 'state', 'rails', `.exit-lock-${state.session}`)} и повтори остановку`,
+      };
+    }
     return { removed: false, busy: true };
   }
   try {
-    // Замок мог быть похищен, пока брали (наш клейм исчез или сменился).
+    // Наш клейм мог исчезнуть или смениться (ручное удаление/вмешательство).
     try {
       if (readFileSync(lock.token, 'utf8') !== String(process.pid)) return { removed: false, attempted: true, traced: false };
     } catch {
@@ -492,14 +502,15 @@ function acquireExitLock(root, session) {
     };
     return { busy: false, lockFile, token: lockFile, release };
   }
-  // Занято: читаем владельца (для сообщения о мёртвом процессе). Не читается
-  // — busy без имени.
-  let owner = null;
+  // Занято: читаем владельца. `owner` — pid, если файл разобран (живой или
+  // мёртвый); undefined — файл не читается/не распознан (для различения
+  // «мёртвый владелец» и «неизвестный владелец»).
+  let owner;
   try {
     const pid = Number(readFileSync(lockFile, 'utf8').trim());
     if (Number.isInteger(pid) && pid > 0) owner = pid;
   } catch {
-    owner = null;
+    owner = undefined;
   }
   return { busy: true, owner };
 }
@@ -536,9 +547,14 @@ export function performExit({ root, session, now = Date.now() }) {
     return failWithTemplate(`замок выхода не создан: ${err && err.message ? err.message : err}`);
   }
   if (lock.busy) {
-    return failWithTemplate(lock.owner !== undefined && !pidAlive(lock.owner)
-      ? `замок остался от завершившегося процесса (pid ${lock.owner}) — удали файл ${join(root, '.workflow', 'state', 'rails', `.exit-lock-${session}`)} и повтори команду`
-      : 'выход или снятие подтверждения этой сессии выполняются — повтори команду');
+    const lockHint = `удали файл ${join(root, '.workflow', 'state', 'rails', `.exit-lock-${session}`)} и повтори команду`;
+    if (lock.owner === undefined) {
+      return failWithTemplate(`файл замка не читается — ${lockHint}`);
+    }
+    if (!pidAlive(lock.owner)) {
+      return failWithTemplate(`замок остался от завершившегося процесса (pid ${lock.owner}) — ${lockHint}`);
+    }
+    return failWithTemplate(`выход или снятие подтверждения этой сессии выполняются (pid ${lock.owner}) — повтори команду; если процесс завис, ${lockHint}`);
   }
   try {
     return exitLocked({ root, session, completion, path, token: lock.token, failWithTemplate, now });
@@ -549,9 +565,9 @@ export function performExit({ root, session, now = Date.now() }) {
 
 // Шаги выхода под замком: потребление разрешения, перечитывание состояния,
 // отметка и пост-проверка записи. Владение замком перепроверяется по токену
-// перед потреблением разрешения и перед маркером: похищение (наш каталог
-// переименовал другой процесс) отменяет шаги — атомарность потребления и 'wx'
-// маркера ограничивают последствия (ревью 2026-10-06).
+// перед потреблением разрешения и перед маркером: расхождение содержания
+// (ручное удаление/вмешательство) отменяет шаги — атомарность потребления и
+// 'wx' маркера ограничивают последствия (ревью 2026-10-06).
 function exitLocked({ root, session, completion, path, token, failWithTemplate, now }) {
 
   // Наш клейм на месте (файл с нашим pid)? Похищение мёртвого возможно
@@ -648,7 +664,7 @@ function exitLocked({ root, session, completion, path, token, failWithTemplate, 
     }
     return failWithTemplate('маркер завершения не создан — разрешение потреблено, владелец перевыпускает');
   }
-  // Запоздавшее похищение: замок украли, пока шла запись маркера — шаги после
+  // Замок потерян, пока шла запись маркера — шаги после
   // паузы ненадёжны, маркер снимается обратно, выход не состоялся (ревью
   // 2026-10-06, восьмой круг).
   if (lostLock()) {
