@@ -281,7 +281,16 @@ export function invalidateCompletion({ root, state, cause, now = Date.now() }) {
     if (!existsSync(lock.token)) return { removed: false, attempted: true, traced: false };
     // Маркер мог появиться, пока брали замок.
     if (readCompletedMarker(root, state.session)) return { removed: false };
-    const digest = completionDigest(state.completion);
+    const completion = state.completion;
+    const digest = completionDigest(completion);
+    // Замок могли похитить, пока инвалидация спала перед сохранением: без
+    // замка сохранение запрещено, подтверждение в памяти восстанавливается —
+    // иначе выход, похитивший протухший замок, встал бы на неснятое
+    // подтверждение (ревью 2026-10-06, девятый круг).
+    if (!existsSync(lock.token)) {
+      state.completion = completion;
+      return { removed: false, stolen: true };
+    }
     delete state.completion;
     state.updated = new Date().toISOString();
     let saved = true;
