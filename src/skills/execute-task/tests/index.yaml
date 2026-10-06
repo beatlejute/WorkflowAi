@@ -7,7 +7,7 @@ execution:
     - claude-haiku
     - kilo-free
     - gpt-luna
-  judge_agent: jev  # неуверенные оценки и отказы переоценивает escalate_to (claude-opus)
+  judge_agent: jev  # неуверенные оценки и отказы переоценивает escalate_to (Sol)
   default_timeout_s: 2400
   baseline_ref: origin/main
 

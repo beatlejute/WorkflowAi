@@ -104,7 +104,7 @@ pipeline:
       args: [".workflow/src/scripts/decisions-judge.js", "--model", "typesafe/jev-1.13", "--url", "https://openrouter.ai/api/alpha/decisions", "--key-file", "~/.workflow/secrets/openrouter.key"]
       workdir: "."
       prompt_stdin: true
-      escalate_to: claude-opus
+      escalate_to: sol-judge
       escalate_below: 0.8
       escalation_share: 0.292
       cost_per_call: 0.0001
@@ -113,6 +113,18 @@ pipeline:
       tool_less: true
       capabilities: [text]
       description: "Jev (TypeSafe) через OpenRouter — судья тестов скилов и модель ревью по evidence"
+
+    # Эскалация судьи (решение владельца 2026-10-06): вместо claude-opus — Sol через
+    # kilo. Обёртка kilo-judge: без инструментов, промпт из stdin, ответ — балл и
+    # уверенность. Цена не замерялась — preFlight берёт дефолт $0.02/вызов.
+    sol-judge:
+      command: "node"
+      args: [".workflow/src/scripts/kilo-judge.js", "--model", "openai/gpt-5.6-sol", "--timeout", "240"]
+      workdir: "."
+      prompt_stdin: true
+      tool_less: true
+      capabilities: [text]
+      description: "Sol (gpt-5.6-sol) через kilo — переоценка неуверенных и сбойных вердиктов Jev"
 
     # Селектор модели стадии (selection.selector, README «Выбор модели стадии») — модель
     # решений Jev через обёртку decisions-select.js в режиме models: промпт из stdin, в нём
