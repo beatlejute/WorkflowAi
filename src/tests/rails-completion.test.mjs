@@ -531,7 +531,7 @@ test('cli exit: повторный выход и параллельный кон
   });
 });
 
-test('замок выхода: живой владелец — «повтори команду», мёртвый — похищается', () => {
+test('замок выхода: живой владелец — busy, мёртвый — указание ручного удаления', () => {
   withProject(({ root }) => {
     const sessionId = pinnedSession(root, 'P5S1');
     assert.equal(recordCompletion({ root, state: readSession(root, sessionId), source: 'stop-hook', answer: PASS_ANSWER }).ok, true);
@@ -543,12 +543,18 @@ test('замок выхода: живой владелец — «повтори 
     assert.equal(r.ok, false);
     assert.match(r.reason, /выполняются — повтори команду/);
     assert.equal(existsSync(grantPath(root, sessionId)), true);
-    // мёртвый владелец — замок похищается, выход проходит
+    // мёртвый владелец — клейм не похищается: отказ называет pid и путь
     const dead = spawnSync(process.execPath, ['-e', '']);
     writeFileSync(lockFile, String(dead.pid), 'utf8');
     r = performExit({ root, session: sessionId });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, new RegExp(`pid ${dead.pid}`));
+    assert.match(r.reason, /удали файл/);
+    assert.equal(existsSync(lockFile), true);
+    // владелец убирает клейм руками — выход проходит
+    rmSync(lockFile);
+    r = performExit({ root, session: sessionId });
     assert.equal(r.ok, true, r.reason);
-    assert.equal(existsSync(lockFile), false);
   });
 });
 
