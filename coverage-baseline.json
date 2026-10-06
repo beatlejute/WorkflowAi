@@ -1,5 +1,5 @@
 {
-  "_comment": "Порог покрытия каждого файла — его измеренное покрытие. Проверяет scripts/check-coverage-ratchet.mjs после npm run coverage; переписывается им же с --update. Файл, которого здесь нет, держит default. Первый замер 2026-09-24 — Windows, Node 25; файлам, которые ветвятся по платформе (process.platform, win32, EPERM, ENOTSUP, junction), порог опущен на 5 пунктов как запас на непроверенный Linux. 2026-09-25 CI впервые дошёл до храповика на ubuntu и macOS: восемь порогов оказались выше замера на Node 22, на котором идёт CI (agent-spawner functions 88.88 при базе 95 — и на Windows, session-memo branches 94.11 при 94.28, js-yaml, shell-scan, artifact-snapshot — на долю процента). Эти пороги опущены до минимума трёх замеров на Node 22: Windows, Linux (WSL, чистый клон) и Linux с TMPDIR через символическую ссылку, как /var на macOS. Остальные пороги не менялись; запас на платформу снимается после зелёного CI на всех трёх ОС.",
+  "_comment": "Порог покрытия каждого файла — измеренное покрытие. База 2026-10-06 после 1.26.0: минимум замеров Windows (Node 25) и Linux (Node 22, WSL); macOS — после зелёного CI. Правило прежнее: ниже порога нельзя, выше можно; файла нет в базе — default. Переписывается scripts/check-coverage-ratchet.mjs --update.",
   "default": {
     "lines": 80,
     "statements": 80,
@@ -8,28 +8,34 @@
   },
   "files": {
     "src/cli.mjs": {
-      "lines": 91.28,
-      "statements": 91.28,
-      "functions": 95,
-      "branches": 77.45
+      "lines": 95.7,
+      "statements": 95.7,
+      "functions": 100,
+      "branches": 76.81
     },
     "src/global-dir.mjs": {
-      "lines": 88.75,
-      "statements": 88.75,
-      "functions": 95,
-      "branches": 77.6
+      "lines": 94,
+      "statements": 94,
+      "functions": 100,
+      "branches": 89.65
     },
     "src/init.mjs": {
-      "lines": 77.5,
-      "statements": 77.5,
-      "functions": 89.11,
-      "branches": 75.76
+      "lines": 89.8,
+      "statements": 89.8,
+      "functions": 100,
+      "branches": 83.43
     },
     "src/junction-manager.mjs": {
-      "lines": 84.95,
-      "statements": 84.95,
-      "functions": 87.85,
-      "branches": 86.89
+      "lines": 88.94,
+      "statements": 88.94,
+      "functions": 95.23,
+      "branches": 86.32
+    },
+    "src/lib/agent-env.mjs": {
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 98
     },
     "src/lib/agent-health-registry.mjs": {
       "lines": 84.55,
@@ -38,52 +44,106 @@
       "branches": 66.66
     },
     "src/lib/agent-history.mjs": {
-      "lines": 95.97,
-      "statements": 95.97,
+      "lines": 97.26,
+      "statements": 97.26,
       "functions": 100,
-      "branches": 92.1
+      "branches": 94.28
+    },
+    "src/lib/agent-run-changes.mjs": {
+      "lines": 95.63,
+      "statements": 95.63,
+      "functions": 100,
+      "branches": 86.11
+    },
+    "src/lib/agent-runs.mjs": {
+      "lines": 98.66,
+      "statements": 98.66,
+      "functions": 100,
+      "branches": 93.85
     },
     "src/lib/agent-spawner.mjs": {
-      "lines": 72.19,
-      "statements": 72.19,
-      "functions": 88.88,
-      "branches": 62.36
+      "lines": 80.19,
+      "statements": 80.19,
+      "functions": 100,
+      "branches": 69.15
     },
     "src/lib/artifact-snapshot.mjs": {
-      "lines": 85.59,
-      "statements": 85.59,
+      "lines": 90.25,
+      "statements": 90.25,
       "functions": 100,
-      "branches": 83.01
+      "branches": 83.33
+    },
+    "src/lib/check-runner.mjs": {
+      "lines": 97.98,
+      "statements": 97.98,
+      "functions": 100,
+      "branches": 94.34
     },
     "src/lib/error-classifier.mjs": {
-      "lines": 82.9,
-      "statements": 82.9,
+      "lines": 85.62,
+      "statements": 85.62,
       "functions": 92.85,
-      "branches": 78.7
+      "branches": 82.45
     },
     "src/lib/find-root.mjs": {
-      "lines": 92.36,
-      "statements": 92.36,
-      "functions": 95,
-      "branches": 81.66
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 93.33
     },
     "src/lib/js-yaml.mjs": {
-      "lines": 65.56,
-      "statements": 65.56,
-      "functions": 65.69,
-      "branches": 68.18
+      "lines": 72.4,
+      "statements": 72.4,
+      "functions": 72.99,
+      "branches": 74.97
+    },
+    "src/lib/kilo-catalog.mjs": {
+      "lines": 89.43,
+      "statements": 89.43,
+      "functions": 83.33,
+      "branches": 82.22
+    },
+    "src/lib/kilo-models.mjs": {
+      "lines": 88.49,
+      "statements": 88.49,
+      "functions": 93.33,
+      "branches": 91.93
     },
     "src/lib/logger.mjs": {
       "lines": 97.7,
       "statements": 97.7,
       "functions": 90.9,
-      "branches": 86.36
+      "branches": 86.95
     },
     "src/lib/marker.mjs": {
-      "lines": 78.03,
-      "statements": 78.03,
-      "functions": 95,
-      "branches": 70
+      "lines": 88.39,
+      "statements": 88.39,
+      "functions": 100,
+      "branches": 77.77
+    },
+    "src/lib/model-client.mjs": {
+      "lines": 97.29,
+      "statements": 97.29,
+      "functions": 100,
+      "branches": 87.5
+    },
+    "src/lib/model-evaluate.mjs": {
+      "lines": 97.04,
+      "statements": 97.04,
+      "functions": 100,
+      "branches": 92.1
+    },
+    "src/lib/model-facts.mjs": {
+      "lines": 98.7,
+      "statements": 98.7,
+      "functions": 100,
+      "branches": 89.15
+    },
+    "src/lib/model-pools.mjs": {
+      "lines": 98.6,
+      "statements": 98.6,
+      "functions": 100,
+      "branches": 89.71
     },
     "src/lib/operations/plans.mjs": {
       "lines": 100,
@@ -92,16 +152,16 @@
       "branches": 93.1
     },
     "src/lib/operations/skills.mjs": {
-      "lines": 91.68,
-      "statements": 91.68,
-      "functions": 95,
-      "branches": 81.95
+      "lines": 96.68,
+      "statements": 96.68,
+      "functions": 100,
+      "branches": 86.95
     },
     "src/lib/operations/tickets.mjs": {
-      "lines": 86.93,
-      "statements": 86.93,
-      "functions": 91.66,
-      "branches": 73.04
+      "lines": 89.78,
+      "statements": 89.78,
+      "functions": 93.75,
+      "branches": 81.87
     },
     "src/lib/package-version.mjs": {
       "lines": 90.47,
@@ -116,10 +176,16 @@
       "branches": 100
     },
     "src/lib/process-alive.mjs": {
-      "lines": 95,
-      "statements": 95,
-      "functions": 95,
-      "branches": 80.71
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 85.71
+    },
+    "src/lib/rails-run-state.mjs": {
+      "lines": 99.33,
+      "statements": 99.33,
+      "functions": 100,
+      "branches": 90.99
     },
     "src/lib/review-section.mjs": {
       "lines": 97.28,
@@ -127,83 +193,107 @@
       "functions": 100,
       "branches": 94.66
     },
+    "src/lib/rubric-levels.mjs": {
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 94.11
+    },
+    "src/lib/skill-judge.mjs": {
+      "lines": 99.65,
+      "statements": 99.65,
+      "functions": 100,
+      "branches": 93.04
+    },
+    "src/lib/stage-selection.mjs": {
+      "lines": 99.14,
+      "statements": 99.14,
+      "functions": 100,
+      "branches": 92.76
+    },
     "src/lib/stop-command.mjs": {
-      "lines": 63.96,
-      "statements": 63.96,
-      "functions": 45,
-      "branches": 61.66
+      "lines": 68.96,
+      "statements": 68.96,
+      "functions": 50,
+      "branches": 66.66
     },
     "src/lib/utils.mjs": {
-      "lines": 89.73,
-      "statements": 89.73,
-      "functions": 95,
-      "branches": 75
+      "lines": 96.18,
+      "statements": 96.18,
+      "functions": 100,
+      "branches": 86.55
     },
     "src/rails/actions.mjs": {
-      "lines": 91.27,
-      "statements": 91.27,
-      "functions": 95,
-      "branches": 81.87
+      "lines": 94.95,
+      "statements": 94.95,
+      "functions": 98.91,
+      "branches": 87.59
     },
     "src/rails/claude-hook.mjs": {
-      "lines": 92.72,
-      "statements": 92.72,
-      "functions": 95,
-      "branches": 73.83
+      "lines": 96.6,
+      "statements": 96.6,
+      "functions": 100,
+      "branches": 78.91
     },
     "src/rails/cli.mjs": {
-      "lines": 91.86,
-      "statements": 91.86,
-      "functions": 95,
-      "branches": 74.75
+      "lines": 96.35,
+      "statements": 96.35,
+      "functions": 100,
+      "branches": 80.81
     },
     "src/rails/core.mjs": {
-      "lines": 91.85,
-      "statements": 91.85,
-      "functions": 95,
-      "branches": 78.12
+      "lines": 96.03,
+      "statements": 96.03,
+      "functions": 100,
+      "branches": 82.96
     },
     "src/rails/coverage.mjs": {
-      "lines": 88.25,
-      "statements": 88.25,
-      "functions": 95,
-      "branches": 72.41
+      "lines": 93.25,
+      "statements": 93.25,
+      "functions": 100,
+      "branches": 77.41
     },
     "src/rails/graph.mjs": {
-      "lines": 97.5,
-      "statements": 97.5,
+      "lines": 97.54,
+      "statements": 97.54,
       "functions": 100,
-      "branches": 92.34
+      "branches": 92.76
     },
     "src/rails/journal.mjs": {
       "lines": 100,
       "statements": 100,
       "functions": 100,
-      "branches": 98.18
+      "branches": 98.41
     },
     "src/rails/kilo-plugin.mjs": {
       "lines": 100,
       "statements": 100,
       "functions": 100,
-      "branches": 97.14
+      "branches": 94.73
     },
     "src/rails/output-check.mjs": {
-      "lines": 96.77,
-      "statements": 96.77,
+      "lines": 97,
+      "statements": 97,
       "functions": 100,
-      "branches": 89.28
+      "branches": 96.05
     },
     "src/rails/paths.mjs": {
-      "lines": 87.63,
-      "statements": 87.63,
-      "functions": 95,
-      "branches": 70.24
+      "lines": 92.63,
+      "statements": 92.63,
+      "functions": 100,
+      "branches": 76.41
     },
     "src/rails/rails-config.mjs": {
-      "lines": 88.4,
-      "statements": 88.4,
+      "lines": 90.76,
+      "statements": 90.76,
       "functions": 100,
-      "branches": 84.76
+      "branches": 86.61
+    },
+    "src/rails/runtime-snapshot.mjs": {
+      "lines": 89.55,
+      "statements": 89.55,
+      "functions": 100,
+      "branches": 88.88
     },
     "src/rails/session-memo.mjs": {
       "lines": 97.22,
@@ -212,26 +302,32 @@
       "branches": 94.11
     },
     "src/rails/shell-scan.mjs": {
-      "lines": 92.71,
-      "statements": 92.71,
+      "lines": 93.03,
+      "statements": 93.03,
       "functions": 100,
-      "branches": 89.2
+      "branches": 89.25
     },
     "src/rails/state.mjs": {
-      "lines": 99.51,
-      "statements": 99.51,
+      "lines": 99.73,
+      "statements": 99.73,
       "functions": 100,
-      "branches": 85.43
+      "branches": 87.54
+    },
+    "src/rails/write-policy.mjs": {
+      "lines": 91.09,
+      "statements": 91.09,
+      "functions": 100,
+      "branches": 77.77
     },
     "src/runner.mjs": {
-      "lines": 75.07,
-      "statements": 75.07,
-      "functions": 75.85,
-      "branches": 63.05
+      "lines": 93.89,
+      "statements": 93.89,
+      "functions": 95.18,
+      "branches": 86.11
     },
     "src/scripts/archive-plan-tickets.js": {
-      "lines": 84,
-      "statements": 84,
+      "lines": 84.12,
+      "statements": 84.12,
       "functions": 66.66,
       "branches": 90
     },
@@ -242,16 +338,16 @@
       "branches": 73.91
     },
     "src/scripts/check-conditions.js": {
-      "lines": 80.2,
-      "statements": 80.2,
-      "functions": 85.71,
-      "branches": 65.71
+      "lines": 92.43,
+      "statements": 92.43,
+      "functions": 95.45,
+      "branches": 91.45
     },
     "src/scripts/check-mcp.js": {
-      "lines": 94.27,
-      "statements": 94.27,
-      "functions": 95,
-      "branches": 84.74
+      "lines": 99.28,
+      "statements": 99.28,
+      "functions": 100,
+      "branches": 90
     },
     "src/scripts/check-plan-decomposed.js": {
       "lines": 89.02,
@@ -266,16 +362,16 @@
       "branches": 97.29
     },
     "src/scripts/check-rails-coverage.js": {
-      "lines": 87.3,
-      "statements": 87.3,
-      "functions": 95,
-      "branches": 79.61
+      "lines": 92.3,
+      "statements": 92.3,
+      "functions": 100,
+      "branches": 84.61
     },
     "src/scripts/check-rails-graph.js": {
-      "lines": 87.06,
-      "statements": 87.06,
-      "functions": 95,
-      "branches": 79.61
+      "lines": 95.79,
+      "statements": 95.79,
+      "functions": 91.66,
+      "branches": 78.94
     },
     "src/scripts/check-relevance.js": {
       "lines": 82.25,
@@ -283,11 +379,53 @@
       "functions": 90,
       "branches": 88.73
     },
+    "src/scripts/check-report-needed.js": {
+      "lines": 96.67,
+      "statements": 96.67,
+      "functions": 100,
+      "branches": 90.09
+    },
+    "src/scripts/check-ticket-dod.js": {
+      "lines": 94.23,
+      "statements": 94.23,
+      "functions": 100,
+      "branches": 84.21
+    },
+    "src/scripts/claude-judge.js": {
+      "lines": 94.4,
+      "statements": 94.4,
+      "functions": 93.33,
+      "branches": 77.52
+    },
+    "src/scripts/compare-judges.js": {
+      "lines": 95.8,
+      "statements": 95.8,
+      "functions": 90,
+      "branches": 86.75
+    },
     "src/scripts/complete-plan.js": {
-      "lines": 64.28,
-      "statements": 64.28,
-      "functions": 66.66,
-      "branches": 84.61
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 96.29
+    },
+    "src/scripts/decisions-judge.js": {
+      "lines": 97.48,
+      "statements": 97.48,
+      "functions": 100,
+      "branches": 84.31
+    },
+    "src/scripts/decisions-select.js": {
+      "lines": 98.45,
+      "statements": 98.45,
+      "functions": 100,
+      "branches": 81.35
+    },
+    "src/scripts/free-quota-gate.js": {
+      "lines": 97.32,
+      "statements": 97.32,
+      "functions": 100,
+      "branches": 83.78
     },
     "src/scripts/get-next-id.js": {
       "lines": 86.91,
@@ -296,16 +434,40 @@
       "branches": 76.92
     },
     "src/scripts/get-next-test-id.js": {
-      "lines": 95,
-      "statements": 95,
-      "functions": 95,
-      "branches": 95
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 100
+    },
+    "src/scripts/human-gate-route.js": {
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 100
+    },
+    "src/scripts/human-route-core.js": {
+      "lines": 85.6,
+      "statements": 85.6,
+      "functions": 100,
+      "branches": 77.51
+    },
+    "src/scripts/kilo-judge.js": {
+      "lines": 57.79,
+      "statements": 57.79,
+      "functions": 66.66,
+      "branches": 60.6
+    },
+    "src/scripts/kilo-models-list.js": {
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 82.35
     },
     "src/scripts/mark-blocked-core.js": {
-      "lines": 98.72,
-      "statements": 98.72,
+      "lines": 98.75,
+      "statements": 98.75,
       "functions": 100,
-      "branches": 94.44
+      "branches": 95
     },
     "src/scripts/mark-blocked.js": {
       "lines": 100,
@@ -319,6 +481,12 @@
       "functions": 100,
       "branches": 82.64
     },
+    "src/scripts/model-scores.js": {
+      "lines": 96.85,
+      "statements": 96.85,
+      "functions": 88.88,
+      "branches": 86.46
+    },
     "src/scripts/move-ticket-core.js": {
       "lines": 96.2,
       "statements": 96.2,
@@ -326,40 +494,40 @@
       "branches": 90.9
     },
     "src/scripts/move-ticket.js": {
-      "lines": 84.71,
-      "statements": 84.71,
-      "functions": 80.71,
-      "branches": 78.67
+      "lines": 89.87,
+      "statements": 89.87,
+      "functions": 85.71,
+      "branches": 83.67
     },
     "src/scripts/move-to-ready.js": {
-      "lines": 91.26,
-      "statements": 91.26,
+      "lines": 94.79,
+      "statements": 94.79,
       "functions": 100,
-      "branches": 70.58
+      "branches": 88.23
     },
     "src/scripts/move-to-review.js": {
-      "lines": 79.76,
-      "statements": 79.76,
-      "functions": 66.66,
-      "branches": 81.25
+      "lines": 93.12,
+      "statements": 93.12,
+      "functions": 100,
+      "branches": 83.33
     },
     "src/scripts/pick-next-task-core.js": {
-      "lines": 95.15,
-      "statements": 95.15,
+      "lines": 96.64,
+      "statements": 96.64,
       "functions": 92.85,
-      "branches": 78.23
+      "branches": 82.66
     },
     "src/scripts/pick-next-task.js": {
-      "lines": 90.93,
-      "statements": 90.93,
-      "functions": 95,
-      "branches": 77.69
+      "lines": 96.02,
+      "statements": 96.02,
+      "functions": 100,
+      "branches": 83.01
     },
     "src/scripts/register-rails.js": {
-      "lines": 93.19,
-      "statements": 93.19,
-      "functions": 95,
-      "branches": 91.29
+      "lines": 98.19,
+      "statements": 98.19,
+      "functions": 100,
+      "branches": 96.29
     },
     "src/scripts/reset-agent-health.js": {
       "lines": 100,
@@ -367,23 +535,35 @@
       "functions": 100,
       "branches": 100
     },
+    "src/scripts/reset-model-history.js": {
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 94.73
+    },
+    "src/scripts/review-failure-route.js": {
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 100
+    },
     "src/scripts/run-skill-tests.js": {
-      "lines": 78.24,
-      "statements": 78.24,
-      "functions": 91.29,
-      "branches": 63.28
+      "lines": 87.73,
+      "statements": 87.73,
+      "functions": 96.87,
+      "branches": 80.94
     },
     "src/scripts/scan-fixtures-for-secrets.js": {
-      "lines": 81.45,
-      "statements": 81.45,
-      "functions": 87.5,
-      "branches": 63.88
+      "lines": 90.23,
+      "statements": 90.23,
+      "functions": 100,
+      "branches": 72.34
     },
     "src/scripts/sync-ticket-status-core.js": {
       "lines": 96.77,
       "statements": 96.77,
       "functions": 100,
-      "branches": 87.5
+      "branches": 88.46
     },
     "src/scripts/sync-ticket-status.js": {
       "lines": 100,
