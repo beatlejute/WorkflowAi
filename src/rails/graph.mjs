@@ -9,7 +9,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 
 // Идентификатор узла: этап, тип, номер. §3.
-export const NODE_ID_RE = /^P(\d+)([ERSGQ])(\d+)$/;
+export const NODE_ID_RE = /^P(\d+)([ERSGQH])(\d+)$/;
 
 // Хвост на строке открывающего забора (`` ```mermaid `` + пробелы/атрибуты до
 // перевода строки) допускается и игнорируется — сам забор всё равно распознан.
@@ -305,6 +305,7 @@ export class Graph {
     // ронять validate() — new Set(число) бросает TypeError, new Set(строка) даёт Set из символов.
     const terminal = new Set(Array.isArray(cfg.terminal) ? cfg.terminal : []);
     const pauseNodes = new Set(Array.isArray(cfg.pause_nodes) ? cfg.pause_nodes : []);
+    const handoffNodes = new Set(Array.isArray(cfg.handoff?.nodes) ? cfg.handoff.nodes : []);
     const errors = [];
     const warnings = [];
 
@@ -317,7 +318,7 @@ export class Graph {
       if (seenIds.has(occ.id)) continue;
       seenIds.add(occ.id);
       if (!NODE_ID_RE.test(occ.id)) {
-        errors.push({ code: 'bad-id', message: `Идентификатор «${occ.id}» не соответствует грамматике ^P(\\d+)([ERSGQ])(\\d+)$`, id: occ.id });
+        errors.push({ code: 'bad-id', message: `Идентификатор «${occ.id}» не соответствует грамматике ^P(\\d+)([ERSGQH])(\\d+)$`, id: occ.id });
       }
     }
 
@@ -418,6 +419,12 @@ export class Graph {
       }
     }
 
+    for (const id of handoffNodes) {
+      if (!this._defined.has(id)) {
+        errors.push({ code: 'unknown-handoff', message: `rails.yaml.handoff.nodes ссылается на неопределённый узел «${id}»`, id });
+      }
+    }
+
     // --- unknown-guard-edge: страж на ребро, которого в графе нет, молча не сработал бы ---
     const guards = Array.isArray(cfg.edge_guards) ? cfg.edge_guards : [];
     for (const g of guards) {
@@ -435,8 +442,8 @@ export class Graph {
     }
     for (const id of this._defined.keys()) {
       const n = outCount.get(id) || 0;
-      if (n === 0 && !terminal.has(id) && !pauseNodes.has(id)) {
-        errors.push({ code: 'dead-end', message: `У узла «${id}» нет исходящих рёбер, и он не в terminal/pause_nodes`, id });
+      if (n === 0 && !terminal.has(id) && !pauseNodes.has(id) && !handoffNodes.has(id)) {
+        errors.push({ code: 'dead-end', message: `У узла «${id}» нет исходящих рёбер, и он не в terminal/pause_nodes/handoff.nodes`, id });
       }
     }
 

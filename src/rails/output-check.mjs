@@ -33,6 +33,34 @@ const FORBIDDEN_MISSING_PREFIX = 'forbidden:';
  */
 export function check(text, config, state) {
   const value = String(text ?? '');
+  // Передача не завершает задачу и не проходит требования успешного терминала.
+  // Этот слой проверяет только форму: полномочия даёт проверенное доказательство.
+  if (/^RAILS_OUTCOME: out_of_scope(?:\r?\n|$)/.test(value)) {
+    const missing = [];
+    const policy = config?.handoff;
+    if (!policy || !Array.isArray(policy.nodes) || !policy.nodes.includes(state?.node)) {
+      missing.push(`handoff:position:${state?.node ?? ''}`);
+    }
+    for (const key of ['requires', 'forbids']) {
+      if (!Array.isArray(policy?.[key]) || policy[key].length === 0) {
+        missing.push(`handoff:policy:${key}`);
+        continue;
+      }
+      for (const pattern of policy[key]) {
+        let re;
+        try {
+          re = new RegExp(pattern, 'im');
+        } catch {
+          missing.push(`handoff:regex:${pattern}`);
+          continue;
+        }
+        if (key === 'requires' ? !re.test(value) : re.test(value)) {
+          missing.push(`handoff:${key}:${pattern}`);
+        }
+      }
+    }
+    return { ok: missing.length === 0, missing, outcome: 'out_of_scope' };
+  }
   // Приостановка — отдельный исход, не успешный терминал. Поля описывают
   // необходимое разрешение и незавершённую работу без изменения состояния.
   const outcome = /^RAILS_OUTCOME: (blocked|needs_user)\r?\n/.exec(value);

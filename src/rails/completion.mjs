@@ -23,7 +23,7 @@
 // честности, не криптография — см. README §16.
 
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 import { loadSkillRuntime } from './core.mjs';
@@ -37,6 +37,8 @@ import {
 import { realpathDeep } from './paths.mjs';
 import { appendEvent, readJournal } from './journal.mjs';
 import { check as outputCheck } from './output-check.mjs';
+import { acquireLifecycleLock as acquireExitLock, heldLifecycleLock, withLifecycleLock } from './lifecycle-lock.mjs';
+import { readHandoff } from './handoff.mjs';
 
 function digest(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -118,9 +120,28 @@ const SOURCES = new Set(['stop-hook', 'cli-transcript', 'runner']);
  *   иначе текст берётся из `transcriptPath` (последнее сообщение ассистента).
  * @returns {{ok: boolean, reason?: string, missing?: string[], completion?: object, verdict?: string|null}}
  */
-export function recordCompletion({ root, state, source, answer = null, transcriptPath = null }) {
+export function recordCompletion(args) {
+  if (!args.state?.session) return { ok: false, reason: 'нет состояния сессии' };
+  try {
+    return withLifecycleLock(args.root, args.state.session, () => {
+      if (args.state.runtime && digest(launchIdentity(args.root, args.state)) !== args.state.runtime.id) {
+        return { ok: false, reason: 'привязка runtime не соответствует личности запуска (повреждена)' };
+      }
+      const fresh = loadState(args.root, args.state.session);
+      if (!fresh || essentialStateDigest(fresh) !== essentialStateDigest(args.state)) {
+        return { ok: false, reason: 'состояние подтверждения устарело' };
+      }
+      return recordCompletionLocked({ ...args, state: fresh });
+    });
+  } catch (error) {
+    return { ok: false, reason: `подтверждение не записано: ${error.message}` };
+  }
+}
+
+function recordCompletionLocked({ root, state, source, answer = null, transcriptPath = null }) {
   const refuse = (reason, extra = {}) => ({ ok: false, reason, ...extra });
   if (!state || !state.session || !state.skill) return refuse('нет состояния сессии');
+  if (readHandoff(root, state.session)) return refuse('сессия передала запрос — завершение закрыто');
   if (readCompletedMarker(root, state.session)) return refuse('сессия уже завершена штатным выходом');
   if (!SOURCES.has(source)) return refuse(`неизвестный источник подтверждения: ${String(source)}`);
   if (!state.runtime) return refuse('runtime сессии не закреплён — подтверждение не создаётся');
@@ -263,9 +284,10 @@ export function invalidateCompletion({ root, state, cause }) {
   // инвалидация вклинивалась бы между перечитыванием и маркером выхода
   // (ревью 2026-10-06). Сбой захвата (диск недоступен) — не «нет работы»,
   // а видимый неудавшийся след: вызывающий блокирует остановку.
+  const inheritedLock = heldLifecycleLock(root, state.session);
   let lock;
   try {
-    lock = acquireExitLock(root, state.session);
+    lock = inheritedLock || acquireExitLock(root, state.session);
   } catch (err) {
     return { removed: false, attempted: true, traced: false, error: err };
   }
@@ -361,7 +383,7 @@ export function invalidateCompletion({ root, state, cause }) {
     }
     return { removed: true, saved, traced };
   } finally {
-    lock.release();
+    if (!inheritedLock) lock.release();
   }
 }
 
@@ -409,6 +431,7 @@ export function verifyExit({ root, session }) {
   const fail = (reason) => ({ ok: false, reason });
   let state;
   try {
+    if (readHandoff(root, session)) return fail('сессия передала запрос — штатный выход закрыт');
     state = loadState(root, session);
   } catch (err) {
     return fail(`состояние сессии не прочитано: ${err && err.message ? err.message : err}`);
@@ -477,44 +500,6 @@ function pidAlive(pid) {
 // защищённые действия (потребление разрешения, маркер, сохранение снятия)
 // выполняет только владелец клейма, перепроверяя содержание на каждом шаге.
 // Возвращает {busy: true, owner?: number} либо {lockFile, token, release}.
-function acquireExitLock(root, session) {
-  const lockDir = join(root, '.workflow', 'state', 'rails');
-  const lockFile = join(lockDir, `.exit-lock-${session}`);
-  mkdirSync(lockDir, { recursive: true });
-  let fd;
-  try {
-    fd = openSync(lockFile, 'wx');
-  } catch (err) {
-    if (err.code !== 'EEXIST') throw err;
-  }
-  if (fd !== undefined) {
-    try {
-      writeSync(fd, String(process.pid), 0, 'utf8');
-    } finally {
-      closeSync(fd);
-    }
-    const release = () => {
-      try {
-        // снимаем только свой клейм (по совпадению pid)
-        if (readFileSync(lockFile, 'utf8') === String(process.pid)) unlinkSync(lockFile);
-      } catch {
-        // файла нет или уже чужой — не наш
-      }
-    };
-    return { busy: false, lockFile, token: lockFile, release };
-  }
-  // Занято: читаем владельца. `owner` — pid, если файл разобран (живой или
-  // мёртвый); undefined — файл не читается/не распознан (для различения
-  // «мёртвый владелец» и «неизвестный владелец»).
-  let owner;
-  try {
-    const pid = Number(readFileSync(lockFile, 'utf8').trim());
-    if (Number.isInteger(pid) && pid > 0) owner = pid;
-  } catch {
-    owner = undefined;
-  }
-  return { busy: true, owner };
-}
 
 /**
  * Штатный выход: проверить подтверждение, одноразово потребить разрешение
@@ -580,6 +565,11 @@ function exitLocked({ root, session, completion, path, token, failWithTemplate, 
     }
   };
   if (lostLock()) return failWithTemplate('замок выхода потерян — повтори команду');
+  const verified = verifyExit({ root, session });
+  if (!verified.ok) return verified;
+  if (completionDigest(verified.completion) !== completionDigest(completion)) {
+    return failWithTemplate('подтверждение изменилось до потребления разрешения');
+  }
 
   let raw;
   try {
@@ -859,5 +849,6 @@ export function transcriptFinalAnswer(transcriptPath, sessionId) {
   if (!text.trim()) {
     return { ok: false, reason: 'последнее сообщение ассистента без текста', integrity: 'empty' };
   }
-  return { ok: true, text, integrity: 'ok' };
+  return { ok: true, text, timestamp: entries[lastIdx]?.timestamp,
+    latest: !entries.slice(lastIdx + 1).some((entry) => entry.type === 'user'), integrity: 'ok' };
 }

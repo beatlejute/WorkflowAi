@@ -33,6 +33,8 @@ import {
 } from './state.mjs';
 import { appendDenial, appendEvent, readJournal, readJournalFile, summarize } from './journal.mjs';
 import { checkCoverage } from './coverage.mjs';
+import { relinquish, readHandoff } from './handoff.mjs';
+import { withLifecycleLock } from './lifecycle-lock.mjs';
 import { rememberSessionRoot } from './session-memo.mjs';
 import {
   recordCompletion,
@@ -966,6 +968,22 @@ export function run(argv, { cwd = process.cwd(), env = process.env } = {}) {
   }
 
   try {
+    if (['start', 'goto', 'reset', 'complete'].includes(command)) {
+      const resolved = command === 'start'
+        ? { sessionId: flags.session || env?.WORKFLOW_RAILS_SESSION || randomUUID() }
+        : resolveSessionId(root, flags, env);
+      if (resolved.sessionId) {
+        const session = String(resolved.sessionId);
+        return withLifecycleLock(root, session, () => {
+          if (readHandoff(root, session)) return { code: 2, stdout: 'Сессия передала запрос вне компетенции; изменения запуска закрыты.\n' };
+          const boundFlags = { ...flags, session };
+          if (command === 'start') return cmdStart(root, rest, boundFlags, env);
+          if (command === 'goto') return cmdGoto(root, rest, boundFlags, env);
+          if (command === 'reset') return cmdReset(root, rest, boundFlags, env);
+          return cmdComplete(root, rest, boundFlags, env, cwd);
+        });
+      }
+    }
     switch (command) {
       case 'start':
         return cmdStart(root, rest, flags, env);
@@ -979,6 +997,16 @@ export function run(argv, { cwd = process.cwd(), env = process.env } = {}) {
         return cmdComplete(root, rest, flags, env, cwd);
       case 'exit':
         return cmdExit(root, rest, flags, env);
+      case 'relinquish': {
+        const { sessionId } = resolveSessionId(root, flags, env);
+        if (!sessionId || typeof flags.transcript !== 'string' || typeof flags['state-digest'] !== 'string') {
+          return { code: 2, stdout: 'Нужны --session, --transcript и --state-digest для проверяемой передачи.\n' };
+        }
+        const result = relinquish({ root, session: sessionId, transcriptPath: resolvePath(cwd, flags.transcript), expectedStateDigest: flags['state-digest'] });
+        return { code: result.ok ? 0 : 2, stdout: result.ok
+          ? 'Запрос передан вне компетенции; состояние сохранено. Происхождение не подтверждено — нейтральный режим не разрешён.\n'
+          : `Передача отклонена: ${result.reason}\n` };
+      }
       case 'report':
         return cmdReport(root, rest, flags, cwd);
       case 'check':

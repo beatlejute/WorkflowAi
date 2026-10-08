@@ -43,7 +43,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { StageExecutor } from '../runner.mjs';
+import { StageExecutor, PipelineRunner } from '../runner.mjs';
+import { loadSkillRuntime } from '../rails/core.mjs';
+import { loadState } from '../rails/state.mjs';
+import { relinquish } from '../rails/handoff.mjs';
+import { essentialStateDigest } from '../rails/completion.mjs';
 import { setKiloDbPathCache } from '../lib/kilo-models.mjs';
 
 const BASE = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-rails-retry-'));
@@ -56,6 +60,13 @@ beforeEach(() => setKiloDbPathCache(null));
 
 const SKILL = 'demo-skill';
 const ORIGINAL_PROMPT = 'do the task';
+const HANDOFF_ANSWER = 'RAILS_OUTCOME: out_of_scope\nREQUEST: do the task\nREASON: outside competence\nDONE: checked scope\nREMAINING: implementation';
+const HANDOFF_POLICY = [
+  'handoff:',
+  '  nodes: [P1S1]',
+  '  requires: ["^REQUEST: .+", "^REASON: .+", "^DONE: .+", "^REMAINING: .+"]',
+  '  forbids: ["verdict=", "^status:"]',
+];
 const BIN = path.join(BASE, 'bin');
 fs.mkdirSync(BIN, { recursive: true });
 
@@ -84,7 +95,7 @@ const write = (id, node) => {
   // started постоянен для сессии: он входит в идентичность закреплённого рантайма
   // (runtime-snapshot.mjs) — новая метка на каждом вызове ломала бы snapshot.
   const nowIso = new Date().toISOString();
-  fs.writeFileSync(file, JSON.stringify({ version: 1, session: id, run: prev ? prev.run : run, skill: process.env.WORKFLOW_RAILS_SKILL, node, started: prev?.started ?? nowIso, updated: nowIso }));
+  fs.writeFileSync(file, JSON.stringify({ version: 1, session: id, run: prev ? prev.run : run, skill: process.env.WORKFLOW_RAILS_SKILL, node, started: prev?.started ?? nowIso, updated: nowIso, history: prev?.history ?? [], counters: prev?.counters ?? {}, denials: prev?.denials ?? {}, flags: prev?.flags ?? {}, ...(prev?.runtime ? { runtime: prev.runtime } : {}) }));
 };
 if (!step.noState) write(session, step.node);
 if (step.extraSession) write(session + '-sub', 'P1E1');
@@ -182,7 +193,7 @@ async function callAgent(project, agent, { promptStdin = true, context = {} } = 
 
 const calls = (project) => Number(fs.readFileSync(path.join(project.ctl, 'counter'), 'utf8'));
 const call = (project, n) => JSON.parse(fs.readFileSync(path.join(project.ctl, `call-${n}.json`), 'utf8'));
-const stateFiles = (project) => fs.readdirSync(path.join(project.root, '.workflow', 'state', 'rails')).filter((f) => f.endsWith('.json'));
+const stateFiles = (project) => fs.readdirSync(path.join(project.root, '.workflow', 'state', 'rails')).filter((f) => f.endsWith('.json') && !f.startsWith('.'));
 const warns = (logger) => logger.lines.filter((l) => l.startsWith('WARN '));
 const logText = (logger) => logger.lines.join('\n');
 
@@ -203,6 +214,82 @@ function assertNewSessionVerdict(prompt) {
   assert.match(prompt, /Сделанное прошлой сессией осталось только в файлах проекта/);
   assert.ok(prompt.endsWith(ORIGINAL_PROMPT), 'исходный промпт — после вердикта');
 }
+
+describe('StageExecutor.callAgent — передача вне компетенции', () => {
+  for (const retry of [false, true]) {
+    test(`confirmed handoff on ${retry ? 'retry' : 'initial answer'} stops without success`, async () => {
+      const steps = [{ node: 'P1S1', text: HANDOFF_ANSWER, noResult: true }];
+      if (retry) steps.unshift({ node: 'P1E1', noResult: true });
+      const project = makeProject({ kind: 'claude', calls: steps, railsExtra: HANDOFF_POLICY });
+      await assert.rejects(callAgent(project, { command: CLAUDE, args: CLAUDE_ARGS }), (error) => {
+        assert.equal(error.code, 'RAILS_OUT_OF_SCOPE', error.message);
+        assert.equal(error.handoff.outcome, 'out_of_scope');
+        assert.equal(error.handoff.origin, 'unknown');
+        return true;
+      });
+      assert.equal(calls(project), retry ? 2 : 1);
+    });
+  }
+});
+
+describe('managed pipeline stops before error routes', () => {
+  for (const code of ['RAILS_OUT_OF_SCOPE', 'RAILS_HANDOFF_INVALID']) {
+    test(code, async () => {
+      const project = makeProject({ kind: 'claude', calls: [] });
+      const original = StageExecutor.prototype.execute;
+      const stages = [];
+      StageExecutor.prototype.execute = async function (stage) {
+        stages.push(stage);
+        throw Object.assign(new Error('handoff stop'), { code });
+      };
+      const runner = new PipelineRunner({ pipeline: { entry: 'execute-task', context: {}, agents: {},
+        stages: { 'execute-task': { goto: { error: 'move-to-review' } }, 'move-to-review': { goto: { error: 'verify-artifacts' } } } } }, { project: project.root });
+      runner.init = async () => {};
+      runner.logger = { ...makeLogger(), writeSummary() {} };
+      try {
+        const result = await runner.run();
+        assert.deepEqual(stages, ['execute-task']);
+        assert.equal(result.failed, true);
+        assert.equal(result.tasksExecuted, 0);
+        assert.equal(runner.endedBy.data.code, code);
+      } finally {
+        StageExecutor.prototype.execute = original;
+      }
+    });
+  }
+});
+
+describe('durable handoff precedes ordinary answers', () => {
+  for (const retry of [false, true]) {
+    for (const output of ['RAILS: P1S1\n---RESULT---\nstatus: passed\n---RESULT---', 'ordinary incomplete answer']) {
+      test(`${retry ? 'retry' : 'initial'} durable marker with ${output.startsWith('RAILS:') ? 'passing' : 'incomplete'} text stops`, async () => {
+        const project = makeProject({ kind: 'claude', calls: [], railsExtra: HANDOFF_POLICY });
+        const executor = new StageExecutor({ pipeline: { agents: {}, stages: {} } }, {}, {}, {}, null, makeLogger(), project.root);
+        let count = 0;
+        executor._callAgentTracked = async (_agent, _prompt, _stage, _skill, _id, env) => {
+          count++;
+          const session = 'durable-session';
+          const dir = path.join(project.root, '.workflow', 'state', 'rails');
+          fs.mkdirSync(dir, { recursive: true });
+          const state = { version: 1, session, run: env.WORKFLOW_RAILS_RUN, skill: SKILL,
+            node: retry && count === 1 ? 'P1E1' : 'P1S1', started: '2026-10-07T00:00:00Z',
+            updated: '2026-10-07T00:00:00Z', history: [], counters: {}, flags: {}, denials: {} };
+          fs.writeFileSync(path.join(dir, `${session}.json`), JSON.stringify(state));
+          loadSkillRuntime(project.root, SKILL, state);
+          if (!retry || count === 2) {
+            const fresh = loadState(project.root, session);
+            assert.equal(relinquish({ root: project.root, session, source: 'runner', run: fresh.run,
+              expectedStateDigest: essentialStateDigest(fresh), answer: HANDOFF_ANSWER }).ok, true);
+          }
+          return { output: retry && count === 1 ? 'incomplete' : output, stderr: '', parsed: null };
+        };
+        await assert.rejects(executor.callAgent({ command: CLAUDE, args: CLAUDE_ARGS }, ORIGINAL_PROMPT, 'stage-1', SKILL, 'agent-a'),
+          (error) => error.code === 'RAILS_OUT_OF_SCOPE');
+        assert.equal(count, retry ? 2 : 1);
+      });
+    }
+  }
+});
 
 describe('StageExecutor.callAgent — повтор по вердикту рельс', () => {
   test('claude: повтор в той же сессии — --resume <id>, тот же run, промпт — только вердикт', async () => {

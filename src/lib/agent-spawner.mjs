@@ -4,6 +4,7 @@ import { spawn, execSync } from 'child_process';
 import path from 'path';
 import { loadRules, scanStderrForFatalRule } from './error-classifier.mjs';
 import { buildAgentEnv } from './agent-env.mjs';
+import { registerManagedLauncher } from '../rails/launch-origin.mjs';
 
 const STDERR_WARN_LOGGER = {
   info() {},
@@ -219,6 +220,7 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
 
     // windowsHide: без него у раннера без консоли (запуск из MCP) каждый
     // агент открывает своё окно терминала — см. callAgent в runner.mjs.
+    registerManagedLauncher(projectRoot);
     const child = spawn(agentConfig.command, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],

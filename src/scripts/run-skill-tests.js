@@ -12,6 +12,8 @@ import { writeClaudeHooks, writeKiloPluginLoader, userHasRailsHooks } from '../i
 import { loadRailsConfig } from '../rails/rails-config.mjs';
 import { loadSkillRuntime } from '../rails/core.mjs';
 import { check as checkRailsOutput } from '../rails/output-check.mjs';
+import { relinquish, readHandoff } from '../rails/handoff.mjs';
+import { essentialStateDigest } from '../rails/completion.mjs';
 import {
   railsEngagement,
   railsNotEngagedMessage,
@@ -170,7 +172,7 @@ async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, ro
 
   // Приостановка не даёт PASS и не запускает другого исполнителя.
   const suspension = checkRailsOutput(result.output || '', {}, null);
-  if (suspension.outcome) {
+  if (suspension.outcome && suspension.outcome !== 'out_of_scope') {
     result.rails = { failed: true, outcome: suspension.outcome };
     result.railsVerdict = suspension;
     return result;
@@ -204,7 +206,33 @@ async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, ro
     verdictText = railsNotEngagedVerdict({ skill, config });
     console.log(`[Runner] rails: ${who} — хуки рельс (${host}) на месте, а вызовов инструментов под рельсами нет: повтор с вердиктом`);
   } else {
+    try {
+      const marker = readHandoff(root, state.session);
+      if (marker) {
+        result.rails.failed = true;
+        result.rails.outcome = 'out_of_scope';
+        result.rails.handoff = marker;
+        return result;
+      }
+    } catch (error) {
+      result.rails.failed = true;
+      result.rails.outcome = 'blocked';
+      result.railsVerdict = { ok: false, reason: error.message };
+      return result;
+    }
     verdict = checkRailsOutput(result.output || '', config, state);
+    if (verdict.outcome === 'out_of_scope') {
+      const marker = readHandoff(root, state.session);
+      const handoff = marker ? { ok: true, marker } : relinquish({
+        root, session: state.session, source: 'runner', run: runId,
+        answer: result.output || '', expectedStateDigest: essentialStateDigest(state),
+      });
+      result.rails.failed = true;
+      result.rails.outcome = handoff.ok ? 'out_of_scope' : 'blocked';
+      result.rails.handoff = handoff.marker;
+      result.railsVerdict = { ...verdict, ok: handoff.ok, reason: handoff.reason };
+      return result;
+    }
     if (verdict.outcome) {
       // Приостановка и при зацепившихся рельсах — не PASS и не повтор.
       result.rails.failed = true;
@@ -227,13 +255,46 @@ async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, ro
   retryResult.railsRetried = true;
   retryResult.railsVerdict = verdict;
   const retrySuspension = checkRailsOutput(retryResult.output || '', {}, null);
-  if (retrySuspension.outcome) {
+  if (retrySuspension.outcome && retrySuspension.outcome !== 'out_of_scope') {
     retryResult.rails = { failed: true, outcome: retrySuspension.outcome };
     retryResult.railsRetryVerdict = retrySuspension;
     return retryResult;
   }
   const retry = railsEngagement({ sandboxRoot: root, projectRoot, run: retryRunId });
   retryResult.rails = { engaged: retry.engaged, escaped: retry.escaped };
+  if (retry.state && !retry.escaped) {
+    try {
+      const marker = readHandoff(root, retry.state.session);
+      if (marker) {
+        retryResult.rails.failed = true;
+        retryResult.rails.outcome = 'out_of_scope';
+        retryResult.rails.handoff = marker;
+        return retryResult;
+      }
+    } catch (error) {
+      retryResult.rails.failed = true;
+      retryResult.rails.outcome = 'blocked';
+      retryResult.railsRetryVerdict = { ok: false, reason: error.message };
+      return retryResult;
+    }
+  }
+  if (retry.state && !retry.escaped && retrySuspension.outcome === 'out_of_scope') {
+    const marker = readHandoff(root, retry.state.session);
+    const handoff = marker ? { ok: true, marker } : relinquish({
+      root, session: retry.state.session, source: 'runner', run: retryRunId,
+      answer: retryResult.output || '', expectedStateDigest: essentialStateDigest(retry.state),
+    });
+    retryResult.rails.failed = true;
+    retryResult.rails.outcome = handoff.ok ? 'out_of_scope' : 'blocked';
+    retryResult.rails.handoff = handoff.marker;
+    retryResult.railsRetryVerdict = { ...retrySuspension, ok: handoff.ok, reason: handoff.reason };
+    return retryResult;
+  }
+  if (retrySuspension.outcome === 'out_of_scope') {
+    retryResult.rails.failed = true;
+    retryResult.rails.outcome = 'blocked';
+    return retryResult;
+  }
   if (!retry.state) {
     console.log(railsNotEngagedMessage({ who: `${who} (повтор по output-check)`, escaped: retry.escaped, projectRoot }));
     if (hooks && !retry.escaped) {
@@ -1205,7 +1266,7 @@ function persistRailsArtifacts(taskWorkdir, skillName, caseId, agentId, trialNum
     fs.rmSync(journalCopy, { force: true });
     fs.rmSync(stateCopy, { force: true });
     const hasJournal = fs.existsSync(journal);
-    const states = fs.existsSync(stateDir) ? fs.readdirSync(stateDir).filter((f) => f.endsWith('.json')) : [];
+    const states = fs.existsSync(stateDir) ? fs.readdirSync(stateDir).filter((f) => f.endsWith('.json') && !f.startsWith('.')) : [];
     if (!hasJournal && states.length === 0) return;
     ensureDir(agentDir);
     if (hasJournal) fs.copyFileSync(journal, journalCopy);

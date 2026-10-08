@@ -18,7 +18,10 @@ import { findProjectRoot } from '../lib/find-root.mjs';
 import { decide, loadSkillRuntime } from './core.mjs';
 import { fromClaude } from './actions.mjs';
 import { loadState, saveState, readCompletedMarker } from './state.mjs';
-import { recordCompletion, invalidateCompletion, transcriptFinalAnswer } from './completion.mjs';
+import { recordCompletion, invalidateCompletion, transcriptFinalAnswer, essentialStateDigest } from './completion.mjs';
+import { relinquish, readHandoff } from './handoff.mjs';
+import { bindHostSession } from './launch-origin.mjs';
+import { withLifecycleLock } from './lifecycle-lock.mjs';
 import { realpathDeep } from './paths.mjs';
 import { appendEvent } from './journal.mjs';
 import { check as outputCheck, lastAssistantText } from './output-check.mjs';
@@ -159,6 +162,19 @@ function handlePostToolUse(input, env) {
 // каждого блока продвигается к терминалу, а задать его нечем — другого ключа в rails.yaml нет.
 
 function handleStop(input, env) {
+  const session = input?.session_id;
+  if (!session) return null;
+  let root;
+  try { root = findProjectRoot(input?.cwd || process.cwd()); }
+  catch { return null; }
+  try {
+    return withLifecycleLock(root, session, () => handleStopLocked(input, env));
+  } catch (error) {
+    return { decision: 'block', reason: `RAILS: действие отклонено: ${error.message}` };
+  }
+}
+
+function handleStopLocked(input, env) {
   const cwd = (input && input.cwd) || process.cwd();
   const sessionId = input && input.session_id;
   if (!sessionId) return null;
@@ -174,6 +190,7 @@ function handleStop(input, env) {
   if (!state || !state.skill) return null;
   // Штатный выход: остановки завершённой сессии не проверяются и не блокируются.
   if (readCompletedMarker(root, sessionId)) return null;
+  if (readHandoff(root, sessionId)) return null;
 
   let config;
   try {
@@ -198,6 +215,16 @@ function handleStop(input, env) {
   const answer = transcriptFinalAnswer((input && input.transcript_path) || '', sessionId);
   const text = answer.ok ? answer.text : '';
   const result = outputCheck(text, config, state);
+  if (result.ok && result.outcome === 'out_of_scope') {
+    const handoff = relinquish({ root, session: sessionId,
+      transcriptPath: input?.transcript_path, expectedStateDigest: essentialStateDigest(state) });
+    if (handoff.ok) return null;
+    const invalidated = invalidateCompletion({ root, state, cause: `передача отклонена: ${handoff.reason}` });
+    if ((invalidated?.removed || invalidated?.attempted) && invalidated.traced === false) {
+      return { decision: 'block', reason: invalidated.blockReason ?? 'RAILS: подтверждение не снято и след не записан — повторите остановку после восстановления доступа' };
+    }
+    return { decision: 'block', reason: `RAILS: ${handoff.reason}` };
+  }
   if (result.ok) {
     // Положительная проверка в терминале — единственное доказательство завершения:
     // сохранить сразу (дефект 2026-10-06: «pass» не сохранялся, и завершённая
@@ -335,10 +362,18 @@ function handleUserPromptSubmit(input, env) {
     root = null;
   }
 
+  if (root && sessionId) {
+    return withLifecycleLock(root, sessionId, () => handleCorrectionLocked(root, sessionId));
+  }
+  return correctionReply(null, '');
+}
+
+function handleCorrectionLocked(root, sessionId) {
   let node = null;
   let label = '';
-  if (root && sessionId) {
+  {
     const state = loadState(root, sessionId);
+    if (readHandoff(root, sessionId)) return null;
     // Штатный выход: рельсы завершённую сессию не комментируют.
     if (state && readCompletedMarker(root, sessionId)) return null;
     if (state && state.skill) {
@@ -360,6 +395,10 @@ function handleUserPromptSubmit(input, env) {
     }
   }
 
+  return correctionReply(node, label);
+}
+
+function correctionReply(node, label) {
   const suffix = node ? ` узла ${node} «${truncate(label, 80)}»` : '';
   return {
     hookSpecificOutput: {
@@ -427,6 +466,7 @@ function handleSessionStart(input, env) {
 
   const state = loadState(root, sessionId);
   if (!state || !state.skill) {
+    if (!state) bindHostSession(root, sessionId);
     const hint = runSkill ? runSkillHint(root, runSkill, sessionId) : null;
     return reply(hint || `RAILS: сессия ${sessionId}, проект ${root}; скил не запущен — node .workflow/src/rails/cli.mjs start <skill> --session ${sessionId}`);
   }

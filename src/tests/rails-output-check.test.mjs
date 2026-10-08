@@ -239,6 +239,17 @@ test('lastAssistantText: нет assistant-записей -> пустая стр�
   });
 });
 
+test('lastAssistantText: malformed content and non-text blocks are ignored', () => {
+  withTmpDir((dir) => {
+    const file = join(dir, 'malformed-content.jsonl');
+    const entries = [
+      { type: 'assistant', message: { content: { type: 'text', text: 'not an array' } } },
+      { type: 'assistant', message: { content: [null, { type: 'image' }, { type: 'text', text: 42 }] } },
+    ];
+    writeFileSync(file, `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`, 'utf8');
+    assert.equal(lastAssistantText(file), '');
+  });
+});
 test('приостановка: дописанный RESULT со status: pass не превращает её в успех (ревью 2026-10-05)', () => {
   const base = 'RAILS_OUTCOME: needs_user\nACTION: решение владельца\nREASON: жду разрешения\nDONE: правки внесены\nREMAINING: выбор варианта\n';
   const ok = check(base, null, { node: 'P3S5' });

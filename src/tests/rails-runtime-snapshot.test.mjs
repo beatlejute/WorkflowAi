@@ -58,6 +58,15 @@ test('different run cannot reuse a prior runtime binding', () => fixture(({ root
   assert.throws(() => pinnedRuntime(root, state, () => live()), WritePolicyError);
 }));
 
+test('handoff policy is checked when pinning and reading runtime', () => fixture(({ root, state, live }) => {
+  const source = live();
+  source.config.handoff = { nodes: ['P0S9'], requires: ['REQUEST:'], forbids: ['verdict='] };
+  assert.throws(() => pinnedRuntime(root, state, () => source), WritePolicyError);
+  source.config.handoff.nodes = ['P0R3'];
+  source.config.handoff.requires = ['['];
+  assert.throws(() => pinnedRuntime(root, state, () => source), WritePolicyError);
+}));
+
 test('new run without a prior binding captures its own sources', () => fixture(({ root, state, live }) => {
   pinnedRuntime(root, state, () => live());
   const next = { ...state, run: 'run-2', runtime: undefined };

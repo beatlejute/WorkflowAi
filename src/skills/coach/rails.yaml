@@ -6,6 +6,16 @@ skill: coach
 entry: P0E1
 terminal: [P8S2]
 pause_nodes: [P3S5, P10S2]
+handoff:
+  nodes: [P0H1]
+  requires:
+    - '^REQUEST: .+'
+    - '^REASON: .+'
+    - '^DONE: .+'
+    - '^REMAINING: .+'
+  forbids:
+    - 'verdict\s*=\s*pass'
+    - '^status:\s*pass'
 fragments: ["workflows/*.md"]
 quote_min: 25
 canary: "echo RAILS_CANARY"

@@ -55,7 +55,9 @@ const KILO_FINAL_READ_DELAY_MS = 300;
 import { loadRailsConfig } from './rails/rails-config.mjs';
 import { check as checkRailsOutput } from './rails/output-check.mjs';
 import { loadSkillRuntime } from './rails/core.mjs';
-import { recordCompletion } from './rails/completion.mjs';
+import { recordCompletion, essentialStateDigest } from './rails/completion.mjs';
+import { relinquish, readHandoff } from './rails/handoff.mjs';
+import { registerManagedLauncher } from './rails/launch-origin.mjs';
 import { evaluate as evaluateWithModel, validateInput } from './lib/model-evaluate.mjs';
 import { ModelClientError, assertModelUrl, redactNetworkDetail, imageBatches } from './lib/model-client.mjs';
 import { buildCliJudgePrompt, parseJudgeScore, parseJudgeExtras } from './lib/skill-judge.mjs';
@@ -2380,7 +2382,7 @@ class StageExecutor {
           status = 'aborted';
         } else if (banned) {
           status = 'model_banned';
-        } else if (err.code === 'RAILS_INCOMPLETE' || err.code === 'RAILS_SUSPENDED' || err.code === 'RAILS_RUNTIME_LOST') {
+        } else if (err.code === 'RAILS_INCOMPLETE' || err.code === 'RAILS_SUSPENDED' || err.code === 'RAILS_RUNTIME_LOST' || err.code === 'RAILS_OUT_OF_SCOPE' || err.code === 'RAILS_HANDOFF_INVALID') {
           // Скил брошен без итога или приостановлен владельцем, либо потеряно закрепление
           // рантайма (callAgent), хост вышел с кодом 0. stderr kilo — лог его
           // инструментов: «403» и «network» там — текст проекта, и ни класс
@@ -2421,7 +2423,7 @@ class StageExecutor {
         const diffResult = snapshotEnabled ? diff(before, after) : null;
         const diffEmpty = snapshotEnabled && isEmpty(diffResult);
 
-        if (err.code === 'RAILS_SUSPENDED' || err.code === 'RAILS_RUNTIME_LOST') {
+        if (err.code === 'RAILS_SUSPENDED' || err.code === 'RAILS_RUNTIME_LOST' || err.code === 'RAILS_OUT_OF_SCOPE' || err.code === 'RAILS_HANDOFF_INVALID') {
           // Приостановка владельцем или потеря закреплённого рантайма — не отказ
           // агента: ни повтор, ни передача другому исполнителю (дизайн 2026-10-05).
           if (this.logger) this.logger.warn(`rails: ${err.code} — без fallback на другого агента`, stageId);
@@ -3100,6 +3102,7 @@ class StageExecutor {
       // консоль создаётся скрытой, а внуки агента наследуют её без окон.
       // env: машинный agent.env (прокси и т.п.) и PWD = cwd агента — см. lib/agent-env.mjs.
       const agentCwd = path.resolve(this.projectRoot, agent.workdir || '.');
+      registerManagedLauncher(this.projectRoot);
       const child = spawn(agent.command, args, {
         cwd: agentCwd,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -3491,18 +3494,38 @@ class StageExecutor {
       }
       verdict = { ok: false, missing: ['ни одного вызова инструмента под рельсами'] };
     } else {
+      this.checkDurableHandoff(state, result);
       verdict = checkRailsOutput(result.output || '', config, state);
       if (verdict.ok && !verdict.outcome) {
         // Проверенный финальный ответ в терминале — подтверждение завершения
         // (дефект 2026-10-06: положительный результат проверки не сохранялся,
         // и завершённая сессия не могла выйти из роли штатно). recordCompletion
         // сам проверяет терминал/приостановку/целостность runtime и не бросает.
-        try {
-          recordCompletion({ root: this.projectRoot, state, source: 'runner', answer: result.output || '' });
-        } catch {
-          // подтверждение не должно ломать успешный ответ стадии
+        const completion = recordCompletion({ root: this.projectRoot, state, source: 'runner', answer: result.output || '' });
+        if (!completion.ok) {
+          this.checkDurableHandoff(state, result);
+          const error = new Error(`Completion rejected: ${completion.reason}`);
+          error.code = 'RAILS_RUNTIME_LOST';
+          error.exitCode = -1;
+          error.stdout = result.output || '';
+          error.stderr = result.stderr || '';
+          throw error;
         }
         return result;
+      }
+      if (verdict.outcome === 'out_of_scope') {
+        const existing = readHandoff(this.projectRoot, state.session);
+        const handoff = existing ? { ok: true, marker: existing } : relinquish({
+          root: this.projectRoot, session: state.session, source: 'runner', run: runId,
+          answer: result.output || '', expectedStateDigest: essentialStateDigest(state),
+        });
+        const error = new Error(handoff.ok ? 'Agent handed off an out-of-scope request' : `Handoff rejected: ${handoff.reason}`);
+        error.code = handoff.ok ? 'RAILS_OUT_OF_SCOPE' : 'RAILS_HANDOFF_INVALID';
+        error.exitCode = 0;
+        error.stdout = result.output || '';
+        error.stderr = result.stderr || '';
+        error.handoff = handoff.marker;
+        throw error;
       }
       if (verdict.ok && verdict.outcome) {
         // Приостановка RAILS_OUTCOME (blocked/needs_user) — не успех и не повод для
@@ -3574,6 +3597,19 @@ class StageExecutor {
     const retryState = resumeArgs
       ? railsStatesByRun(this.projectRoot, retryRun).find((s) => s.session === state.session) ?? null
       : findRailsStateByRun(this.projectRoot, retryRun);
+    if (retryState) {
+      this.checkDurableHandoff(retryState, retryResult);
+      try {
+        ({ config } = loadSkillRuntime(this.projectRoot, skillId, retryState));
+      } catch (cause) {
+        const error = new Error(`Retry lost its pinned rails runtime: ${cause.message}`);
+        error.code = 'RAILS_RUNTIME_LOST';
+        error.exitCode = -1;
+        error.stdout = retryResult.output || '';
+        error.stderr = retryResult.stderr || '';
+        throw error;
+      }
+    }
     const retryVerdict = retryState
       ? checkRailsOutput(retryResult.output || '', config, retryState)
       : { ok: false, missing: ['ни одного вызова инструмента под рельсами'] };
@@ -3583,13 +3619,32 @@ class StageExecutor {
       // у первого ответа: без него штатный выход этой сессии недоступен
       // (ревью 2026-10-06, major; kilo-плагин Stop-пути не имеет).
       if (retryState) {
-        try {
-          recordCompletion({ root: this.projectRoot, state: retryState, source: 'runner', answer: retryResult.output || '' });
-        } catch {
-          // подтверждение не должно ломать успешный ответ стадии
+        const completion = recordCompletion({ root: this.projectRoot, state: retryState, source: 'runner', answer: retryResult.output || '' });
+        if (!completion.ok) {
+          this.checkDurableHandoff(retryState, retryResult);
+          const error = new Error(`Completion rejected: ${completion.reason}`);
+          error.code = 'RAILS_RUNTIME_LOST';
+          error.exitCode = -1;
+          error.stdout = retryResult.output || '';
+          error.stderr = retryResult.stderr || '';
+          throw error;
         }
       }
       return retryResult;
+    }
+    if (retryVerdict.outcome === 'out_of_scope') {
+      const existing = retryState ? readHandoff(this.projectRoot, retryState.session) : null;
+      const handoff = existing ? { ok: true, marker: existing } : relinquish({
+        root: this.projectRoot, session: retryState?.session, source: 'runner', run: retryRun,
+        answer: retryResult.output || '', expectedStateDigest: essentialStateDigest(retryState),
+      });
+      const error = new Error(handoff.ok ? 'Agent handed off an out-of-scope request on retry' : `Handoff rejected: ${handoff.reason}`);
+      error.code = handoff.ok ? 'RAILS_OUT_OF_SCOPE' : 'RAILS_HANDOFF_INVALID';
+      error.exitCode = 0;
+      error.stdout = retryResult.output || '';
+      error.stderr = retryResult.stderr || '';
+      error.handoff = handoff.marker;
+      throw error;
     }
     if (retryVerdict.ok && retryVerdict.outcome) {
       // Приостановка и в ответе повтора — не успех (ревью 2026-10-05, второй раунд).
@@ -3622,6 +3677,29 @@ class StageExecutor {
     }
     if (this.logger) this.logger.warn(`rails: ${what} — ответ принят без процедуры скила, дальше — по переходам стадии`, stageId);
     return retryResult;
+  }
+
+  checkDurableHandoff(state, result) {
+    let marker;
+    try {
+      marker = readHandoff(this.projectRoot, state.session);
+    } catch (cause) {
+      const error = new Error(`Handoff rejected: ${cause.message}`);
+      error.code = 'RAILS_HANDOFF_INVALID';
+      error.exitCode = 0;
+      error.stdout = result.output || '';
+      error.stderr = result.stderr || '';
+      throw error;
+    }
+    if (marker) {
+      const error = new Error('Agent handed off an out-of-scope request');
+      error.code = 'RAILS_OUT_OF_SCOPE';
+      error.exitCode = 0;
+      error.stdout = result.output || '';
+      error.stderr = result.stderr || '';
+      error.handoff = marker;
+      throw error;
+    }
   }
 
   /**
@@ -4464,6 +4542,13 @@ class PipelineRunner {
       } catch (err) {
         const failedStage = this.currentStage;
         this.logger.error(`Error at stage "${failedStage}": ${err.message}`, 'PipelineRunner');
+
+        if (err.code === 'RAILS_OUT_OF_SCOPE' || err.code === 'RAILS_HANDOFF_INVALID') {
+          this.currentExecutor = null;
+          this.endedBy = { stage: failedStage, status: 'error', data: { error: err.message, code: err.code } };
+          this.running = false;
+          break;
+        }
 
         // Пытаемся получить fallback transition
         const stage = this.pipeline.stages[failedStage];

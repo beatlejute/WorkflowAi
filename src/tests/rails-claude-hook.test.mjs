@@ -725,3 +725,28 @@ test('child_process: PreToolUse-канарейка через junction на src/
     }
   });
 });
+
+test('unknown hook events are ignored', () => {
+  withProject(({ root }) => {
+    assert.equal(handleHookInput({ hook_event_name: 'PostToolUse', cwd: root }, {}), null);
+  });
+});
+
+test('child_process: SessionStart emits the active session context', () => {
+  withProject(({ root }) => {
+    const sessionId = makeState(root, 'P4S1');
+    const input = JSON.stringify({ hook_event_name: 'SessionStart', session_id: sessionId, cwd: root });
+    const result = runHookProcess(input, root);
+    assert.equal(result.code, 0);
+    assert.match(JSON.parse(result.stdout).hookSpecificOutput.additionalContext, /hooktest/);
+  });
+});
+
+ test('child_process: unknown event produces no output', () => {
+  withProject(({ root }) => {
+    const input = JSON.stringify({ hook_event_name: 'PostToolUse', session_id: uuid(), cwd: root });
+    const result = runHookProcess(input, root);
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout.trim(), '');
+  });
+});

@@ -5,6 +5,16 @@ import { join } from 'node:path';
 import { Graph } from './graph.mjs';
 import { realpathDeep } from './paths.mjs';
 import { loadWritePolicy, WritePolicyError } from './write-policy.mjs';
+import { validateRailsConfig } from './rails-config.mjs';
+
+function validateHandoff(config, graph) {
+  if (config.handoff === undefined) return;
+  const errors = validateRailsConfig(config).errors.filter((error) => error.field.startsWith('handoff'));
+  if (errors.length) throw new Error(errors.map((error) => error.message).join('; '));
+  for (const node of config.handoff.nodes) {
+    if (!graph.node(node)) throw new Error(`handoff.nodes: неизвестный узел ${node}`);
+  }
+}
 
 function digest(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -38,8 +48,9 @@ export function pinnedRuntime(root, state, loadLive) {
     } catch (error) {
       if (error.code !== 'ENOENT' || state.runtime) throw error;
       const { config, graph } = loadLive();
+      validateHandoff(config, graph);
       const payload = {
-        version: 1, identity, config,
+        version: 1, identity, launch: state.launch ?? null, config,
         graph: { occurrences: graph._occurrences, edges: graph._edges, files: graph._files, errors: graph._parseErrors },
       };
       snapshot = { payload, hash: digest(payload) };
@@ -54,13 +65,16 @@ export function pinnedRuntime(root, state, loadLive) {
     const payload = snapshot?.payload;
     if (!payload || payload.version !== 1 || digest(payload.identity) !== id || digest(payload) !== snapshot.hash
       || (state.runtime && state.runtime.hash !== snapshot.hash)
+      || digest(payload.launch ?? null) !== digest(state.launch ?? null)
       || !payload.config || typeof payload.config !== 'object' || Array.isArray(payload.config)
       || !payload.graph || !['occurrences', 'edges', 'files', 'errors'].every((field) => Array.isArray(payload.graph[field]))) {
       throw new Error('повреждён snapshot runtime');
     }
-    state.runtime = { version: 1, id, hash: snapshot.hash };
     const data = payload.graph;
-    return { config: payload.config, graph: new Graph(data.occurrences, data.edges, data.files, data.errors) };
+    const graph = new Graph(data.occurrences, data.edges, data.files, data.errors);
+    validateHandoff(payload.config, graph);
+    state.runtime = { version: 1, id, hash: snapshot.hash };
+    return { config: payload.config, graph };
   } catch (error) {
     throw new WritePolicyError(`runtime не закреплён: ${error.message}`);
   }

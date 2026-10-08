@@ -24,6 +24,7 @@
     "src/skills/**",
     "bin/**",
     ".stryker-tmp/**",
+    ".claude/worktrees/**",
     "test_snippet.mjs",
     "scripts/**",
     "**/*.test.js"

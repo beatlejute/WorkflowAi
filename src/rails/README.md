@@ -838,6 +838,66 @@ export const WorkflowRails = async ({ directory }) => ({
 200/200, прогон 2026-09-22). Взятая карта печатается строкой `Карта:`.
 Непокрытые фразы печатаются списком; код выхода 1.
 
+## Передача вне компетенции
+
+`handoff` в rails.yaml задаёт `nodes`, непустые списки регулярных выражений
+`requires` и `forbids`. Ссылки проверяются при закреплении и чтении runtime.
+Ответ начинается с `RAILS_OUTCOME: out_of_scope` и содержит единственные непустые
+строки `REQUEST`, `REASON`, `DONE`, `REMAINING`. Он не проверяется требованиями
+успешного терминала и не создаёт completion или grant.
+
+CLI `relinquish` не принимает произвольный transcript: передача ответа хоста
+выполняется Stop-хуком. При старте происхождение закрепляется по реальной цепочке
+процессов ОС (Windows CIM, Linux /proc): PID, время создания, executable и хеш argv.
+Положительный IDE-запуск Claude требует пути native-binary расширения VS Code,
+`--permission-prompt-tool stdio`, `--replay-user-messages`, обоих stream-json
+форматов и совпадения `--resume`/`--session-id` с host session, если эти ключи есть.
+При первом старте без ключа сессии только штатный SessionStart адаптера закрепляет
+host session из callback за ОС-личностью хоста; CLI такое связывание не создаёт.
+Связь не заменяется при смене процесса, существующее состояние не перекрепляется.
+Нечитаемая строка постороннего Windows-процесса пропускается; разрыв цепочки до
+хоста оставляет происхождение unknown. `-p`/`--print`,
+`kilo run` или зарегистрированный предок раннера означают managed-запуск.
+Раннер и общий agent-spawner регистрируют свою ОС-личность до spawn. Ошибка чтения
+ОС и старое состояние без происхождения остаются unknown; роль, env и отсутствие
+run не дают интерактивных полномочий. Происхождение входит в закреплённый runtime.
+Stop сверяет живой хост с закреплённым запуском, принадлежность transcript сессии
+и время последнего ответа относительно текущего состояния; более позднее
+сообщение пользователя делает ответ устаревшим. Managed-ответ раннера проверяется
+по run, узлу, идентичности и целостности runtime, текущему состоянию и форме ответа.
+Отдельный `.handoff-S.json` сохраняет доказательство; при чтении оно сверяется
+с текущим закреплённым состоянием. `handoff_attempt` в журнале обозначает только
+попытку; точка фиксации — публикация полного маркера без замены существующего.
+Состояние, runtime, история, счётчики и старые grants не удаляются. После
+передачи completion и exit отклоняются до потребления разрешения.
+Общий lifecycle-lock сохраняет имя прежнего `.exit-lock-S`; чужие клеймы
+не перехватываются. CLI-мутации и записи состояния после передачи отклоняются.
+
+Подтверждённая интерактивная передача снимает процедуру в той же живой host-сессии,
+но сохраняет нейтральные G0 guards и защиту состояния/канона. Другой процесс,
+переиспользованный PID или изменённые argv не наследуют освобождение. Managed и
+unknown после передачи блокируют любые агентские действия до executor bypass.
+Runner обрабатывает исход отдельно в первом ответе и ответе повтора, без успеха,
+повторов и fallback. Ветки coach/create-plan подключены к P0H1 через проверку
+компетенции; новый запуск закрепляет их актуальный runtime. Старые запуски не
+перекрепляются автоматически.
+
+Инвентарь общих вызывающих для этой правки (коммит не выполнялся):
+- `loadRailsConfig`: core runtime loader, CLI check, runner, skill-test harness.
+- `validateRailsConfig`: CLI check и проверка handoff в runtime snapshot.
+- `Graph.validate`: CLI check и детерминированные graph/skill tests.
+- output `check`: Claude Stop, completion, runner initial/retry, skill-test harness.
+- `pinnedRuntime`: core `loadSkillRuntime` и runtime snapshot tests.
+- `saveState`/`startState`: CLI start/goto, core decision/session initialization,
+  Claude hooks, completion/invalidation, fixtures детерминированных тестов.
+- `deleteState`: CLI reset и state tests.
+- completion/exit lock: invalidateCompletion и performExit; recordCompletion
+  вызывают CLI complete, Claude Stop и runner initial/retry.
+- `StageExecutor.callAgent`: executeWithFallback и runner tests.
+- `spawnTargetAgentWithRailsCheck`: deterministic/rubric trials skill-test harness.
+
+Старый completion/exit-контракт описан отдельно в §16 и не заменён передачей.
+
 ## 13. Тесты
 
 Все — `node:test`, во временных каталогах, без сети и без запуска агентов.

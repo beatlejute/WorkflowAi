@@ -6,6 +6,16 @@ skill: create-plan
 entry: P0E1
 terminal: [P6S2]
 pause_nodes: [P6S3]
+handoff:
+  nodes: [P0H1]
+  requires:
+    - '^REQUEST: .+'
+    - '^REASON: .+'
+    - '^DONE: .+'
+    - '^REMAINING: .+'
+  forbids:
+    - 'verdict\s*=\s*pass'
+    - '^status:\s*pass'
 fragments: ["workflows/*.md"]
 quote_min: 25
 canary: "echo RAILS_CANARY"

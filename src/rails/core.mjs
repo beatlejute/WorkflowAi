@@ -36,6 +36,9 @@ import { explainShellWrites, shellAbsolutePath } from './actions.mjs';
 import { nestedScripts, scanCommand, toSingleQuoted } from './shell-scan.mjs';
 import { classifyWrites } from './write-policy.mjs';
 import { pinnedRuntime } from './runtime-snapshot.mjs';
+import { readHandoff } from './handoff.mjs';
+import { launchOrigin, sameLaunch } from './launch-origin.mjs';
+import { withLifecycleLock } from './lifecycle-lock.mjs';
 
 // --- cli.mjs: узнаём вызов служебной команды (§7.4.1) -----------------------
 //
@@ -68,7 +71,7 @@ import { pinnedRuntime } from './runtime-snapshot.mjs';
 // файл. Теперь CR под PowerShell — разделитель, под bash — символ слова, и любой токен
 // с CR/LF вне кавычек не инертен (см. tokenIsInert).
 
-const CLI_SUBCOMMANDS = ['start', 'goto', 'status', 'reset', 'report', 'check', 'coverage', 'selfcheck', 'complete', 'exit'];
+const CLI_SUBCOMMANDS = ['start', 'goto', 'status', 'reset', 'report', 'check', 'coverage', 'selfcheck', 'complete', 'exit', 'relinquish'];
 // Якорь — `rails/cli.mjs` (`rails\cli.mjs` на Windows), а не любой `cli.mjs`: в
 // репозитории есть свой `src/cli.mjs`, не имеющий отношения к рельсам.
 const CLI_PATH_RE = /(?:^|[\\/])rails[\\/]cli\.mjs$/;
@@ -1268,6 +1271,21 @@ function decideInProject(root, action, ctx) {
   const classify = (callerSkill = null) => ((editWrite || (action?.kind === 'shell' && targets.length > 0)) && !cli?.isCli
     ? classifyWrites(root, targets, action.kind, ctx?.cwd ?? root, callerSkill)
     : { unrestricted: new Set() });
+  // Передача проверяется до executor bypass и до возврата сохранённого allow.
+  const handoff = ctx?.sessionId ? readHandoff(root, ctx.sessionId) : null;
+  if (handoff) {
+    if (handoff.origin !== 'interactive' || !sameLaunch(handoff.evidence.launch, launchOrigin(root, ctx.sessionId))) {
+      classify();
+      return { decision: 'deny', reason: 'RAILS: запрос передан вне компетенции; агентская работа остановлена' };
+    }
+    const base = decideNoSkillMode(root, action, ctx);
+    if (base.decision === 'deny') return base;
+    classify();
+    if (cli?.isCli && cli.command !== action.command) {
+      return { decision: 'allow', updatedCommand: cli.command };
+    }
+    return base;
+  }
   const role = ctx?.role ?? process.env.WORKFLOW_RAILS_ROLE;
   if (role === 'executor') {
     classify(); // канон/protected отказывает и делегату — до разрешения роли
@@ -1529,7 +1547,9 @@ export function decide({ action, ctx } = {}) {
   }
 
   try {
-    return decideInProject(root, action, ctx);
+    return ctx?.sessionId
+      ? withLifecycleLock(root, ctx.sessionId, () => decideInProject(root, action, ctx))
+      : decideInProject(root, action, ctx);
   } catch (err) {
     if (err?.railsFailClosed) {
       const reason = `RAILS: действие отклонено: ${err.message}`;

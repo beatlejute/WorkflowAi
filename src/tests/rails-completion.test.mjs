@@ -764,6 +764,52 @@ test('transcriptFinalAnswer: обезличенный transcript без отве
   });
 });
 
+test('transcriptFinalAnswer: rejects transcripts without assistant output and joins message fragments', () => {
+  withProject(({ base }) => {
+    const sessionId = uuid();
+    const path = join(base, `${sessionId}.jsonl`);
+    writeFileSync(path, `${JSON.stringify({ type: 'user', sessionId, message: {} })}\n`, 'utf8');
+    assert.equal(transcriptFinalAnswer(path, sessionId).integrity, 'no-assistant');
+
+    const fragments = [
+      { type: 'assistant', sessionId, message: { id: 'joined', content: [{ type: 'text', text: 'first ' }] } },
+      { type: 'assistant', sessionId, message: { id: 'joined', content: [{ type: 'text', text: 'second' }] } },
+    ];
+    writeFileSync(path, `${fragments.map((entry) => JSON.stringify(entry)).join('\n')}\n`, 'utf8');
+    assert.deepEqual(transcriptFinalAnswer(path, sessionId), { ok: true, text: 'first second', timestamp: undefined, latest: true, integrity: 'ok' });
+
+    const separateMessages = [
+      { type: 'assistant', sessionId, message: { id: 'prior', content: [{ type: 'text', text: 'stale' }] } },
+      { type: 'assistant', sessionId, message: { id: 'latest', content: [{ type: 'text', text: 'current' }] } },
+    ];
+    writeFileSync(path, `${separateMessages.map((entry) => JSON.stringify(entry)).join('\n')}\n`, 'utf8');
+    assert.deepEqual(transcriptFinalAnswer(path, sessionId), { ok: true, text: 'current', timestamp: undefined, latest: true, integrity: 'ok' });
+  });
+});
+
+test('transcriptFinalAnswer: non-array content yields an empty answer', () => {
+  withProject(({ base }) => {
+    const sessionId = uuid();
+    const path = join(base, `${sessionId}.jsonl`);
+    writeFileSync(path, `${JSON.stringify({
+      type: 'assistant', sessionId, message: { content: { type: 'text', text: 'not an array' } },
+    })}\n`, 'utf8');
+    assert.equal(transcriptFinalAnswer(path, sessionId).integrity, 'empty');
+  });
+});
+
+test('transcriptFinalAnswer: skips blank records and refuses malformed JSON', () => {
+  withProject(({ base }) => {
+    const sessionId = uuid();
+    const path = join(base, `${sessionId}.jsonl`);
+    const entry = JSON.stringify({ type: 'assistant', sessionId, message: { content: [{ type: 'text', text: 'answer' }] } });
+    writeFileSync(path, `\n${entry}\n`, 'utf8');
+    assert.equal(transcriptFinalAnswer(path, sessionId).text, 'answer');
+    writeFileSync(path, '{malformed json}\n', 'utf8');
+    assert.equal(transcriptFinalAnswer(path, sessionId).ok, false);
+  });
+});
+
 test('пустое последнее сообщение ассистента снимает прежнее подтверждение', () => {
   withProject(({ base, root }) => {
     const sessionId = pinnedSession(root, 'P5S1');

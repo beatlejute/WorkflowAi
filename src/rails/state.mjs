@@ -18,10 +18,13 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { normalizeLabel } from './graph.mjs';
 import { isEdgeGuardPath, TICKET_PLACEHOLDER } from './rails-config.mjs';
+import { withLifecycleLock } from './lifecycle-lock.mjs';
+import { readHandoff } from './handoff.mjs';
+import { launchOrigin } from './launch-origin.mjs';
 
 export { normalizeLabel };
 
-const NODE_ID_RE = /^P(\d+)([ERSGQ])(\d+)$/;
+const NODE_ID_RE = /^P(\d+)([ERSGQH])(\d+)$/;
 
 function parseNodeId(id) {
   const m = NODE_ID_RE.exec(String(id));
@@ -201,6 +204,13 @@ export function loadState(root, sessionId) {
  * @param {object} state
  */
 export function saveState(root, state) {
+  return withLifecycleLock(root, state.session, () => {
+    if (readHandoff(root, state.session)) throw new StateError('сессия передала запрос — состояние сохраняется без изменений');
+    return saveStateUnlocked(root, state);
+  });
+}
+
+function saveStateUnlocked(root, state) {
   const dir = stateDir(root);
   fs.mkdirSync(dir, { recursive: true });
   const target = statePath(root, state.session);
@@ -228,11 +238,14 @@ export function saveState(root, state) {
  * @param {string} sessionId
  */
 export function deleteState(root, sessionId) {
-  try {
-    fs.unlinkSync(statePath(root, sessionId));
-  } catch (err) {
-    if (err && err.code !== 'ENOENT') throw err;
-  }
+  return withLifecycleLock(root, sessionId, () => {
+    if (readHandoff(root, sessionId)) throw new StateError('сессия передала запрос — состояние сохраняется');
+    try {
+      fs.unlinkSync(statePath(root, sessionId));
+    } catch (err) {
+      if (err && err.code !== 'ENOENT') throw err;
+    }
+  });
 }
 
 /**
@@ -261,6 +274,7 @@ export function startState({ root, sessionId, skill, entry, run = null, ticket =
     skill,
     node: entry,
     started: now,
+    launch: launchOrigin(root, sessionId),
     updated: now,
     history: [],
     counters: {},

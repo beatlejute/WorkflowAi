@@ -1686,6 +1686,36 @@ describe('All skills aggregation', () => {
     assert.match(stdout, /outcome_message: All skills passed/);
   });
 
+  it('--all reports aggregated_failed when one skill fails', async () => {
+    const skill = `__test-all-failed-${Date.now()}`;
+    const dir = join(AGG_SKILLS_DIR, skill);
+    const tests = join(dir, 'tests');
+    mkdirSync(tests, { recursive: true });
+    writeFileSync(join(dir, 'SKILL.md'), '# Failing aggregate skill\n');
+    writeFileSync(join(tests, 'fail.yaml'), buildCaseYaml([
+      { kind: 'skill_contains', pattern: 'MISSING_AGGREGATE_MARKER', reason: 'aggregate failure' },
+    ]));
+    writeFileSync(join(tests, 'index.yaml'), 'cases:\n  - id: TC-FAIL\n    file: fail.yaml\n');
+    try {
+      const { stdout } = await runRunner(['--all', '--layer', 'static'], { WORKFLOW_SKILLS_DIR: AGG_SKILLS_DIR });
+      assert.match(stdout, /verdict: aggregated_failed/);
+      assert.match(stdout, /outcome_message: Some skills failed/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('--all returns error when the skills root is not a directory', async () => {
+    const skillsFile = join(AGG_SKILLS_DIR, 'not-a-directory');
+    writeFileSync(skillsFile, 'not a directory');
+    const { stdout, exitCode } = await runRunner(['--all', '--layer', 'static'], { WORKFLOW_SKILLS_DIR: skillsFile });
+    assert.equal(exitCode, 1, stdout);
+    assert.match(stdout, /status: error/);
+    assert.match(stdout, /error:/);
+  });
+
+
+
   it('--all без --tag берёт все кейсы каталога — значит фильтр выше отбрасывает, а не совпадает', async () => {
     // Пара к предыдущему тесту: фиксирует, что отбрасывать реально было что.
     // Если этот тест увидит 2, значит фикстуры снова оставили только кейсы с

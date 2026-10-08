@@ -9,7 +9,7 @@ import { load } from '../lib/js-yaml.mjs';
 const VALID_KINDS = new Set(['shell', 'edit', 'write', 'read', 'agent', 'mcp', 'other']);
 
 // §3: идентификатор узла графа.
-const NODE_ID = /^P\d+[ERSGQ]\d+$/;
+const NODE_ID = /^P\d+[ERSGQH]\d+$/;
 
 /**
  * Подстановка id тикета запуска в путь стража ребра (§4): раннер передаёт тикет в
@@ -282,6 +282,26 @@ export function validateRailsConfig(obj) {
           pushError(errors, 'bad-type', `${prefix}.incident`, 'incident должен быть строкой');
         }
       });
+    }
+  }
+
+  if (obj.handoff !== undefined) {
+    if (!isPlainObject(obj.handoff)) {
+      pushError(errors, 'bad-type', 'handoff', 'handoff должен быть объектом');
+    } else {
+      const policy = obj.handoff;
+      if (!isStringArray(policy.nodes) || policy.nodes.length === 0 || policy.nodes.some((id) => !NODE_ID.test(id))) {
+        pushError(errors, 'bad-type', 'handoff.nodes', 'nodes должен быть непустым массивом идентификаторов узлов');
+      }
+      for (const key of ['requires', 'forbids']) {
+        if (!isStringArray(policy[key]) || policy[key].length === 0) {
+          pushError(errors, 'bad-type', `handoff.${key}`, `${key} должен быть непустым массивом строк-регулярок`);
+          continue;
+        }
+        policy[key].forEach((pattern, i) => {
+          if (!isValidRegex(pattern)) pushError(errors, 'bad-regex', `handoff.${key}[${i}]`, `невалидное регулярное выражение: ${pattern}`);
+        });
+      }
     }
   }
 
