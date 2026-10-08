@@ -1,15 +1,20 @@
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import { strict as assert } from 'node:assert';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
-import { handleHookInput } from '../rails/claude-hook.mjs';
-import { startState, saveState, loadState } from '../rails/state.mjs';
+import { handleHookInput, main } from '../rails/claude-hook.mjs';
+import { StateError, startState, saveState, loadState } from '../rails/state.mjs';
 import { readJournal } from '../rails/journal.mjs';
 import { createJunction } from '../junction-manager.mjs';
+import { pathToFileURL } from 'node:url';
+
+const fsReadFileSync = fs.readFileSync;
 
 // Хук через decide() пишет память «сессия → корень» в <WORKFLOW_HOME>/state —
 // изолируем (наследуется и дочерними процессами execFileSync).
@@ -86,6 +91,21 @@ function writeTranscript(base, sessionId, entries) {
   const p = join(base, `${sessionId}.jsonl`);
   writeFileSync(p, entries.map((e) => JSON.stringify({ sessionId, ...e })).join('\n') + '\n', 'utf8');
   return p;
+}
+
+function withLifecycleReadFailure(lockFile, failAt, fn) {
+  let reads = 0;
+  const probe = mock.method(fs, 'readFileSync', (path, ...args) => {
+    if (String(path) === lockFile && ++reads === failAt) throw new Error('клейм не читается');
+    return fsReadFileSync(path, ...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    return fn(() => reads);
+  } finally {
+    probe.mock.restore();
+    syncBuiltinESMExports();
+  }
 }
 
 // --- неизвестное событие ------------------------------------------------------------
@@ -367,6 +387,52 @@ test('handleHookInput: необработанное исключение вне 
   });
 });
 
+test('handleHookInput: StateError maps to PreToolUse deny and Stop block', () => {
+  for (const event of ['PreToolUse', 'Stop']) {
+    const input = { hook_event_name: event };
+    Object.defineProperty(input, 'session_id', {
+      get() { throw new StateError('состояние повреждено'); },
+    });
+    const result = handleHookInput(input, {});
+    if (event === 'PreToolUse') {
+      assert.equal(result.hookSpecificOutput.permissionDecision, 'deny');
+      assert.match(result.hookSpecificOutput.permissionDecisionReason, /состояние повреждено/);
+    } else {
+      assert.equal(result.decision, 'block');
+      assert.match(result.reason, /состояние повреждено/);
+    }
+  }
+});
+
+test('handleHookInput: сбой stderr и отсутствие корня не выбрасывают исключение', () => {
+  const base = mkdtempSync(join(tmpdir(), 'rails-hook-no-root-'));
+  const probe = mock.method(process.stderr, 'write', () => { throw new Error('stderr недоступен'); });
+  try {
+    const input = { cwd: base };
+    Object.defineProperty(input, 'hook_event_name', {
+      get() { throw new Error('поле события недоступно'); },
+    });
+    assert.equal(handleHookInput(input, {}), null);
+  } finally {
+    probe.mock.restore();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('Stop: если проектный корень пропал перед обработкой под замком, остановка безопасно пропускается', () => {
+  withProject(({ root, base }) => {
+    const sessionId = makeState(root, 'P4S1');
+    let cwdReads = 0;
+    const input = { hook_event_name: 'Stop', session_id: sessionId };
+    Object.defineProperty(input, 'cwd', {
+      get() { cwdReads += 1; return cwdReads === 1 ? root : base; },
+    });
+    assert.equal(handleHookInput(input, {}), null);
+    assert.equal(cwdReads, 2);
+    assert.equal(loadState(root, sessionId).counters['stop_blocks:P4S1'], undefined);
+  });
+});
+
 // --- Stop ------------------------------------------------------------------------------
 
 // Прогон PulseProxy 2026-09-27: хук пропускал любую остановку со stop_hook_active=true —
@@ -435,6 +501,146 @@ test('Stop: счётчик блоков по узлу — новый узел д
     assert.equal(counters['stop_blocks:P4S1'], 2);
     assert.equal(counters['stop_blocks:P5E1'], 1);
   });
+});
+
+test('Stop: сбой чтения замка оставляет completion до следующей остановки', () => {
+  withProject(({ root, base }) => {
+    const sessionId = makeState(root, 'P5S1');
+    const transcriptPath = writeTranscript(base, sessionId, [
+      { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'RAILS: P5S1 завершено.' }] } },
+    ]);
+    const input = { hook_event_name: 'Stop', session_id: sessionId, cwd: root, transcript_path: transcriptPath };
+    assert.equal(handleHookInput(input, {}), null);
+    assert.ok(loadState(root, sessionId).completion);
+
+    writeTranscript(base, sessionId, [
+      { type: 'assistant', message: { id: 'm2', content: [{ type: 'text', text: 'новый, непроходной ответ' }] } },
+    ]);
+    const lockFile = join(root, '.workflow', 'state', 'rails', `.exit-lock-${sessionId}`);
+    withLifecycleReadFailure(lockFile, 2, (readCount) => {
+      const failed = handleHookInput(input, {});
+      assert.equal(readCount(), 3);
+      assert.equal(failed.decision, 'block');
+      assert.match(failed.reason, /подтверждение(?: завершения)? не снято и след не записан/);
+      assert.ok(loadState(root, sessionId).completion);
+    });
+
+    assert.equal(handleHookInput(input, {}).decision, 'block');
+    assert.equal(loadState(root, sessionId).completion, undefined);
+  });
+});
+
+test('Stop: invalidation failure after denied handoff blocks completion removal', () => {
+  withProject(({ root, skillDir, base }) => {
+    const yaml = RAILS_YAML.replace('terminal: [P5S1]', 'terminal: [P4S1]').replace('output:', [
+      'handoff:',
+      '  nodes: [P4S1]',
+      '  requires: ["REQUEST: ", "REASON: ", "DONE: ", "REMAINING: "]',
+      '  forbids: ["verdict = pass"]',
+      '',
+      'output:',
+    ].join('\n'));
+    writeFileSync(join(skillDir, 'rails.yaml'), yaml, 'utf8');
+    const sessionId = makeState(root, 'P4S1');
+    const transcriptPath = writeTranscript(base, sessionId, [
+      { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'Готово. RAILS: P4S1 завершено.' }] } },
+    ]);
+    const input = { hook_event_name: 'Stop', session_id: sessionId, cwd: root, transcript_path: transcriptPath };
+    assert.equal(handleHookInput(input, {}), null);
+    assert.ok(loadState(root, sessionId).completion);
+
+    writeTranscript(base, sessionId, [
+      { type: 'assistant', message: { id: 'm2', content: [{ type: 'text', text: [
+        'RAILS_OUTCOME: out_of_scope', 'REQUEST: исходный запрос', 'REASON: вне компетенции',
+        'DONE: проверена область', 'REMAINING: работа не выполнена',
+      ].join('\n') }] } },
+    ]);
+    const lockFile = join(root, '.workflow', 'state', 'rails', `.exit-lock-${sessionId}`);
+    withLifecycleReadFailure(lockFile, 3, (readCount) => {
+      const blocked = handleHookInput(input, {});
+      assert.equal(readCount(), 4);
+      assert.equal(blocked.decision, 'block');
+      assert.match(blocked.reason, /подтверждение не снято и след не записан/);
+      assert.ok(loadState(root, sessionId).completion);
+    });
+  });
+});
+
+test('Stop: приостановка блокирует остановку, если completion нельзя снять', () => {
+  withProject(({ root, base }) => {
+    const sessionId = makeState(root, 'P5S1');
+    const transcriptPath = writeTranscript(base, sessionId, [
+      { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'RAILS: P5S1 завершено.' }] } },
+    ]);
+    const input = { hook_event_name: 'Stop', session_id: sessionId, cwd: root, transcript_path: transcriptPath };
+    assert.equal(handleHookInput(input, {}), null);
+    assert.ok(loadState(root, sessionId).completion);
+
+    writeTranscript(base, sessionId, [
+      { type: 'assistant', message: { id: 'm2', content: [{ type: 'text', text: [
+        'RAILS_OUTCOME: blocked', 'ACTION: дождаться владельца', 'REASON: нужно подтверждение',
+        'DONE: риск объяснён', 'REMAINING: решение владельца',
+      ].join('\n') }] } },
+    ]);
+    const lockFile = join(root, '.workflow', 'state', 'rails', `.exit-lock-${sessionId}`);
+    withLifecycleReadFailure(lockFile, 2, () => {
+      const result = handleHookInput(input, {});
+      assert.equal(result.decision, 'block');
+      assert.match(result.reason, /подтверждение завершения не снято и след не записан/);
+      assert.ok(loadState(root, sessionId).completion);
+    });
+  });
+});
+
+test('Stop: invalidateCompletion errors are swallowed for suspension and rejected output', () => {
+  for (const response of [
+    ['RAILS_OUTCOME: blocked', 'ACTION: дождаться владельца', 'REASON: нужно подтверждение',
+      'DONE: риск объяснён', 'REMAINING: решение владельца'].join('\n'),
+    'новый, непроходной ответ',
+  ]) {
+    withProject(({ root, base }) => {
+      const sessionId = makeState(root, 'P5S1');
+      const transcriptPath = writeTranscript(base, sessionId, [
+        { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'RAILS: P5S1 завершено.' }] } },
+      ]);
+      const initial = { hook_event_name: 'Stop', session_id: sessionId, cwd: root, transcript_path: transcriptPath };
+      assert.equal(handleHookInput(initial, {}), null);
+      assert.ok(loadState(root, sessionId).completion);
+      writeTranscript(base, sessionId, [
+        { type: 'assistant', message: { id: 'm2', content: [{ type: 'text', text: response }] } },
+      ]);
+
+      let probe;
+      let failed = false;
+      const originalRealpath = fs.realpathSync.native;
+      const input = { hook_event_name: 'Stop', session_id: sessionId, cwd: root };
+      Object.defineProperty(input, 'transcript_path', {
+        get() {
+          if (!probe) {
+            probe = mock.method(fs.realpathSync, 'native', (path, ...args) => {
+              if (!failed && String(path) === root) {
+                failed = true;
+                throw new Error('корень временно недоступен');
+              }
+              return originalRealpath(path, ...args);
+            });
+            syncBuiltinESMExports();
+          }
+          return transcriptPath;
+        },
+      });
+      try {
+        const result = handleHookInput(input, {});
+        assert.equal(failed, true);
+        assert.ok(loadState(root, sessionId).completion);
+        if (response.startsWith('RAILS_OUTCOME:')) assert.equal(result, null);
+        else assert.equal(result.decision, 'block');
+      } finally {
+        probe?.mock.restore();
+        syncBuiltinESMExports();
+      }
+    });
+  }
 });
 
 test('Stop: max_stop_blocks: 0 -> нарушение не блокирует ни разу, но пишется в журнал', () => {
@@ -639,7 +845,79 @@ test('SessionStart: cwd вне проекта (зонтик) -> подсказк
   }
 });
 
+test('main: readStdin resolves empty input when stdin setup fails', async () => {
+  const exitCode = process.exitCode;
+  const probe = mock.method(process.stdin, 'setEncoding', () => { throw new Error('stdin закрыт'); });
+  try {
+    await main();
+    assert.equal(process.exitCode, 0);
+  } finally {
+    probe.mock.restore();
+    process.exitCode = exitCode;
+  }
+});
+
+test('main: catches synchronous readStdin construction failure', async () => {
+  const exitCode = process.exitCode;
+  const OriginalPromise = globalThis.Promise;
+  let pending;
+  try {
+    globalThis.Promise = class { constructor() { throw new Error('promise creation failed'); } };
+    pending = main();
+  } finally {
+    globalThis.Promise = OriginalPromise;
+  }
+  try {
+    await pending;
+    assert.equal(process.exitCode, 0);
+  } finally {
+    process.exitCode = exitCode;
+  }
+});
+
+test('main: stdout write failure is ignored and the hook exits successfully', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'rails-main-stdout-'));
+  const exitCode = process.exitCode;
+  const output = [];
+  const encoding = mock.method(process.stdin, 'setEncoding', () => process.stdin);
+  const events = mock.method(process.stdin, 'on', (event, listener) => {
+    if (event === 'data') listener(JSON.stringify({ hook_event_name: 'UserPromptSubmit', prompt: 'нет', cwd: base }));
+    if (event === 'end') listener();
+    return process.stdin;
+  });
+  const write = mock.method(process.stdout, 'write', (chunk) => {
+    output.push(String(chunk));
+    throw new Error('stdout закрыт');
+  });
+  try {
+    await main();
+    assert.equal(process.exitCode, 0);
+    assert.equal(output.length, 1);
+    assert.match(output[0], /UserPromptSubmit/);
+  } finally {
+    write.mock.restore();
+    events.mock.restore();
+    encoding.mock.restore();
+    process.exitCode = exitCode;
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('isDirectRun: failed realpath does not start the hook', () => {
+  const script = [
+    "import fs from 'node:fs';",
+    "import { mock } from 'node:test';",
+    `const probe = mock.method(fs.realpathSync, 'native', () => { throw new Error('realpath unavailable'); });`,
+    `process.argv[1] = ${JSON.stringify(HOOK_PATH)};`,
+    `await import(${JSON.stringify(pathToFileURL(HOOK_PATH).href)});`,
+    'probe.mock.restore();',
+  ].join('\n');
+  const stdout = execFileSync('node', ['--input-type=module', '-e', script], { encoding: 'utf8' });
+  assert.equal(stdout, '');
+});
+
 // --- через child_process: настоящий процесс claude-hook.mjs (§9.1, §13) ------------
+
 
 function runHookProcess(stdin, cwd) {
   try {
@@ -742,7 +1020,7 @@ test('child_process: SessionStart emits the active session context', () => {
   });
 });
 
- test('child_process: unknown event produces no output', () => {
+test('child_process: unknown event produces no output', () => {
   withProject(({ root }) => {
     const input = JSON.stringify({ hook_event_name: 'PostToolUse', session_id: uuid(), cwd: root });
     const result = runHookProcess(input, root);

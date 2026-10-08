@@ -1,5 +1,7 @@
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import { strict as assert } from 'node:assert';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve as resolvePathAbs } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,11 +11,14 @@ import {
   rmSync,
   mkdirSync,
   writeFileSync,
+  readFileSync,
+  readlinkSync,
+  readdirSync,
   utimesSync,
   lstatSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { execSync, execFileSync } from 'node:child_process';
+import childProcess, { execSync, execFileSync } from 'node:child_process';
 
 import { decide, buildDenyReason, loadSkillRuntime, analyzeCliCommand } from '../rails/core.mjs';
 
@@ -45,6 +50,8 @@ import { run as runCli } from '../rails/cli.mjs';
 import { createJunction } from '../junction-manager.mjs';
 import { realpathDeep } from '../rails/paths.mjs';
 import { fromClaude, fromKilo } from '../rails/actions.mjs';
+import { essentialStateDigest } from '../rails/completion.mjs';
+import { relinquish } from '../rails/handoff.mjs';
 
 // Память «сессия → корень» (session-memo.mjs) живёт в <WORKFLOW_HOME>/state —
 // тесты изолируют её, иначе временные корни вытесняют реальные сессии
@@ -148,9 +155,20 @@ function withProject(fn, { allowTemp = true } = {}) {
   }
 }
 
+function startFixtureState(args) {
+  if (process.platform !== 'win32') return startState(args);
+  // Core fixtures need no launch provenance; avoid a PowerShell/CIM scan per state.
+  const probe = mock.method(childProcess, 'execFileSync', () => '[]');
+  try {
+    const state = startState(args);
+    assert.equal(state.launch.origin, 'unknown');
+    return state;
+  } finally { probe.mock.restore(); }
+}
+
 function makeState(root, node, extra = {}) {
   const sessionId = uuid();
-  const state = startState({ root, sessionId, skill: 'coretest', entry: 'P4E1' });
+  const state = startFixtureState({ root, sessionId, skill: 'coretest', entry: 'P4E1' });
   state.node = node;
   Object.assign(state, extra);
   saveState(root, state);
@@ -1172,7 +1190,7 @@ test('decide: stage_actions — deny одним правилом не расхо
     mkdirSync(join(root, '.workflow', 'work'), { recursive: true });
 
     const sessionId = uuid();
-    const state = startState({ root, sessionId, skill: 'coretest', entry: 'P4E1' });
+    const state = startFixtureState({ root, sessionId, skill: 'coretest', entry: 'P4E1' });
     state.node = 'P4S1'; // этап 4: правило "a" подходит по этапу, правило "b" — нет (только 5)
     saveState(root, state);
 
@@ -1220,7 +1238,7 @@ test('decide: независимый локальный скил правитс�
     writeFileSync(join(skillDir, 'rails.yaml'), railsYaml().replace('skill: coretest', 'skill: coach'), 'utf8');
     const ctxOf = (node) => {
       const sessionId = uuid();
-      const state = startState({ root, sessionId, skill: 'coach', entry: 'P4E1' });
+      const state = startFixtureState({ root, sessionId, skill: 'coach', entry: 'P4E1' });
       state.node = node;
       saveState(root, state);
       return { cwd: root, sessionId };
@@ -1348,7 +1366,7 @@ test('decide: активная сессия с битым rails.yaml — fail cl
     writeFileSync(brokenSkillDir + '/rails.yaml', 'version: 1\nentry: [P0E1\n', 'utf8');
 
     const sessionId = uuid();
-    const state = startState({ root, sessionId, skill: 'broken', entry: 'P0E1' });
+    const state = startFixtureState({ root, sessionId, skill: 'broken', entry: 'P0E1' });
     void state;
 
     const origWrite = process.stderr.write;
@@ -1468,7 +1486,7 @@ test('decide: cd <skillDir> && sed -i SKILL.md при write_scope на этот 
     writeFileSync(join(skillDir, 'rails.yaml'), yaml, 'utf8');
 
     const sessionId = uuid();
-    const state = startState({ root, sessionId, skill: 'coretest', entry: 'P4E1' });
+    const state = startFixtureState({ root, sessionId, skill: 'coretest', entry: 'P4E1' });
     state.node = 'P4S1';
     saveState(root, state);
 
@@ -1520,7 +1538,7 @@ test('decide: cd в разрешённый каталог + запись ../outs
     writeFileSync(join(skillDir, 'rails.yaml'), yaml, 'utf8');
 
     const sessionId = uuid();
-    const state = startState({ root, sessionId, skill: 'coretest', entry: 'P4E1' });
+    const state = startFixtureState({ root, sessionId, skill: 'coretest', entry: 'P4E1' });
     state.node = 'P4S1';
     saveState(root, state);
 
@@ -3095,3 +3113,76 @@ test('executor: shell-редирект в канонический файл — 
   assert.equal(r.decision, 'deny');
   assert.match(r.reason, /каноническая цель защищена/);
 }));
+
+test('decide: positive interactive handoff enters neutral mode and still guards skill writes', { skip: process.platform !== 'linux' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'rails-core-handoff-'));
+  mkdirSync(join(root, '.workflow'), { recursive: true });
+  const sessionId = 'linux-handoff-session';
+  const hook = fileURLToPath(new URL('../rails/claude-hook.mjs', import.meta.url));
+  const skillDir = join(root, '.workflow', 'src', 'skills', 'handofftest');
+  mkdirSync(skillDir, { recursive: true });
+  writeFileSync(join(skillDir, 'SKILL.md'), '```mermaid\nflowchart TD\nP0E1["entry"] --> P0S2["scope decision with immutable handoff evidence"]\n```\n');
+  writeFileSync(join(skillDir, 'rails.yaml'), [
+    'version: 1', 'skill: handofftest', 'entry: P0E1', 'terminal: [P0S2]',
+    'handoff:', '  nodes: [P0S2]',
+    '  requires: ["^REQUEST: .+", "^REASON: .+", "^DONE: .+", "^REMAINING: .+"]',
+    '  forbids: ["verdict=", "^status:"]', '',
+  ].join('\n'));
+  writeCliStub(root);
+
+  const hostPid = process.pid + 1;
+  const runnerPid = process.pid + 2;
+  const executable = '/home/owner/.vscode-oss/extensions/anthropic.claude-code/native-binary/claude.exe';
+  const processes = new Map([
+    [String(process.pid), { ppid: hostPid, executable: process.execPath,
+      argv: [process.execPath, hook], start: '100' }],
+    [String(hostPid), { ppid: runnerPid, executable, argv: [executable, '--output-format', 'stream-json',
+      '--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', `--resume=${sessionId}`,
+      '--replay-user-messages'], start: '200' }],
+    [String(runnerPid), { ppid: 0, executable: '/usr/bin/node', argv: ['node', 'runner.mjs'], start: '300' }],
+  ]);
+  const originals = { readdirSync, readFileSync, readlinkSync };
+  const probes = [
+    mock.method(fs, 'readdirSync', (dir, ...args) => String(dir) === '/proc'
+      ? [...processes.keys()] : originals.readdirSync.call(fs, dir, ...args)),
+    mock.method(fs, 'readFileSync', (file, ...args) => {
+      const value = String(file);
+      if (value === '/proc/sys/kernel/random/boot_id') return '12345678-1234-1234-1234-123456789abc\n';
+      const match = /^\/proc\/(\d+)\/(stat|cmdline)$/.exec(value);
+      if (!match) return originals.readFileSync.call(fs, file, ...args);
+      const row = processes.get(match[1]);
+      if (match[2] === 'cmdline') return row.argv.join('\0') + '\0';
+      return `(${row.executable.split('/').at(-1)}) S ${row.ppid} ${Array(17).fill('0').join(' ')} ${row.start}`;
+    }),
+    mock.method(fs, 'readlinkSync', (file, ...args) => {
+      const match = /^\/proc\/(\d+)\/exe$/.exec(String(file));
+      return match ? processes.get(match[1]).executable : originals.readlinkSync.call(fs, file, ...args);
+    }),
+  ];
+  syncBuiltinESMExports();
+  try {
+    const state = startState({ root, sessionId, skill: 'handofftest', entry: 'P0S2', run: 'test-run' });
+    assert.equal(state.launch.origin, 'interactive');
+    loadSkillRuntime(root, state.skill, state);
+    saveState(root, state);
+    const answer = 'RAILS_OUTCOME: out_of_scope\nREQUEST: original task\nREASON: outside scope\nDONE: checked scope\nREMAINING: implementation';
+    const transcriptPath = join(root, `${sessionId}.jsonl`);
+    writeFileSync(transcriptPath, JSON.stringify({ type: 'assistant', sessionId, timestamp: new Date(Date.now() + 1000).toISOString(),
+      message: { content: [{ type: 'text', text: answer }] } }) + '\n');
+    const transfer = relinquish({ root, session: sessionId, transcriptPath,
+      expectedStateDigest: essentialStateDigest(state), source: 'stop-hook' });
+    assert.equal(transfer.ok, true, transfer.reason);
+
+    const ctx = { cwd: root, sessionId };
+    assert.deepEqual(decide({ action: { tool: 'Read', kind: 'read' }, ctx }), { decision: 'allow' });
+    const cli = decide({ action: { tool: 'Bash', kind: 'shell', command: 'node .workflow/src/rails/cli.mjs status', shell: 'posix' }, ctx });
+    assert.equal(cli.updatedCommand, `node .workflow/src/rails/cli.mjs status --session ${sessionId}`);
+    const protectedEdit = decide({ action: { tool: 'Edit', kind: 'edit', path: join(skillDir, 'SKILL.md') }, ctx });
+    assert.equal(protectedEdit.decision, 'deny');
+    assert.match(protectedEdit.reason, /правки скилов только через коуча/);
+  } finally {
+    for (const probe of probes) probe.mock.restore();
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

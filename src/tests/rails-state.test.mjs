@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, mkdirSync, rmSync, readdirSync, writeFileSync, existsSync, symlinkSync, unlinkSync } from 'node:fs';
+import fs, { mkdtempSync, mkdirSync, rmSync, readdirSync, writeFileSync, existsSync, symlinkSync, unlinkSync } from 'node:fs';
 import {
   loadState,
   saveState,
@@ -17,6 +17,10 @@ import {
   currentNodeInfo,
   bumpCounter,
   newestSessionId,
+  listSessionIds,
+  completedMarkerPath,
+  readCompletedMarker,
+  writeCompletedMarker,
   normalizeLabel,
 } from '../rails/state.mjs';
 import { loadSkillGraph } from '../rails/graph.mjs';
@@ -562,6 +566,10 @@ test('loadState: повреждённая форма состояния -> State
       { ...base, denials: 'x' },
       { ...base, runtime: { version: 1, id: 'zz', hash: 'a'.repeat(64) } },
       { ...base, runtime: { version: 1, id: 'a'.repeat(64) } },
+      { ...base, run: 7 },
+      { ...base, flags: [] },
+      { ...base, dedupe: null },
+      { ...base, completion: { version: 1, t: 'bad-time' } },
     ];
     for (const broken of cases) {
       writeFileSync(path, JSON.stringify(broken), 'utf8');
@@ -1066,6 +1074,37 @@ test('bumpCounter: null вместо state не бросает', () => {
 test('newestSessionId: null вместо root не бросает, возвращает null', () => {
   assert.doesNotThrow(() => {
     assert.equal(newestSessionId(null), null);
+  });
+});
+
+test('listSessionIds: пропускает файл, чей stat завершился ошибкой', (t) => {
+  withRoot((root) => {
+    const dir = join(root, '.workflow', 'state', 'rails');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'good.json'), '{}');
+    writeFileSync(join(dir, 'unreadable.json'), '{}');
+    const original = fs.statSync;
+    t.mock.method(fs, 'statSync', (path, ...args) => {
+      if (String(path).endsWith('unreadable.json')) throw new Error('stat denied');
+      return original.call(fs, path, ...args);
+    });
+
+    assert.deepEqual(listSessionIds(root), ['good']);
+  });
+});
+
+test('completed marker: read errors fail closed, and non-collision write errors pass through', () => {
+  withRoot((root) => {
+    const readPath = completedMarkerPath(root, 'read-error');
+    mkdirSync(readPath, { recursive: true });
+    assert.throws(() => readCompletedMarker(root, 'read-error'), /маркер завершения не прочитан/);
+
+    const writePath = completedMarkerPath(root, 'write-error');
+    mkdirSync(writePath, { recursive: true });
+    assert.throws(() => writeCompletedMarker(root, 'write-error', {
+      t: new Date().toISOString(),
+      completion_sha256: 'a'.repeat(64),
+    }));
   });
 });
 

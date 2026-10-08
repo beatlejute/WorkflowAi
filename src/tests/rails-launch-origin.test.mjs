@@ -9,6 +9,7 @@ import { classifyLaunch, sameLaunch, splitWindowsCommand, processSnapshot, launc
 import { loadSkillRuntime } from '../rails/core.mjs';
 import { check } from '../rails/output-check.mjs';
 import { fileURLToPath } from 'node:url';
+import { syncBuiltinESMExports } from 'node:module';
 
 test('coach and create-plan accept their real handoff nodes without success requirements', () => {
   const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -29,6 +30,64 @@ const ide = { pid: 20, ppid: 30, birth: '2026-10-08T10:00:00Z', executable,
 const caller = { pid: 10, ppid: 20, executable: '/usr/bin/node', argv: ['node', 'cli.mjs'], birth: 'caller' };
 const classify = (host = ide, registered) => classifyLaunch([caller, host,
   { pid: 30, ppid: 0, executable: '/usr/bin/node', birth: 'runner', argv: ['node', 'runner.mjs'] }], 10, session, registered);
+
+test('Linux host session binds once and launchOrigin verifies the binding', { skip: process.platform !== 'linux' }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rails-linux-host-binding-'));
+  fs.mkdirSync(path.join(root, '.workflow'));
+  const hook = fileURLToPath(new URL('../rails/claude-hook.mjs', import.meta.url));
+  const session = 'linux-host-session';
+  const hostPid = process.pid + 1;
+  const runnerPid = process.pid + 2;
+  const executable = '/home/owner/.vscode-oss/extensions/anthropic.claude-code/native-binary/claude.exe';
+  const processes = new Map([
+    [String(process.pid), { ppid: hostPid, executable: process.execPath,
+      argv: [process.execPath, hook], start: '100' }],
+    [String(hostPid), { ppid: runnerPid, executable, argv: [executable, '--output-format', 'stream-json',
+      '--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', `--resume=${session}`,
+      '--replay-user-messages'], start: '200' }],
+    [String(runnerPid), { ppid: 0, executable: '/usr/bin/node', argv: ['node', 'runner.mjs'], start: '300' }],
+  ]);
+  const originals = {
+    readdirSync: fs.readdirSync,
+    readFileSync: fs.readFileSync,
+    readlinkSync: fs.readlinkSync,
+  };
+  const probes = [
+    mock.method(fs, 'readdirSync', (dir, ...args) => String(dir) === '/proc'
+      ? [...processes.keys()] : originals.readdirSync.call(fs, dir, ...args)),
+    mock.method(fs, 'readFileSync', (file, ...args) => {
+      const value = String(file);
+      if (value === '/proc/sys/kernel/random/boot_id') return '12345678-1234-1234-1234-123456789abc\n';
+      const match = /^\/proc\/(\d+)\/(stat|cmdline)$/.exec(value);
+      if (!match) return originals.readFileSync.call(fs, file, ...args);
+      const row = processes.get(match[1]);
+      if (match[2] === 'cmdline') return row.argv.join('\0') + '\0';
+      return `(${path.basename(row.executable)}) S ${row.ppid} ${Array(17).fill('0').join(' ')} ${row.start}`;
+    }),
+    mock.method(fs, 'readlinkSync', (file, ...args) => {
+      const match = /^\/proc\/(\d+)\/exe$/.exec(String(file));
+      return match ? processes.get(match[1]).executable : originals.readlinkSync.call(fs, file, ...args);
+    }),
+  ];
+  syncBuiltinESMExports();
+  try {
+    assert.equal(bindHostSession(root, session), true);
+    assert.equal(bindHostSession(root, session), true, 'replaying SessionStart accepts the same binding');
+    const launch = launchOrigin(root, session);
+    assert.equal(launch.origin, 'interactive');
+    assert.equal(launch.callback, 'stop-hook');
+
+    const bindingPath = path.join(root, '.workflow', 'state', 'rails', `.host-session-${session}.json`);
+    const binding = JSON.parse(fs.readFileSync(bindingPath, 'utf8'));
+    binding.host.argv_sha256 = 'tampered';
+    fs.writeFileSync(bindingPath, JSON.stringify(binding));
+    assert.equal(bindHostSession(root, session), false, 'a conflicting existing binding is immutable');
+  } finally {
+    for (const probe of probes) probe.mock.restore();
+    syncBuiltinESMExports();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('only the OS desktop shell anchors Windows ancestry; gaps before it refuse', { skip: process.platform !== 'win32' }, () => {
   const rows = [caller, ide, { pid: 30, ppid: 8772, executable: 'C:\\Windows\\explorer.exe',

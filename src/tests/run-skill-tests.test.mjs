@@ -2406,6 +2406,15 @@ describe('WORKFLOW_SKILLS_DIR — каталог скилов раннера', (
   });
 });
 
+it('CLI --help и -h печатают справку до разбора параметров', async () => {
+  for (const flag of ['--help', '-h']) {
+    const { stdout, exitCode } = await runRunner([flag]);
+    assert.equal(exitCode, 0);
+    assert.match(stdout, /Usage:/);
+    assert.match(stdout, /--skill <name>/);
+  }
+});
+
 // ============================================================================
 // Безынструментный агент (kind: http) не исполняет кейсы. У него нет ни
 // инструментов, ни файлов — выполнить скил он не может. validateAgents
@@ -2594,13 +2603,24 @@ describe('Скил на рельсах: рельсы не зацепились �
 
   before(() => {
     mkdirSync(join(skillDir, 'tests', 'rubrics'), { recursive: true });
-    writeFileSync(join(skillDir, 'SKILL.md'), '# Rails engage probe\n');
+    writeFileSync(join(skillDir, 'SKILL.md'), [
+      '# Rails engage probe',
+      '```mermaid',
+      'graph TD',
+      '  P0E1["Start"] --> P0S1["Scope decision"]',
+      '```',
+      ''
+    ].join('\n'));
     // final_requires не выполняет ни один мок: зацепившийся запуск всегда уходит в повтор.
     writeFileSync(join(skillDir, 'rails.yaml'), [
       'version: 1',
       `skill: ${RAILS_SKILL}`,
       'entry: P0E1',
       'terminal: [P0S1]',
+      'handoff:',
+      '  nodes: [P0S1]',
+      '  requires: ["REQUEST: .+", "REASON: .+", "DONE: .+", "REMAINING: .+"]',
+      '  forbids: ["verdict=", "^status:"]',
       'output:',
       '  final_requires: ["RAILS_ENGAGE_TOKEN_NEVER_PRINTED"]',
       ''
@@ -2636,6 +2656,74 @@ describe('Скил на рельсах: рельсы не зацепились �
 
   function readMeta() {
     return JSON.parse(readFileSync(join(skillDir, 'tests', 'cases', CASE_ID, 'current', 'meta.json'), 'utf8'));
+  }
+
+  async function runRunnerWithHandoffFixture(mode) {
+    const agentScript = join(RAILS_SKILLS_DIR, 'handoff-agent.mjs');
+    const pipelinePath = join(RAILS_SKILLS_DIR, 'handoff-pipeline.yaml');
+    const yamlPath = (value) => value.replace(/\\/g, '/');
+    const answer = [
+      'RAILS_OUTCOME: out_of_scope',
+      'REQUEST: test request',
+      'REASON: outside competence',
+      'DONE: checked scope',
+      'REMAINING: implementation'
+    ];
+    writeFileSync(agentScript, [
+      "import { randomUUID } from 'node:crypto';",
+      "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+      "import { join } from 'node:path';",
+      "import { pathToFileURL } from 'node:url';",
+      "const root = process.cwd();",
+      "const stateApi = await import(pathToFileURL(join(root, '.workflow', 'src', 'rails', 'state.mjs')).href);",
+      "const coreApi = await import(pathToFileURL(join(root, '.workflow', 'src', 'rails', 'core.mjs')).href);",
+      "const handoffApi = await import(pathToFileURL(join(root, '.workflow', 'src', 'rails', 'handoff.mjs')).href);",
+      "const completionApi = await import(pathToFileURL(join(root, '.workflow', 'src', 'rails', 'completion.mjs')).href);",
+      "const counterPath = join(root, '.workflow', 'handoff-test-count');",
+      "const count = existsSync(counterPath) ? Number(readFileSync(counterPath, 'utf8')) + 1 : 1;",
+      "writeFileSync(counterPath, String(count));",
+      "const skill = process.env.WORKFLOW_RAILS_SKILL;",
+      "const run = process.env.WORKFLOW_RAILS_RUN;",
+      "const handoff = process.env.WORKFLOW_HANDOFF_MODE === 'initial' || count > 1;",
+      "const session = randomUUID();",
+      "const state = stateApi.startState({ root, sessionId: session, skill, entry: handoff ? 'P0S1' : 'P0E1', run });",
+      "coreApi.loadSkillRuntime(root, skill, state);",
+      `const answer = ${JSON.stringify(answer.join('\n'))};`,
+      "let output = handoff ? answer : 'ordinary response';",
+      "if (handoff) {",
+      "  const result = handoffApi.relinquish({ root, session, source: 'runner', run, answer, expectedStateDigest: completionApi.essentialStateDigest(state) });",
+      "  if (!result.ok) output = 'HANDOFF_ERROR: ' + result.reason;",
+      "}",
+      "console.log('---RESULT---\\nstatus: passed\\noutput: |');",
+      "for (const line of output.split('\\n')) console.log('  ' + line);",
+      "console.log('---RESULT---');",
+      ''
+    ].join('\n'));
+    writeFileSync(pipelinePath, [
+      'pipeline:',
+      '  name: "handoff-test-pipeline"',
+      '  version: "1.0"',
+      '  agents:',
+      '    agent-handoff:',
+      '      command: "node"',
+      `      args: ["${yamlPath(agentScript)}"]`,
+      '      workdir: "."',
+      '      capabilities: [text]',
+      '    mock-judge:',
+      '      command: "node"',
+      `      args: ["${yamlPath(join(PROJECT_ROOT, 'src', 'tests', 'fixtures', 'mock-judge.js'))}"]`,
+      '      workdir: "."',
+      '      capabilities: [text]',
+      '  default_agents: [agent-handoff]',
+      ''
+    ].join('\n'));
+    useAgent('agent-handoff');
+    const result = await runRunner(
+      ['--skill', RAILS_SKILL, '--layer', 'l2', '--skip-secret-scan', '--fast', '--yes', '--pipeline', pipelinePath],
+      { WORKFLOW_SKILLS_DIR: RAILS_SKILLS_DIR, WORKFLOW_HANDOFF_MODE: mode }
+    );
+    const trialPath = join(skillDir, 'tests', 'cases', CASE_ID, 'current', 'agent-handoff', 'trial-1.md');
+    return { ...result, stdout: `${result.stdout}\n${readFileSync(trialPath, 'utf8')}` };
   }
 
   it('мок-агент без вызовов инструментов — предупреждение, строка rails_warnings в RESULT и счётчик в meta.json', async () => {
@@ -2755,6 +2843,24 @@ describe('Скил на рельсах: рельсы не зацепились �
     const meta = readMeta();
     assert.equal(meta.per_model['agent-suspender'].passed, false);
     assert.equal(meta.per_model['agent-suspender'].rails_failed, 1);
+  });
+
+  it('confirmed handoff on the initial answer stops the test attempt', async () => {
+    const { stdout } = await runRunnerWithHandoffFixture('initial');
+
+    assert.match(stdout, /status: failed/, stdout);
+    assert.match(stdout, /RAILS_OUTCOME: out_of_scope/, stdout);
+    assert.equal(readMeta().per_model['agent-handoff'].rails_failed, 1);
+    assert.equal(readMeta().per_model['agent-handoff'].pass_count, 0);
+  });
+
+  it('confirmed handoff on retry stops the test attempt', async () => {
+    const { stdout } = await runRunnerWithHandoffFixture('retry');
+
+    assert.match(stdout, /status: failed/, stdout);
+    assert.match(stdout, /RAILS_OUTCOME: out_of_scope/, stdout);
+    assert.equal(readMeta().per_model['agent-handoff'].rails_failed, 1);
+    assert.equal(readMeta().per_model['agent-handoff'].pass_count, 0);
   });
 });
 

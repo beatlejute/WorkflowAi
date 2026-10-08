@@ -134,6 +134,51 @@ test('check: битая регулярка в forbids ответ не глуши
   assert.equal(r.ok, true, JSON.stringify(r.missing));
 });
 
+test('check: битая handoff-регулярка отражается в пропусках', () => {
+  const config = {
+    handoff: { nodes: ['P0R3'], requires: ['['], forbids: ['forbidden'] },
+  };
+  const text = 'RAILS_OUTCOME: out_of_scope\nREASON: forbidden запрос';
+  const result = check(text, config, { node: 'P0R3' });
+  assert.deepEqual(result, {
+    ok: false,
+    missing: ['handoff:regex:[', 'handoff:forbids:forbidden'],
+    outcome: 'out_of_scope',
+  });
+});
+
+test('check: пустая handoff-политика сообщает отсутствующие требования', () => {
+  const result = check('RAILS_OUTCOME: out_of_scope\nREASON: вне компетенции', {
+    handoff: { nodes: ['P0R3'], requires: ['REASON'], forbids: ['forbidden'] },
+    terminal: ['P0R3'],
+  }, { node: 'P0R3' });
+  assert.deepEqual(result, { ok: true, missing: [], outcome: 'out_of_scope' });
+  assert.equal(check('RAILS_OUTCOME: out_of_scope\nREASON: вне компетенции', {
+    handoff: { nodes: ['P0R3'] }, terminal: ['P0R3'],
+  }, { node: 'P0R3' }).ok, false);
+});
+
+test('check: битая required-регулярка попадает в missing', () => {
+  const result = check('ответ', { terminal: ['P8S3'], output: { final_requires: ['['] } }, { node: 'P8S3' });
+  assert.deepEqual(result, { ok: false, missing: ['['] });
+});
+
+test('check: nullish ответ нормализуется и отсутствующий узел даёт position', () => {
+  const result = check(null, { output: { final_requires: [] } }, {});
+  assert.deepEqual(result, {
+    ok: false,
+    missing: ['position: не входит в terminal/pause_nodes'],
+  });
+});
+
+test('lastAssistantText: assistant message с не-массивным content даёт пустой текст', () => {
+  withTmpDir((dir) => {
+    const file = join(dir, 'transcript-non-array-content.jsonl');
+    writeFileSync(file, JSON.stringify({ type: 'assistant', message: { content: 'not an array' } }), 'utf8');
+    assert.equal(lastAssistantText(file), '');
+  });
+});
+
 test('lastAssistantText: берёт текст последней assistant-записи', () => {
   withTmpDir((dir) => {
     const file = join(dir, 'transcript.jsonl');

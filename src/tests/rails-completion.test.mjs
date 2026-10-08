@@ -141,6 +141,41 @@ function readSession(root, sessionId) {
 
 // --- recordCompletion: прямые отказы и успех ---------------------------------------------
 
+test('essentialStateDigest: отсутствующее и неполное состояние нормализуется', () => {
+  assert.equal(essentialStateDigest(null), essentialStateDigest({}));
+  assert.equal(essentialStateDigest({ history: 'not-an-array' }), essentialStateDigest({}));
+  assert.notEqual(essentialStateDigest({ history: ['step'] }), essentialStateDigest({}));
+});
+
+test('recordCompletion: ошибка захвата замка возвращается без исключения', () => {
+  const result = recordCompletion({
+    root: tmpdir(),
+    state: { session: '../invalid' },
+    source: 'stop-hook',
+    answer: PASS_ANSWER,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /недопустимая сессия замка/);
+});
+
+test('recordCompletion: состояние без сессии и устаревшее состояние отклоняются', () => {
+  assert.deepEqual(recordCompletion({ root: tmpdir(), state: {}, source: 'stop-hook', answer: PASS_ANSWER }), {
+    ok: false,
+    reason: 'нет состояния сессии',
+  });
+
+  withProject(({ root }) => {
+    const sessionId = pinnedSession(root, 'P5S1');
+    const stale = readSession(root, sessionId);
+    const changed = { ...stale, flags: { changed: true } };
+    saveState(root, changed);
+    const result = recordCompletion({ root, state: stale, source: 'stop-hook', answer: PASS_ANSWER });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'состояние подтверждения устарело');
+    assert.equal(readSession(root, sessionId).completion, undefined);
+  });
+});
+
 test('recordCompletion: успех в терминале — подтверждение, verdict, журнал, диск', () => {
   withProject(({ root }) => {
     const sessionId = pinnedSession(root, 'P5S1');
@@ -222,6 +257,13 @@ test('recordCompletion: без закреплённого runtime и с чужо
     const r2 = recordCompletion({ root, state: state2, source: 'stop-hook', answer: PASS_ANSWER });
     assert.equal(r2.ok, false);
     assert.match(r2.reason, /личности запуска/);
+
+    const sessionId3 = pinnedSession(root, 'P5S1');
+    const state3 = readSession(root, sessionId3);
+    state3.started = 'tampered';
+    const r3 = recordCompletion({ root, state: state3, source: 'stop-hook', answer: PASS_ANSWER });
+    assert.equal(r3.ok, false);
+    assert.match(r3.reason, /личности запуска/);
   });
 });
 
@@ -745,6 +787,14 @@ test('журнал: summarize считает completion и exit', () => {
 });
 
 // --- transcriptFinalAnswer: принадлежность и ответ одним чтением ---------------------------
+
+test('transcriptFinalAnswer: отсутствующий файл своей сессии возвращает unreadable', () => {
+  const sessionId = uuid();
+  const result = transcriptFinalAnswer(join(tmpdir(), `${sessionId}.jsonl`), sessionId);
+  assert.equal(result.ok, false);
+  assert.equal(result.integrity, 'unreadable');
+  assert.match(result.reason, /файла нет/);
+});
 
 test('transcriptFinalAnswer: обезличенный transcript без ответов — отказ', () => {
   withProject(({ base, root }) => {

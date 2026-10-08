@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
-import { run } from '../rails/cli.mjs';
+import { main, run } from '../rails/cli.mjs';
 import { decide } from '../rails/core.mjs';
 import { startState, loadState } from '../rails/state.mjs';
 import { readJournal } from '../rails/journal.mjs';
@@ -74,6 +74,42 @@ function withProject(fn) {
 }
 
 // --- run(): прямой вызов (юнит-уровень) ----------------------------------------------
+
+test('main: недоступный stdout не мешает выставить код выхода', () => {
+  const previousArgv = process.argv;
+  const previousExitCode = process.exitCode;
+  const previousWrite = process.stdout.write;
+  try {
+    process.argv = [process.execPath, CLI_PATH, 'unknown-command'];
+    process.stdout.write = () => { throw new Error('stdout is closed'); };
+    assert.doesNotThrow(() => main());
+    assert.equal(process.exitCode, 1);
+  } finally {
+    process.argv = previousArgv;
+    process.exitCode = previousExitCode;
+    process.stdout.write = previousWrite;
+  }
+});
+
+test('run: непереданный список аргументов даёт обычную ошибку команды', () => {
+  withProject(({ root }) => {
+    const result = run(null, { cwd: root, env: {} });
+    assert.equal(result.code, 1);
+    assert.match(result.stdout, /Неизвестная команда: \(нет\)/);
+  });
+});
+
+test('run: повреждённое состояние сессии возвращается как CLI-ошибка', () => {
+  withProject(({ root }) => {
+    const stateDir = join(root, '.workflow', 'state', 'rails');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'broken-session.json'), '{not-json', 'utf8');
+
+    const result = run(['status', '--session', 'broken-session'], { cwd: root, env: {} });
+    assert.equal(result.code, 1);
+    assert.match(result.stdout, /состояние сессии повреждено/);
+  });
+});
 
 test('run: неизвестная команда -> code 1, список команд в stdout', () => {
   withProject(({ root }) => {

@@ -169,6 +169,15 @@ test('eject: ссылка заменена копией, общая копия �
   assert.match(r.out, /\.kilocode\/skills synced \(project-local: coach\)/);
 });
 
+test('init: инициализирует отдельный проект из CLI', () => {
+  const target = path.join(BASE, 'initialized-project');
+  fs.mkdirSync(target, { recursive: true });
+  const r = run(['init', target]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /Initialization completed/);
+  assert.ok(fs.existsSync(path.join(target, '.workflow', 'config', 'config.yaml')));
+});
+
 test('eject без имени скила — код 1 и понятная ошибка', () => {
   const r = run(['eject']);
   assert.equal(r.code, 1);

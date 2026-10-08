@@ -17,17 +17,18 @@
  *    срока подключения, не держит процесс до конца этого срока;
  *  - в тексте сетевой ошибки после повторов и ошибки таймаута — число попыток.
  *
- * Имя прокси `proxy-hang.test` разрешается подменённым dns.lookup, который не отвечает:
- * так фаза подключения зависает детерминированно (проверено запуском, Node v25.5.0:
- * через globalAgent срок — 5 с, с `agent: false` и одним req.setTimeout — не срабатывает
- * вовсе). Прочие имена разрешает настоящий dns.lookup.
+ * Первая проверка зависшего TCP использует запрос-заглушку без события `socket`, чтобы
+ * проверять собственный таймер CONNECT независимо от системного DNS. Отдельный тест отмены
+ * срока попытки оставляет `proxy-hang.test` с подменённым dns.lookup.
  *
  * Запуск: node --test src/tests/model-client-proxy-timeout.test.mjs
  */
 
-import { describe, it, before, after } from 'node:test';
+import { describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import dns from 'node:dns';
+import { EventEmitter } from 'node:events';
+import { performance } from 'node:perf_hooks';
+import http from 'node:http';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { chat, ModelClientError } from '../lib/model-client.mjs';
@@ -69,44 +70,48 @@ async function startSilentProxy() {
 }
 
 describe('model-client: срок подключения к прокси', () => {
-  let originalLookup;
-  before(() => {
-    originalLookup = dns.lookup;
-    dns.lookup = function lookup(hostname, ...rest) {
-      if (hostname === HANG_HOST) return {};
-      return originalLookup.call(this, hostname, ...rest);
-    };
-  });
-  after(() => {
-    dns.lookup = originalLookup;
-  });
-
   it('TCP до прокси не установлен — network по заданному сроку, не через 5 с', async () => {
-    const started = Date.now();
-    const err = await caught(chat(chatAgent('https://model.invalid/chat', { timeout_s: 30 }), { message: 'm' }, {
-      env: { TEST_MODEL_KEY: TEST_KEY, HTTPS_PROXY: `http://${HANG_HOST}:3128` },
-      retryDelaysMs: [],
-      proxyConnectTimeoutMs: 7000,
-    }));
-    const elapsed = Date.now() - started;
-    assert.ok(err instanceof ModelClientError, String(err));
-    assert.equal(err.class, 'network', err.message);
-    assert.ok(elapsed >= 6800, `ошибка через ${elapsed} мс — срок 7 с не действует`);
-    assert.ok(elapsed < 12000, `ошибка через ${elapsed} мс — срок подключения не сработал`);
-    assert.match(err.message, /proxy connection timeout: TCP connection not established in 7s/);
-    assert.match(err.message, /after 1 attempt:/);
+    const request = new EventEmitter();
+    let destroyed = false;
+    request.end = () => {};
+    request.destroy = (error) => {
+      if (destroyed) return request;
+      destroyed = true;
+      if (error) request.emit('error', error);
+      request.emit('close');
+      return request;
+    };
+    const probe = mock.method(http, 'request', () => request);
+    try {
+      const started = performance.now();
+      const err = await caught(chat(chatAgent('https://model.invalid/chat', { timeout_s: 30 }), { message: 'm' }, {
+        env: { TEST_MODEL_KEY: TEST_KEY, HTTPS_PROXY: `http://${HANG_HOST}:3128` },
+        retryDelaysMs: [],
+        proxyConnectTimeoutMs: 7000,
+      }));
+      const elapsed = performance.now() - started;
+      assert.equal(destroyed, true);
+      assert.ok(err instanceof ModelClientError, String(err));
+      assert.equal(err.class, 'network', err.message);
+      assert.ok(elapsed >= 6800, `ошибка через ${elapsed} мс — срок 7 с не действует`);
+      assert.ok(elapsed < 12000, `ошибка через ${elapsed} мс — срок подключения не сработал`);
+      assert.match(err.message, /proxy connection timeout: TCP connection not established in 7s/);
+      assert.match(err.message, /after 1 attempt:/);
+    } finally {
+      probe.mock.restore();
+    }
   });
 
   it('прокси принял соединение и молчит — network по заданному сроку, нет ответа на CONNECT', async () => {
     const proxy = await startSilentProxy();
     try {
-      const started = Date.now();
+      const started = performance.now();
       const err = await caught(chat(chatAgent('https://model.invalid/chat', { timeout_s: 30 }), { message: 'm' }, {
         env: { TEST_MODEL_KEY: TEST_KEY, HTTPS_PROXY: proxy.url },
         retryDelaysMs: [1],
         proxyConnectTimeoutMs: 1500,
       }));
-      const elapsed = Date.now() - started;
+      const elapsed = performance.now() - started;
       assert.equal(err.class, 'network', err.message);
       assert.ok(elapsed >= 2900 && elapsed < 10000, `две попытки по 1,5 с, а прошло ${elapsed} мс`);
       assert.match(err.message, /proxy connection timeout: no CONNECT response in 1\.5s/);
@@ -131,7 +136,7 @@ describe('model-client: срок подключения к прокси', () => 
         console.log(JSON.stringify({ class: err.class, message: err.message }));
       }
     `;
-    const started = Date.now();
+    const started = performance.now();
     const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let out = '';
     child.stdout.on('data', (chunk) => { out += chunk; });
@@ -140,7 +145,7 @@ describe('model-client: срок подключения к прокси', () => 
       const guard = setTimeout(() => { child.kill(); resolve('killed'); }, 20000);
       child.on('exit', (c) => { clearTimeout(guard); resolve(c); });
     });
-    const elapsed = Date.now() - started;
+    const elapsed = performance.now() - started;
     assert.equal(code, 0, out);
     const result = JSON.parse(out.trim().split('\n').pop());
     assert.equal(result.class, 'timeout', out);

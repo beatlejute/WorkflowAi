@@ -43,7 +43,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { StageExecutor } from '../runner.mjs';
+import { StageExecutor, PipelineRunner } from '../runner.mjs';
 import { readRunEvents, openRunPath } from '../lib/agent-runs.mjs';
 
 const IS_WIN = process.platform === 'win32';
@@ -183,7 +183,8 @@ function makeRunnerProject(prefix, { onTerm = 'default' } = {}) {
  * pid агента, копирует запись в run/open-run-seen.json и делает `action`:
  *   throw — исключение из таймера; reject — отказ промиса без обработчика;
  *   exit:<код> — process.exit; emit:<сигнал>[,<сигнал>] — process.emit сигналов подряд;
- *   run-throws — (без ожидания агента) PipelineRunner.prototype.run бросает после init.
+ *   run-throws — (без ожидания агента) PipelineRunner.prototype.run бросает после init;
+ *   emit-warn-throws — cleanup warning бросает, onSignal глотает.
  */
 function writeHarness(root) {
   const file = join(root, 'harness.mjs');
@@ -212,12 +213,19 @@ const timer = action === 'run-throws' ? null : setInterval(() => {
   if (action === 'throw') setTimeout(() => { throw new Error('boom-crash'); }, 0);
   else if (action === 'reject') Promise.reject(new Error('boom-rejection'));
   else if (action.startsWith('exit:')) process.exit(Number(action.slice(5)));
-  else if (action.startsWith('emit:')) for (const signal of action.slice(5).split(',')) process.emit(signal);
+  else if (action === 'emit-warn-throws') {
+    const marker = path.join(root, '.workflow', 'logs', '.pipeline.lock');
+    fs.unlinkSync(marker);
+    fs.mkdirSync(marker);
+    console.warn = () => { throw new Error('cleanup warning failed'); };
+    process.emit('SIGINT');
+    process.emit('SIGTERM');
+  } else if (action.startsWith('emit:')) for (const signal of action.slice(5).split(',')) process.emit(signal);
 }, 25);
 
 const outcome = await runPipeline(['--project', root]);
 if (timer) clearInterval(timer);
-note('outcome.json', { exitCode: outcome.exitCode ?? null });
+note('outcome.json', { exitCode: outcome.exitCode ?? null, failed: outcome.result?.failed ?? null });
 process.exit(outcome.exitCode ?? 0);
 `);
   return file;
@@ -335,6 +343,15 @@ describe('след смерти раннера в логе прогона', () =
     assertInterrupted(root);
     assert.ok(await waitGone(agentPid(root)), 'процесса агента нет');
   });
+
+  it('второй сигнал завершает процесс, даже если cleanup lock выдаёт исключение', async () => {
+    const root = makeRunnerProject('wf-death-forced-cleanup-', { onTerm: 'ignore' });
+    const { exit, output } = await runHarness(root, 'emit-warn-throws');
+    assert.equal(exit.code, 130, output);
+    assertInterrupted(root);
+    assert.ok(existsSync(markerPath(root)), 'cleanup failure leaves the lock path for teardown');
+    assert.ok(await waitGone(agentPid(root)), 'процесса агента нет');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -364,6 +381,34 @@ function heartbeatConfig(root, agentScript, timeoutS = 30) {
 }
 
 const heartbeats = (logger) => logger.lines.filter((line) => line.startsWith('INFO HEARTBEAT '));
+
+describe('повтор селектора раннера', () => {
+  it('складывает стоимость первой попытки, если повтор не вернул cost', async () => {
+    const root = makeRoot('wf-selector-retry-cost-');
+    const ticketDir = join(root, '.workflow', 'tickets', 'in-progress');
+    mkdirSync(ticketDir, { recursive: true });
+    writeFileSync(join(ticketDir, 'TASK-1.md'), '---\ntype: impl\n---\n');
+    const executor = new StageExecutor({ pipeline: { agents: { selector: { command: 'node' } } } },
+      { ticket_id: 'TASK-1' }, {}, {}, null, captureLogger(), root);
+    let calls = 0;
+    executor._runSelector = async () => {
+      calls += 1;
+      return { fallback: 'error', errorClass: 'server', cost: calls === 1 ? 0.25 : null };
+    };
+    executor._markSelectorFailure = () => {};
+
+    const decision = await executor._stageSelection({
+      stage: { selection: { selector: 'selector', levels: ['low', 'high'] } },
+      stageId: 'work', skillId: 'test-skill', ticket: 'TASK-1', above: ['agent-a', 'agent-b'],
+      level: (id) => id === 'agent-a' ? 1 : 2, free: () => false, fact: () => null,
+      floor: 0, floorInfo: { executorRuns: [], history: [] }, notRun: new Set(['agent-a', 'agent-b']),
+      listIndex: new Map([['agent-a', 0], ['agent-b', 1]]),
+    });
+    assert.equal(calls, 2, 'обычная ошибка селектора получает одну повторную попытку');
+    assert.equal(decision.fallback, 'error');
+    assert.equal(decision.cost, 0.25, 'стоимость первой попытки сохраняется при отсутствии стоимости повтора');
+  });
+});
 
 describe('HEARTBEAT во время агента', () => {
   it('строки с pid агента и временем, пока он работает; после выхода — ни одной', async () => {
