@@ -3114,7 +3114,7 @@ test('executor: shell-редирект в канонический файл — 
   assert.match(r.reason, /каноническая цель защищена/);
 }));
 
-test('decide: positive interactive handoff enters neutral mode and still guards skill writes', { skip: process.platform !== 'linux' }, () => {
+test('decide: mocked Linux interactive handoff enters neutral mode on every OS and still guards skill writes', () => {
   const root = mkdtempSync(join(tmpdir(), 'rails-core-handoff-'));
   mkdirSync(join(root, '.workflow'), { recursive: true });
   const sessionId = 'linux-handoff-session';
@@ -3141,6 +3141,8 @@ test('decide: positive interactive handoff enters neutral mode and still guards 
       '--replay-user-messages'], start: '200' }],
     [String(runnerPid), { ppid: 0, executable: '/usr/bin/node', argv: ['node', 'runner.mjs'], start: '300' }],
   ]);
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
   const originals = { readdirSync, readFileSync, readlinkSync };
   const probes = [
     mock.method(fs, 'readdirSync', (dir, ...args) => String(dir) === '/proc'
@@ -3183,6 +3185,7 @@ test('decide: positive interactive handoff enters neutral mode and still guards 
   } finally {
     for (const probe of probes) probe.mock.restore();
     syncBuiltinESMExports();
+    Object.defineProperty(process, 'platform', platform);
     rmSync(root, { recursive: true, force: true });
   }
 });

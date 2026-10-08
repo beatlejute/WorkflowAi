@@ -44,7 +44,7 @@ const caller = { pid: 10, ppid: 20, executable: '/usr/bin/node', argv: ['node', 
 const classify = (host = ide, registered) => classifyLaunch([caller, host,
   { pid: 30, ppid: 0, executable: '/usr/bin/node', birth: 'runner', argv: ['node', 'runner.mjs'] }], 10, session, registered);
 
-test('Linux host session binds once and launchOrigin verifies the binding', { skip: process.platform !== 'linux' }, () => {
+test('mocked Linux host session binds once and launchOrigin verifies the binding on every OS', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rails-linux-host-binding-'));
   fs.mkdirSync(path.join(root, '.workflow'));
   const hook = fileURLToPath(new URL('../rails/claude-hook.mjs', import.meta.url));
@@ -60,6 +60,8 @@ test('Linux host session binds once and launchOrigin verifies the binding', { sk
       '--replay-user-messages'], start: '200' }],
     [String(runnerPid), { ppid: 0, executable: '/usr/bin/node', argv: ['node', 'runner.mjs'], start: '300' }],
   ]);
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
   const originals = {
     readdirSync: fs.readdirSync,
     readFileSync: fs.readFileSync,
@@ -98,6 +100,7 @@ test('Linux host session binds once and launchOrigin verifies the binding', { sk
   } finally {
     for (const probe of probes) probe.mock.restore();
     syncBuiltinESMExports();
+    Object.defineProperty(process, 'platform', platform);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
