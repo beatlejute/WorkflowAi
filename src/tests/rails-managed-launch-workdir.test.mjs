@@ -7,7 +7,7 @@ import childProcess from 'node:child_process';
 import { spawnAgent } from '../lib/agent-spawner.mjs';
 import { StageExecutor } from '../runner.mjs';
 
-test('both spawn paths register the project root, never the nested child workdir', async () => {
+test('both spawn paths use the project root, never the nested child workdir', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rails-managed-workdir-'));
   const cwd = path.join(root, 'src');
   fs.mkdirSync(cwd);
@@ -33,9 +33,13 @@ test('both spawn paths register the project root, never the nested child workdir
       const result = await launch();
       assert.equal(result.exitCode, 0);
       assert.ok(result.output.includes(cwd));
-      assert.equal(JSON.parse(fs.readFileSync(receipt, 'utf8')).pid, process.pid);
+      if (process.platform === 'darwin') {
+        assert.equal(fs.existsSync(receipt), false, 'unsupported OS does not register a launcher');
+      } else {
+        assert.equal(JSON.parse(fs.readFileSync(receipt, 'utf8')).pid, process.pid);
+        fs.unlinkSync(receipt); // each spawn path must independently register the real root
+      }
       assert.equal(fs.existsSync(path.join(cwd, '.workflow')), false);
-      fs.unlinkSync(receipt); // each spawn path must independently register the real root
     }
   } finally {
     probe.mock.restore();

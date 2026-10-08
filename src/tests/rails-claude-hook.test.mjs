@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { handleHookInput, main } from '../rails/claude-hook.mjs';
 import { StateError, startState, saveState, loadState } from '../rails/state.mjs';
 import { readJournal } from '../rails/journal.mjs';
+import { realpathDeep } from '../rails/paths.mjs';
 import { createJunction } from '../junction-manager.mjs';
 import { pathToFileURL } from 'node:url';
 
@@ -96,7 +97,7 @@ function writeTranscript(base, sessionId, entries) {
 function withLifecycleReadFailure(lockFile, failAt, fn) {
   let reads = 0;
   const probe = mock.method(fs, 'readFileSync', (path, ...args) => {
-    if (String(path) === lockFile && ++reads === failAt) throw new Error('клейм не читается');
+    if (realpathDeep(String(path)) === realpathDeep(lockFile) && ++reads === failAt) throw new Error('клейм не читается');
     return fsReadFileSync(path, ...args);
   });
   syncBuiltinESMExports();

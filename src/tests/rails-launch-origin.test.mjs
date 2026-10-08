@@ -12,13 +12,26 @@ import { fileURLToPath } from 'node:url';
 import { syncBuiltinESMExports } from 'node:module';
 
 test('coach and create-plan accept their real handoff nodes without success requirements', () => {
-  const root = fileURLToPath(new URL('../../', import.meta.url));
+  const source = fileURLToPath(new URL('../skills/', import.meta.url));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rails-handoff-skills-'));
   const answer = 'RAILS_OUTCOME: out_of_scope\nREQUEST: original task\nREASON: outside competence\nDONE: scope checked\nREMAINING: task';
-  for (const skill of ['coach', 'create-plan']) {
-    const { config, graph } = loadSkillRuntime(root, skill);
-    assert.deepEqual(config.handoff.nodes, ['P0H1']);
-    assert.deepEqual(graph.validate(config).errors, []);
-    assert.equal(check(answer, config, { node: 'P0H1' }).outcome, 'out_of_scope');
+  try {
+    assert.equal(fs.existsSync(path.join(root, '.workflow')), false);
+    for (const skill of ['coach', 'create-plan']) {
+      const sourceDir = path.join(source, skill);
+      const targetDir = path.join(root, '.workflow', 'src', 'skills', skill);
+      fs.mkdirSync(targetDir, { recursive: true });
+      for (const file of ['SKILL.md', 'rails.yaml']) {
+        fs.copyFileSync(path.join(sourceDir, file), path.join(targetDir, file));
+      }
+      fs.cpSync(path.join(sourceDir, 'workflows'), path.join(targetDir, 'workflows'), { recursive: true });
+      const { config, graph } = loadSkillRuntime(root, skill);
+      assert.deepEqual(config.handoff.nodes, ['P0H1']);
+      assert.deepEqual(graph.validate(config).errors, []);
+      assert.equal(check(answer, config, { node: 'P0H1' }).outcome, 'out_of_scope');
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
