@@ -107,6 +107,33 @@ agents:
   free-openrouter:
     extends: kilo-free
 
+  # 2026-10-11: именованные kilo-агенты, у которых правил не было вовсе, — их stderr не
+  # разбирал ни онлайн-скан (агент уходил в retry-цикл до самого выхода), ни привязка сбоя
+  # к правилу (сбой шёл как неопознанный и давал часовой запрет вместо двухминутного).
+  # PulseProxy: glm-free молотила 12 минут на «service temporarily overloaded» и получила
+  # час. Пулы были прикрыты — участник наследует правила пула (healthRulesId), — а эти
+  # агенты нет, поэтому дыра не была заметна.
+  gpt-luna:
+    extends: kilo-free
+
+  gpt-terra:
+    extends: kilo-free
+
+  gpt-sol:
+    extends: kilo-free
+
+  gemini-flash:
+    extends: kilo-free
+
+  glm-flash:
+    extends: kilo-free
+
+  glm-free:
+    extends: kilo-free
+
+  glm:
+    extends: kilo-free
+
   deepseek-flash:
     rules:
       - id: "deepseek-provider-down"
