@@ -13,8 +13,9 @@
  *    готовый тикет плана записал в «### Найденные дефекты» дефект без исправления:
  *    исправление — более поздний готовый тикет того же плана, который называет записавший
  *    полем unblocks или supersedes либо фразой «исправление дефекта <ID>»; тикет, закрытый
- *    заменой (superseded_by), исправлен своей заменой; старые тикеты без подраздела и
- *    запись «нет» проходят.
+ *    заменой (superseded_by), исправлен своей заменой; тикет, возвращённый исправлением из
+ *    blocked/ (`unblocked_by`), исправлен без сверки времён — проверка закрылась после него;
+ *    старые тикеты без подраздела и запись «нет» проходят.
  *
  * Запуск: node --test --import ./src/tests/_rails-home.mjs src/tests/plan-close-gate.test.mjs
  */
@@ -190,6 +191,30 @@ test('checkAndClosePlan: исправление из другого плана �
   putTicket(project, 'done', 'FIX-50', { plan: 'PLAN-021', fm: { unblocks: ['QA-175'], completed_at: '2026-09-30T08:00:00Z' } });
   const result = checkAndClosePlan(project.workflowDir, 'PLAN-020');
   assert.equal(result.closed, true, JSON.stringify(result));
+});
+
+// 2026-10-10 ListeningGlass PLAN-001: QA-016 записала средовой дефект (407 от прокси), FIX-012
+// исправил его и назвал QA-016 в `unblocks`, check-conditions.js вернул QA-016 в работу
+// (`unblocked_by`), та закрылась позже исправления — план не закрывался: сверка времён
+// «исправление позже дефекта» для этого порядка обратная. Возврат из blocked/ уже доказывает,
+// что проверка прошла после исправления.
+test('checkAndClosePlan: тикет, возвращённый исправлением в работу, исправлен без сверки времён', () => {
+  const DEFECT_407 = '- полный E2E падает: connectOverCDP 407';
+  const project = makeProject();
+  putTicket(project, 'done', 'QA-016', {
+    fm: { unblocked_by: ['FIX-012'], completed_at: '2026-10-10T18:33:00Z' },
+    defects: DEFECT_407,
+  });
+  putTicket(project, 'done', 'FIX-012', { fm: { unblocks: ['QA-016'], completed_at: '2026-10-10T16:15:00Z' } });
+  assert.equal(checkAndClosePlan(project.workflowDir, 'PLAN-020').closed, true);
+
+  // Без возврата в работу (`unblocked_by` не писан) исправление, закрытое раньше записи
+  // дефекта, дефект не снимает — прежнее правило в силе.
+  const second = makeProject();
+  putTicket(second, 'done', 'QA-016', { fm: { completed_at: '2026-10-10T18:33:00Z' }, defects: DEFECT_407 });
+  putTicket(second, 'done', 'FIX-012', { fm: { unblocks: ['QA-016'], completed_at: '2026-10-10T16:15:00Z' } });
+  const notFixed = checkAndClosePlan(second.workflowDir, 'PLAN-020');
+  assert.deepEqual(notFixed.defects, [{ id: 'QA-016', defects: DEFECT_407 }]);
 });
 
 // check-conditions.js закрывает заблокированный тикет тестирования заменой: T в done/ с

@@ -73,7 +73,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
-import { normalizePlanId, parseFrontmatter, printResult } from 'workflow-ai/lib/utils.mjs';
+import { normalizePlanId, parseFrontmatter, printResult, readBoardTickets } from 'workflow-ai/lib/utils.mjs';
 import { readRunEvents } from 'workflow-ai/lib/agent-runs.mjs';
 
 export const STATE_FILE = '.workflow/state/report-gate.json';
@@ -85,33 +85,14 @@ export const SIGNATURE_FORMAT = 2;
  * читает.
  */
 export function boardTickets(ticketsDir) {
-  let columns = [];
-  try {
-    columns = fs.readdirSync(ticketsDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort();
-  } catch {
-    return [];
-  }
-  const tickets = [];
-  for (const column of columns) {
-    const dir = path.join(ticketsDir, column);
-    for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.md')).sort()) {
-      let frontmatter = {};
-      try {
-        frontmatter = parseFrontmatter(fs.readFileSync(path.join(dir, file), 'utf8')).frontmatter || {};
-      } catch {
-        // Нечитаемый тикет — в подписи по имени файла.
-      }
-      tickets.push({
-        column,
-        id: String(frontmatter.id || path.basename(file, '.md')),
-        updated_at: frontmatter.updated_at ? String(frontmatter.updated_at) : '',
-        completed_at: frontmatter.completed_at ? String(frontmatter.completed_at) : '',
-        plan: frontmatter.parent_plan ? normalizePlanId(String(frontmatter.parent_plan)) : null,
-        blocked_reason: firstLine(frontmatter.blocked_reason),
-      });
-    }
-  }
-  return tickets;
+  return readBoardTickets(ticketsDir).map(({ dir, id, frontmatter }) => ({
+    column: dir,
+    id,
+    updated_at: frontmatter.updated_at ? String(frontmatter.updated_at) : '',
+    completed_at: frontmatter.completed_at ? String(frontmatter.completed_at) : '',
+    plan: frontmatter.parent_plan ? normalizePlanId(String(frontmatter.parent_plan)) : null,
+    blocked_reason: firstLine(frontmatter.blocked_reason),
+  }));
 }
 
 // Первая непустая строка значения: RESULT и строка журнала однострочные.
@@ -217,7 +198,18 @@ export function decide({ tickets, report, state, events }) {
     // берёт первый активный план, и повтор закрыл бы следующий план, которого разбор не
     // касался (ревью 2026-09-28, четвёртый раунд).
     if (!report.planId) {
+      // Незакрытая работа плана на доске: отчёт по плану не сделан, и кончать прогон рано.
+      // Архивные тикеты закрытого плана не в счёт: подпись доски у них не меняется, а
+      // `parent_plan` остаётся навсегда — иначе гейт заказывал бы отчёт на каждом запуске
+      // без работы (2026-10-11 ревью: needed → create-report → analyze-report → needed).
+      if (tickets.some(t => t.plan && t.column !== 'archive')) {
+        return { status: 'needed', reason: `${report.id}: план отчёта не указан при наличии тикетов плана` };
+      }
       return { status: 'unchanged', report_id: report.id, reason: `доска не менялась с ${report.id}, разбор — completed, план отчёта не указан` };
+    }
+    const open = tickets.filter(t => t.plan === report.planId && !FINAL_COLUMNS.has(t.column));
+    if (open.length > 0) {
+      return { status: 'analyze', report_id: report.id, reason: `разбор completed противоречит доске: ${open.map(t => t.id).join(', ')}` };
     }
     return { status: 'close_plan', report_id: report.id, plan_id: report.planId, reason: `доска не менялась с ${report.id}, разбор по нему — completed` };
   }

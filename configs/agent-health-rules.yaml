@@ -78,7 +78,9 @@ agents:
         exit_codes: "any"
       - id: "kilo-provider-rate-limit"
         class: "unavailable"
-        ttl: "15m"
+        # 2026-10-10: 15m → 2m — минутный 429 у бесплатных моделей жил секунды-минуты,
+        # 15-минутный бан выводил из выбора весь пул на тикете (HUMAN-006).
+        ttl: "2m"
         pattern: '(?:^|\n)timestamp=[^ \n]+ level=ERROR [^\n]*message="stream error"[^\n]*(?:Rate limit exceeded|rate-limited upstream)'
         exit_codes: "any"
       # Перегрузка провайдера восстанавливается сама (замер 25.09 15:53 — запуск
@@ -86,14 +88,16 @@ agents:
       # за запуск (не обязательно подряд), а не на первой.
       - id: "kilo-provider-overloaded"
         class: "unavailable"
-        ttl: "15m"
+        # 2026-10-10: 15m → 2m, та же причина, что и для rate-limit.
+        ttl: "2m"
         pattern: '(?:(?:^|\n)timestamp=[^ \n]+ level=ERROR [^\n]*message="stream error"[^\n]*(?:[Oo]verloaded|ResourceExhausted)[\s\S]*?){3}'
         exit_codes: "any"
 
   # Пулы моделей (PLAN-004): правила участника `<пул>@<id>` ищутся по id пула — состав
   # пула известен только после раскрытия, поэтому в файле он не описывается. Пометка
   # нездоровья — по id участника (маршрут). Участника, получившего 429, выводит из
-  # выбора `kilo-provider-rate-limit` на 15 минут. Своего правила дневного лимита
+  # выбора `kilo-provider-rate-limit` на 2 минуты (2026-10-10: было 15 минут —
+  # минутный 429 не должен выключать пул на весь тикет). Своего правила дневного лимита
   # аккаунта OpenRouter у free-openrouter нет: по документации тело такого 429 от
   # общего не отличается, место пула до 00:00 UTC закрывает шлагбаум models.gate
   # (free-quota-gate.js по счётчику GET /api/v1/key).

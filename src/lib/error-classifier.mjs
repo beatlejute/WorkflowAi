@@ -213,6 +213,27 @@ export async function classify(rules, agentId, { exitCode, stderr }) {
   return null;
 }
 
+// Конец последнего match шаблона в тексте (или -1). Клон с флагом g: у правила
+// флагов нет, а исходный RegExp без g в exec не двигается по совпадениям сам.
+function lastPatternMatchEnd(pattern, text) {
+  const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g');
+  let last = null;
+  let match;
+  while ((match = global.exec(text)) !== null) {
+    last = match;
+    if (match.index === global.lastIndex) global.lastIndex += 1;
+  }
+  return last ? last.index + last[0].length : -1;
+}
+
+function newlinesAfter(text, from) {
+  let count = 0;
+  for (let i = text.indexOf('\n', from); i !== -1; i = text.indexOf('\n', i + 1)) {
+    count += 1;
+  }
+  return count;
+}
+
 /**
  * Онлайн-проверка stderr на "фатальные" паттерны для агента.
  * Используется spawn-хендлером для раннего kill зависшего процесса,
@@ -222,12 +243,22 @@ export async function classify(rules, agentId, { exitCode, stderr }) {
  * у которых class ∈ {unavailable, misconfigured} — это сигналы, после которых
  * продолжать вызов бессмысленно.
  *
+ * С опцией `maxTailNewlines` фатальным считается только match в конце stderr:
+ * после конца match — не больше maxTailNewlines переводов строк. Решение
+ * владельца (Telegram975, 2026-10-10): 429 из середины, после которого агент
+ * сам повторил запрос и продолжил работу, снятием не считается — фатален
+ * запуск, застрявший на ограничении, то есть ограничение в последних строках
+ * (тот же принцип, что у PROVIDER_RATE_LIMIT_PATTERN в classifyAgentResult:
+ * «429 из середины не в счёт»). Берётся последний match правила: в retry-цикле
+ * строк ограничения несколько, у хвоста — последняя.
+ *
  * @param {{common: Array, agents: Map}} rules — результат loadRules()
  * @param {string} agentId
  * @param {string} stderrText — весь накопленный stderr (до STDERR_MATCH_LIMIT)
+ * @param {{maxTailNewlines?: number}} [opts]
  * @returns {{rule_id: string, class: string, ttl: string, reason: string} | null}
  */
-export function scanStderrForFatalRule(rules, agentId, stderrText) {
+export function scanStderrForFatalRule(rules, agentId, stderrText, { maxTailNewlines } = {}) {
   if (!stderrText || !agentId) return null;
   const truncated = truncateStderr(stderrText);
   const agentRules = rules.agents.get(agentId) || [];
@@ -235,19 +266,85 @@ export function scanStderrForFatalRule(rules, agentId, stderrText) {
     if (rule.class !== 'unavailable' && rule.class !== 'misconfigured') continue;
     if (!rule.pattern) continue;
     try {
-      if (rule.pattern.test(truncated)) {
-        return {
-          rule_id: rule.id,
-          class: rule.class,
-          ttl: rule.ttl,
-          reason: truncated,
-        };
+      if (typeof maxTailNewlines === 'number') {
+        const matchEnd = lastPatternMatchEnd(rule.pattern, truncated);
+        if (matchEnd < 0) continue;
+        if (newlinesAfter(truncated, matchEnd) > maxTailNewlines) continue;
+      } else if (!rule.pattern.test(truncated)) {
+        continue;
       }
+      return {
+        rule_id: rule.id,
+        class: rule.class,
+        ttl: rule.ttl,
+        reason: truncated,
+      };
     } catch {
       // broken regex — пропускаем
     }
   }
   return null;
+}
+
+// Сколько переводов строк допускается после конца match фатального правила,
+// чтобы считать match «концом запуска»: сам match и не больше одной строки
+// после него (перевод строки, кончающий строку match, тоже считается).
+const FATAL_TAIL_NEWLINES = 2;
+
+// Grace-окно решает судьбу match: kill не мгновенный, а через 4 с, и только
+// если ограничение осталось в хвосте stderr. Решение владельца (Telegram975,
+// 2026-10-10): агент, сам повторивший запрос после 429 и продолживший работу,
+// за окно печатает новый вывод — match уходит из хвоста, снятие отменяется;
+// застрявший на ограничении агент снимается по истечении окна (прежнее назначение
+// онлайн-скана — retry-цикл kilo вместо ожидания timeout_per_stage).
+// Признак живости — только новые строки stderr: скан идёт по нему, и порция меньше
+// порога скана (200 байт) его не двигает. Агент, который после ограничения пишет
+// только в stdout, для окна неотличим от застрявшего и снимается: окно лишь снимает
+// retry-цикл раньше timeout_per_stage, и границу держит он.
+export const FATAL_KILL_GRACE_MS = 4000;
+
+/**
+ * Ранний kill по онлайн-скану stderr с grace-окном (см. FATAL_KILL_GRACE_MS).
+ * onScan(stderr) — накопленный stderr на очередном скане (вызывает сторона
+ * после своего throttle); match в хвосте stderr взводит таймер, уход match
+ * из хвоста — отменяет: новые строки stderr и есть единственный признак того,
+ * что агент продолжил работу. По таймеру правило перепроверяется на текущем
+ * stderr: всё ещё в хвосте — onKill(match).
+ * dispose() — на выходе, таймауте и ошибке процесса: отменяет взведённый
+ * таймер и глушит onScan.
+ */
+export function createFatalStderrArbiter(rules, agentId, onKill, { graceMs = FATAL_KILL_GRACE_MS } = {}) {
+  let disposed = false;
+  let timer = null;
+  let lastStderr = '';
+  const scan = () => scanStderrForFatalRule(rules, agentId, lastStderr, { maxTailNewlines: FATAL_TAIL_NEWLINES });
+  const evaluate = () => {
+    timer = null;
+    const match = scan();
+    if (match) onKill(match);
+  };
+  return {
+    onScan(stderrText) {
+      if (disposed || !rules || !agentId) return;
+      lastStderr = stderrText;
+      if (scan()) {
+        if (!timer) {
+          timer = setTimeout(evaluate, graceMs);
+          timer.unref?.();
+        }
+      } else if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+    dispose() {
+      disposed = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+  };
 }
 
 export function parseTtl(ttl, now = Date.now()) {

@@ -6,7 +6,7 @@ import { spawn, execSync } from 'child_process';
 import crypto from 'crypto';
 import yaml from './lib/js-yaml.mjs';
 import { findProjectRoot } from './lib/find-root.mjs';
-import { loadRules, scanStderrForFatalRule, classify, parseTtl } from './lib/error-classifier.mjs';
+import { loadRules, createFatalStderrArbiter, classify, parseTtl } from './lib/error-classifier.mjs';
 import { snapshot, diff, isEmpty } from './lib/artifact-snapshot.mjs';
 import { markUnhealthy, isHealthy } from './lib/agent-health-registry.mjs';
 import { writeMarker, readMarker, removeMarker } from './lib/marker.mjs';
@@ -62,7 +62,8 @@ import { evaluate as evaluateWithModel, validateInput } from './lib/model-evalua
 import { ModelClientError, assertModelUrl, redactNetworkDetail, imageBatches } from './lib/model-client.mjs';
 import { buildCliJudgePrompt, parseJudgeScore, parseJudgeExtras } from './lib/skill-judge.mjs';
 import { RUBRIC_LEVEL_COUNT } from './lib/rubric-levels.mjs';
-import { parseFrontmatter, normalizePlanId } from './lib/utils.mjs';
+import { parseFrontmatter, normalizePlanId, checkPlanReadiness } from './lib/utils.mjs';
+import { prepareReportInput } from './lib/report-input.mjs';
 
 // Ошибка клиента безынструментного агента или класс ошибки в ответе агента с
 // командой на шаге «модель» model_io → запись health-реестра. Классы и TTL —
@@ -2067,6 +2068,7 @@ class StageExecutor {
     }
 
     const triedInThisAttempt = [];
+    let attemptsStarted = 0;
     // Порядок участников мест-пулов в этой попытке: id пула → id участников по ранжиру
     // селектора или null (порядок маски). Решение принимается при первом выборе места.
     const poolOrders = new Map();
@@ -2151,7 +2153,10 @@ class StageExecutor {
           return lastModelFailure;
         }
         if (resolved.blocked === 'all_banned' && this.logger) this.logger.warn(resolved.reason, stageId);
-        return { status: 'blocked', blocked_reason: resolved.blocked, reason: resolved.reason };
+        return {
+          status: 'blocked', blocked_reason: resolved.blocked, reason: resolved.reason,
+          result: { blocked_reason: resolved.blocked, reason: resolved.reason, attempts: attemptsStarted },
+        };
       }
 
       const { effectiveStage } = resolved;
@@ -2197,6 +2202,7 @@ class StageExecutor {
       }
 
       const run = this._openAgentRun(stageId, effectiveStage, agentId, agent, resolved.attempt, resolved.selection ?? null);
+      attemptsStarted++;
       // Показание шлагбаума из прохода свежо только до первого запуска попытки: пока шёл
       // этот запуск, квоту пула могли израсходовать (другой проект на том же ключе), и
       // первый запуск участника после него опрашивает шлагбаум заново.
@@ -2249,6 +2255,8 @@ class StageExecutor {
           lastModelFailure = result;
           continue;
         }
+
+        this.checkReportCompletion(effectiveStage, result);
 
         const callResult = {
           exitCode: result.exitCode ?? 0,
@@ -2350,6 +2358,13 @@ class StageExecutor {
           }
         }
 
+        if (result.status === 'blocked' && !result.blocked_reason) {
+          result.result = {
+            ...result.result,
+            reason: result.result?.reason || 'Agent reported blocked without a reason',
+            attempts: 1,
+          };
+        }
         if (this.logger) this.logger.stageComplete(stageId, result.status, result.exitCode);
         return result;
       } catch (err) {
@@ -2382,7 +2397,7 @@ class StageExecutor {
           status = 'aborted';
         } else if (banned) {
           status = 'model_banned';
-        } else if (err.code === 'RAILS_INCOMPLETE' || err.code === 'RAILS_SUSPENDED' || err.code === 'RAILS_RUNTIME_LOST' || err.code === 'RAILS_OUT_OF_SCOPE' || err.code === 'RAILS_HANDOFF_INVALID') {
+        } else if (err.code === 'REPORT_NOT_READY' || err.code === 'RAILS_INCOMPLETE' || err.code === 'RAILS_SUSPENDED' || err.code === 'RAILS_RUNTIME_LOST' || err.code === 'RAILS_OUT_OF_SCOPE' || err.code === 'RAILS_HANDOFF_INVALID') {
           // Скил брошен без итога или приостановлен владельцем, либо потеряно закрепление
           // рантайма (callAgent), хост вышел с кодом 0. stderr kilo — лог его
           // инструментов: «403» и «network» там — текст проекта, и ни класс
@@ -2659,10 +2674,50 @@ class StageExecutor {
    * @param {string} stageId - ID stage из конфигурации
    * @returns {Promise<{status: string, output: string, result?: object}>}
    */
+  checkReportCompletion(stage, result) {
+    if (stage.skill === 'create-report' && this.context.board_scan_ok === true && !['error', 'blocked'].includes(result.status)) {
+      const generated = prepareReportInput(this.projectRoot, {
+        plan_id: this.context.plan_id,
+        report_id: result.result?.report_id,
+      }, 'analyze-report');
+      if (generated.report_scope !== this.context.report_scope || generated.plan_id !== this.context.plan_id) {
+        throw new Error('Generated report scope conflicts with requested report scope');
+      }
+    }
+    if (stage.skill !== 'analyze-report' || result.status !== 'completed') return;
+    if (this.context.report_scope === 'board' && this.context.board_scan_ok === true && !this.context.plan_id) {
+      result.result = { ...result.result, report_scope: 'board', report_plan_id: '' };
+      return;
+    }
+    let readiness;
+    try {
+      readiness = this.context.plan_id
+        ? checkPlanReadiness(path.join(this.projectRoot, '.workflow'), this.context.plan_id)
+        : { ready: false, reason: 'Analysis completed without a valid plan' };
+    } catch (err) {
+      readiness = { ready: false, reason: err.message };
+    }
+    if (!readiness.ready && !readiness.already) {
+      throw Object.assign(new Error(`Analysis completion rejected: ${readiness.reason}`), {
+        code: 'REPORT_NOT_READY', exitCode: -1, stdout: result.output || '',
+      });
+    }
+    result.result = { ...result.result, report_scope: 'plan', report_plan_id: this.context.plan_id };
+  }
+
   async execute(stageId) {
     const stage = this.pipeline.stages[stageId];
     if (!stage) {
       throw new Error(`Stage not found: ${stageId}`);
+    }
+
+    if (stage.skill === 'create-report' || stage.skill === 'analyze-report') {
+      this.context = prepareReportInput(this.projectRoot, this.context, stage.skill);
+      this.promptBuilder.context = this.context;
+    }
+
+    if (stageId === 'complete-plan' && this.context.report_scope === 'board') {
+      return { status: 'no_plan', result: { status: 'no_plan', report_scope: 'board', reason: 'Board analysis does not authorize plan closure' } };
     }
 
     // Legacy-ветка: скрипт-стейдж (детерминированный). Capability-фильтр не применяется.
@@ -2679,6 +2734,7 @@ class StageExecutor {
         ? await this.callModelAgent(agent, prompt, stageId, stage, stage.agent)
         : await this.callAgent(agent, prompt, stageId, stage.skill, stage.agent);
 
+      this.checkReportCompletion(stage, result);
       if (this.logger) this.logger.stageComplete(stageId, result.status, result.exitCode);
       if (this.fileGuard && !skipGuard) {
         const violations = this.fileGuard.checkAndRollback();
@@ -3157,6 +3213,7 @@ class StageExecutor {
         timedOut = true;
         // На Windows SIGTERM игнорируется — используем taskkill /T /F для убийства дерева
         killChild();
+        fatalArbiter.dispose();
         if (this.logger && !ownTimeout) {
           this.logger.timeout(stageId, timeout);
         }
@@ -3204,22 +3261,17 @@ class StageExecutor {
         }
       });
 
-      child.stderr.on('data', (data) => {
-        stderr += data.toString();
-        process.stderr.write(data);
-
-        // Online-детекция фатальных паттернов (quota/429/usage-limit и т.п.).
-        // Нужна чтобы не ждать timeout_per_stage (1800s), когда агентский CLI
-        // уходит в молчаливый retry-цикл после HTTP 429.
-        if (!hasAgentRules || earlyKilled || timedOut) return;
-        // Throttle: первый скан всегда, последующие — только после 200+ новых байт.
-        if (lastScanSize > 0 && stderr.length - lastScanSize < 200) return;
-        lastScanSize = stderr.length;
-        const match = scanStderrForFatalRule(healthRules, rulesId, stderr);
-        if (!match) return;
-
+      // Ранний kill по фатальному правилу — через арбитр с grace-окном: match
+      // снимает процесс, только если ограничение осталось в последних строках
+      // stderr (решение владельца, Telegram975 2026-10-10): агент, сам повторивший
+      // запрос после 429 и продолживший работу, не снимается — 429 из середины
+      // уходит из хвоста, и таймер отменяется. Молчащий retry-цикл на HTTP 429
+      // по-прежнему снимается, не дожидаясь timeout_per_stage (1800s).
+      const fatalArbiter = createFatalStderrArbiter(healthRules, rulesId, (match) => {
+        if (earlyKilled || timedOut) return;
         earlyKilled = true;
         earlyKillRule = match;
+        fatalArbiter.dispose();
         clearTimeout(timeoutId);
         stopHeartbeat();
         if (this.logger) {
@@ -3240,6 +3292,19 @@ class StageExecutor {
         reject(err);
       });
 
+      child.stderr.on('data', (data) => {
+        stderr += data.toString();
+        process.stderr.write(data);
+
+        // Online-детекция фатальных паттернов (quota/429/usage-limit и т.п.):
+        // решение о снятии — у fatalArbiter выше.
+        if (!hasAgentRules || earlyKilled || timedOut) return;
+        // Throttle: первый скан всегда, последующие — только после 200+ новых байт.
+        if (lastScanSize > 0 && stderr.length - lastScanSize < 200) return;
+        lastScanSize = stderr.length;
+        fatalArbiter.onScan(stderr);
+      });
+
       child.on('close', (code, signal) => {
         // Только свой процесс: после таймаута или EARLY_KILL вызов уже отклонён, и
         // стадия могла запустить следующего агента раньше, чем этот процесс закрылся —
@@ -3247,6 +3312,7 @@ class StageExecutor {
         if (this.currentChild === child) this.currentChild = null;
         clearTimeout(timeoutId);
         stopHeartbeat();
+        fatalArbiter.dispose();
         // Обрабатываем остаток буфера стриминга
         if (stdoutBuffer.trim()) {
           try {
@@ -3376,6 +3442,7 @@ class StageExecutor {
       child.on('error', (err) => {
         clearTimeout(timeoutId);
         stopHeartbeat();
+        fatalArbiter.dispose();
         if (!timedOut && !earlyKilled) {
           if (this.logger) {
             this.logger.error(`CLI error: ${err.message}`, stageId);
@@ -4512,6 +4579,10 @@ class PipelineRunner {
          } else {
            this.currentExecutor = new StageExecutor(this.config, this.stageContext(this.currentStage, stage), this.counters, {}, this.fileGuard, this.logger, this.projectRoot, { runId: this.runId });
            result = await this.currentExecutor.execute(this.currentStage);
+           if (stage.skill === 'analyze-report' && result.status === 'completed') {
+             this.context.report_scope = result.result?.report_scope;
+             this.context.report_plan_id = result.result?.report_plan_id;
+           }
            this.currentExecutor = null;
            this.recordStageEvent(this.currentStage, stage, result);
          }
@@ -4522,7 +4593,7 @@ class PipelineRunner {
         const nextStage = this.resolveNextStage(this.currentStage, result);
 
         // Считаем выполненные задачи (execute-task)
-        if (this.currentStage === 'execute-task' && result.status !== 'error') {
+        if (this.currentStage === 'execute-task' && result.status !== 'error' && result.status !== 'blocked') {
           this.tasksExecuted++;
         }
 
@@ -4650,6 +4721,15 @@ class PipelineRunner {
       return `Pipeline stopped: stage ${ended.stage} failed — ${reason}`;
     }
 
+    if (ended.stage === 'complete-plan' && ended.status === 'not_ready') {
+      return `Pipeline stopped: plan ${ended.data.plan_id || 'unknown'} not ready — ${ended.data.reason || 'unfinished work'}`;
+    }
+    if (['create-report', 'analyze-report'].includes(ended.stage) && ended.status === 'blocked') {
+      return `Pipeline stopped: ${ended.stage} blocked — ${ended.data.reason || ended.data.blocked_reason || 'agents unavailable'}`;
+    }
+    if (['increment-create-report-attempts', 'increment-analyze-report-attempts'].includes(ended.stage) && ended.status === 'max_reached') {
+      return `Pipeline stopped: reporting attempts exhausted (${ended.stage})`;
+    }
     if (!STUCK_END_STATUSES.has(ended.status)) return null;
     const plan = ended.data.plan_id ? `plan ${ended.data.plan_id}` : 'plan';
     const blocked = ended.data.blocked_tickets
@@ -4725,7 +4805,7 @@ class PipelineRunner {
     const newTicketId = params.ticket_id ?
       (typeof params.ticket_id === 'string' ?
         params.ticket_id
-          .replace(/\$result\.(\w+)/g, (_, k) => resultData[k] || '')
+          .replace(/\$result\.(\w+)/g, (_, k) => resultData[k] ?? '')
           .replace(/\$context\.(\w+)/g, (_, k) => this.context[k] || '')
         : params.ticket_id)
       : null;
@@ -4748,7 +4828,7 @@ class PipelineRunner {
         let resolvedValue = value;
 
         // $result.*
-        resolvedValue = resolvedValue.replace(/\$result\.(\w+)/g, (_, k) => resultData[k] || '');
+        resolvedValue = resolvedValue.replace(/\$result\.(\w+)/g, (_, k) => resultData[k] ?? '');
 
         // $context.*
         resolvedValue = resolvedValue.replace(/\$context\.(\w+)/g, (_, k) => this.context[k] || '');
@@ -4790,7 +4870,10 @@ class PipelineRunner {
     if (dropped.length > 0) {
       this.logger.info(`scope=plan stage="${stageId}" ticket context not passed (${dropped.join(' ')})`, 'PipelineRunner');
     }
-    if (!view.plan_id && view.report_id) {
+    if (stageId === 'complete-plan' && view.report_scope) {
+      view.plan_id = view.report_scope === 'plan' ? view.report_plan_id : '';
+    }
+    if (!view.plan_id && view.report_id && view.report_scope !== 'board') {
       const planId = reportPlanId(this.projectRoot, view.report_id);
       if (planId) {
         view.plan_id = planId;

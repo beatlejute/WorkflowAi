@@ -123,8 +123,19 @@ function main() {
 
   console.log(`[INFO] Completing plan: ${planId}`);
 
-  const WORKFLOW_DIR = path.join(findProjectRoot(), '.workflow');
-  const result = checkAndClosePlan(WORKFLOW_DIR, planId);
+  // Доска читается целиком (readBoardTickets) и ошибку чтения не глушит: недоступный каталог
+  // тикетов или битый frontmatter — это не «план готов», а отказ. Контракт стадии —
+  // status: error, а не стектрейс (2026-10-11 ревью).
+  let WORKFLOW_DIR;
+  let result;
+  try {
+    WORKFLOW_DIR = path.join(findProjectRoot(), '.workflow');
+    result = checkAndClosePlan(WORKFLOW_DIR, planId);
+  } catch (err) {
+    console.error(`[ERROR] Plan ${planId}: ${err.message}`);
+    printResult({ status: 'error', plan_id: planId, reason: err.message });
+    process.exit(0);
+  }
 
   if (result.closed) {
     console.log(`[INFO] Plan ${planId} completed: ${result.done}/${result.total} tickets done, ${result.archived?.length || 0} archived`);

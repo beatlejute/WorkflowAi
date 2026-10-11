@@ -2,7 +2,7 @@
 
 import { spawn, execSync } from 'child_process';
 import path from 'path';
-import { loadRules, scanStderrForFatalRule } from './error-classifier.mjs';
+import { loadRules, createFatalStderrArbiter } from './error-classifier.mjs';
 import { buildAgentEnv } from './agent-env.mjs';
 import { registerManagedLauncher } from '../rails/launch-origin.mjs';
 
@@ -261,6 +261,7 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
     const timeoutId = setTimeout(() => {
       timedOut = true;
       killChild();
+      fatalArbiter.dispose();
       if (logger) {
         logger.timeout(stageId, timeout);
       }
@@ -297,18 +298,13 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
       }
     });
 
-    child.stderr.on('data', (data) => {
-      stderr += data.toString();
-      process.stderr.write(data);
-
-      if (!hasAgentRules || earlyKilled || timedOut) return;
-      // Throttle: первый скан всегда, последующие — только после 200+ новых байт.
-      if (lastScanSize > 0 && stderr.length - lastScanSize < 200) return;
-      lastScanSize = stderr.length;
-      const match = scanStderrForFatalRule(rules, agentId, stderr);
-      if (!match) return;
-
+    // Ранний kill по фатальному правилу — через арбитр с grace-окном: 429 из
+    // середины stderr, после которого агент сам повторил и продолжил, снятия
+    // не даёт (решение владельца, Telegram975 2026-10-10); см. runner.mjs.
+    const fatalArbiter = createFatalStderrArbiter(rules, agentId, (match) => {
+      if (earlyKilled || timedOut) return;
       earlyKilled = true;
+      fatalArbiter.dispose();
       clearTimeout(timeoutId);
       if (logger) {
         logger.error?.(
@@ -328,11 +324,23 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
       reject(err);
     });
 
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+      process.stderr.write(data);
+
+      if (!hasAgentRules || earlyKilled || timedOut) return;
+      // Throttle: первый скан всегда, последующие — только после 200+ новых байт.
+      if (lastScanSize > 0 && stderr.length - lastScanSize < 200) return;
+      lastScanSize = stderr.length;
+      fatalArbiter.onScan(stderr);
+    });
+
     child.on('close', (code) => {
       if (currentChildRef) {
         currentChildRef.current = null;
       }
       clearTimeout(timeoutId);
+      fatalArbiter.dispose();
       const durationMs = Date.now() - startTime;
 
       if (stdoutBuffer.trim()) {
@@ -407,6 +415,7 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
 
     child.on('error', (err) => {
       clearTimeout(timeoutId);
+      fatalArbiter.dispose();
       if (!timedOut && !earlyKilled) {
         if (logger) {
           logger.error(`CLI error: ${err.message}`, stageId);

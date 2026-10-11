@@ -482,7 +482,26 @@ const PLAN_TICKET_DIRS = ['backlog', 'ready', 'in-progress', 'blocked', 'review'
 // Колонки готового тикета — те же, что у check-conditions.js (FINISHED_COLUMNS).
 const PLAN_FINISHED_DIRS = new Set(['done', 'archive']);
 
-/** Тикеты плана во всех колонках: id, колонка, frontmatter и тело; нечитаемые пропускаются. */
+/** Полное чтение доски: ошибка чтения или пустой frontmatter не означают пустую доску. */
+export function readBoardTickets(ticketsDir) {
+  const columns = fs.readdirSync(ticketsDir, { withFileTypes: true }).filter(d => d.isDirectory());
+  const tickets = [];
+  for (const column of columns) {
+    for (const file of fs.readdirSync(path.join(ticketsDir, column.name)).filter(f => f.endsWith('.md') && !f.startsWith('.'))) {
+      const content = fs.readFileSync(path.join(ticketsDir, column.name, file), 'utf8');
+      const { frontmatter, body } = parseFrontmatter(content);
+      if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter) || Object.keys(frontmatter).length === 0) {
+        throw new Error(`Invalid ticket: ${column.name}/${file}`);
+      }
+      if (frontmatter.parent_plan && !normalizePlanId(String(frontmatter.parent_plan))) {
+        throw new Error(`Invalid ticket parent_plan: ${column.name}/${file}`);
+      }
+      tickets.push({ id: String(frontmatter.id || file.replace('.md', '')), dir: column.name, frontmatter, body });
+    }
+  }
+  return tickets;
+}
+
 function readPlanTickets(ticketsDir, planId) {
   const tickets = [];
   for (const dirName of PLAN_TICKET_DIRS) {
@@ -676,6 +695,11 @@ function namesAsFixed(fixer, target) {
  * (`superseded_by`), исправлен своей заменой без сверки времени: его запись заменила
  * проверка, которая называет его в `supersedes` и которую check-conditions.js уже сверил
  * с исправлениями; её собственный подраздел проверяется здесь же как у любого тикета.
+ * Тикет, возвращённый в работу своим исправлением (`unblocked_by` пишет check-conditions.js
+ * при переносе из blocked/ в backlog/), исправлен без сверки времени: она здесь обратная —
+ * исправление всегда раньше проверки, которая закрылась после него (2026-10-10 ListeningGlass
+ * PLAN-001: FIX-012 исправил средовой 407 и назвал QA-016 в `unblocks`, QA-016 закрылась
+ * позже — план не закрывался).
  *
  * Зачем: тикет тестирования по канону закрывается в done/ и с найденным дефектом, а дефект
  * остаётся строкой его результата. 2026-09-30 PulseProxy: QA-175 записал дефект подсказки
@@ -689,10 +713,14 @@ function unfixedDefects(tickets, ticketsDir) {
     const defects = recordedDefects(target.body);
     if (defects === null) continue;
     const supersededBy = target.frontmatter.superseded_by;
+    const unblockedBy = planIdList(target.frontmatter.unblocked_by);
     const fixed = fixersAnyPlan.some(fixer => {
       if (fixer.id === target.id || !namesAsFixed(fixer, target)) return false;
       if (supersededBy !== undefined && supersededBy !== null && String(supersededBy) === fixer.id
         && planIdList(fixer.frontmatter.supersedes).includes(target.id)) return true;
+      // Это исправление вернуло тикет из blocked/ в работу: проверка прошла после него,
+      // и закрылась она позже исправления — обычная сверка времён тут не подходит.
+      if (unblockedBy.includes(fixer.id)) return true;
       return workTimeOf(fixer.frontmatter) > planTimeOf(target.frontmatter.completed_at);
     });
     if (!fixed) unfixed.push({ id: target.id, defects });
@@ -713,13 +741,19 @@ function unfixedDefects(tickets, ticketsDir) {
  * @param {string} planId - Нормализованный ID плана (например "PLAN-002")
  * @returns {{ closed: boolean, reason: string, total: number, done: number, already?: boolean, defects?: Array<{id: string, defects: string}>, blocked?: Array<{id: string, reason: string}>, archived?: string[] }}
  */
-export function checkAndClosePlan(workflowDir, planId) {
+export function checkPlanReadiness(workflowDir, planId) {
+  const result = preparePlanClose(workflowDir, planId);
+  const { allTickets, frontmatter, body, planPath, ...diagnostics } = result;
+  return { ...diagnostics, ready: Boolean(allTickets) };
+}
+
+function preparePlanClose(workflowDir, planId) {
   if (!workflowDir || !planId) {
     return { closed: false, reason: 'Missing workflowDir or planId', total: 0, done: 0 };
   }
 
   const ticketsDir = path.join(workflowDir, 'tickets');
-  const allTickets = readPlanTickets(ticketsDir, planId);
+  const allTickets = readBoardTickets(ticketsDir).filter(t => normalizePlanId(t.frontmatter.parent_plan) === planId);
 
   const total = allTickets.length;
   const done = allTickets.filter(t => PLAN_FINISHED_DIRS.has(t.dir)).length;
@@ -754,6 +788,9 @@ export function checkAndClosePlan(workflowDir, planId) {
   const planPath = path.join(plansDir, planFile);
   const planContent = fs.readFileSync(planPath, 'utf8');
   const { frontmatter, body } = parseFrontmatter(planContent);
+  if (!frontmatter || !frontmatter.status) {
+    return { closed: false, reason: 'Invalid plan frontmatter', total, done };
+  }
 
   // Повторный вызов на закрытом плане — ничего не меняет. Прежний ответ not_ready читался
   // как «план не готов» (2026-09-30 PulseProxy PLAN-020, см. countPlanTickets).
@@ -766,6 +803,15 @@ export function checkAndClosePlan(workflowDir, planId) {
     return { closed: false, reason: `Unfixed defects: ${defects.map(d => d.id).join(', ')}`, total, done, defects };
   }
 
+  return { closed: false, total, done, allTickets, frontmatter, body, planPath };
+}
+
+export function checkAndClosePlan(workflowDir, planId) {
+  const prepared = preparePlanClose(workflowDir, planId);
+  const { allTickets, frontmatter, body, planPath, ...result } = prepared;
+  if (!allTickets) return result;
+  const { total, done } = result;
+  const ticketsDir = path.join(workflowDir, 'tickets');
   frontmatter.status = 'completed';
   frontmatter.completed_at = new Date().toISOString();
   frontmatter.updated_at = new Date().toISOString();

@@ -82,9 +82,17 @@ const LIVE_STREAM_ERROR = 'timestamp=2026-09-27T11:40:25.237Z level=ERROR run=93
 // Команда списка: печатает свои аргументы, по одному на строку.
 const LIST_SCRIPT = `process.stdout.write(process.argv.slice(2).join('\\n') + '\\n');\n`;
 
+// Вывод продолжившего работу агента: сам повтор после 429 удался — обычные строки
+// прогресса в stderr (12 строк: match ограничения уходит дальше последних трёх).
+const CONTINUATION_STDERR = Array.from(
+  { length: 12 },
+  (_, i) => `recovery step ${i + 1}: normal progress line of the continuing agent`
+).join('\n') + '\n';
+
 // Участник: поведение по модели (аргумент после --model). m-1 — строка 429 в stderr и
-// ожидание (сам выходит через 30 с, если его не сняли); m-3 — строка, которую ловит
-// только classify, и выход 1; прочие — RESULT passed. pid — в файл <каталог pid>/<модель>.
+// ожидание (сам выходит через 30 с, если его не сняли); m-4 — строка 429 и продолжение
+// работы (сам повтор удался); m-3 — строка, которую ловит только classify, и выход 1;
+// прочие — RESULT passed. pid — в файл <каталог pid>/<модель>.
 const MEMBER_AGENT = (pidDir, liveLine) => `
 const fs = require('fs');
 const path = require('path');
@@ -94,6 +102,12 @@ if (model.endsWith('/m-1')) {
   process.stderr.write(${JSON.stringify(liveLine)} + '\\n');
   setInterval(() => {}, 1000);
   setTimeout(() => process.exit(1), 30000);
+} else if (model.endsWith('/m-4')) {
+  process.stderr.write(${JSON.stringify(liveLine)} + '\\n');
+  setTimeout(() => {
+    process.stderr.write(${JSON.stringify(CONTINUATION_STDERR)});
+    process.stdout.write('---RESULT---\\nstatus: passed\\n---RESULT---\\n');
+  }, 500);
 } else if (model.endsWith('/m-3')) {
   process.stderr.write('vendor overloaded marker\\n');
   process.exit(1);
@@ -199,6 +213,25 @@ describe('правила health участника пула', () => {
       alive = processAlive(pid);
     }
     assert.equal(alive, false, `процесс участника ${pid} снят`);
+  });
+
+  test('ограничение из середины stderr (агент сам повторил и продолжил) — сессия не снимается', async () => {
+    const env = makeTemp();
+    pidFile(env, 'prov/vendor/m-4');
+
+    const { result, logger, elapsed, events } = await runPoolStage(env, ['prov/vendor/m-4', 'prov/vendor/m-2']);
+
+    assert.equal(result.status, 'passed', logger.lines.join('\n'));
+    assert.ok(
+      !logger.lines.some((l) => l.includes('Fatal stderr pattern matched')),
+      'продолживший работу агент не снимается: ' + logger.lines.join('\n'),
+    );
+    assert.ok(elapsed < 3500, `агент доработал до результата, а не снят по grace: ${elapsed} мс`);
+    const health = readHealth(env.root);
+    assert.equal(health['pool-a@prov/vendor/m-4'], undefined, JSON.stringify(health));
+    assert.equal(isHealthy(env.root, 'pool-a@prov/vendor/m-4'), true);
+    // passed первым участником — стадия завершена, фолбэка к следующему нет.
+    assert.deepEqual(events.map((e) => e.agent), ['pool-a@prov/vendor/m-4']);
   });
 
   test('сбой, опознанный правилом пула после выхода, — пометка участника и TTL правила в crash_ttl_ms', async () => {

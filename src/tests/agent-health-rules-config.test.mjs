@@ -134,8 +134,8 @@ const STEP0_RULE_IDS = ['kilo-provider-daily-limit', 'kilo-provider-rate-limit',
 const STEP0_CASES = {
   'живая строка 429': {
     stderr: LIVE_STREAM_ERROR,
-    online: { rule_id: 'kilo-provider-rate-limit', ttl: '15m' },
-    classify: { rule_id: 'kilo-provider-rate-limit', ttl: '15m' },
+    online: { rule_id: 'kilo-provider-rate-limit', ttl: '2m' },
+    classify: { rule_id: 'kilo-provider-rate-limit', ttl: '2m' },
   },
   'дневной лимит провайдера (limit_rpd, порядок правил)': {
     stderr: LIVE_DAILY_LIMIT,
@@ -149,8 +149,8 @@ const STEP0_CASES = {
   },
   'перегрузка провайдера, три раза за запуск (между ними — работа)': {
     stderr: [LIVE_OVERLOADED, WORK, LIVE_OVERLOADED, WORK, LIVE_OVERLOADED].join('\n'),
-    online: { rule_id: 'kilo-provider-overloaded', ttl: '15m' },
-    classify: { rule_id: 'kilo-provider-overloaded', ttl: '15m' },
+    online: { rule_id: 'kilo-provider-overloaded', ttl: '2m' },
+    classify: { rule_id: 'kilo-provider-overloaded', ttl: '2m' },
   },
   'эхо исходника теста и строка диффа (не начало строки)': {
     stderr: [SOURCE_ECHO_ENDING, DIFF_LINE_ENDING].join('\n'),
@@ -264,7 +264,7 @@ test('общий текст ограничения без "stream error" не п
   }
 });
 
-test('шаг 0: агент с правилом kilo-provider-rate-limit снимается на живой строке 429 онлайн за 15m, агент без него — нет', () => {
+test('шаг 0: агент с правилом kilo-provider-rate-limit снимается на живой строке 429 онлайн за 2m, агент без него — нет', () => {
   const rules = shippedRules();
   const withRule = [...rules.agents.entries()]
     .find(([, agentRules]) => agentRules.some((rule) => rule.id === 'kilo-provider-rate-limit'));
@@ -273,7 +273,7 @@ test('шаг 0: агент с правилом kilo-provider-rate-limit сним
   const hit = scanStderrForFatalRule(rules, agentWithRuleId, LIVE_STREAM_ERROR);
   assert.equal(hit?.rule_id, 'kilo-provider-rate-limit');
   assert.equal(hit?.class, 'unavailable');
-  assert.equal(hit?.ttl, '15m');
+  assert.equal(hit?.ttl, '2m');
 
   const without = [...rules.agents.entries()]
     .find(([, agentRules]) => !agentRules.some((rule) => rule.id === 'kilo-provider-rate-limit'));

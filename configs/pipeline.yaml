@@ -114,17 +114,30 @@ pipeline:
       capabilities: [text]
       description: "Jev (TypeSafe) через OpenRouter — судья тестов скилов и модель ревью по evidence"
 
+    # Резервный текстовый судья; переоценка неуверенных вердиктов основного судьи.
+    glm-4-7-judge:
+      command: "node"
+      args: [".workflow/src/scripts/kilo-judge.js", "--model", "zai/glm-4.7-flash", "--timeout", "240"]
+      workdir: "."
+      prompt_stdin: true
+      escalate_to: sol-judge
+      escalate_below: 0.8
+      cost_per_call: 0.0001
+      tool_less: true
+      capabilities: [text]
+      description: "GLM 4.7 Flash через OpenRouter decisions — основной судья тестов скилов"
+
     # Эскалация судьи (решение владельца 2026-10-06): вместо claude-opus — Sol через
     # kilo. Обёртка kilo-judge: без инструментов, промпт из stdin, ответ — балл и
     # уверенность. Цена не замерялась — preFlight берёт дефолт $0.02/вызов.
     sol-judge:
       command: "node"
-      args: [".workflow/src/scripts/kilo-judge.js", "--model", "openai/gpt-5.6-sol", "--timeout", "240"]
+      args: [".workflow/src/scripts/kilo-judge.js", "--model", "openai/gpt-6.1-sol", "--timeout", "240"]
       workdir: "."
       prompt_stdin: true
       tool_less: true
       capabilities: [text]
-      description: "Sol (gpt-5.6-sol) через kilo — переоценка неуверенных и сбойных вердиктов Jev"
+      description: "Sol (gpt-6.1-sol) через kilo — переоценка неуверенных и сбойных вердиктов Jev"
 
     # Селектор модели стадии (selection.selector, README «Выбор модели стадии») — модель
     # решений Jev через обёртку decisions-select.js в режиме models: промпт из stdin, в нём
@@ -172,18 +185,6 @@ pipeline:
       capabilities: [text, multimodal]
       description: "Claude Haiku без инструментов — оценка пунктов DoD со скриншотами в стадии ревью"
 
-    # multimodal у gpt-агентов — по метаданным kilo: `kilo models --verbose` даёт
-    # capabilities.input.image: true у openai/gpt-5.6-luna, -terra и -sol (2026-09-28). mcp нет:
-    # kilo .mcp.json проекта не читает, в `kilo mcp list` только puppeteer (disabled).
-    # Решение стейкхолдера 2026-09-28 по ручной правке ~/.workflow/configs: перенести в
-    # канон только multimodal.
-    gpt-luna:
-      command: "kilo"
-      args: ["-m", "openai/gpt-5.6-luna", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
-      workdir: "."
-      capabilities: [text, multimodal]
-      description: "Kilo GPT"
-
     # Судья пунктов DoD со скриншотами на kilo-модели: аналог claude-judge.js, но
     # картинки агент открывает сам инструментом чтения (gpt-5.6-luna, multimodal по
     # метаданным kilo). Решение стейкхолдера 2026-10-04: Claude недоступен (аккаунт на
@@ -194,13 +195,43 @@ pipeline:
     # --kilo/KILO_BIN.
     gpt-luna-vision:
       command: "node"
-      args: [".workflow/src/scripts/kilo-judge.js", "--model", "openai/gpt-5.6-luna", "--timeout", "240"]
+      args: [".workflow/src/scripts/kilo-judge.js", "--model", "openai/gpt-6-luna", "--timeout", "240"]
       workdir: "."
       prompt_stdin: true
       tool_less: true
       capabilities: [text, multimodal]
       description: "GPT Luna через kilo — оценка пунктов DoD со скриншотами в стадии ревью"
 
+    gpt-deepseek-vision:
+      command: "node"
+      args: [".workflow/src/scripts/kilo-judge.js", "--model", "deepseek/deepseek-flash", "--timeout", "240"]
+      workdir: "."
+      prompt_stdin: true
+      tool_less: true
+      capabilities: [text, multimodal]
+      description: "deepseek-flash через kilo — оценка пунктов DoD со скриншотами в стадии ревью"
+
+    gpt-glm-vision:
+      command: "node"
+      args: [".workflow/src/scripts/kilo-judge.js", "--model", "zai/glm-4.6v-flash", "--timeout", "240"]
+      workdir: "."
+      prompt_stdin: true
+      tool_less: true
+      capabilities: [text, multimodal]
+      description: "glm через kilo — оценка пунктов DoD со скриншотами в стадии ревью"
+
+    # multimodal у gpt-агентов — по метаданным kilo: `kilo models --verbose` даёт
+    # capabilities.input.image: true у openai/gpt-5.6-luna, -terra и -sol (2026-09-28). mcp нет:
+    # kilo .mcp.json проекта не читает, в `kilo mcp list` только puppeteer (disabled).
+    # Решение стейкхолдера 2026-09-28 по ручной правке ~/.workflow/configs: перенести в
+    # канон только multimodal.
+    gpt-luna:
+      command: "kilo"
+      args: ["-m", "openai/gpt-6-luna", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
+      workdir: "."
+      capabilities: [text, multimodal]
+      description: "Kilo GPT"
+            
     gpt-terra:
       command: "kilo"
       args: ["-m", "openai/gpt-5.6-terra", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
@@ -210,7 +241,7 @@ pipeline:
 
     gpt-sol:
       command: "kilo"
-      args: ["-m", "openai/gpt-5.6-sol", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
+      args: ["-m", "openai/gpt-6.1-sol", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
       workdir: "."
       capabilities: [text, multimodal]
       description: "Kilo GPT"
@@ -242,6 +273,27 @@ pipeline:
       workdir: "."
       capabilities: [text]
       description: "Kilo deepseek"
+
+    glm-flash:
+      command: "kilo"
+      args: ["-m", "zai/glm-5.3-flash", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
+      workdir: "."
+      capabilities: [text]
+      description: "Kilo GLM"
+
+    glm-free:
+      command: "kilo"
+      args: ["-m", "zai/glm-4.7-flash", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
+      workdir: "."
+      capabilities: [text]
+      description: "Kilo GLM"
+
+    glm:
+      command: "kilo"
+      args: ["-m", "zai/glm-5.3", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
+      workdir: "."
+      capabilities: [text]
+      description: "Kilo GLM"
 
     # Роутер kilo — агент target_agents тестов скилов execute-task и deep-research
     # (PLAN-004, решение 4); в списках стадий его нет: там бесплатные модели — пулы ниже.
@@ -285,7 +337,10 @@ pipeline:
           - '^kilo/stealth/space-bunny-alpha$'
           - '^kilo/nvidia/nemotron-3-ultra-550b-a55b:free$'
           - '^kilo/[^/]+/[^/]+:free$'
-        max_per_attempt: 3
+        # Пул из 10-14 моделей с независимыми квотами: лимит участников за попытку
+        # меньше размера пула бросает пул, не перебирая остальных — лимит должен
+        # позволять обойти весь пул.
+        max_per_attempt: 8
 
     free-openrouter:
       command: "kilo"
@@ -298,7 +353,8 @@ pipeline:
         match:
           - '^openrouter/nvidia/nemotron-3-ultra-550b-a55b:free$'
           - '^openrouter/(?!nvidia/nemotron-3\.5-content-safety:free$)[^/]+/[^/]+:free$'
-        max_per_attempt: 3
+        # 2026-10-10: та же логика лимита участников, что и у free-kilo.
+        max_per_attempt: 8
         gate: ["node", ".workflow/src/scripts/free-quota-gate.js", "--url", "https://openrouter.ai/api/v1/key", "--key-file", "~/.workflow/secrets/openrouter.key", "--timeout", "10"]
 
     script-move:
@@ -421,7 +477,7 @@ pipeline:
 
 
   # Дефолтный список агентов для стейджа, если у него не задан свой agents / agents_by_type.
-  default_agents: [claude-sonnet, gpt-luna, gemini-flash-lite, deepseek-flash]
+  default_agents: [glm-free, glm-flash, gpt-luna, gemini-flash-lite, deepseek-flash]
 
   # ===========================================================================
   # Этапы (stages)
@@ -608,7 +664,7 @@ pipeline:
     # -------------------------------------------------------------------------
     decompose-plan:
       description: "Декомпозировать план на тикеты"
-      agents: [claude-sonnet, gpt-luna]
+      agents: [glm-flash, gpt-luna]
       skill: decompose-plan
       instructions: "Декомпозируй план .workflow/$context.plan_file на тикеты. ID тикетов бери ТОЛЬКО из JSON-карты id_ranges_json=$context.id_ranges_json — это стартовые номера по префиксам в формате {\"PREFIX\":N_start,...}, уже выделенные стадией allocate-ticket-ids. Распарси JSON, используй значения как есть. НЕ вызывай get-next-id.js и НЕ изобретай номера самостоятельно. Подробности: гейт нумерации P10G3 в workflows/decompose.md. Если в Context есть atomicity_failures — учти их при декомпозиции: исправь неатомарные тикеты."
       goto:
@@ -884,7 +940,7 @@ pipeline:
           - "change needing mcp/browser checks, or debugging with a known cause"
           - "unknown root cause, several modules, repeat after a failed attempt"
           - "regression after others failed, architecture, ambiguous DoD"
-      agents: [free-kilo, free-openrouter, gpt-luna, gemini-flash-lite, claude-haiku, claude-sonnet, claude-opus, deepseek-flash]
+      agents: [free-kilo, free-openrouter, glm-free, gpt-luna, gemini-flash-lite, glm-flash, gpt-sol, deepseek-flash]
       # instructions типа — содержание работы, а не скил. Скил стадии раннер передаёт агенту в
       # WORKFLOW_RAILS_SKILL: по нему хук ведёт состояние рельс, по его терминалу раннер
       # проверяет финальный ответ, `start` другого скила рельсы отклоняют (src/rails/README.md §5).
@@ -893,13 +949,13 @@ pipeline:
       # прогон PulseProxy 2026-09-27, QA-тикеты — старт manual-testing вместо execute-task.
       agents_by_type:
         coach:
-          agents: [claude-opus, gpt-sol, gemini-flash, deepseek-pro]
+          agents: [gpt-sol, glm, gemini-flash, deepseek-pro]
           instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: правка скилов по описанию и DoD тикета."
         qa:
-          agents: [claude-haiku, gpt-luna, gemini-flash-lite, claude-sonnet, claude-opus]
+          agents: [glm-free, glm-flash, gpt-luna, gemini-flash-lite, gpt-sol]
           instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: по описанию и DoD тикета напиши и реально запусти тесты и проверки: каждый случай тикета — отдельный тест против продукта (модуль, сборка, запущенное приложение в среде из тикета, плана или shared), значения в отчёте — измеренные, расхождение с ожиданием — в «### Найденные дефекты»."
         arch:
-          agents: [claude-opus, gpt-sol]
+          agents: [gpt-sol, glm]
       goto:
         default:
           stage: move-to-review
@@ -915,10 +971,11 @@ pipeline:
         # не может его взять, verify-artifacts фейлится с пустым result, счётчик достигает
         # max → blocked всё равно). Прямой маршрут экономит ~6 пустых итераций на тикет.
         blocked:
-          stage: move-ticket
+          stage: mark-blocked
           params:
             ticket_id: "$context.ticket_id"
-            target: blocked
+            attempts: "$result.attempts"
+            reason: "$result.reason"
         error:
           stage: move-to-review
           params:
@@ -1128,9 +1185,11 @@ pipeline:
     # -------------------------------------------------------------------------
     review-result:
       description: "Оценить прозаические пункты и пункты со скриншотами по собранным evidence"
-      # 2026-10-04: Claude недоступен (аккаунт на холде) — скриншоты оценивает
-      # gpt-luna-vision; claude-haiku-vision возвращается после разблокировки.
-      agents: [jev, gpt-luna-vision]
+      # Порядок судей: основной — Jev; переоценка неуверенных пунктов идёт к
+      # следующему агенту списка; при его error фолбэка к третьему нет (вердикт
+      # остаётся у первого). Все судьи — tool_less: модель видит только evidence,
+      # deepseek-flash с инструментами в этой роли не применим.
+      agents: [jev, glm-4-7-judge, gpt-glm-vision, gpt-deepseek-vision, gpt-luna-vision]
       counter: task_attempts
       model_io:
         prepare: ".workflow/src/skills/review-result/scripts/prepare-review.js"
@@ -1166,7 +1225,7 @@ pipeline:
     # -------------------------------------------------------------------------
     review-result-legacy:
       description: "Проверить результат выполнения на соответствие DoD тикета (тикеты без dod_format: 2, тикет человека с правками вне своей области)"
-      agents: [claude-haiku, gpt-luna, gemini-flash-lite, claude-sonnet]
+      agents: [glm-free, glm-flash, gpt-luna, gemini-flash-lite, gpt-sol]
       skill: review-result
       counter: task_attempts
       goto:
@@ -1280,7 +1339,7 @@ pipeline:
     # -------------------------------------------------------------------------
     create-report:
       description: "Создать итоговый отчёт по выполненным задачам"
-      agents: [gpt-luna, gemini-flash-lite, claude-sonnet, deepseek-flash]
+      agents: [gpt-luna, glm-flash, gemini-flash-lite, deepseek-flash]
       skill: create-report
       counter: create_report_attempts
       # Стадия уровня плана: ключей тикета (ticket_id, task_type, required_capabilities, …)
@@ -1320,7 +1379,7 @@ pipeline:
     # -------------------------------------------------------------------------
     analyze-report:
       description: "Проанализировать отчёт: план выполнен полностью?"
-      agents: [gpt-luna, gemini-flash-lite, claude-sonnet, deepseek-flash]
+      agents: [gpt-luna, glm-flash, deepseek-flash, gemini-flash-lite]
       skill: analyze-report
       counter: analyze_report_attempts
       scope: plan   # см. create-report
@@ -1391,7 +1450,7 @@ pipeline:
     # -------------------------------------------------------------------------
     decompose-gaps:
       description: "Декомпозировать недочёты из отчёта в новые тикеты"
-      agents: [claude-sonnet, gpt-luna, deepseek-flash]
+      agents: [glm-flash, gpt-luna, deepseek-flash]
       skill: decompose-gaps
       # plan_id, которого требует скил (узлы P0R2 и P0Q1), при запуске без --plan — из
       # related_plan отчёта report_id; см. create-report.
