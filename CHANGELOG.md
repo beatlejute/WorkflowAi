@@ -1,3 +1,11 @@
+## [1.26.4] — 2026-10-11
+
+### Fixed
+
+- **Вход отчётов не падает на файле рядом с планом** (`src/lib/report-input.mjs`): файл в `plans/current/` с именем не вида `PLAN-NNN` — например, вынесенный из плана справочник `PLAN-001-reference.md` — больше не считается испорченным планом. HegelCodec: `create-report` падал на нём, счётчик попыток исчерпывался, и прогон завершался «reporting attempts exhausted». Строгость к плану с испорченной шапкой сохранена; регресс — `orchestration-safeguards.test.mjs`.
+- **Правила health для семи kilo-агентов** (`configs/agent-health-rules.yaml`): `gpt-luna`, `gpt-terra`, `gpt-sol`, `gemini-flash`, `glm-flash`, `glm-free` и `glm` наследуют правила `kilo-free`. Раньше у них правил не было вовсе: их stderr не разбирал ни онлайн-скан (агент уходил в retry-цикл до выхода), ни привязка сбоя к правилу (сбой шёл как неопознанный и давал часовой запрет вместо двухминутного). PulseProxy: glm-free молотила 12 минут на «service temporarily overloaded».
+- **Лимит стадии 30 минут → 2 часа** (`configs/pipeline.yaml`, `execution.timeout_per_stage`): декомпозиция плана HegelCodec PLAN-001 (110 задач) не укладывалась в получасовую стадию — агент успел создать 32 тикета и был снят по таймауту. Ключ общий для всех стадий с CLI-агентами.
+
 ## [1.26.3] — 2026-10-11
 
 ### Added / Fixed (2026-10-10/11)
