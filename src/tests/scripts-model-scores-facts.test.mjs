@@ -18,6 +18,15 @@
  *    (`unknown`); хост claude — по цене каталога; цена — прямой записи id: недатированный
  *    платный id с бесплатной новейшей версией (R2) и платный псевдоним с бесплатной целью
  *    — платные;
+ *  - градация: пороги — оценки опорных моделей из аргументов (`--anchor-high`,
+ *    `--anchor-medium`), `high` — не ниже опоры высокого, `medium` — выше опоры среднего,
+ *    `low` — не выше неё; опоры не названы, не оценены или вывернуты — WARN и уровня нет;
+ *    оценка взята у младшей версии семейства — `level_source: older`; поправка из своей
+ *    практики (`--overrides`, имя уровня или своя оценка) бьёт данные, ключ — в любой
+ *    форме (id, без маршрута, без варианта, slug), значение не уровень и не число —
+ *    WARN и уровня нет; файла нет — WARN, уровни по данным; голое имя модели принимается
+ *    при единственном производителе, неоднозначное — WARN и игнор; опора вне каталога
+ *    кэша заказывает загрузку старше часа; в прежнем режиме опоры и поправки не читаются;
  *  - режим и кэш: смесь строк — выход 1; прежний режим — прежний вывод; кэш v1 без
  *    `models` в режиме фактов загружается заново, в прежнем — нет; ключ `models`
  *    переживает чтение прежним режимом; сбой kilo — WARN, выход 0, флаги только по
@@ -64,6 +73,10 @@ const CATALOG = {
     rec('vendor-f/model-max', 'vendor-f/model-max-20260920'),
     rec('vendor-f/model-max-0801', 'vendor-f/model-max-20260801'),
     rec('vendor-z/model-zero', 'vendor-z/model-zero-20260101', { prompt: '0', completion: '0' }),
+    // Имя model-pair: у vendor-p без варианта, у vendor-q только вариант :free — голый ключ
+    // model-pair неоднозначен (вариант не делает производителя другим).
+    rec('vendor-p/model-pair', 'vendor-p/model-pair-20260101'),
+    rec('vendor-q/model-pair:free', 'vendor-q/model-pair:free-20260101'),
   ],
 };
 const bench = (slug, intelligence, coding = null) => ({ model_permaslug: slug, intelligence_index: intelligence, coding_index: coding, agentic_index: null });
@@ -342,6 +355,203 @@ describe('model-scores: режим фактов', () => {
     assert.equal(r.hits, 2);
     assert.equal(r.out.citation, META.citation);
     assert.ok(JSON.parse(readFileSync(cacheFile, 'utf8')).models, 'кэш с models');
+  });
+
+  // Градация: опоры задаются аргументами, поправки — файлом. Помощник тот же, но с
+  // добавочными аргументами команды (--anchor-high, --overrides и прочие).
+  const factsExtra = async (lines, extra = [], options) => {
+    const result = await run([...args(), ...extra], factsInput(lines), options);
+    const out = result.exitCode === 0 ? JSON.parse(result.stdout) : null;
+    const byId = out ? Object.fromEntries(out.models.map((m) => [`${m.id}|${m.host ?? ''}`, m])) : {};
+    return { ...result, out, get: (id, host = null) => byId[`${id}|${host ?? ''}`] };
+  };
+  // Опорами берутся датированные версии: недатированный id разрешается в новейшую
+  // версию семейства (правило R2), и опора «съезжала» бы вместе с фидом.
+  const ANCHORS = ['--anchor-high', 'vendor-b/model-pro-0813', '--anchor-medium', 'vendor-e/m-x-4.5-20251001'];
+
+  it('градация: пороги — оценки опор, уровень по ним; оценка младшей версии — source older', async () => {
+    const r = await factsExtra([
+      ['vendor-a/model-one'], ['vendor-s/model-solo-5'], ['vendor-b/model-pro'], ['vendor-b/model-pro-0501'],
+      ['vendor-e/m-x-4.5-20251001'], ['vendor-d/model-v3-lite'], ['vendor-d/model-v2-lite'], ['vendor-f/model-max'],
+      ['kilo/vendor-k/model-stealth', 'kilo'],
+    ], ANCHORS);
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.deepEqual(r.out.levels, {
+      high: 36, medium: 16.9, anchors: { high: 'vendor-b/model-pro-0813', medium: 'vendor-e/m-x-4.5-20251001' },
+    });
+    const level = (id, host = null) => [r.get(id, host).level, r.get(id, host).level_source];
+    assert.deepEqual(level('vendor-a/model-one'), ['medium', 'feed']);
+    assert.deepEqual(level('vendor-s/model-solo-5'), ['high', 'feed']);
+    assert.deepEqual(level('vendor-b/model-pro'), ['high', 'feed']);
+    assert.deepEqual(level('vendor-b/model-pro-0501'), ['medium', 'feed']);
+    // Ровно на опоре среднего — низ («ниже уровня опоры» — строгое неравенство).
+    assert.deepEqual(level('vendor-e/m-x-4.5-20251001'), ['low', 'feed']);
+    assert.deepEqual(level('vendor-d/model-v3-lite'), ['medium', 'feed']);
+    assert.deepEqual(level('vendor-d/model-v2-lite'), ['low', 'feed']);
+    // Оценки самой версии нет — взята у младшей (правило R4).
+    assert.deepEqual(level('vendor-f/model-max'), ['high', 'older']);
+    assert.deepEqual(level('kilo/vendor-k/model-stealth', 'kilo'), [null, null]);
+  });
+
+  it('градация: опоры не названы, не оценены или вывернуты — уровня нет и WARN', async () => {
+    const none = await factsExtra([['vendor-a/model-one']]);
+    assert.equal(none.exitCode, 0, none.stderr);
+    assert.match(none.stderr, /WARN model-scores: level anchors not scored/);
+    assert.deepEqual([none.out.levels.high, none.out.levels.medium, none.get('vendor-a/model-one').level], [null, null, null]);
+
+    const backward = await factsExtra([['vendor-a/model-one']], ['--anchor-high', 'vendor-e/m-x-4.5', '--anchor-medium', 'vendor-b/model-pro']);
+    assert.equal(backward.exitCode, 0, backward.stderr);
+    assert.match(backward.stderr, /WARN model-scores: level anchors out of order/);
+    assert.equal(backward.get('vendor-a/model-one').level, null);
+
+    const missing = await factsExtra([['vendor-a/model-one']], ['--anchor-high', 'vendor-q/unknown-model', '--anchor-medium', 'vendor-e/m-x-4.5']);
+    assert.match(missing.stderr, /WARN model-scores: level anchors not scored/);
+    assert.equal(missing.get('vendor-a/model-one').level, null);
+  });
+
+  it('градация: поправка своей практики бьёт оценку данных, ключ — в любой форме', async () => {
+    const file = join(root, 'levels.yaml');
+    writeFileSync(file, [
+      'overrides:',
+      '  "vendor-k/model-stealth": high',
+      '  "route-x/vendor-a/model-one:free": 40',
+      '  "vendor-d/model-v2-lite": medium',
+      '  "vendor-q/unknown-model": superb',
+      '',
+    ].join('\n'));
+    const r = await factsExtra([
+      ['kilo/vendor-k/model-stealth', 'kilo'], ['route-x/vendor-a/model-one:free'], ['vendor-a/model-one'],
+      ['vendor-d/model-v2-lite'], ['vendor-q/unknown-model'], ['vendor-d/model-v3-lite'],
+    ], [...ANCHORS, '--overrides', file]);
+    assert.equal(r.exitCode, 0, r.stderr);
+    const level = (id) => [r.get(id).level, r.get(id).level_source];
+    assert.deepEqual([r.get('kilo/vendor-k/model-stealth', 'kilo').level, r.get('kilo/vendor-k/model-stealth', 'kilo').level_source], ['high', 'override']);
+    // Своя оценка 40 ≥ опоры высокого уровня: уровень считается теми же порогами.
+    assert.deepEqual(level('route-x/vendor-a/model-one:free'), ['high', 'override']);
+    assert.deepEqual(level('vendor-a/model-one'), ['medium', 'feed']);
+    assert.deepEqual(level('vendor-d/model-v2-lite'), ['medium', 'override']);
+    assert.deepEqual(level('vendor-q/unknown-model'), [null, null]);
+    assert.match(r.stderr, /WARN model-scores: level override for "vendor-q\/unknown-model" is neither a level/);
+    assert.deepEqual(level('vendor-d/model-v3-lite'), ['medium', 'feed']);
+  });
+
+  it('градация: файла поправок нет — WARN, уровни по данным', async () => {
+    const r = await factsExtra([['vendor-a/model-one']], [...ANCHORS, '--overrides', join(root, 'нет-такого.yaml')]);
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.match(r.stderr, /WARN model-scores: overrides not read \(ENOENT\)/);
+    assert.deepEqual([r.get('vendor-a/model-one').level, r.get('vendor-a/model-one').level_source], ['medium', 'feed']);
+  });
+
+  it('градация: голое имя модели — при одном производителе работает, неоднозначное — WARN и игнор', async () => {
+    const file = join(root, 'bare.yaml');
+    writeFileSync(file, ['overrides:', '  "model-one": high', '  "model-twin": high', ''].join('\n'));
+    const r = await factsExtra([
+      ['vendor-a/model-one'], ['vendor-t/model-twin'], ['vendor-u/model-twin'],
+    ], [...ANCHORS, '--overrides', file]);
+    assert.equal(r.exitCode, 0, r.stderr);
+    // Единственный производитель имени model-one (vendor-a) — голый ключ применяется.
+    assert.deepEqual([r.get('vendor-a/model-one').level, r.get('vendor-a/model-one').level_source], ['high', 'override']);
+    // Два производителя имени model-twin — WARN, поправка не применяется.
+    assert.match(r.stderr, /WARN model-scores: level override key "model-twin" is ambiguous \(vendors vendor-t, vendor-u\) — ignored/);
+    assert.notEqual(r.get('vendor-t/model-twin').level_source, 'override');
+    assert.notEqual(r.get('vendor-u/model-twin').level_source, 'override');
+  });
+
+  it('градация: голый входной id без производителя при двух производителях — WARN и игнор', async () => {
+    const file = join(root, 'bare-input.yaml');
+    writeFileSync(file, ['overrides:', '  "model-twin": high', ''].join('\n'));
+    // Входной id — само голое имя (без производителя): проверка однозначности та же.
+    const r = await factsExtra([['model-twin']], [...ANCHORS, '--overrides', file]);
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.match(r.stderr, /WARN model-scores: level override key "model-twin" is ambiguous \(vendors vendor-t, vendor-u\) — ignored/);
+    assert.notEqual(r.get('model-twin').level_source, 'override');
+  });
+
+  it('градация: вариант :free у второго производителя делает голый ключ неоднозначным', async () => {
+    const file = join(root, 'pair.yaml');
+    writeFileSync(file, ['overrides:', '  "model-pair": high', ''].join('\n'));
+    // Имя model-pair есть у vendor-p (без варианта) и vendor-q (только :free): вариант
+    // снимается при подсчёте производителей — ключ неоднозначен.
+    const r = await factsExtra([['vendor-p/model-pair']], [...ANCHORS, '--overrides', file]);
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.match(r.stderr, /WARN model-scores: level override key "model-pair" is ambiguous \(vendors vendor-p, vendor-q\) — ignored/);
+    assert.notEqual(r.get('vendor-p/model-pair').level_source, 'override');
+  });
+
+  it('градация: недействительные опоры — строковая поправка уровень держит, числовая молчит', async () => {
+    const file = join(root, 'invalid-anchors.yaml');
+    writeFileSync(file, ['overrides:', '  "vendor-d/model-v3-lite": high', '  "vendor-a/model-one": 40', ''].join('\n'));
+    // Равные опоры (high ≤ medium) — пороги не сосчитаны.
+    const r = await factsExtra([['vendor-d/model-v3-lite'], ['vendor-a/model-one']],
+      ['--anchor-high', 'vendor-b/model-pro', '--anchor-medium', 'vendor-b/model-pro', '--overrides', file]);
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.match(r.stderr, /level anchors out of order/);
+    assert.deepEqual(r.out.levels, { high: null, medium: null, anchors: { high: 'vendor-b/model-pro', medium: 'vendor-b/model-pro' } });
+    // Строковая поправка 'high' сохраняет уровень даже без порогов; числовая 40 — нет.
+    assert.deepEqual([r.get('vendor-d/model-v3-lite').level, r.get('vendor-d/model-v3-lite').level_source], ['high', 'override']);
+    assert.deepEqual([r.get('vendor-a/model-one').level, r.get('vendor-a/model-one').level_source], [null, null]);
+  });
+
+  it('обновление кэша: опора вне каталога кэша заказывает загрузку старше часа', async () => {
+    const agedCache = () => ({
+      version: 1,
+      fetched_at: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
+      as_of: 'cached', citation: 'Cached citation', source_url: null,
+      catalog: {
+        'vendor-a/model-one': 'vendor-a/model-one-20260101',
+        'vendor-b/model-pro-0813': 'vendor-b/model-pro-20260813',
+        'vendor-e/m-x-4.5-0301': 'vendor-e/m-4.5-x-20260301',
+      },
+      benchmarks: {
+        'vendor-a/model-one-20260101': { intelligence: 30.5, coding: 60.1, agentic: null },
+        'vendor-b/model-pro-20260813': { intelligence: 36, coding: null, agentic: null },
+        'vendor-e/m-4.5-x-20260301': { intelligence: 20, coding: null, agentic: null },
+      },
+      models: {},
+    });
+    mkdirSync(dirname(cacheFile), { recursive: true });
+
+    // Опоры нет в каталоге кэша — загрузка заказывается (>1 ч), как у ключа кандидата.
+    const seen0 = server.requests.length;
+    writeFileSync(cacheFile, JSON.stringify(agedCache()));
+    const missing = await run([...args(), '--anchor-high', 'vendor-q/missing', '--anchor-medium', 'vendor-e/m-x-4.5-0301'], factsInput([['vendor-a/model-one']]));
+    assert.equal(missing.exitCode, 0, missing.stderr);
+    assert.equal(server.requests.length - seen0, 2, 'опора вне каталога — загрузка');
+
+    // Кандидат и обе опоры в каталоге — загрузки нет (кэш младше 24 ч).
+    const seen1 = server.requests.length;
+    writeFileSync(cacheFile, JSON.stringify(agedCache()));
+    const present = await run([...args(), '--anchor-high', 'vendor-b/model-pro-0813', '--anchor-medium', 'vendor-e/m-x-4.5-0301'], factsInput([['vendor-a/model-one']]));
+    assert.equal(present.exitCode, 0, present.stderr);
+    assert.equal(server.requests.length - seen1, 0, 'опоры и кандидат в каталоге — без загрузки');
+  });
+
+  it('обновление кэша: отсутствовавшая опора после загрузки оценена, пороги сосчитаны', async () => {
+    const aged = {
+      version: 1,
+      fetched_at: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
+      as_of: 'cached', citation: 'Cached citation', source_url: null,
+      catalog: { 'vendor-a/model-one': 'vendor-a/model-one-20260101' },
+      benchmarks: { 'vendor-a/model-one-20260101': { intelligence: 30.5, coding: null, agentic: null } },
+      models: {},
+    };
+    mkdirSync(dirname(cacheFile), { recursive: true });
+    writeFileSync(cacheFile, JSON.stringify(aged));
+    const seen = server.requests.length;
+    const r = await factsExtra([['vendor-a/model-one']], [...ANCHORS]);
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.equal(server.requests.length - seen, 2, 'опоры нет в старом каталоге — загрузка');
+    assert.equal(r.out.as_of, META.as_of, 'ответ по свежему кэшу');
+    assert.deepEqual([r.out.levels.high, r.out.levels.medium], [36, 16.9], 'опоры оценены после загрузки');
+  });
+
+  it('градация: в прежнем режиме опоры и поправки не читаются, вывод прежний', async () => {
+    // Прежний режим ждёт id участника пула: маршрут отбрасывается (memberKey).
+    const r = await run([...args(), ...ANCHORS], 'route-x/vendor-a/model-one\n');
+    assert.equal(r.exitCode, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.deepEqual(Object.keys(out).sort(), ['as_of', 'citation', 'scores']);
+    assert.deepEqual(out.scores['route-x/vendor-a/model-one'], { intelligence: 30.5, coding: 60.1, agentic: null });
   });
 
   it('загрузка не удалась без кэша — WARN, выход 0, флаг kilo остаётся', async () => {

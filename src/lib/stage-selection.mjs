@@ -7,7 +7,11 @@
  *     и шлагбаум пула, запреты, пробованные в попытке, max_per_attempt пула, нижняя
  *     граница); отсеянных не видит и не запускает ни один порядок обхода;
  *  3. никаких данных моделей в коде и конфиге: ни уровней агентов, ни соответствия
- *     агент → оценка, ни порогов — уровни считаются по оценкам из данных;
+ *     агент → оценка, ни порогов — уровни считаются по оценкам из данных. Единственное
+ *     исключение — файл поправок своей практики (`--overrides`, configs/model-levels.yaml):
+ *     это соответствие модель → уровень/оценка, но осознанное (наблюдение владельца, бьёт
+ *     фид), а не данные конфига стадии; почему так — README, «Градация: откуда берутся
+ *     оценки и уровень»;
  *  4. приоритет у бесплатных; бесплатность — по данным поставщика (флаг kilo), затем
  *     по каталогу OpenRouter; неизвестно — платная.
  *
@@ -29,7 +33,8 @@ import { parseFrontmatter } from './utils.mjs';
 import { DOD_HEADING } from './check-runner.mjs';
 import { requestedModel } from './agent-runs.mjs';
 import { railsHost } from './rails-run-state.mjs';
-import { isModelPool, poolMembers, runPoolCommand, selectorTicket, POOL_COMMAND_TIMEOUT_MS } from './model-pools.mjs';
+import { levelRank, LEVELS } from './model-facts.mjs';
+import { isModelPool, poolMembers, runPoolCommand, selectorTicket, parsePlace, POOL_COMMAND_TIMEOUT_MS } from './model-pools.mjs';
 
 /** Градации запусков исполнителя, поднимающие нижнюю границу тикета (решение 4). */
 export const FLOOR_GRADES = Object.freeze(['refused', 'empty', 'artifacts_failed', 'review_failed']);
@@ -41,8 +46,9 @@ export const NOTES_LIMIT = 1000;
 // Сколько строк stderr команды фактов попадает в лог.
 const STDERR_LOG_LINES = 20;
 
-// Факты процесса: config.pipeline → Map<id стадии, {reason, as_of, citation, facts:
-// Map<id\0хост, факт>, candidates: string[]}>. Ключ — объект pipeline, как у POOL_STATE.
+// Факты процесса: config.pipeline → Map<id стадии, {reason, as_of, citation, levels,
+// facts: Map<id\0хост, факт>, candidates: string[]}>. Ключ — объект pipeline, как у
+// POOL_STATE.
 const FACTS_STATE = new WeakMap();
 
 function isPlainObject(value) {
@@ -68,7 +74,9 @@ export function isGoverned(stage, taskType) {
 
 /**
  * Списки агентов стадии под выбором: `stage.agents` (без него — `default_agents`) и
- * списки `agents_by_type`, не отказавшиеся от выбора.
+ * списки `agents_by_type`, не отказавшиеся от выбора. Запись места разбирается
+ * parsePlace (lib/model-pools.mjs): в списке отдаётся базовый id, тег уровня места
+ * (`free-kilo[medium]`) здесь не нужен — порядок обхода его учитывает в раннере.
  */
 export function governedLists(pipeline, stage) {
   if (!isPlainObject(stage?.selection)) return [];
@@ -78,13 +86,15 @@ export function governedLists(pipeline, stage) {
   for (const entry of Object.values(isPlainObject(stage.agents_by_type) ? stage.agents_by_type : {})) {
     if (isPlainObject(entry) && entry.selection !== false && Array.isArray(entry.agents)) lists.push(entry.agents);
   }
-  return lists;
+  return lists.map((list) => list.map((place) => parsePlace(place).id));
 }
 
 /**
  * Кандидаты мест списка: место-пул заменяется своими участниками (`membersOf(id)` —
  * участники, прошедшие фильтры, в порядке маски), пул в списке дважды даёт участников
- * один раз, на первой позиции.
+ * один раз, на первой позиции. Уровень места (тег `place[level]`) вызывающий берёт
+ * отсюда по `placeLevels` с ключом `entry.pool ?? entry.id`: у участника пула — по id
+ * места-пула, у одиночного агента — по своему id.
  * @returns {Array<{id: string, pool: string|null}>} в порядке списка
  */
 export function flattenSurvivors(places, { isPool, membersOf }) {
@@ -157,17 +167,42 @@ export function capFloor(floor, maxLevel) {
 }
 
 /**
- * Порядок обхода выживших над нижней границей (R' = max(R, floor + 1)):
- *   1. бесплатные с уровнем ≥ R' — по возрастанию уровня;
- *   2. платные с уровнем ≥ R' — по возрастанию уровня;
- *   3. хвост floor < уровень < R' — по убыванию уровня, в уровне бесплатные раньше.
- * Внутри уровня — не запускавшиеся на тикете раньше, затем место в ранжире селектора,
- * затем порядок списка. Выход — перестановка выживших с уровнем > floor: отсеянного id
- * в нём нет (правило 2).
- * @param {{survivors: string[], levelOf: (id) => number, freeOf: (id) => boolean, R: number|null,
- *   floor: number, ranking?: string[], notRun?: Set<string>, listIndex?: Map<string, number>}} input
+ * Ступень кандидата в порядке обхода по тегу уровня места (`place[level]`, мягкая
+ * семантика — решение владельца, больше — позже):
+ *   0 — тега нет или уровень подтверждён и не ниже требуемого (порядок прежний);
+ *   1 — уровень неизвестен (нет оценки): свежие модели фида ещё не оценены, в конец их
+ *       не ссылаем, а ставим серединой очереди;
+ *   2 — уровень подтверждён и ниже требуемого (последний резерв).
+ * Дату появления модели в каталоге пока не используем: владелец выбирает между
+ * «середина», «наравне с подтверждёнными» и «середина с сортировкой по дате» — правка
+ * здесь, в одном месте.
+ * @param {string|null} level — подтверждённый уровень кандидата (LEVELS) или null
+ * @param {string|null} minLevel — требуемый уровень места (тег) или null
+ * @returns {0|1|2}
  */
-export function walkOrder({ survivors, levelOf: level, freeOf, R, floor, ranking = [], notRun = null, listIndex = null }) {
+export function levelTierOf(level, minLevel) {
+  if (minLevel === null || minLevel === undefined) return 0;
+  const achieved = levelRank(level);
+  if (achieved === null) return 1;
+  return achieved >= levelRank(minLevel) ? 0 : 2;
+}
+
+/**
+ * Порядок обхода выживших над нижней границей (R' = max(R, floor + 1)):
+ *   0. ступень 0 (тег не ниже уровня или без тега): бесплатные с уровнем ≥ R' по
+ *      возрастанию, платные с уровнем ≥ R' по возрастанию, хвост floor < уровень < R'
+ *      по убыванию уровня (в уровне бесплатные раньше);
+ *   1. ступень 1 (уровень неизвестен) — серединой очереди;
+ *   2. ступень 2 (уровень ниже требуемого) — последним резервом.
+ * Внутри ступени — уровень по убыванию, бесплатные раньше, незапускавшиеся на тикете
+ * раньше, затем ранжир селектора, затем порядок списка. Выход — перестановка выживших с
+ * уровнем > floor: отсеянного id в нём нет (правило 2).
+ * @param {{survivors: string[], levelOf: (id) => number, freeOf: (id) => boolean, R: number|null,
+ *   floor: number, ranking?: string[], notRun?: Set<string>, listIndex?: Map<string, number>,
+ *   tierOf?: (id) => number}} input — tierOf (levelTierOf) задаёт ступень кандидата; без
+ *   него все — ступени 0 (прежнее поведение)
+ */
+export function walkOrder({ survivors, levelOf: level, freeOf, R, floor, ranking = [], notRun = null, listIndex = null, tierOf = null }) {
   const lowest = floor + 1;
   const required = Math.max(Number.isInteger(R) ? R : lowest, lowest);
   const rank = new Map(ranking.map((id, i) => [id, i]));
@@ -175,8 +210,12 @@ export function walkOrder({ survivors, levelOf: level, freeOf, R, floor, ranking
   const key = (id) => {
     const l = level(id);
     const free = freeOf(id) === true;
-    const group = l >= required ? (free ? 0 : 1) : 2;
+    // Ступени 1–2 идут одной группой после всех групп ступени 0: группа 2 — их вид
+    // «хвоста» (уровень по убыванию, бесплатные раньше), без деления на R'.
+    const tier = tierOf ? tierOf(id) : 0;
+    const group = tier === 0 && l >= required ? (free ? 0 : 1) : 2;
     return [
+      tier,
       group,
       group === 2 ? -l : l,
       group === 2 ? Number(!free) : 0,
@@ -291,8 +330,10 @@ export function factKey(id, host) {
 }
 
 /**
- * Разбор stdout команды фактов: один JSON `{as_of, citation, models: [...]}`.
- * @returns {{facts: Map<string, object>, as_of: string|null, citation: string|null} | {reason: string}}
+ * Разбор stdout команды фактов: один JSON `{as_of, citation, levels, models: [...]}`.
+ * У факта — градация `level` (имя из LEVELS или null) и `level_source` (строка или
+ * null); `levels` — пороги ответа (`{high, medium, anchors}`) или null.
+ * @returns {{facts: Map<string, object>, levels: object|null, as_of: string|null, citation: string|null} | {reason: string}}
  */
 export function parseFactsOutput(stdout) {
   let data = null;
@@ -308,6 +349,7 @@ export function parseFactsOutput(stdout) {
     const host = typeof entry.host === 'string' ? entry.host : null;
     const key = factKey(entry.id, host);
     if (facts.has(key)) continue;
+    const level = typeof entry.level === 'string' && LEVELS.includes(entry.level) ? entry.level : null;
     facts.set(key, {
       id: entry.id,
       host,
@@ -317,10 +359,20 @@ export function parseFactsOutput(stdout) {
       agentic: isNumber(entry.agentic) ? entry.agentic : null,
       free: entry.free === true,
       free_source: typeof entry.free_source === 'string' ? entry.free_source : 'unknown',
+      level,
+      level_source: level === null ? null : (typeof entry.level_source === 'string' ? entry.level_source : null),
     });
   }
+  const levels = isPlainObject(data.levels)
+    ? {
+      high: isNumber(data.levels.high) ? data.levels.high : null,
+      medium: isNumber(data.levels.medium) ? data.levels.medium : null,
+      anchors: isPlainObject(data.levels.anchors) ? data.levels.anchors : null,
+    }
+    : null;
   return {
     facts,
+    levels,
     as_of: typeof data.as_of === 'string' ? data.as_of : null,
     citation: typeof data.citation === 'string' ? data.citation : null,
   };
@@ -332,7 +384,10 @@ export function stageCandidates(pipeline, stage) {
   const out = [];
   const seen = new Set();
   for (const list of governedLists(pipeline, stage)) {
-    for (const id of list) {
+    for (const place of list) {
+      // Запись места разбирается parsePlace: тег уровня не должен уводить поиск пула или
+      // агента на несуществующий id `free-kilo[medium]`.
+      const id = parsePlace(place).id;
       const ids = isModelPool(agents[id]) ? poolMembers(agents, id) : [id];
       for (const agentId of ids) {
         if (seen.has(agentId) || !agents[agentId]) continue;
@@ -410,8 +465,8 @@ export async function loadStageFacts(pipeline, {
     }
     for (const { id, candidates } of members) {
       const entry = parsed.reason
-        ? { reason: parsed.reason, as_of: null, citation: null, facts: new Map(), candidates }
-        : { reason: null, as_of: parsed.as_of, citation: parsed.citation, facts: parsed.facts, candidates };
+        ? { reason: parsed.reason, as_of: null, citation: null, levels: null, facts: new Map(), candidates }
+        : { reason: null, as_of: parsed.as_of, citation: parsed.citation, levels: parsed.levels ?? null, facts: parsed.facts, candidates };
       state.set(id, entry);
       logFacts(pipeline, id, entry, logger, stageId);
     }
@@ -435,7 +490,10 @@ function logFacts(pipeline, stage, entry, logger, stageId) {
     if (fact?.free) free += 1;
     const score = isNumber(fact?.intelligence) ? String(fact.intelligence) : 'n/a';
     const how = `${fact?.free ? 'free' : 'paid'}(${fact?.free_source ?? 'unknown'})`;
-    return `${agentId}=${score}/${how}${fact?.resolved ? `~${fact.resolved}` : ''}`;
+    // Уровень и его источник видны здесь: строка LEVELS несёт только места с тегом и
+    // пороги, а источник поправки (`override`) — свойство отдельной модели.
+    const level = fact?.level ? ` level=${fact.level}(${fact.level_source})` : '';
+    return `${agentId}=${score}/${how}${fact?.resolved ? `~${fact.resolved}` : ''}${level}`;
   });
   logger.info(
     `FACTS stage="${stage}" candidates=${total} scored=${scored} free=${free} as_of="${logText(entry.as_of)}" `
@@ -449,16 +507,17 @@ export function hasStageFacts(pipeline, stageId) {
   return Boolean(FACTS_STATE.get(pipeline)?.has(stageId));
 }
 
-/** Состояние фактов стадии: `{reason, as_of, citation}` или null. */
+/** Состояние фактов стадии: `{reason, as_of, citation, levels}` или null. */
 export function stageFactsInfo(pipeline, stageId) {
   const entry = FACTS_STATE.get(pipeline)?.get(stageId);
-  return entry ? { reason: entry.reason, as_of: entry.as_of, citation: entry.citation } : null;
+  return entry ? { reason: entry.reason, as_of: entry.as_of, citation: entry.citation, levels: entry.levels ?? null } : null;
 }
 
 /**
- * Факт агента стадии: `{intelligence, coding, agentic, free, free_source, resolved}` или
- * null — фактов нет (сбой команды, у агента нет id модели, агента нет в конфиге):
- * такой кандидат без оценки; бесплатность раннер берёт тогда по `:free` на конце id.
+ * Факт агента стадии: `{intelligence, coding, agentic, free, free_source, resolved, level,
+ * level_source}` или null — фактов нет (сбой команды, у агента нет id модели, агента нет
+ * в конфиге): такой кандидат без оценки; бесплатность раннер берёт тогда по `:free` на
+ * конце id, а ступень тега — как у неоценённого (levelTierOf).
  */
 export function factsOf(pipeline, stageId, agentId) {
   const entry = FACTS_STATE.get(pipeline)?.get(stageId);

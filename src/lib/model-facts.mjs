@@ -36,6 +36,17 @@
  *  R4 оценка — `intelligence` выбранной версии; нет — следующей по новизне версии
  *     того же семейства, у которой она есть; `resolved` — slug, чья оценка взята.
  *
+ * Градация силы (level): `high` — оценка не ниже опоры высокого уровня (`high`), `medium`
+ * — выше опоры среднего (`medium`), `low` — не выше неё; оценок нет или пороги не
+ * сосчитаны — вычисляемой градации нет (null). Пороги — оценки опорных моделей из тех же
+ * данных (levelThresholds), а не числа в коде или конфиге: обновился фид — поехали
+ * пороги. Поправка из своей практики (levelOverride) бьёт оценку данных: значение — имя
+ * уровня или своя оценка, по которой уровень считается теми же порогами. Строковая
+ * поправка (имя уровня) сохраняет уровень даже при несосчитанных порогах — осознанно:
+ * наблюдение из практики сильнее и фида, и порогов. `level_source` отличает поправку
+ * (`override`) от оценки младшей версии семейства (`older`, правило R4) и от оценки самой
+ * модели (`feed`).
+ *
  * Бесплатность (первое сработавшее правило):
  *  1. хост kilo, kilo знает ровно этот id и его `isFree` — логическое значение:
  *     флаг поставщика решает в обе стороны (`free_source: kilo`);
@@ -54,6 +65,9 @@ const VERSION_TOKEN = /^v?\d+(\.\d+)*$/;
 const SHORT_INT = /^\d{1,3}$/;
 const SLUG_DATE = /-(\d{8})$/;
 const ID_DATE = /-(\d{8}|\d{4})$/;
+
+/** Градация силы модели по оценке — от слабой к сильной (порядок сравнения уровней). */
+export const LEVELS = Object.freeze(['low', 'medium', 'high']);
 
 const isAlias = (id) => id.startsWith('~');
 const isNumber = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -132,7 +146,10 @@ function createdDate(created) {
 
 /**
  * Индекс кэша: записи каталога `{ id, slug, vendor, name, meta, date }` и доступ по id.
- * Строится один раз на вызов команды.
+ * `modelFacts` берёт готовый индекс (`options.index`) или строит свой. В режиме фактов
+ * команда строит индекс дважды: первый — до решения об обновлении кэша (по нему
+ * считаются ключи, среди них опоры градации), второй — после возможной перезагрузки
+ * (прежний смотрит в старый объект кэша); второй делят пороги градации и сами факты.
  */
 export function catalogIndex(cache) {
   const catalog = cache?.catalog && typeof cache.catalog === 'object' ? cache.catalog : {};
@@ -213,11 +230,12 @@ function familyRecord(id, index, warn) {
   return { record: members[0], exact: false };
 }
 
-// R4: оценка slug или следующей по новизне версии семейства с оценкой.
+// R4: оценка slug или следующей по новизне версии семейства с оценкой; `sibling` —
+// оценка взята у другой (младшей) версии семейства, а не у самой модели.
 function scoreOf(record, index) {
   const row = (slug) => (slug && Object.hasOwn(index.benchmarks, slug) ? index.benchmarks[slug] : null);
   const own = row(record.slug);
-  if (own && isNumber(own.intelligence)) return { resolved: record.slug, row: own };
+  if (own && isNumber(own.intelligence)) return { resolved: record.slug, row: own, sibling: false };
   const key = familyKey(record.name, { ignoreVersions: true });
   const older = index.records
     .filter((r) => r.vendor === record.vendor && r.slug && r.slug !== record.slug
@@ -226,14 +244,15 @@ function scoreOf(record, index) {
     .sort(newestFirst);
   for (const candidate of older) {
     const other = row(candidate.slug);
-    if (other && isNumber(other.intelligence)) return { resolved: candidate.slug, row: other };
+    if (other && isNumber(other.intelligence)) return { resolved: candidate.slug, row: other, sibling: true };
   }
-  return { resolved: own ? record.slug : null, row: own };
+  return { resolved: own ? record.slug : null, row: own, sibling: false };
 }
 
 /**
- * Оценка id: { resolved, intelligence, coding, agentic, price } — `price` — запись,
- * чья цена годится для правила 3 (прямая запись или член семейства с датой id), или null.
+ * Оценка id: { resolved, intelligence, coding, agentic, price, sibling } — `price` —
+ * запись, чья цена годится для правила 3 (прямая запись или член семейства с датой id),
+ * или null; `sibling` — оценка взята у другой версии семейства (правило R4).
  */
 export function resolveScore(id, index, warn = null) {
   let chosen = null;
@@ -256,8 +275,8 @@ export function resolveScore(id, index, warn = null) {
       if (family.exact) price = family.record;
     }
   }
-  if (!chosen || !chosen.slug) return { resolved: null, intelligence: null, coding: null, agentic: null, price };
-  const { resolved, row } = scoreOf(chosen, index);
+  if (!chosen || !chosen.slug) return { resolved: null, intelligence: null, coding: null, agentic: null, price, sibling: false };
+  const { resolved, row, sibling } = scoreOf(chosen, index);
   const value = (v) => (isNumber(v) ? v : null);
   return {
     resolved,
@@ -265,7 +284,101 @@ export function resolveScore(id, index, warn = null) {
     coding: value(row?.coding),
     agentic: value(row?.agentic),
     price,
+    sibling,
   };
+}
+
+/** Порядковый номер уровня (`low` → 0, `high` → 2) или null — не уровень. */
+export function levelRank(level) {
+  const index = LEVELS.indexOf(level);
+  return index === -1 ? null : index;
+}
+
+/**
+ * Пороги градации по опорным моделям: `{high, medium}` — оценки опор в тех же данных,
+ * что и оценки кандидатов (resolveScore), или null, если опора не оценена. Опоры — id
+ * моделей, как их называет агент, или slug. Порядок опор проверяется: `high` не выше
+ * `medium` — пороги недействительны (null): иначе градация вывернута. Числа в коде не
+ * живут — пороги едут за данными вместе с оценками опорных моделей.
+ * @param {object} index — catalogIndex(кэш)
+ * @param {{high?: string, medium?: string}} anchors
+ * @returns {{high: number|null, medium: number|null, anchors: {high: string|null, medium: string|null}}}
+ */
+export function levelThresholds(index, anchors = {}, warn = null) {
+  const score = (what) => {
+    if (typeof what !== 'string' || !what) return null;
+    const { intelligence } = resolveScore(what, index);
+    return isNumber(intelligence) ? intelligence : null;
+  };
+  const high = score(anchors.high);
+  const medium = score(anchors.medium);
+  const named = {
+    high: typeof anchors.high === 'string' && anchors.high ? anchors.high : null,
+    medium: typeof anchors.medium === 'string' && anchors.medium ? anchors.medium : null,
+  };
+  if (high === null || medium === null) {
+    warn?.(`level anchors not scored (high=${named.high ?? '-'} → ${high}, medium=${named.medium ?? '-'} → ${medium}) — levels not computed`);
+    return { high: null, medium: null, anchors: named };
+  }
+  if (high <= medium) {
+    warn?.(`level anchors out of order (high=${named.high} ${high} ≤ medium=${named.medium} ${medium}) — levels not computed`);
+    return { high: null, medium: null, anchors: named };
+  }
+  return { high, medium, anchors: named };
+}
+
+/**
+ * Уровень оценки: `high` — не ниже опоры высокого уровня, `medium` — выше опоры среднего,
+ * `low` — не выше неё. Оценки нет или пороги не сосчитаны — null (уровень неизвестен).
+ */
+export function levelOfScore(score, thresholds) {
+  if (!isNumber(score) || !thresholds || !isNumber(thresholds.high) || !isNumber(thresholds.medium)) return null;
+  if (score >= thresholds.high) return 'high';
+  if (score > thresholds.medium) return 'medium';
+  return 'low';
+}
+
+/**
+ * Поправка из своей практики для id: ключи поправок сверяются с id, id без маршрута,
+ * именем модели (`short`), оценённым slug (`resolved`) и голым именем без производителя
+ * (`base`); первое совпадение выигрывает. Группа ключей без производителя (нет `/` —
+ * голое имя и как ключ, и как входной id) применяется, только если в каталоге не больше
+ * одного производителя с этим именем без варианта; производителей больше — WARN и
+ * поправка не применяется (молчаливое применение сразу ко всем недопустимо). Значение —
+ * число (своя оценка: уровень по порогам) или имя уровня. Нет поправки — null.
+ */
+export function levelOverride(id, resolved, overrides, index = null, warn = null) {
+  if (!overrides || typeof overrides !== 'object') return null;
+  const parts = splitModelId(id);
+  const short = parts.vendor ? `${parts.vendor}/${parts.base}` : parts.base;
+  // Ключ поправки — в любой из привычных форм: полный id, он же без маршрута, имя модели
+  // или slug оценки; вариант (`:free`) и маршрут можно не писать.
+  const keys = [];
+  for (const raw of [id, parts.withoutRoute, short, resolved, parts.base]) {
+    if (typeof raw !== 'string' || !raw) continue;
+    for (const form of [raw, raw.replace(/:[^:/]+$/, '')]) {
+      if (form && !keys.includes(form)) keys.push(form);
+    }
+  }
+  // Производители имени без варианта: голый ключ (нет '/') берётся, только если он один.
+  const vendorsOf = (name) => [...new Set((index?.records ?? [])
+    .filter((r) => splitModelId(r.id).base === name)
+    .map((r) => r.vendor))];
+  for (const key of keys) {
+    if (!Object.hasOwn(overrides, key)) continue;
+    if (!key.includes('/')) {
+      const vendors = vendorsOf(splitModelId(key).base);
+      if (vendors.length > 1) {
+        warn?.(`level override key "${key}" is ambiguous (vendors ${vendors.join(', ')}) — ignored`);
+        continue;
+      }
+    }
+    const value = overrides[key];
+    if (typeof value === 'string' && levelRank(value) !== null) return { level: value, score: null, key };
+    if (isNumber(value)) return { level: null, score: value, key };
+    return { invalid: true, key };
+  }
+  return null;
 }
 
 const priceNumber = (value) => {
@@ -292,18 +405,40 @@ export function freeOf({ id, host }, kilo, price) {
 
 /**
  * Факты строк входа команды: по одной записи на пару id + хост, в порядке входа.
+ * Градация (`level`) — по порогам `thresholds` (levelThresholds): поправка из своей
+ * практики (`overrides`) бьёт оценку данных; без оценки и без поправки уровень null.
+ * `level_source`: `override` — поправка, `older` — оценка младшей версии семейства
+ * (правило R4), `feed` — оценка самой модели, null — уровня нет.
  * @param {Array<{id: string, host: string|null}>} lines
+ * @param {object} cache — кэш команды оценок
+ * @param {Map<string, object>|null} kilo — объекты моделей `kilo models --verbose`
+ * @param {{thresholds?: object|null, overrides?: object|null, index?: object|null}} options —
+ *   index — готовый индекс каталога (catalogIndex кэша): не задан — строится сам, задан —
+ *   переиспользуется (в режиме фактов команды индекс считается один раз)
  */
-export function modelFacts(lines, cache, kilo = null, warn = null) {
-  const index = catalogIndex(cache);
+export function modelFacts(lines, cache, kilo = null, warn = null, { thresholds = null, overrides = null, index = null } = {}) {
+  const catalog = index ?? catalogIndex(cache);
   const seen = new Set();
   const out = [];
   for (const line of lines) {
     const key = `${line.id}\u0000${line.host ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const { price, ...score } = resolveScore(line.id, index, warn);
-    out.push({ id: line.id, host: line.host ?? null, ...score, ...freeOf(line, kilo, price) });
+    const { price, sibling, ...score } = resolveScore(line.id, catalog, warn);
+    const override = levelOverride(line.id, score.resolved, overrides, catalog, warn);
+    if (override?.invalid) {
+      warn?.(`level override for "${override.key}" is neither a level (${LEVELS.join('/')}) nor a number — ignored`);
+    }
+    const known = override && !override.invalid ? override : null;
+    const level = known?.level ?? levelOfScore(known?.score ?? score.intelligence, thresholds);
+    out.push({
+      id: line.id,
+      host: line.host ?? null,
+      ...score,
+      ...freeOf(line, kilo, price),
+      level: level ?? null,
+      level_source: level === null ? null : (known ? 'override' : (sibling ? 'older' : 'feed')),
+    });
   }
   return out;
 }

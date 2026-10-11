@@ -10,6 +10,8 @@
  *  - scores обязателен — непустой массив непустых строк; levels — 2..10 непустых строк;
  *  - escalate_on — подмножество [blocked] без повторов;
  *  - agents_by_type.<тип>.selection — только false и только у стадии с selection;
+ *  - тег минимального уровня места (`place[level]`) — только на стадии с selection,
+ *    имя уровня из LEVELS, базовый id места — агент pipeline.agents;
  *  - селектор или оценки пула, все списки которого под выбором, — мёртвый конфиг;
  *    пул, стоящий и в списке без выбора (или у типа с selection: false), — нет;
  *  - поставляемый configs/pipeline.yaml проходит проверку; у execute-task есть
@@ -165,5 +167,89 @@ describe('поставляемый configs/pipeline.yaml', () => {
         assert.ok(!Object.hasOwn(agent, key), `агент ${id}: поле ${key} (правило 3 — без данных моделей в конфиге)`);
       }
     }
+  });
+});
+
+describe('validateConfig: тег минимального уровня места', () => {
+  const tagged = (list) => config({ stage: { agents: list } });
+
+  it('валидный тег на стадии с selection — без ошибок', () => {
+    assert.deepEqual(validateConfig(tagged(['pool-x[medium]', 'agent-a[low]'])), []);
+  });
+
+  it('неизвестное имя уровня — ошибка', () => {
+    const errors = validateConfig(tagged(['agent-a[superb]']));
+    assert.ok(
+      errors.some((e) => /has invalid agent place "agent-a\[superb\]" in agents: expected "id" or "id\[level\]"/.test(e)),
+      errors.join('\n'),
+    );
+  });
+
+  it('повреждённый синтаксис скобок — ошибка', () => {
+    for (const place of ['agent-a[medium', 'agent-a]', 'agent-a[medium]garbage[']) {
+      const errors = validateConfig(tagged([place]));
+      assert.ok(errors.some((e) => e.includes(`has invalid agent place "${place}"`)), `${place}: ${errors.join('; ')}`);
+    }
+  });
+
+  it('тег у места, которого нет в pipeline.agents, — ошибка (сравнение по базовому id)', () => {
+    const errors = validateConfig(tagged(['ghost-a[medium]']));
+    assert.ok(
+      errors.some((e) => /tags place "ghost-a\[medium\]" in agents, but agent "ghost-a" is not in pipeline\.agents/.test(e)),
+      errors.join('\n'),
+    );
+  });
+
+  it('тег на стадии без selection — ошибка: уровень работает только с выбором модели', () => {
+    const errors = validateConfig(config({ stage: { selection: undefined, agents: ['agent-a[medium]'] } }));
+    assert.ok(errors.some((e) => /has no model selection/.test(e)), errors.join('\n'));
+  });
+
+  it('тег в списке типа с selection: false — ошибка', () => {
+    const errors = validateConfig(config({ stage: { agents_by_type: { qa: { agents: ['agent-a[medium]'], selection: false } } } }));
+    assert.ok(
+      errors.some((e) => /agents_by_type\.qa\.agents, but the stage has no model selection/.test(e)),
+      errors.join('\n'),
+    );
+  });
+
+  it('тег не скрывает HTTP-агента без model_io', () => {
+    const errors = validateConfig(config({ stage: { agents: ['http-a[medium]'] } }));
+    assert.ok(
+      errors.some((e) => /assigns tool-less agent "http-a\[medium\]" \(kind: http\) in agents, but has no model_io/.test(e)),
+      errors.join('\n'),
+    );
+  });
+
+  it('тег в default_agents не запрещается встроенной стадией (update-counter)', () => {
+    const cfg = config({ stage: { agents: ['pool-x', 'agent-a', 'agent-b'] } });
+    cfg.pipeline.default_agents = ['agent-a[medium]'];
+    cfg.pipeline.stages.cnt = { type: 'update-counter', counter: 'task_attempts', goto: { default: 'execute-task' } };
+    assert.deepEqual(validateConfig(cfg), []);
+  });
+
+  it('тег в default_agents не запрещается обеими встроенными стадиями (update-counter и manual-gate)', () => {
+    const cfg = config({ stage: { agents: ['pool-x', 'agent-a', 'agent-b'] } });
+    cfg.pipeline.default_agents = ['agent-a[medium]'];
+    cfg.pipeline.stages.cnt = { type: 'update-counter', counter: 'task_attempts', goto: { default: 'gate' } };
+    cfg.pipeline.stages.gate = { type: 'manual-gate', goto: { approved: 'execute-task', rejected: 'execute-task' } };
+    assert.deepEqual(validateConfig(cfg), []);
+  });
+
+  it('повтор места с разным тегом — ошибка', () => {
+    const errors = validateConfig(tagged(['pool-x[medium]', 'agent-a', 'pool-x[high]']));
+    assert.ok(
+      errors.some((e) => /has place "pool-x" repeated in agents with a different level tag \(first "medium", then "high"\)/.test(e)),
+      errors.join('\n'),
+    );
+  });
+
+  it('тег не скрывает мёртвый models.selector/models.scores пула', () => {
+    const deadPool = { 'pool-x': { command: 'kilo', args: ['-m', '{model}', 'run'], models: { list: ['x'], match: ['.'], selector: 'sel-a', scores: ['node', 's.js'] } } };
+    const errors = validateConfig(config({ agents: deadPool, stage: { agents: ['pool-x[medium]', 'agent-a'] } }));
+    assert.ok(
+      errors.some((e) => /Agent "pool-x" has models\.selector\/models\.scores that is never called/.test(e)),
+      errors.join('\n'),
+    );
   });
 });

@@ -10,6 +10,7 @@
  *
  *   node model-scores.js --benchmarks-url <url> --models-url <url> --key-file <путь>
  *     [--cache <путь>] [--timeout <с>]
+ *     [--anchor-high <модель>] [--anchor-medium <модель>] [--overrides <путь>]
  *
  * Адреса — только из аргументов. Источник по поставляемому конфигу — оценки
  * `benchmarks` (intelligence/coding/agentic) и каталог моделей: оба GET с ключом
@@ -44,10 +45,26 @@
  * одна — прежний режим выше (его вывод не менялся), смесь — `bad input`, выход 1.
  * Строка входа — `{"id": "<id модели, как её вызывает агент>", "host": "kilo"|"claude"|null}`.
  * Вывод — один JSON:
- *   {"as_of", "citation", "models": [{"id", "host", "resolved": "<slug оценки>"|null,
+ *   {"as_of", "citation",
+ *    "levels": {"high": <оценка опоры>|null, "medium": ..., "anchors": {"high", "medium"}},
+ *    "models": [{"id", "host", "resolved": "<slug оценки>"|null,
  *     "intelligence", "coding", "agentic", "free": <bool>,
- *     "free_source": "kilo"|"openrouter_id"|"openrouter_price"|"unknown"}]}
- * Правила оценки и бесплатности — lib/model-facts.mjs. Флаг `isFree` kilo читается
+ *     "free_source": "kilo"|"openrouter_id"|"openrouter_price"|"unknown",
+ *     "level": "low"|"medium"|"high"|null,
+ *     "level_source": "override"|"older"|"feed"|null}]}
+ * Правила оценки и бесплатности — lib/model-facts.mjs.
+ *
+ * Градация (режим фактов): пороги — оценки опорных моделей `--anchor-high` и
+ * `--anchor-medium` из тех же данных (уровень `high` — не ниже опоры высокого уровня,
+ * `medium` — выше опоры среднего, `low` — не выше неё); опоры не названы, не оценены
+ * или стоят в обратном порядке — WARN и вычисляемой градации нет (`level: null` у
+ * моделей без поправки, строковая поправка уровень сохраняет — осознанно). Опора, которой
+ * нет в каталоге кэша, заказывает загрузку наравне с ключом кандидата. Поправки из своей
+ * практики — `--overrides` (YAML-карта «модель → имя уровня или своя оценка»), они бьют
+ * оценку данных; `level_source` говорит, откуда уровень: `override` — поправка,
+ * `older` — оценка младшей версии семейства (правило R4), `feed` — оценка самой модели.
+ * В прежнем режиме (список id для промпта селектора пула) ни опоры, ни поправки не
+ * читаются, и его вывод не менялся. Флаг `isFree` kilo читается
  * `kilo models --verbose` (lib/kilo-catalog.mjs), только если во входе есть хост kilo,
  * параллельно с GET каталога: худший случай — max(18 с kilo, 2 × 20 с GET) в пределах
  * 60 с раннера; своего кэша у kilo нет — флаг должен быть свежим. Сбой kilo — WARN,
@@ -63,12 +80,14 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { getJson, resolveModelKey, redactNetworkDetail } from '../lib/model-client.mjs';
 import { replaceFileAtomicSync } from '../lib/utils.mjs';
 import { getGlobalDir } from '../global-dir.mjs';
 import { runKiloVerbose, parseVerbose } from '../lib/kilo-catalog.mjs';
-import { modelFacts, directRecord, catalogIndex } from '../lib/model-facts.mjs';
+import { modelFacts, directRecord, catalogIndex, levelThresholds } from '../lib/model-facts.mjs';
+import YAML from '../lib/js-yaml.mjs';
 
 const CACHE_VERSION = 1;
 const DEFAULT_TIMEOUT_S = 20;
@@ -95,6 +114,9 @@ function parseArgs(argv) {
     else if (arg === '--models-url') opts.modelsUrl = take();
     else if (arg === '--key-file') opts.keyFile = take();
     else if (arg === '--cache') opts.cache = take();
+    else if (arg === '--overrides') opts.overrides = take();
+    else if (arg === '--anchor-high') opts.anchorHigh = take();
+    else if (arg === '--anchor-medium') opts.anchorMedium = take();
     else if (arg === '--timeout') opts.timeout = Number(take());
     else throw new ScoresError(`unknown argument: ${arg}`);
   }
@@ -144,6 +166,36 @@ function readInput() {
     return { id: value.id, host: value.host ?? null };
   });
   return { mode: 'facts', lines: facts };
+}
+
+/**
+ * Поправки уровней из своей практики: YAML `{overrides: {"<модель>": <число|уровень>}}`
+ * или та же карта без обёртки. Файла нет, он не читается, не разбирается или в нём не
+ * карта — WARN и null (уровни считаются без поправок). `~` в начале — домашний каталог.
+ */
+function readOverrides(file, warn) {
+  if (!file) return null;
+  const target = file.startsWith('~') ? path.join(os.homedir(), file.slice(1)) : file;
+  let text;
+  try {
+    text = fs.readFileSync(target, 'utf-8');
+  } catch (err) {
+    warn(`overrides not read (${err.code || err.message}): ${file}`);
+    return null;
+  }
+  let data = null;
+  try {
+    data = YAML.load(text);
+  } catch (err) {
+    warn(`overrides not parsed: ${String(err.message).replace(/\s+/g, ' ')}`);
+    return null;
+  }
+  const map = data && typeof data === 'object' ? (data.overrides ?? data) : null;
+  if (!map || typeof map !== 'object' || Array.isArray(map)) {
+    warn(`overrides file has no map of models: ${file}`);
+    return null;
+  }
+  return map;
 }
 
 /** Кэш версии CACHE_VERSION с датой загрузки; иначе null (правило 1). */
@@ -262,9 +314,14 @@ async function facts(opts, lines) {
   const now = Date.now();
   let cache = readCache(opts.cache);
   // Ключ «не из каталога» — id без прямой записи (правило R1): такой id обновляет кэш
-  // старше часа, как ключ участника в прежнем режиме.
-  const index = cache ? catalogIndex(cache) : null;
-  const keys = lines.map((line) => (index ? directRecord(line.id, index)?.id : null) ?? line.id);
+  // старше часа, как ключ участника в прежнем режиме. Опоры градации входят в набор
+  // ключей: новая опора, которой нет в каталоге кэша, заказывает загрузку — иначе
+  // градация молчала бы до общего TTL 24 ч.
+  const preIndex = cache ? catalogIndex(cache) : null;
+  const keys = lines.map((line) => (preIndex ? directRecord(line.id, preIndex)?.id : null) ?? line.id);
+  for (const anchor of [opts.anchorHigh, opts.anchorMedium]) {
+    if (typeof anchor === 'string' && anchor) keys.push(preIndex ? directRecord(anchor, preIndex)?.id ?? anchor : anchor);
+  }
   const stale = !cache || typeof cache.models !== 'object' || cache.models === null;
   if (stale || needsRefresh(cache, keys, now)) {
     try {
@@ -280,8 +337,17 @@ async function facts(opts, lines) {
       }
     }
   }
-  const models = modelFacts(lines, cache, await kilo, warn);
-  return { as_of: cache.as_of ?? null, citation: cache.citation ?? null, models };
+  // Индекс — после возможной перезагрузки (fetchCache): прежний preIndex смотрит в старый
+  // объект. Один индекс на пороги и на факты — modelFacts переиспользует его.
+  const index = catalogIndex(cache);
+  const thresholds = levelThresholds(index, { high: opts.anchorHigh, medium: opts.anchorMedium }, warn);
+  const models = modelFacts(lines, cache, await kilo, warn, { thresholds, overrides: readOverrides(opts.overrides, warn), index });
+  return {
+    as_of: cache.as_of ?? null,
+    citation: cache.citation ?? null,
+    levels: { high: thresholds.high, medium: thresholds.medium, anchors: thresholds.anchors },
+    models,
+  };
 }
 
 async function main() {

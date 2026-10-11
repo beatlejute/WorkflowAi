@@ -101,7 +101,8 @@ process.stdin.on('end', () => {
     const f = facts[l.id] || {};
     return { id: l.id, host: l.host, resolved: f.intelligence == null ? null : l.id + '-20260101',
       intelligence: f.intelligence ?? null, coding: null, agentic: null, free: f.free === true,
-      free_source: f.free === true ? 'kilo' : 'unknown' };
+      free_source: f.free === true ? 'kilo' : 'unknown',
+      level: f.level ?? null, level_source: f.level == null ? null : 'feed' };
   });
   process.stdout.write(JSON.stringify({ as_of: '2026-09-01T00:00:00Z', citation: 'Source: test bench', models }) + '\\n');
 });
@@ -688,6 +689,17 @@ describe('факты', () => {
         + `agent-b=30/paid(unknown)~${B}-20260101, agent-c=50/paid(unknown)~${C}-20260101]`,
     ]);
   });
+
+  test('строка FACTS показывает уровень и его источник у кандидата', async () => {
+    const env = makeEnv();
+    setFacts(env, { [A]: { intelligence: 10, level: 'high' }, [B]: { intelligence: 30 } });
+    const { logger, attempt } = await prepare(env, agentsOf(env));
+    await attempt(stageOf(env, { agents: ['agent-a', 'agent-b'] }));
+    const facts = lines(logger, 'FACTS');
+    assert.equal(facts.length, 1);
+    assert.ok(facts[0].includes(`agent-a=10/paid(unknown)~${A}-20260101 level=high(feed)`), facts[0]);
+    assert.ok(facts[0].includes(`agent-b=30/paid(unknown)~${B}-20260101]`), 'без уровня суффикса нет');
+  });
 });
 
 describe('журнал и строки лога', () => {
@@ -853,5 +865,175 @@ describe('сбой селектора — один повтор, затем ст
     assert.equal(r.calls, 0);
     assert.match(r.select[0], / fallback=skipped:unhealthy /);
     assert.deepEqual(r.runs, FROM_TOP);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Тег минимального уровня места (мягкая ступень очереди; решение владельца)
+// ---------------------------------------------------------------------------
+
+describe('тег минимального уровня места', () => {
+  test('кандидат ниже уровня — последним, но стадия его берёт (не no_capable_agent)', async () => {
+    const env = makeEnv();
+    // A low (ступень 2), B high (ступень 0). Список — A первым, тег [high] у обоих мест.
+    setFacts(env, { [A]: { intelligence: 10, level: 'low' }, [B]: { intelligence: 50, level: 'high' } });
+    setMode(env, { kind: 'answer', level: 1 });
+    setBehaviors(env, { [B]: 'fail', [A]: 'ok' });
+    const { logger, attempt } = await prepare(env, agentsOf(env));
+    const { runs, result } = await attempt(stageOf(env, { agents: ['agent-a[high]', 'agent-b[high]'] }));
+    assert.deepEqual(runs, ['agent-b', 'agent-a'], 'сначала ступень 0 (agent-b), затем ступень 2 (agent-a)');
+    assert.equal(result.status, 'passed');
+    assert.deepEqual(lines(logger, 'LEVELS'), [
+      'INFO LEVELS stage="execute-task" places=["agent-a[high]","agent-b[high]"] above=1 tiers=0:1,1:0,2:1 high=n/a medium=n/a as_of="2026-09-01T00:00:00Z"',
+    ]);
+  });
+
+  test('неоценённый — середина очереди, ниже уровня — последний', async () => {
+    const env = makeEnv();
+    // C high (0), B без оценки (1, середина), A low (2).
+    setFacts(env, { [A]: { intelligence: 10, level: 'low' }, [C]: { intelligence: 50, level: 'high' } });
+    setMode(env, { kind: 'answer', level: 1 });
+    setBehaviors(env, { [C]: 'fail', [B]: 'fail', [A]: 'ok' });
+    const { logger, attempt } = await prepare(env, agentsOf(env));
+    const { runs, result } = await attempt(stageOf(env, { agents: ['agent-a[high]', 'agent-b[high]', 'agent-c[high]'] }));
+    assert.deepEqual(runs, ['agent-c', 'agent-b', 'agent-a'], 'ступень 0 → ступень 1 → ступень 2');
+    assert.equal(result.status, 'passed');
+    assert.match(lines(logger, 'LEVELS')[0], / above=1 tiers=0:1,1:1,2:1 /);
+  });
+
+  test('все кандидаты ниже уровня — оба последний резерв, порядок по уровню убывания', async () => {
+    const env = makeEnv();
+    setFacts(env, { [A]: { intelligence: 10, level: 'low' }, [B]: { intelligence: 30, level: 'low' } });
+    setMode(env, { kind: 'answer', level: 1 });
+    setBehaviors(env, { [B]: 'fail', [A]: 'ok' });
+    const { logger, attempt } = await prepare(env, agentsOf(env));
+    const { runs, result } = await attempt(stageOf(env, { agents: ['agent-a[high]', 'agent-b[high]'] }));
+    assert.deepEqual(runs, ['agent-b', 'agent-a'], 'ступень 2: сильнейший раньше');
+    assert.equal(result.status, 'passed');
+    assert.match(lines(logger, 'LEVELS')[0], / above=0 tiers=0:0,1:0,2:2 /);
+  });
+
+  test('тег [low] с кандидатами не ниже уровня ничего не меняет', async () => {
+    const facts = { [A]: { intelligence: 10, level: 'low' }, [B]: { intelligence: 30, level: 'medium' }, [C]: { intelligence: 50, level: 'high' } };
+    const plainEnv = makeEnv();
+    setFacts(plainEnv, facts);
+    setMode(plainEnv, { kind: 'answer', level: 1 });
+    const plain = await (await prepare(plainEnv, agentsOf(plainEnv))).attempt(stageOf(plainEnv, { agents: ['agent-a', 'agent-b', 'agent-c'] }));
+    const tagEnv = makeEnv();
+    setFacts(tagEnv, facts);
+    setMode(tagEnv, { kind: 'answer', level: 1 });
+    const tagged = await (await prepare(tagEnv, agentsOf(tagEnv))).attempt(stageOf(tagEnv, { agents: ['agent-a[low]', 'agent-b[low]', 'agent-c[low]'] }));
+    assert.deepEqual(plain.runs, ['agent-a', 'agent-b', 'agent-c']);
+    assert.deepEqual(tagged.runs, plain.runs);
+  });
+
+  test('факты запрашиваются по базовому id — место с тегом не теряет кандидатов', async () => {
+    const env = makeEnv();
+    setFacts(env, { [A]: { intelligence: 30, level: 'high' } });
+    setBehaviors(env, { [A]: 'ok' });
+    const { attempt } = await prepare(env, agentsOf(env));
+    const { runs, result } = await attempt(stageOf(env, { agents: ['agent-a[medium]'] }));
+    assert.deepEqual(runs, ['agent-a']);
+    assert.equal(result.status, 'passed');
+    assert.deepEqual(readJsonLines(env.factsLog)[0], [{ id: A, host: null }], 'базовый id места ушёл в команду фактов');
+  });
+
+  test('неизвестный/повреждённый тег — WARN и тег как отсутствующий', async () => {
+    const env = makeEnv();
+    setBehaviors(env, { [A]: 'ok' });
+    const { logger, attempt } = await prepare(env, agentsOf(env));
+    const { runs } = await attempt(stageOf(env, { agents: ['agent-a[superb]'] }));
+    assert.deepEqual(runs, ['agent-a']);
+    assert.ok(logger.lines.some((l) => /^WARN stage "execute-task": invalid place tag\(s\) agent-a\[superb\] — tag ignored$/.test(l)), logger.lines.join('\n'));
+    assert.deepEqual(lines(logger, 'LEVELS'), [], 'без валидного тега строки LEVELS нет');
+
+    const broken = makeEnv();
+    setBehaviors(broken, { [A]: 'ok' });
+    const second = await prepare(broken, agentsOf(broken));
+    const { runs: brokenRuns } = await second.attempt(stageOf(broken, { agents: ['agent-a[medium'] }));
+    assert.deepEqual(brokenRuns, ['agent-a']);
+    assert.ok(second.logger.lines.some((l) => /invalid place tag\(s\) agent-a\[medium — tag ignored/.test(l)), second.logger.lines.join('\n'));
+  });
+
+  test('без оценок, но с уровнями поправок: место ступени 0 выбирается раньше ступени 2', async () => {
+    const env = makeEnv();
+    // Уровни есть (поправки), intelligence нет — безоценочная ветка; A low (2), B high (0).
+    setFacts(env, { [A]: { level: 'low' }, [B]: { level: 'high' } });
+    setBehaviors(env, { [B]: 'ok' });
+    const { logger, attempt } = await prepare(env, agentsOf(env));
+    const { runs, result } = await attempt(stageOf(env, { agents: ['agent-a[high]', 'agent-b[high]'] }));
+    assert.deepEqual(runs, ['agent-b'], 'первым — кандидат ступени 0 (agent-b), а не ступени 2 (agent-a)');
+    assert.equal(result.status, 'passed');
+    assert.match(lines(logger, 'SELECT_MODEL')[0], / fallback=skipped:no_scores /);
+    assert.match(lines(logger, 'LEVELS')[0], / places=\["agent-a\[high\]","agent-b\[high\]"\] above=1 tiers=0:1,1:0,2:1 /);
+  });
+
+  test('без оценок: участники места-пула тоже по ступени', async () => {
+    const env = makeEnv();
+    // Уровни только у участников пула, intelligence нет: M1 low (ступень 2), M2 high (0).
+    setFacts(env, { [M1]: { level: 'low' }, [M2]: { level: 'high' } });
+    setBehaviors(env, { [M2]: 'ok' });
+    const { attempt } = await prepare(env, agentsOf(env));
+    const { runs, result } = await attempt(stageOf(env, { agents: ['pool-x[high]'] }));
+    assert.deepEqual(runs, [mem(M2)], 'первым участник ступени 0 (M2), а не ступени 2 (M1)');
+    assert.equal(result.status, 'passed');
+  });
+
+  test('без оценок ступень держится на любой попытке; без тегов — прежний курсор', async () => {
+    // Регресс: без тегов попытки 1–3 идут a, b, c (прежний курсор по местам).
+    const plain = makeEnv();
+    setBehaviors(plain, Object.fromEntries([A, B, C].map((m) => [m, 'ok'])));
+    const plainPrepared = await prepare(plain, agentsOf(plain));
+    const plainFirsts = [];
+    for (const done of [0, 1, 2]) {
+      const { runs } = await plainPrepared.attempt(
+        stageOf(plain, { facts: 'fail', agents: ['agent-a', 'agent-b', 'agent-c'] }),
+        { counters: { task_attempts: done } },
+      );
+      plainFirsts.push(runs[0]);
+    }
+    assert.deepEqual(plainFirsts, ['agent-a', 'agent-b', 'agent-c']);
+
+    // С тегами и ручными уровнями: b, c — ступень 0, a — ступень 2; курсор вращается
+    // внутри ступени 0, слабый a не выбирается ни на одной попытке.
+    const env = makeEnv();
+    setFacts(env, { [A]: { level: 'low' }, [B]: { level: 'high' }, [C]: { level: 'high' } });
+    setBehaviors(env, Object.fromEntries([A, B, C].map((m) => [m, 'ok'])));
+    const prepared = await prepare(env, agentsOf(env));
+    const firsts = [];
+    for (const done of [0, 1, 2]) {
+      const { runs } = await prepared.attempt(
+        stageOf(env, { agents: ['agent-a[high]', 'agent-b[high]', 'agent-c[high]'] }),
+        { counters: { task_attempts: done } },
+      );
+      firsts.push(runs[0]);
+    }
+    assert.deepEqual(firsts, ['agent-b', 'agent-c', 'agent-b'], 'ступень 0 держится: agent-a (ступень 2) не выбирается');
+  });
+
+  test('без оценок: ступень участника пула сильнее истории запусков', async () => {
+    const env = makeEnv();
+    // M1 high (ступень 0) уже запускался на тикете; M2 low (ступень 2) — нет.
+    journal(env.root, [{ ticket: 'IMPL-1', agent: mem(M1), model: M1 }]);
+    setFacts(env, { [M1]: { level: 'high' }, [M2]: { level: 'low' } });
+    setBehaviors(env, { [M1]: 'ok' });
+    const { attempt } = await prepare(env, agentsOf(env));
+    const { runs, result } = await attempt(stageOf(env, { agents: ['pool-x[high]'] }));
+    assert.deepEqual(runs, [mem(M1)], 'выбран подходящий участник (M1), а не слабый незапускавшийся (M2)');
+    assert.equal(result.status, 'passed');
+  });
+
+  test('повтор места с другим тегом — WARN и тег первого вхождения', async () => {
+    const env = makeEnv();
+    setFacts(env, { [A]: { level: 'low' }, [B]: { level: 'low' } });
+    setBehaviors(env, { [A]: 'ok' });
+    const { logger, attempt } = await prepare(env, agentsOf(env));
+    const { runs } = await attempt(stageOf(env, { agents: ['agent-a[low]', 'agent-a[high]', 'agent-b[low]'] }));
+    assert.deepEqual(runs, ['agent-a']);
+    assert.ok(
+      logger.lines.some((l) => /^WARN stage "execute-task": place\(s\) agent-a\[high\] repeat a place with a different tag — first tag kept$/.test(l)),
+      logger.lines.join('\n'),
+    );
+    assert.match(lines(logger, 'LEVELS')[0], / places=\["agent-a\[low\]","agent-b\[low\]"\] /, 'тег первого вхождения');
   });
 });

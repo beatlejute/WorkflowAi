@@ -24,6 +24,16 @@
  * остаётся — это место в списке стадии, само оно не запускается (выбор участника —
  * StageExecutor.resolveAgent).
  *
+ * Место списка стадии может нести тег минимального уровня — `free-kilo[medium]`:
+ * «место free-kilo, кандидат не слабее уровня medium». Уровни — LEVELS
+ * (lib/model-facts.mjs), тег означает «не ниже». Семантика мягкая (решение владельца):
+ * кандидат ниже уровня не выбрасывается, а уходит в конец очереди обхода (последний
+ * резерв); кандидат без оценки — не в конец, а в середину: неоценённые — обычно свежие
+ * модели, фид их ещё не успел оценить. Порядок обхода и ступени — walkOrder и
+ * levelTierOf (lib/stage-selection.mjs). Разбор и печать места — parsePlace и
+ * formatPlace; тег допустим только на стадии с `selection`, проверяет validateConfig
+ * (runner.mjs), раннер лишь предупреждает о некорректном теге (место считается без него).
+ *
  * Раскрытие — один раз на процесс раннера, до первой стадии (PipelineRunner.run):
  * resolveAgent синхронный, а StageExecutor создаётся на каждую стадию. Одинаковая
  * команда списка (равные массивы) запускается один раз (П7): у двух пулов обычно один
@@ -52,6 +62,7 @@ import { spawn, execSync } from 'node:child_process';
 import { buildAgentEnv } from './agent-env.mjs';
 import { parseFrontmatter } from './utils.mjs';
 import { DOD_HEADING } from './check-runner.mjs';
+import { levelRank } from './model-facts.mjs';
 
 /** Место полного id участника в `args` пула. */
 export const MODEL_PLACEHOLDER = '{model}';
@@ -126,6 +137,34 @@ export function healthRulesId(agent, agentId) {
 /** Id участников пула в порядке маски — порядке регистрации в `agents`. */
 export function poolMembers(agents, poolId) {
   return Object.keys(agents || {}).filter((id) => agents[id]?.pool === poolId);
+}
+
+/**
+ * Разбор места списка стадии: `'free-kilo[medium]'` → `{ id: 'free-kilo', minLevel:
+ * 'medium' }`. Без тега — `{ id: place, minLevel: null }`. Запись корректна, только если
+ * она имеет вид `<id>` или `<id>[<уровень>]` — закрывающая скобка в конце, посторонних
+ * символов нет; всё прочее (`a[medium`, `a[medium]garbage[`, `a]`, неизвестное слово
+ * уровня) — `{ id: <часть до '['>, minLevel: null, invalid: <текст> }`, не бросает:
+ * конфиг отклоняет validateConfig, раннер только предупреждает и читает тег
+ * отсутствующим. Имя уровня — из LEVELS (lib/model-facts.mjs), пробелы вокруг id и
+ * уровня отброшены.
+ */
+export function parsePlace(place) {
+  const text = String(place ?? '').trim();
+  if (!text.includes('[')) {
+    return text.includes(']') ? { id: text.replace(/]/g, '').trim(), minLevel: null, invalid: text } : { id: text, minLevel: null };
+  }
+  const open = text.indexOf('[');
+  const id = text.slice(0, open).trim();
+  const match = /^\[([^\]]*)\]$/.exec(text.slice(open));
+  if (!match) return { id, minLevel: null, invalid: text };
+  const word = match[1].trim();
+  return levelRank(word) === null ? { id, minLevel: null, invalid: word } : { id, minLevel: word };
+}
+
+/** Запись места для строки лога: `'id[level]'` или `id` без тега. */
+export function formatPlace(id, minLevel) {
+  return minLevel ? `${id}[${minLevel}]` : String(id);
 }
 
 /** `60000` → `60s`, `700` → `700ms` — для причины `timeout …` в строке POOL. */

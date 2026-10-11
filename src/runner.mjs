@@ -29,13 +29,15 @@ import {
 import { captureRunChanges, listRunChanges, failedRunChanges } from './lib/agent-run-changes.mjs';
 import {
   MODEL_PLACEHOLDER, expandModelPools, isModelPool, maxPerAttempt as poolMaxPerAttempt, poolMembers, healthRulesId,
+  parsePlace, formatPlace,
   SELECTOR_TIMEOUT_MS, SELECTOR_MAX_CANDIDATES, poolSelectorData, selectorTicket, buildSelectorPrompt, selectorRanking,
   GATE_TIMEOUT_MS, runPoolCommand,
 } from './lib/model-pools.mjs';
 import {
   isGoverned, flattenSurvivors, computeBands, levelOf, ticketFloor, capFloor, walkOrder, selectionTicket,
-  buildSelectionPrompt, parseRequiredLevel, loadStageFacts, hasStageFacts, stageFactsInfo, factsOf,
+  buildSelectionPrompt, parseRequiredLevel, loadStageFacts, hasStageFacts, stageFactsInfo, factsOf, levelTierOf,
 } from './lib/stage-selection.mjs';
+import { LEVELS, levelRank } from './lib/model-facts.mjs';
 
 // Как часто, пока kilo-агент работает, смотреть в базу kilo, какие модели ответили.
 const KILO_MODELS_POLL_MS = 15000;
@@ -1387,21 +1389,75 @@ class StageExecutor {
   }
 
   /**
-   * Место курсора среди выживших _stageSurvivors: курсор resolveAgent и выбор модели
-   * стадии, когда ни у одного выжившего нет оценки (_resolveGoverned).
+   * Места выживших, упорядоченные по ступени тега уровня (устойчиво: внутри ступени
+   * прежний порядок списка) — для безоценочной ветки выбора модели, где обход идёт
+   * прежним курсором (_cursorPick) и ступени иначе потерялись бы. Ступень места — лучшая
+   * (минимальная) ступень среди его незапускавшихся участников; у места-пула тем же
+   * порядком идут его `untried`. `cursorPlaces` — первая (лучшая) непустая группа ступени:
+   * курсор вращается внутри неё, и слабые ступени вступают в дело, только когда
+   * подходящие выведены из списка (excludeAgents). Без тегов ступени все 0 — одна группа,
+   * порядок и курсор прежние.
    */
-  _cursorPick(survivors, stageId) {
+  _orderPlacesByTier(survivors, tierOf) {
+    const untriedOf = (poolId) => survivors.poolOf(poolId).untried ?? [];
+    const placeTier = (place) => {
+      if (!survivors.isPool(place)) return tierOf(place);
+      return untriedOf(place).reduce((best, id) => Math.min(best, tierOf(id)), 2);
+    };
+    const places = [...survivors.places].sort((a, b) => placeTier(a) - placeTier(b));
+    const bestTier = places.length > 0 ? placeTier(places[0]) : 0;
+    const cursorPlaces = places.filter((place) => placeTier(place) === bestTier);
+    const poolOf = (poolId) => ({
+      ...survivors.poolOf(poolId),
+      untried: [...untriedOf(poolId)].sort((a, b) => tierOf(a) - tierOf(b)),
+    });
+    return { ...survivors, places, poolOf, cursorPlaces };
+  }
+
+  /**
+   * Место курсора среди выживших _stageSurvivors: курсор resolveAgent и выбор модели
+   * стадии, когда ни у одного выжившего нет оценки (_resolveGoverned). Курсор вращается
+   * по `cursorPlaces` (первая ступень тега, _orderPlacesByTier), без неё — по всем местам.
+   * Участников места-пула при заданном `tierOf` упорядочивает ступень, затем признак «уже
+   * запускался на тикете» (_orderMembersByTier) — иначе не запускавшийся слабее обошёл бы
+   * подходящего.
+   */
+  _cursorPick(survivors, stageId, tierOf = null) {
     const { places, attempt, effectiveStage, isPool, poolOf } = survivors;
 
-    // Курсор = (attempt - 1) % length — ротация по кругу
-    const cursor = (attempt - 1) % places.length;
+    // Курсор = (attempt - 1) % length — ротация по кругу (по первой ступени при теге).
+    const rota = survivors.cursorPlaces ?? places;
+    const cursor = (attempt - 1) % rota.length;
 
-    const place = places[cursor];
+    const place = rota[cursor];
     if (!isPool(place)) {
       return { agentId: place, effectiveStage, attempt, compatible: places };
     }
-    const poolCandidates = this._preferNotRunOnTicket(poolOf(place).untried, stageId);
+    const untried = poolOf(place).untried;
+    const poolCandidates = tierOf
+      ? this._orderMembersByTier(untried, tierOf, stageId)
+      : this._preferNotRunOnTicket(untried, stageId);
     return { agentId: poolCandidates[0], effectiveStage, attempt, compatible: places, pool: place, poolCandidates };
+  }
+
+  /**
+   * Участники места-пула для курсора: сначала ступень (устойчиво), внутри ступени —
+   * незапускавшиеся на тикете раньше (_preferNotRunOnTicket), затем прежний порядок
+   * (маска). Порядок кандидатов `[high, low]`, где high уже запускался, — high, low:
+   * ступень сильнее истории запусков.
+   */
+  _orderMembersByTier(candidates, tierOf, stageId) {
+    const groups = new Map();
+    for (const id of candidates) {
+      const tier = tierOf(id);
+      if (!groups.has(tier)) groups.set(tier, []);
+      groups.get(tier).push(id);
+    }
+    const out = [];
+    for (const tier of [...groups.keys()].sort((a, b) => a - b)) {
+      out.push(...this._preferNotRunOnTicket(groups.get(tier), stageId));
+    }
+    return out;
   }
 
   /**
@@ -1409,9 +1465,10 @@ class StageExecutor {
    * запреты моделей, excludeAgents и max_per_attempt пула) без выбора места курсором.
    * Общий шаг курсора (resolveAgent) и выбора модели стадии (_resolveGoverned).
    * @returns {{places: string[], attempt: number, effectiveStage: object, isPool: (id) => boolean,
-   *   poolOf: (id) => {members: string[], untried: string[]}} | {blocked: string, reason: string, attempt: number}}
-   *   places — выжившие места в порядке списка (пул — одним местом), poolOf(id).untried —
-   *   участники места-пула, прошедшие фильтры
+   *   poolOf: (id) => {members: string[], untried: string[]}, placeLevels: Map<string, string>} | {blocked: string, reason: string, attempt: number}}
+   *   places — выжившие места в порядке списка (пул — одним местом) базовыми id,
+   *   poolOf(id).untried — участники места-пула, прошедшие фильтры, placeLevels — тег
+   *   минимального уровня мест (`place[level]`) по базовому id
    */
   _stageSurvivors(stage, stageId, excludeAgents) {
     // Семантика: counter = число УЖЕ ИСЧЕРПАННЫХ попыток (0 на старте, инкрементируется
@@ -1425,19 +1482,50 @@ class StageExecutor {
       || (this.context.ticket_id && this.context.ticket_id.split('-')[0].toLowerCase())
       || null;
 
-    // Выбор источника списка агентов и instructions
-    let agentIds;
+    // Источник списка агентов и instructions; запись места разбирается parsePlace —
+    // дальше везде идёт базовый id (фильтры способностей, health, запретов, пулы).
+    let rawPlaces;
     let instructions = stage.instructions;
     const byType = stage.agents_by_type && taskType && stage.agents_by_type[taskType];
     if (byType && Array.isArray(byType.agents)) {
-      agentIds = byType.agents;
+      rawPlaces = byType.agents;
       if (byType.instructions !== undefined) instructions = byType.instructions;
     } else if (Array.isArray(stage.agents)) {
-      agentIds = stage.agents;
+      rawPlaces = stage.agents;
     } else if (Array.isArray(this.pipeline.default_agents)) {
-      agentIds = this.pipeline.default_agents;
+      rawPlaces = this.pipeline.default_agents;
     } else {
       throw new Error(`Stage "${stageId}": no agents list and no default_agents`);
+    }
+
+    // Тег минимального уровня у места (`free-kilo[medium]`) — мягкая ступень очереди
+    // обхода (_resolveGoverned). placeLevels — уровень по базовому id места; неизвестное
+    // слово тега — один WARN на стадию, тег считается отсутствующим (validateConfig
+    // такое отклоняет).
+    const agentIds = [];
+    const placeLevels = new Map();
+    const seenTags = new Map();
+    const invalidPlaces = [];
+    const conflictingPlaces = [];
+    for (const place of rawPlaces) {
+      const { id, minLevel, invalid } = parsePlace(place);
+      if (invalid !== undefined) {
+        invalidPlaces.push(place);
+      } else if (seenTags.has(id)) {
+        // Повтор места: тег первого вхождения держится, конфликтующий — WARN (validateConfig
+        // такой повтор отклоняет).
+        if (seenTags.get(id) !== minLevel) conflictingPlaces.push(place);
+      } else {
+        seenTags.set(id, minLevel);
+        if (minLevel !== null) placeLevels.set(id, minLevel);
+      }
+      agentIds.push(id);
+    }
+    if (invalidPlaces.length > 0 && this.logger) {
+      this.logger.warn(`stage "${stageId}": invalid place tag(s) ${invalidPlaces.join(', ')} — tag ignored`, stageId);
+    }
+    if (conflictingPlaces.length > 0 && this.logger) {
+      this.logger.warn(`stage "${stageId}": place(s) ${conflictingPlaces.join(', ')} repeat a place with a different tag — first tag kept`, stageId);
     }
 
     // Требуемые capabilities тикета из context.required_capabilities.
@@ -1561,7 +1649,7 @@ class StageExecutor {
 
     // Клонируем stage с подменой instructions (для agents_by_type override)
     const effectiveStage = { ...stage, instructions };
-    return { places: afterExclude, attempt, effectiveStage, isPool, poolOf };
+    return { places: afterExclude, attempt, effectiveStage, isPool, poolOf, placeLevels };
   }
 
   /**
@@ -1784,8 +1872,11 @@ class StageExecutor {
    *      контроля или ревью на этом тикете), не выше уровня сильнейшего выжившего − 1, и не
    *      ниже уровня отказавшего в этой попытке (эскалация);
    *   5. селектор — не больше одного вызова на попытку (_stageSelection), кэш в `sel`;
-   *   6. порядок обхода — walkOrder по выжившим над границей: сначала бесплатные ≥ R, затем
-   *      платные ≥ R, затем хвост ниже R. Отсеянного id в порядке нет (правило 2).
+   *   6. порядок обхода — walkOrder по выжившим над границей: ступень 0 (тег не ниже
+   *      уровня или без тега) прежними группами — сначала бесплатные ≥ R, затем платные
+   *      ≥ R, затем хвост ниже R; затем ступень 1 (уровень неизвестен — середина), затем
+   *      ступень 2 (уровень ниже требуемого — последний резерв). Отсеянного id в порядке
+   *      нет (правило 2).
    * @returns {Promise<object>} как resolveAgent (`compatible` — порядок обхода, у курсора —
    *   места списка) и
    *   `selection` — поля события run (§7), или blocked
@@ -1830,14 +1921,25 @@ class StageExecutor {
       return f ? f.free === true : /:free$/.test(requestedModel(agents[id]) ?? '');
     };
 
+    // Тег минимального уровня места (`place[level]`, lib/model-pools.mjs) — мягкая
+    // ступень очереди обхода (решение владельца), без отсева: уровень подтверждён и не
+    // ниже требуемого (или тега нет) — ступень 0 (прежний порядок); уровень неизвестен —
+    // ступень 1 (середина: неоценённые — обычно свежие модели); уровень подтверждён и
+    // ниже требуемого — ступень 2 (последний резерв). Ключ уровня — базовый id места
+    // (`pool ?? id`, как в flattenSurvivors).
+    const minLevelOf = (id) => survivors.placeLevels.get(poolById.get(id) ?? id) ?? null;
+    const tierOf = (id) => levelTierOf(fact(id)?.level ?? null, minLevelOf(id));
+
     // Ни у одного выжившего нет оценки (сбой команды фактов, каталог OpenRouter не
     // загружен): все на уровне 1, граница не растёт, и обход уровней пускал бы подряд
     // участников пулов. Попытка идёт прежним курсором по местам (_cursorPick: те же
     // выжившие, ротация по номеру попытки), шлагбаум при запуске — как на стадии с
     // выбором, селектор не вызывается (`skipped:no_scores`).
     if (sel.bands.min === null) {
-      const picked = this._cursorPick(survivors, stageId);
+      const ordered = this._orderPlacesByTier(survivors, tierOf);
+      const picked = this._cursorPick(ordered, stageId, tierOf);
       sel.decision ??= { R: null, ranking: [], mode: 'cursor', requiredLevel: null, fallback: 'skipped:no_scores', cost: null, durationMs: 0 };
+      this._logLevels(stageId, sel, { ids, placeLevels: survivors.placeLevels, minLevelOf, tierOf });
       this._logSelectModel(stage, stageId, sel, { candidates: ids.length, floor: 0, agentId: picked.agentId, level: 1, free: free(picked.agentId) });
       return {
         ...picked,
@@ -1899,9 +2001,10 @@ class StageExecutor {
     }
     const order = walkOrder({
       survivors: above, levelOf: level, freeOf: free, R: sel.decision.R, floor,
-      ranking: sel.decision.ranking, notRun, listIndex,
+      ranking: sel.decision.ranking, notRun, listIndex, tierOf,
     });
     const agentId = order[0];
+    this._logLevels(stageId, sel, { ids, placeLevels: survivors.placeLevels, minLevelOf, tierOf });
     this._logSelectModel(stage, stageId, sel, { candidates: above.length, floor, agentId, level: level(agentId), free: free(agentId) });
     return {
       agentId,
@@ -1919,6 +2022,29 @@ class StageExecutor {
         free: free(agentId),
       },
     };
+  }
+
+  /**
+   * Строка LEVELS — один раз на попытку, рядом с SELECT_MODEL, если в списке стадии есть
+   * хотя бы одно место с тегом уровня (`free-kilo[medium]`). `places` — места с тегом,
+   * `above` — сколько кандидатов этих мест прошло уровень, `tiers` — разбивка всех
+   * кандидатов по ступеням очереди (0 — порядок прежний, 1 — уровень неизвестен, 2 —
+   * ниже требуемого), пороги — из фактов стадии (stageFactsInfo).
+   */
+  _logLevels(stageId, sel, { ids, placeLevels, minLevelOf, tierOf }) {
+    if (sel.loggedLevels) return;
+    sel.loggedLevels = true;
+    if (!placeLevels || placeLevels.size === 0 || !this.logger) return;
+    const places = [...placeLevels].map(([id, level]) => formatPlace(id, level));
+    const tiers = [0, 1, 2].map((t) => ids.filter((id) => tierOf(id) === t).length);
+    const above = ids.filter((id) => minLevelOf(id) !== null && tierOf(id) === 0).length;
+    const info = stageFactsInfo(this.pipeline, stageId);
+    this.logger.info(
+      `LEVELS stage="${stageId}" places=${JSON.stringify(places)} above=${above} `
+        + `tiers=0:${tiers[0]},1:${tiers[1]},2:${tiers[2]} `
+        + `high=${info?.levels?.high ?? 'n/a'} medium=${info?.levels?.medium ?? 'n/a'} as_of="${info?.as_of ?? '-'}"`,
+      stageId,
+    );
   }
 
   /** Строка SELECT_MODEL — один раз на попытку, при первом выборе. */
@@ -5398,11 +5524,11 @@ function validateHttpAgentPlacement(pipeline, errors) {
   if (httpAgents.size === 0) return;
 
   const because = 'tool-less agents run only stages with model_io';
-  if (httpAgents.has(pipeline.default_agent)) {
+  if (pipeline.default_agent && httpAgents.has(parsePlace(pipeline.default_agent).id)) {
     errors.push(`pipeline.default_agent is tool-less agent "${pipeline.default_agent}" (kind: http): ${because}`);
   }
   for (const id of Array.isArray(pipeline.default_agents) ? pipeline.default_agents : []) {
-    if (httpAgents.has(id)) {
+    if (typeof id === 'string' && httpAgents.has(parsePlace(id).id)) {
       errors.push(`pipeline.default_agents contains tool-less agent "${id}" (kind: http): ${because}`);
     }
   }
@@ -5418,7 +5544,8 @@ function validateHttpAgentPlacement(pipeline, errors) {
       }
     }
     for (const [where, id] of places) {
-      if (httpAgents.has(id)) {
+      // Тег уровня места (`h[medium]`) не должен скрывать http-агента: сравнение — по базовому id.
+      if (typeof id === 'string' && httpAgents.has(parsePlace(id).id)) {
         errors.push(`Stage "${stageId}" assigns tool-less agent "${id}" (kind: http) in ${where}, but has no model_io`);
       }
     }
@@ -5481,7 +5608,10 @@ const SELECTION_ESCALATE_ON = Object.freeze(['blocked']);
  *  4. `scores` — команда фактов, непустой массив непустых строк;
  *  5. `levels` — 2..10 непустых строк (рубрика сложности, от слабого к сильному);
  *  6. `escalate_on` — подмножество SELECTION_ESCALATE_ON без повторов;
- *  7. `agents_by_type.<тип>.selection` — только `false` и только у стадии с `selection`.
+ *  7. `agents_by_type.<тип>.selection` — только `false` и только у стадии с `selection`;
+ *  8. тег минимального уровня у места списка (`place[level]`) — только у стадии с
+ *     `selection` (список типа с `selection: false` и стадия без `selection` тег не
+ *     допускают), имя уровня — из LEVELS, базовый id места — агент `pipeline.agents`.
  * И мёртвый конфиг пула: `models.selector`/`models.scores` пула, все списки которого под
  * выбором модели, не вызывается никогда — селектор пула на такой стадии не зовут.
  */
@@ -5512,6 +5642,45 @@ function validateStageSelection(pipeline, errors) {
     else if (picksAgent && !stage.agent && Array.isArray(pipeline.default_agents)) listUses.push({ list: pipeline.default_agents, governed: governed && !optedOutOnDefault });
     for (const entry of Object.values(byType)) {
       if (picksAgent && isPlainObject(entry) && Array.isArray(entry.agents)) listUses.push({ list: entry.agents, governed: governed && entry.selection !== false });
+    }
+
+    // Тег минимального уровня у места списка (`place[level]`, lib/model-pools.mjs):
+    // уровень только упорядочивает кандидатов стадии с выбором модели (_resolveGoverned),
+    // вне selection он не значит ничего. Список типа с `selection: false` и стадия без
+    // `selection` тег не допускают. Как в listUses, встроенные типы (update-counter,
+    // manual-gate) агентов не выбирают — тег в их списках (в том числе в default_agents)
+    // не проверяется. Сравнение — по базовому id места (parsePlace).
+    const taggedLists = [];
+    if (picksAgent && Array.isArray(stage.agents)) taggedLists.push({ where: 'agents', list: stage.agents, governed: governed && !optedOutOnDefault });
+    else if (picksAgent && !stage.agent && Array.isArray(pipeline.default_agents)) taggedLists.push({ where: 'default_agents', list: pipeline.default_agents, governed: governed && !optedOutOnDefault });
+    for (const [type, entry] of Object.entries(byType)) {
+      if (picksAgent && isPlainObject(entry) && Array.isArray(entry.agents)) taggedLists.push({ where: `agents_by_type.${type}.agents`, list: entry.agents, governed: governed && entry.selection !== false });
+    }
+    for (const { where: listWhere, list, governed: listGoverned } of taggedLists) {
+      const firstTag = new Map();
+      for (const place of list) {
+        if (typeof place !== 'string') continue;
+        const parsed = parsePlace(place);
+        if (parsed.invalid !== undefined) {
+          errors.push(`Stage "${stageId}" has invalid agent place "${place}" in ${listWhere}: expected "id" or "id[level]" with level one of ${LEVELS.join(', ')}`);
+          continue;
+        }
+        // Повтор места держит тег первого вхождения: другой тег на повторе — ошибка (раннер
+        // такой повтор допускает с WARN, здесь конфиг отклоняется — так яснее).
+        const tag = parsed.minLevel === null ? 'none' : JSON.stringify(parsed.minLevel);
+        if (!firstTag.has(parsed.id)) {
+          firstTag.set(parsed.id, tag);
+        } else if (firstTag.get(parsed.id) !== tag) {
+          errors.push(`Stage "${stageId}" has place "${parsed.id}" repeated in ${listWhere} with a different level tag (first ${firstTag.get(parsed.id)}, then ${tag})`);
+        }
+        if (parsed.minLevel === null) continue;
+        if (!Object.hasOwn(agents, parsed.id)) {
+          errors.push(`Stage "${stageId}" tags place "${place}" in ${listWhere}, but agent "${parsed.id}" is not in pipeline.agents`);
+        }
+        if (!listGoverned) {
+          errors.push(`Stage "${stageId}" tags place "${place}" in ${listWhere}, but the stage has no model selection: a level tag works only on a stage with model selection (selection), where it orders candidates`);
+        }
+      }
     }
     if (selection === undefined) continue;
 
@@ -5555,7 +5724,9 @@ function validateStageSelection(pipeline, errors) {
   for (const [poolId, pool] of Object.entries(agents)) {
     if (!isPlainObject(pool) || !isPlainObject(pool.models)) continue;
     if (pool.models.selector === undefined && pool.models.scores === undefined) continue;
-    const uses = listUses.filter(({ list }) => list.includes(poolId));
+    // Список хранит необработанные записи: тег уровня (`p[medium]`) не должен скрывать
+    // пул от проверки мёртвого конфига — сравнение по базовому id (parsePlace).
+    const uses = listUses.filter(({ list }) => list.some((place) => typeof place === 'string' && parsePlace(place).id === poolId));
     if (uses.length > 0 && uses.every(({ governed }) => governed)) {
       errors.push(`Agent "${poolId}" has models.selector/models.scores that is never called: every stage listing pool ${poolId} uses selection (drop them from the pool)`);
     }

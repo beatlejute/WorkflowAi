@@ -30,7 +30,7 @@ import path from 'node:path';
 import {
   isGoverned, governedLists, flattenSurvivors, computeBands, levelOf, ticketFloor, capFloor, walkOrder,
   parseRequiredLevel, selectionTicket, buildSelectionPrompt, parseFactsOutput, stageCandidates, factLine,
-  DESCRIPTION_LIMIT, loadStageFacts, factsOf,
+  DESCRIPTION_LIMIT, loadStageFacts, factsOf, stageFactsInfo,
 } from '../lib/stage-selection.mjs';
 import { gradeRuns } from '../lib/agent-runs.mjs';
 
@@ -278,27 +278,38 @@ describe('тикет и промпт селектора', () => {
 });
 
 describe('вывод команды фактов', () => {
-  it('факты по id и хосту; числа — только конечные; free — только true', () => {
+  it('факты по id и хосту; числа — только конечные; free — только true; level — из LEVELS', () => {
     const parsed = parseFactsOutput(JSON.stringify({
       as_of: 'a', citation: 'c',
+      levels: { high: 60, medium: 30, anchors: { high: 'h', medium: 'm' } },
       models: [
-        { id: 'vendor-a/model-one', host: 'kilo', resolved: 'vendor-a/model-one-20260101', intelligence: 30, coding: 'x', agentic: null, free: true, free_source: 'kilo' },
-        { id: 'vendor-a/model-one', host: 'claude', intelligence: 31, free: 'yes' },
+        { id: 'vendor-a/model-one', host: 'kilo', resolved: 'vendor-a/model-one-20260101', intelligence: 30, coding: 'x', agentic: null, free: true, free_source: 'kilo', level: 'medium', level_source: 'feed' },
+        { id: 'vendor-a/model-one', host: 'claude', intelligence: 31, free: 'yes', level: 'superb', level_source: 'feed' },
         { id: 'vendor-a/model-one', host: 'kilo', intelligence: 99 },
         { nope: true },
       ],
     }));
     assert.equal(parsed.as_of, 'a');
+    assert.deepEqual(parsed.levels, { high: 60, medium: 30, anchors: { high: 'h', medium: 'm' } });
     assert.equal(parsed.facts.size, 2);
     assert.deepEqual(parsed.facts.get('vendor-a/model-one\u0000kilo'), {
       id: 'vendor-a/model-one', host: 'kilo', resolved: 'vendor-a/model-one-20260101',
       intelligence: 30, coding: null, agentic: null, free: true, free_source: 'kilo',
+      level: 'medium', level_source: 'feed',
     });
+    // Имя уровня не из LEVELS — level null, level_source тоже null.
+    assert.deepEqual(
+      { level: parsed.facts.get('vendor-a/model-one\u0000claude').level, level_source: parsed.facts.get('vendor-a/model-one\u0000claude').level_source },
+      { level: null, level_source: null },
+    );
     assert.equal(parsed.facts.get('vendor-a/model-one\u0000claude').free, false);
     assert.equal(parsed.facts.get('vendor-a/model-one\u0000claude').free_source, 'unknown');
   });
 
-  it('не JSON или без models — причина', () => {
+  it('без levels в ответе — null; не JSON или без models — причина', () => {
+    const parsed = parseFactsOutput(JSON.stringify({ models: [{ id: 'x', host: null }] }));
+    assert.equal(parsed.levels, null);
+    assert.equal(parsed.facts.get('x\u0000').level, null);
     for (const bad of ['not json', '{}', '{"models": {}}', '[]']) {
       assert.equal(parseFactsOutput(bad).reason, 'output is not JSON with "models" array', bad);
     }
@@ -389,6 +400,30 @@ describe('факты стадии без id моделей', () => {
       assert.ok(!lines.some((l) => l.includes('selection.scores failed')), lines.join('\n'));
       assert.equal(factsOf(pipeline, 's1', 'agent-a'), null, 'фактов у кандидата без id модели нет — без оценки и платный');
       assert.ok(lines.some((l) => l.startsWith('INFO FACTS stage="s1" candidates=2 scored=0 free=0 ')), lines.join('\n'));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('пороги уровня в фактах стадии', () => {
+  it('levels из ответа сохраняются и отдаются stageFactsInfo; level факта — в карте', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-facts-levels-'));
+    const script = path.join(dir, 'facts.mjs');
+    fs.writeFileSync(script, 'process.stdout.write(JSON.stringify({as_of:"a",citation:"c",'
+      + 'levels:{high:60,medium:30,anchors:{high:"h",medium:"m"}},'
+      + 'models:[{id:"model-a",host:"claude",intelligence:50,free:false,level:"high",level_source:"feed"}]}));\n');
+    const pipeline = {
+      agents: { 'agent-a': { command: 'claude', args: ['--model', 'model-a'] } },
+      stages: { s1: { selection: { selector: 'sel', scores: ['node', script], levels: ['a', 'b'] }, agents: ['agent-a'] } },
+    };
+    try {
+      await loadStageFacts(pipeline, { projectRoot: dir });
+      assert.deepEqual(stageFactsInfo(pipeline, 's1').levels, { high: 60, medium: 30, anchors: { high: 'h', medium: 'm' } });
+      assert.deepEqual(factsOf(pipeline, 's1', 'agent-a'), {
+        id: 'model-a', host: 'claude', resolved: null, intelligence: 50, coding: null, agentic: null,
+        free: false, free_source: 'unknown', level: 'high', level_source: 'feed',
+      });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
