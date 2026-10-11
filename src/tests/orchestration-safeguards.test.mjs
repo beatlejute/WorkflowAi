@@ -77,6 +77,22 @@ test('report input selects the only active plan without changing runner context'
   assert.throws(() => prepareReportInput('.', {}), /absolute/);
 });
 
+// HegelCodec 2026-10-11: рядом с планом лежит вынесенный из него справочник
+// PLAN-001-reference.md. Имя не вида PLAN-NNN — это не испорченный план, и ронять на нём
+// стадию create-report нельзя: прогон завершался «reporting attempts exhausted».
+test('report input: не-план рядом с планом не считается испорченным планом', (t) => {
+  const root = project(t);
+  ticket(root, 'review', 'QA-001');
+  fs.writeFileSync(
+    path.join(root, '.workflow/plans/current/PLAN-001-reference.md'),
+    '# Справочные данные\n\nВынесено из плана отдельным файлом.\n',
+    'utf8',
+  );
+  const input = prepareReportInput(root, { plan_id: 'PLAN-001' });
+  assert.equal(input.plan_id, 'PLAN-001');
+  assert.equal(input.board_total, 1);
+});
+
 test('report input permits verified empty board but rejects missing and malformed data', (t) => {
   const root = project(t);
   fs.unlinkSync(path.join(root, '.workflow/plans/current/PLAN-001.md'));

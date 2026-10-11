@@ -11,11 +11,15 @@ export function prepareReportInput(projectRoot, context, stage = context.report_
   const tickets = readBoardTickets(path.join(workflow, 'tickets'));
   const plansDir = path.join(workflow, 'plans', 'current');
   const plans = fs.readdirSync(plansDir).filter(f => f.endsWith('.md') && !f.startsWith('.')).map(file => {
-    const { frontmatter } = parseFrontmatter(fs.readFileSync(path.join(plansDir, file), 'utf8'));
+    // Рядом с планом в каталоге лежат не-планы (например, справочник PLAN-001-reference.md,
+    // вынесенный из плана): имя не вида PLAN-NNN — это не испорченный план, а чужой файл,
+    // и падать на нём стадия не должна (HegelCodec 2026-10-11: create-report ронял прогон).
     const id = normalizePlanId(file);
-    if (!id || !frontmatter.status) throw new Error(`Invalid plan: ${file}`);
+    if (!id) return null;
+    const { frontmatter } = parseFrontmatter(fs.readFileSync(path.join(plansDir, file), 'utf8'));
+    if (!frontmatter.status) throw new Error(`Invalid plan: ${file}`);
     return { id, status: frontmatter.status };
-  });
+  }).filter(Boolean);
   let planId = context.plan_id ? normalizePlanId(context.plan_id) : null;
   if (context.plan_id && !planId) throw new Error('Invalid report plan_id');
   if (analyzing) {
