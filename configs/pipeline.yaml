@@ -280,7 +280,7 @@ pipeline:
       command: "kilo"
       args: ["-m", "zai/glm-5.3-flash", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
       workdir: "."
-      capabilities: [text]
+      capabilities: [text, mcp]
       description: "Kilo GLM"
 
     glm-free:
@@ -957,11 +957,14 @@ pipeline:
           agents: [gpt-sol, glm, gemini-flash, deepseek-pro]
           instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: правка скилов по описанию и DoD тикета."
         qa:
-          # Со способностью `mcp` здесь gpt-luna, deepseek-flash и glm-free (2026-10-11): серверы kilo берёт из
-          # своего конфига, а не из проектного .mcp.json. До этого способности mcp у типа qa
-          # не было ни у кого, и qa-тикет с required_capabilities: [mcp] оставался без
-          # исполнителя (no_capable_agent → blocked/; охраняет pipeline-mcp-capability.test.mjs).
-          agents: [glm-free, glm-flash, gpt-luna, gemini-flash-lite, gpt-sol]
+          # Со способностью `mcp` здесь glm-free, glm-flash, gpt-luna и deepseek-flash (2026-10-11):
+          # серверы kilo берёт из своего конфига, а не из проектного .mcp.json. Остальные в списке
+          # (gemini-flash-lite, gpt-sol) способности не заявляют — для тикета с
+          # required_capabilities: [mcp] они не подходят.
+          # Список расширен вечером 2026-10-11: на типе qa оставалось два способных исполнителя
+          # (glm-free и gpt-luna), и постоянный запрет одной модели оставлял тикет без исполнителя
+          # (no_capable_agent → blocked/; охраняет pipeline-mcp-capability.test.mjs).
+          agents: [glm-free, glm-flash, gpt-luna, gemini-flash-lite, gpt-sol, deepseek-flash]
           instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: по описанию и DoD тикета напиши и реально запусти тесты и проверки: каждый случай тикета — отдельный тест против продукта (модуль, сборка, запущенное приложение в среде из тикета, плана или shared), значения в отчёте — измеренные, расхождение с ожиданием — в «### Найденные дефекты»."
         arch:
           agents: [gpt-sol, glm]
