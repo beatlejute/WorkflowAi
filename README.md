@@ -669,7 +669,7 @@ node .workflow/src/scripts/reset-model-history.js --model poolside/laguna-s-2.1:
       counter: task_attempts
       selection:
         selector: jev-place
-        scores: ["node", ".workflow/src/scripts/model-scores.js", "--benchmarks-url", "https://openrouter.ai/api/v1/benchmarks?source=artificial-analysis", "--models-url", "https://openrouter.ai/api/v1/models", "--key-file", "~/.workflow/secrets/openrouter.key"]
+        scores: ["node", ".workflow/src/scripts/model-scores.js", "--benchmarks-url", "https://openrouter.ai/api/v1/benchmarks?source=artificial-analysis", "--models-url", "https://openrouter.ai/api/v1/models", "--key-file", "~/.workflow/secrets/openrouter.key", "--anchor-high", "z-ai/glm-5.2", "--anchor-medium", "anthropic/claude-4.5-haiku", "--overrides", ".workflow/config/model-levels.yaml"]
         escalate_on: [blocked]
         levels:
           - "mechanical edit from a precise recipe, 1-2 files, DoD checked by one command"
