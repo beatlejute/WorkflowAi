@@ -1099,3 +1099,42 @@ describe('runner: неуверенная оценка стадии model_io — 
     assert.equal(readJson(join(root, '.workflow', 'state', 'model-io', copies[0])).questions.length, 1, 'копия — запрос первого агента');
   });
 });
+
+describe('runner: судья model_io — первый доступный из списка (решение владельца 2026-10-12)', () => {
+  const options = { options: { levels: 5, pass_level: 4 } };
+
+  it('сожжённые попытки тикета не сдвигают судью: первым судит judge-a, а не третий по счётчику', async () => {
+    const root = makeProject();
+    const config = makeConfig({ 'judge-a': judgeAgent('score: 5'), 'judge-b': judgeAgent('score: 2') }, ['judge-a', 'judge-b'], options);
+    config.pipeline.stages.review.counter = 'task_attempts';
+
+    const { result, logger } = await runStage(root, config, {}, {
+      onExecutor: (executor) => { executor.counters = { task_attempts: 3 }; },
+    });
+
+    assert.equal(result.status, 'passed');
+    assert.equal(result.agentId, 'judge-a');
+    assert.ok(logger.lines.some((l) => l.includes('Agent selected: judge-a (attempt 4')), logger.lines.join('\n'));
+  });
+
+  it('судья не отработал (RESULT status: error) — в той же попытке судит следующий', async () => {
+    const root = makeProject();
+    // Как реальный отказ судьи (kilo-judge на перегрузке провайдера): разобранный
+    // RESULT со status: error и ненулевой выход.
+    writeFileSync(join(root, 'scripts', 'error-agent.mjs'),
+      "console.log('---RESULT---');\nconsole.log('status: error');\nprocess.exit(1);\n");
+    const agents = {
+      'judge-a': { command: 'node', args: ['scripts/error-agent.mjs'], capabilities: ['text'] },
+      'judge-b': judgeAgent('score: 5'),
+    };
+    const config = makeConfig(agents, ['judge-a', 'judge-b'], options);
+
+    const { result, logger } = await runStage(root, config, {}, {
+      onExecutor: (executor) => { executor.counters = { task_attempts: 3 }; },
+    });
+
+    assert.equal(result.status, 'passed');
+    assert.equal(result.agentId, 'judge-b');
+    assert.ok(logger.lines.some((l) => /не отработал \(exit -?\d+\) — ревью продолжает judge-b/.test(l)), logger.lines.join('\n'));
+  });
+});

@@ -1416,8 +1416,11 @@ class StageExecutor {
 
   /**
    * Место курсора среди выживших _stageSurvivors: курсор resolveAgent и выбор модели
-   * стадии, когда ни у одного выжившего нет оценки (_resolveGoverned). Курсор вращается
-   * по `cursorPlaces` (первая ступень тега, _orderPlacesByTier), без неё — по всем местам.
+   * стадии, когда ни у одного выжившего нет оценки (_resolveGoverned). У стадии с
+   * model_io (судьи ревью) курсор всегда на первом доступном месте списка —
+   * переключение на следующего только по сбою агента (решение владельца 2026-10-12).
+   * У остальных курсор вращается по `cursorPlaces` (первая ступень тега,
+   * _orderPlacesByTier), без неё — по всем местам.
    * Участников места-пула при заданном `tierOf` упорядочивает ступень, затем признак «уже
    * запускался на тикете» (_orderMembersByTier) — иначе не запускавшийся слабее обошёл бы
    * подходящего.
@@ -1425,9 +1428,15 @@ class StageExecutor {
   _cursorPick(survivors, stageId, tierOf = null) {
     const { places, attempt, effectiveStage, isPool, poolOf } = survivors;
 
-    // Курсор = (attempt - 1) % length — ротация по кругу (по первой ступени при теге).
+    // Стадия обмена с моделью (судьи ревью и подобные): агент — всегда первый
+    // доступный из списка (решение владельца 2026-10-12). Сдвиг по номеру попытки
+    // тикета отдавал судью по счётчику сгоревших попыток: основной судья (Jev)
+    // не судил тикеты с историей, хотя был доступен. Внутри попытки сбой агента
+    // продвигает список дальше (excludeAgents), следующая попытка снова с первого.
+    // Исполнительные стадии без выбора сохраняют ротацию по кругу
+    // (attempt - 1) % length (по первой ступени при теге).
     const rota = survivors.cursorPlaces ?? places;
-    const cursor = (attempt - 1) % rota.length;
+    const cursor = effectiveStage.model_io ? 0 : (attempt - 1) % rota.length;
 
     const place = rota[cursor];
     if (!isPool(place)) {
@@ -2477,6 +2486,30 @@ class StageExecutor {
             );
           }
           if (stronger) {
+            pending = next;
+            lastErr = null;
+            lastModelFailure = null;
+            continue;
+          }
+        }
+
+        // Судья не отработал (решение владельца 2026-10-12): обмен завершился ошибкой
+        // без вердикта (судья упал, провайдер недоступен) — ревью в этой же попытке
+        // ведёт следующий агент списка. Старт всегда с первого (model_io без сдвига
+        // по попыткам), вперёд — только по сбою. no_key — не «судья не отработал»,
+        // а его неверная настройка: переключение не поможет, стадия завершается
+        // ошибкой, как раньше.
+        const judgeMisconfigured = result.modelError?.class === 'no_key';
+        if (run.modelIo && status === 'error' && !judgeMisconfigured && !this.stopRequested) {
+          triedInThisAttempt.push(agentId);
+          const next = this.resolveAgent(stage, stageId, { excludeAgents: triedInThisAttempt });
+          if (!next.blocked) {
+            if (this.logger) {
+              this.logger.info(
+                `agent ${agentId} не отработал (exit ${callResult.exitCode}) — ревью продолжает ${next.agentId}`,
+                stageId
+              );
+            }
             pending = next;
             lastErr = null;
             lastModelFailure = null;
