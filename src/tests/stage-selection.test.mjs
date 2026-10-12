@@ -83,7 +83,7 @@ describe('нижняя граница тикета', () => {
   const scores = { 'agent-a': 10, 'agent-b': 30, 'agent-c': 55, 'agent-d': 45, 'agent-e': 45 };
   const scoreOf = (r) => (Object.hasOwn(scores, r.agent) ? { known: true, score: scores[r.agent] } : { known: false });
 
-  it('считает refused, empty, artifacts_failed, review_failed; история без id', () => {
+  it('градации прежние: refused, empty, artifacts_failed, review_failed; история без id', () => {
     const events = [
       run('agent-a', { status: 'blocked' }),
       run('agent-a', { changed_files: 0 }),
@@ -92,20 +92,24 @@ describe('нижняя граница тикета', () => {
     ];
     const graded = gradeRuns(events);
     assert.deepEqual(graded.map((r) => r.grade), ['refused', 'empty', 'artifacts_failed', 'review_failed']);
+    // Границу поднимает только реальная работа, не прошедшая контроль
+    // (решение владельца, 2026-10-12): refused и empty границу не поднимают.
     const result = ticketFloor(graded, 'IMPL-1', scoreOf, bands);
     assert.equal(result.floor, 4);
     assert.equal(result.executorRuns, 4);
+    // refused границу не поднимает; пустой результат — поднимает (модель не
+    // поняла задачу, решение владельца 2026-10-12).
     assert.deepEqual(result.history, [
-      { level: 1, outcome: 'refused' }, { level: 1, outcome: 'empty' },
+      { level: 1, outcome: 'empty' },
       { level: 3, outcome: 'artifacts_failed' }, { level: 4, outcome: 'review_failed' },
     ]);
     assert.ok(!JSON.stringify(result.history).includes('agent-'), 'в истории нет id');
   });
 
-  it('отказ формы FIX-032 (status: ok, result_status: blocked, 3 файла) — refused, поднимает границу', () => {
+  it('отказ формы FIX-032 (status: ok, result_status: blocked, 3 файла) — refused, границу не поднимает', () => {
     const graded = gradeRuns([run('agent-c', { result_status: 'blocked', changed_files: 3 })]);
     assert.equal(graded[0].grade, 'refused');
-    assert.equal(ticketFloor(graded, 'IMPL-1', scoreOf, bands).floor, 5);
+    assert.equal(ticketFloor(graded, 'IMPL-1', scoreOf, bands).floor, 0);
   });
 
   it('не считает crashed, crashed_after_work, throttled, stopped, pending и запуски до reset', () => {
@@ -126,9 +130,9 @@ describe('нижняя граница тикета', () => {
 
   it('другой тикет не считается; агент без факта — оценка события, без неё — пропуск', () => {
     const graded = gradeRuns([
-      run('agent-c', { ticket: 'IMPL-2', changed_files: 0 }),
-      run('gone-agent', { changed_files: 0, score: 30 }),
-      run('lost-agent', { changed_files: 0 }),
+      run('agent-c', { ticket: 'IMPL-2' }),
+      run('gone-agent', { score: 30 }), { type: 'verify', ticket: 'IMPL-1', status: 'failed', fail_reasons: ['x'] },
+      run('lost-agent'), { type: 'verify', ticket: 'IMPL-1', status: 'failed', fail_reasons: ['y'] },
     ]);
     const byEvent = (r) => (Object.hasOwn(r, 'score') ? { known: true, score: r.score } : scoreOf(r));
     const result = ticketFloor(graded, 'IMPL-1', byEvent, bands);
@@ -137,7 +141,8 @@ describe('нижняя граница тикета', () => {
   });
 
   it('модель без оценки — уровень 1; нет тикета — граница 0', () => {
-    const graded = gradeRuns([run('agent-x', { changed_files: 0 })]);
+    const graded = gradeRuns([run('agent-x'), { type: 'verify', ticket: 'IMPL-1', status: 'failed', fail_reasons: ['x'] }]);
+    assert.equal(graded[0].grade, 'artifacts_failed');
     assert.equal(ticketFloor(graded, 'IMPL-1', () => ({ known: true, score: null }), bands).floor, 1);
     assert.equal(ticketFloor(graded, null, scoreOf, bands).floor, 0);
   });

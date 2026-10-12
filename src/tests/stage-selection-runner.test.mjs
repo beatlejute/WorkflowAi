@@ -593,7 +593,9 @@ describe('эскалация по отказу агента', () => {
 describe('между попытками и перезапусками', () => {
   test('граница из журнала: новый процесс начинает выше проваленного уровня', async () => {
     const env = makeEnv();
-    journal(env.root, [{ ticket: 'IMPL-1', agent: 'agent-b', model: B, status: 'ok', result_status: 'blocked', changed_files: 3 }]);
+    // Пустой результат агентом b — граница поднимается на его уровень (решение
+    // владельца 2026-10-12); отказ (result_status: blocked) границу не поднимает.
+    journal(env.root, [{ ticket: 'IMPL-1', agent: 'agent-b', model: B }]);
     const { attempt, logger } = await prepare(env, agentsOf(env));
     const { runs } = await attempt(stageOf(env), { counters: { task_attempts: 3 } });
     assert.deepEqual(runs, [mem(M2), 'agent-c']);

@@ -37,7 +37,11 @@ import { levelRank, LEVELS } from './model-facts.mjs';
 import { isModelPool, poolMembers, runPoolCommand, selectorTicket, parsePlace, POOL_COMMAND_TIMEOUT_MS } from './model-pools.mjs';
 
 /** Градации запусков исполнителя, поднимающие нижнюю границу тикета (решение 4). */
-export const FLOOR_GRADES = Object.freeze(['refused', 'empty', 'artifacts_failed', 'review_failed']);
+// Решение владельца, 2026-10-12: границу поднимает провал модели над задачей —
+// пустой результат (модель не поняла, что нужно), артефакты, не принятые
+// контролем, отклонённое ревью. Отказ (`refused`) — процесс не состоялся или
+// агент сам ушёл в blocked: это не про силу модели, границу не поднимает.
+export const FLOOR_GRADES = Object.freeze(['empty', 'artifacts_failed', 'review_failed']);
 
 /** Пределы полей тикета в промпте селектора (цена вызова растёт с объёмом промпта). */
 export const DESCRIPTION_LIMIT = 2000;
@@ -134,8 +138,10 @@ export function levelOf(bands, score) {
 
 /**
  * Нижняя граница тикета: наибольший уровень (в замороженных полосах) среди его
- * запусков исполнителя с градациями FLOOR_GRADES; сбой после работы
- * (`crashed_after_work`) не считается — работу оборвал сбой, а не бессилие модели.
+ * запусков исполнителя с градациями FLOOR_GRADES — провал модели над задачей
+ * (решение владельца, 2026-10-12). Сбой после работы (`crashed_after_work`) и
+ * отказ (`refused`) не считаются: работу оборвал сбой или процесс не состоялся,
+ * а не модель провалила задачу.
  * `scoreOf(run)` — `{ known: true, score }` или `{ known: false }` (запуск пропускается).
  * @param {Array<object>} gradedRuns — gradeRuns журнала (reset уже учтён)
  * @returns {{floor: number, history: Array<{level: number, outcome: string}>, executorRuns: number, skipped: string[]}}
