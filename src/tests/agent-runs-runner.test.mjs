@@ -195,9 +195,11 @@ describe('событие run: успех, ошибка, fallback', () => {
     const events = runEvents(root);
     assert.equal(events.length, 1, JSON.stringify(events));
     const [event] = events;
-    const { ts, run_key: runKey, duration_ms: durationMs, ...rest } = event;
+    const { ts, started_at: startedAt, run_key: runKey, duration_ms: durationMs, ...rest } = event;
     assert.match(ts, ISO_RE);
-    assert.ok(Date.parse(ts) >= started - 1000 && Date.parse(ts) <= Date.now() + 1000, `ts в окне запуска: ${ts}`);
+    assert.ok(Date.parse(ts) >= started - 1000 && Date.parse(ts) <= Date.now() + 1000, `ts в окне записи: ${ts}`);
+    assert.match(startedAt, ISO_RE);
+    assert.ok(Date.parse(startedAt) >= started - 1000 && Date.parse(startedAt) <= Date.now() + 1000, `started_at в окне запуска: ${startedAt}`);
     assert.match(runKey, UUID_RE);
     assert.ok(Number.isInteger(durationMs) && durationMs >= 0, `duration_ms: ${durationMs}`);
     assert.deepEqual(rest, {

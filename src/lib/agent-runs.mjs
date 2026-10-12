@@ -200,10 +200,12 @@ export function appendRunEvent(projectRoot, event) {
 
 /**
  * События журнала в порядке файла. Нет файла — пустой массив; строка, не разбираемая
- * как JSON-объект, пропускается. Ошибка чтения (кроме отсутствия файла) бросается:
- * вызывающий решает, как без журнала работать дальше.
+ * как JSON-объект с типом события, пропускается. Ошибка чтения (кроме отсутствия файла)
+ * бросается: вызывающий решает, как без журнала работать дальше. `onMalformedLine` —
+ * необязательная диагностика пропусков (для отчётов, где нельзя выдавать неполный журнал
+ * за полную сводку); существующие потребители сохраняют прежнее поведение.
  */
-export function readRunEvents(projectRoot) {
+export function readRunEvents(projectRoot, { onMalformedLine = null } = {}) {
   let text;
   try {
     text = fs.readFileSync(runsLogPath(projectRoot), 'utf8');
@@ -212,15 +214,19 @@ export function readRunEvents(projectRoot) {
     throw err;
   }
   const events = [];
-  for (const line of text.split('\n')) {
+  for (const [index, line] of text.split('\n').entries()) {
     if (!line.trim()) continue;
+    let event;
     try {
-      const event = JSON.parse(line);
-      if (event && typeof event === 'object' && !Array.isArray(event) && typeof event.type === 'string') {
-        events.push(event);
-      }
-    } catch {
-      // Испорченная строка (оборванная запись) — пропускается.
+      event = JSON.parse(line);
+    } catch (err) {
+      onMalformedLine?.({ line_number: index + 1, error: err.message });
+      continue;
+    }
+    if (event && typeof event === 'object' && !Array.isArray(event) && typeof event.type === 'string') {
+      events.push(event);
+    } else {
+      onMalformedLine?.({ line_number: index + 1, error: 'not a JSON event object with string type' });
     }
   }
   return events;
@@ -347,18 +353,21 @@ function gradeOf(run, verify, review) {
  * в журнале, как у `unban`. Окно такой запуск держит: иначе его контроль достался бы
  * предыдущему запуску того же тикета.
  *
+ * @param {{respectResets?: boolean}} options — false включает в расчёт запуски до
+ *   последнего reset; только для исторического отчёта всех запусков. По умолчанию
+ *   сохраняется существующий отсев для статистики качества и запретов.
  * @returns {Array<object>} поля события `run` и `grade`, `crashed_after_work`,
  *   `artifacts_passed` (true — контроль в окне пройден, false — `failed` с причинами,
  *   null — контроля с вердиктом нет или градация до контроля), `crash` (идёт во
  *   временный запрет), `verify`, `review` (события окна или null).
  */
-export function gradeRuns(events) {
-  return gradeIndexed(events).map(({ run }) => run);
+export function gradeRuns(events, { respectResets = true } = {}) {
+  return gradeIndexed(events, { respectResets }).map(({ run }) => run);
 }
 
 // gradeRuns с позицией события `run` в журнале: по ней запуск сравнивается со снятием
 // запрета (`unban`).
-function gradeIndexed(events) {
+function gradeIndexed(events, { respectResets = true } = {}) {
   const runs = [];
   const windows = new Map();
   // Модель → позиция её последнего `reset`.
@@ -380,7 +389,9 @@ function gradeIndexed(events) {
     }
   }
   // Окна уже построены со всеми запусками — отсев по `reset` только после них.
-  const counted = runs.filter(({ event, index }) => !(event.model && index < (lastReset.get(event.model) ?? -1)));
+  const counted = respectResets
+    ? runs.filter(({ event, index }) => !(event.model && index < (lastReset.get(event.model) ?? -1)))
+    : runs;
   return counted.map(({ event, index, verify, review }) => {
     const graded = gradeOf(event, verify, review);
     return {
@@ -672,6 +683,165 @@ export function statsTable(events, now = Date.now()) {
   });
 }
 
+// В новых записях `started_at` сохраняет момент старта. В старых обычных записях ts был
+// временем закрытия, но `duration_ms` позволяет восстановить его с миллисекундной точностью;
+// старое прерывание уже хранит `started_at`. Открытый marker хранит старт в `ts`.
+function runStartTimestamp(event) {
+  const startedAt = Date.parse(event.started_at);
+  if (Number.isFinite(startedAt)) return { timestamp: startedAt, estimated: false };
+  const recordedAt = Date.parse(event.ts);
+  if (!Number.isFinite(recordedAt)) return { timestamp: null, estimated: false };
+  if (event.open === true) return { timestamp: recordedAt, estimated: false };
+  if (typeof event.duration_ms === 'number' && Number.isFinite(event.duration_ms) && event.duration_ms >= 0) {
+    return { timestamp: recordedAt - event.duration_ms, estimated: true };
+  }
+  return { timestamp: null, estimated: false };
+}
+
+/**
+ * Сводка запусков по модели для диапазона времени. `fromMs` включительно, `toMs`
+ * исключительно; timestamp запуска — `started_at`, для legacy-записи — `ts - duration_ms`,
+ * у активного open marker — его `ts`. Старое событие без достаточных полей не датируется.
+ * GRADE считается по полному журналу до фильтрации дат, чтобы verify/review после конца
+ * периода завершали оценку старта внутри него. Запуски до reset включаются: это история
+ * запусков, а не текущая статистика и запреты (`statsTable` сохраняет старую семантику).
+ *
+ * `openRun` — необязательная запись из agent-run-open.json: добавляется как `pending`, если
+ * соответствующего `run_key` ещё нет в журнале. `project` помечает вклад журнала в строках.
+ * @param {Array<object>} events — полный журнал одного проекта
+ * @param {{fromMs?: number, toMs?: number, openRun?: object|null, project?: string|null}} options
+ * @returns {{rows: Array<object>, totals: object, unplaced_starts: number}}
+ */
+export function runStatsTable(events, {
+  fromMs = -Infinity,
+  toMs = Infinity,
+  openRun = null,
+  project = null,
+} = {}) {
+  const journal = Array.isArray(events) ? events : [];
+  const loggedRunKeys = new Set(journal
+    .filter((event) => event?.type === 'run' && typeof event.run_key === 'string')
+    .map((event) => event.run_key));
+  const hasOpenRun = openRun && typeof openRun.run_key === 'string' && !loggedRunKeys.has(openRun.run_key);
+  const source = hasOpenRun
+    ? [...journal, { ...openRun, type: 'run', status: 'pending', changed_files: null, open: true }]
+    : journal;
+
+  const gradedExecutorRuns = gradeRuns(source, { respectResets: false });
+  let gradeIndex = 0;
+  const rows = new Map();
+  const totals = {
+    starts: 0,
+    estimated_starts: 0,
+    process_ok: 0,
+    process_statuses: {},
+    executor_starts: 0,
+    executor_graded: 0,
+    executor_ungraded: 0,
+    executor_grades: Object.fromEntries(GRADES.map((grade) => [grade, 0])),
+    open_starts: 0,
+  };
+  let unplacedStarts = 0;
+  const unplacedByModel = new Map();
+
+  const increment = (map, key) => {
+    const count = (Object.hasOwn(map, key) ? map[key] : 0) + 1;
+    Object.defineProperty(map, key, { value: count, enumerable: true, configurable: true, writable: true });
+  };
+  for (const event of source) {
+    if (event?.type !== 'run') continue;
+    const isExecutor = event.skill === EXECUTOR_SKILL;
+    let grade = null;
+    if (isExecutor && event.ticket) {
+      grade = gradedExecutorRuns[gradeIndex++]?.grade ?? null;
+    }
+
+    const model = typeof event.model === 'string' && event.model ? event.model : null;
+    const { timestamp, estimated } = runStartTimestamp(event);
+    if (timestamp === null) {
+      unplacedStarts += 1;
+      unplacedByModel.set(model, (unplacedByModel.get(model) || 0) + 1);
+      continue;
+    }
+    if (timestamp < fromMs || timestamp >= toMs) continue;
+
+    const status = typeof event.status === 'string' && event.status ? event.status : 'unknown';
+    const key = JSON.stringify(model);
+    if (!rows.has(key)) {
+      rows.set(key, {
+        model,
+        agents: new Set(),
+        projects: new Set(),
+        ticket_types: new Set(),
+        starts: 0,
+        estimated_starts: 0,
+        process_ok: 0,
+        process_statuses: {},
+        executor_starts: 0,
+        executor_graded: 0,
+        executor_ungraded: 0,
+        executor_grades: Object.fromEntries(GRADES.map((item) => [item, 0])),
+        open_starts: 0,
+      });
+    }
+    const row = rows.get(key);
+    row.starts += 1;
+    totals.starts += 1;
+    if (estimated) {
+      row.estimated_starts += 1;
+      totals.estimated_starts += 1;
+    }
+    increment(row.process_statuses, status);
+    increment(totals.process_statuses, status);
+    if (event.status === 'ok') {
+      row.process_ok += 1;
+      totals.process_ok += 1;
+    }
+    if (typeof event.agent === 'string' && event.agent) row.agents.add(event.agent);
+    if (typeof event.ticket_type === 'string' && event.ticket_type) row.ticket_types.add(event.ticket_type);
+    if (project) row.projects.add(project);
+    if (event.open === true) {
+      row.open_starts += 1;
+      totals.open_starts += 1;
+    }
+    if (isExecutor) {
+      row.executor_starts += 1;
+      totals.executor_starts += 1;
+      if (grade === null) {
+        row.executor_ungraded += 1;
+        totals.executor_ungraded += 1;
+      } else {
+        row.executor_graded += 1;
+        totals.executor_graded += 1;
+        increment(row.executor_grades, grade);
+        increment(totals.executor_grades, grade);
+      }
+    }
+  }
+
+  const modelOrder = (a, b) => {
+    if (a.model === b.model) return 0;
+    if (a.model === null) return 1;
+    if (b.model === null) return -1;
+    return a.model.localeCompare(b.model);
+  };
+  const resultRows = [...rows.values()].sort(modelOrder).map((row) => ({
+    ...row,
+    agents: [...row.agents].sort(),
+    projects: [...row.projects].sort(),
+    ticket_types: [...row.ticket_types].sort(),
+  }));
+  const unplaced_starts_by_model = [...unplacedByModel]
+    .map(([model, starts]) => ({ model, starts }))
+    .sort((a, b) => {
+      if (a.model === b.model) return 0;
+      if (a.model === null) return 1;
+      if (b.model === null) return -1;
+      return a.model.localeCompare(b.model);
+    });
+  return { rows: resultRows, totals, unplaced_starts: unplacedStarts, unplaced_starts_by_model };
+}
+
 /**
  * Снятие запрета человеком: дописывает `unban`. С `ticket_type` — снятие постоянного
  * запрета пары, без него — временных запретов модели (за сбой и «модель недоступна»:
@@ -736,6 +906,31 @@ export function recordReset(projectRoot, { model, reason } = {}, now = Date.now(
 
 export function openRunPath(projectRoot) {
   return path.join(projectRoot, ...OPEN_RUN_FILE.split('/'));
+}
+
+/**
+ * Читает запись открытого запуска, оставленную до его закрытия. Нет файла — null;
+ * повреждённая запись или недоступный файл — ошибка для вызывающего отчёта.
+ */
+export function readOpenRun(projectRoot) {
+  let text;
+  try {
+    text = fs.readFileSync(openRunPath(projectRoot), 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+  let record;
+  try {
+    record = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`Open agent run is not valid JSON: ${err.message}`);
+  }
+  if (!record || typeof record !== 'object' || Array.isArray(record)
+    || typeof record.run_key !== 'string' || !record.run_key) {
+    throw new Error('Open agent run has no run_key');
+  }
+  return record;
 }
 
 /** Пишет запись открытого запуска целиком. Ошибка возвращается, не бросается. */

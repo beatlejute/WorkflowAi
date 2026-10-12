@@ -2690,7 +2690,7 @@ class StageExecutor {
    */
   _closeAgentRun(run, { status, exitCode, changedPaths, stopRequested, resultStatus = null, kiloModels = null, modelIoModel = null, crashTtlMs = null }) {
     const { ts, ...record } = run.record;
-    const event = { type: 'run', ...record, status };
+    const event = { type: 'run', ...record, status, started_at: ts };
     try {
       Object.assign(event, {
         models: isKiloRun(run.agent) ? (kiloModels?.models ?? null) : null,
