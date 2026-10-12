@@ -943,7 +943,10 @@ describe('runner: неуверенная оценка стадии model_io — 
     assert.equal(result.status, 'failed');
     assert.equal(result.agentId, 'judge-a');
     assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }, { agent: 'judge-a', retry: null }]);
-    assert.ok(logger.lines.some((l) => l.includes('artifact diff empty — falling back in-stage')), logger.lines.join('\n'));
+    // Крах шага модели — graceful-ошибка обмена (класс server, пометка unhealthy);
+    // агентов не осталось — вердикт по неуверенному ответу первого.
+    assert.ok(logger.lines.some((l) => l.includes('agent judge-b model error server — falling back in-stage')), logger.lines.join('\n'));
+    assert.ok(logger.lines.some((l) => l.includes('verdict without re-review: status=failed')), logger.lines.join('\n'));
   });
 
   it('второй агент списка не проходит по способностям (пункт visual, текстовый агент) — флага переоценки нет', async () => {
@@ -1136,5 +1139,53 @@ describe('runner: судья model_io — первый доступный из �
     assert.equal(result.status, 'passed');
     assert.equal(result.agentId, 'judge-b');
     assert.ok(logger.lines.some((l) => /не отработал \(exit -?\d+\) — ревью продолжает judge-b/.test(l)), logger.lines.join('\n'));
+  });
+
+  it('судья ответил error с выходом 0 — следующий судит: классификатор не решает', async () => {
+    const root = makeProject();
+    writeFileSync(join(root, 'scripts', 'error-agent.mjs'),
+      "console.log('---RESULT---');\nconsole.log('status: error');\n");
+    const agents = {
+      'judge-a': { command: 'node', args: ['scripts/error-agent.mjs'], capabilities: ['text'] },
+      'judge-b': judgeAgent('score: 5'),
+    };
+    const config = makeConfig(agents, ['judge-a', 'judge-b'], options);
+
+    const { result } = await runStage(root, config, {});
+
+    assert.equal(result.status, 'passed');
+    assert.equal(result.agentId, 'judge-b');
+  });
+
+  it('ошибка переоценки — сначала оставшиеся судьи, вердикт по неуверенному — когда никого', async () => {
+    const root = uncertainProject();
+    writeFileSync(join(root, 'scripts', 'error-agent.mjs'),
+      "console.log('---RESULT---');\nconsole.log('status: error');\nprocess.exit(1);\n");
+    const agents = {
+      'judge-a': judgeAgent('score: 2'),
+      'judge-b': { command: 'node', args: ['scripts/error-agent.mjs'], capabilities: ['text'] },
+      'judge-c': judgeAgent('score: 5'),
+    };
+
+    const { result, logger } = await runStage(root, makeConfig(agents, ['judge-a', 'judge-b', 'judge-c'], options));
+
+    assert.equal(result.status, 'passed');
+    assert.equal(result.agentId, 'judge-c');
+    assert.ok(logger.lines.some((l) => l.includes('REVIEW_UNCERTAIN re-review by "judge-b" gave status=error — continues with "judge-c"')), logger.lines.join('\n'));
+  });
+
+  it('внезапная смерть процесса судьи без RESULT — следующий судит (снимки выключены)', async () => {
+    const root = makeProject();
+    writeFileSync(join(root, 'scripts', 'crash-agent.mjs'), 'process.exit(1);\n');
+    const agents = {
+      'judge-a': { command: 'node', args: ['scripts/crash-agent.mjs'], capabilities: ['text'] },
+      'judge-b': judgeAgent('score: 5'),
+    };
+    const config = makeConfig(agents, ['judge-a', 'judge-b'], options);
+
+    const { result } = await runStage(root, config, {});
+
+    assert.equal(result.status, 'passed');
+    assert.equal(result.agentId, 'judge-b');
   });
 });

@@ -2458,9 +2458,27 @@ class StageExecutor {
           continue;
         }
         // Переоценка без вердикта (ошибка шага модели или apply у следующего агента) —
-        // вердикт по неуверенному ответу: иначе ошибка вела в increment-review-errors, и
-        // та же пара агентов крутилась до mark-blocked.
+        // сначала оставшиеся судьи списка (решение владельца 2026-10-12: переключение
+        // по сбою судьи); вердикт по неуверенному ответу — только когда переоценить
+        // некому. Без этого ошибка переоценки вела в increment-review-errors, и та же
+        // пара агентов крутилась до mark-blocked.
         if (uncertain && run.modelIo && !this.stopRequested && result.status !== 'passed' && result.status !== 'failed') {
+          if (result.status === 'error') {
+            triedInThisAttempt.push(agentId);
+            const next = this.resolveAgent(stage, stageId, { excludeAgents: triedInThisAttempt });
+            if (!next.blocked) {
+              if (this.logger) {
+                this.logger.info(
+                  `REVIEW_UNCERTAIN re-review by "${agentId}" gave status=error — continues with "${next.agentId}"`,
+                  stageId
+                );
+              }
+              pending = next;
+              lastErr = null;
+              lastModelFailure = null;
+              continue;
+            }
+          }
           if (this.logger) {
             this.logger.info(`REVIEW_UNCERTAIN re-review by "${agentId}" gave status=${result.status} — verdict by "${uncertain.agentId}"`, stageId);
           }
@@ -2495,12 +2513,13 @@ class StageExecutor {
 
         // Судья не отработал (решение владельца 2026-10-12): обмен завершился ошибкой
         // без вердикта (судья упал, провайдер недоступен) — ревью в этой же попытке
-        // ведёт следующий агент списка. Старт всегда с первого (model_io без сдвига
-        // по попыткам), вперёд — только по сбою. no_key — не «судья не отработал»,
-        // а его неверная настройка: переключение не поможет, стадия завершается
-        // ошибкой, как раньше.
+        // ведёт следующий агент списка. Условие — статус самого обмена: классификатор
+        // может назвать запуск ok при выходе 0 с RESULT status: error, а сетевые и
+        // auth-классы — не ok. Старт всегда с первого (model_io без сдвига по попыткам),
+        // вперёд — только по сбою. no_key — не «судья не отработал», а его неверная
+        // настройка: переключение не поможет, стадия завершается ошибкой, как раньше.
         const judgeMisconfigured = result.modelError?.class === 'no_key';
-        if (run.modelIo && status === 'error' && !judgeMisconfigured && !this.stopRequested) {
+        if (run.modelIo && result.status === 'error' && !judgeMisconfigured && !this.stopRequested) {
           triedInThisAttempt.push(agentId);
           const next = this.resolveAgent(stage, stageId, { excludeAgents: triedInThisAttempt });
           if (!next.blocked) {
@@ -3071,7 +3090,15 @@ class StageExecutor {
         })
         : await this._askCommandAgent(agent, agentId, input, stageId, stage.skill, signal);
     } catch (err) {
-      if (!(err instanceof ModelClientError)) throw err;
+      // Внезапная смерть процесса судьи (не ModelClientError) — сбой шага модели:
+      // та же graceful-обработка, что у ошибок обмена, и переключение на следующего
+      // агента попытки (решение владельца 2026-10-12). Ошибки prepare и apply
+      // остаются исключениями стадии: у них другой шаг, и переключение судьи не поможет.
+      if (!(err instanceof ModelClientError)) {
+        if (signal.aborted) throw new ModelClientError('aborted', `stage stopped during model call: ${err.message}`);
+        timing.model_ms = Date.now() - started;
+        return this._modelIoFailure(agentId, stageId, new ModelClientError('server', `judge process failed: ${err.message}`), timing);
+      }
       timing.model_ms = Date.now() - started;
       return this._modelIoFailure(agentId, stageId, err, timing);
     }
