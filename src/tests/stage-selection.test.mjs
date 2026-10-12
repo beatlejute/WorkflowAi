@@ -6,9 +6,10 @@
  * Что охраняется:
  *  - полосы равной ширины между min и max оценок выживших; max — уровень N, min — 1,
  *    без оценки — 1, полосы нулевой ширины — N, ниже min — 0 (только для границы);
- *  - граница считает refused, empty, artifacts_failed и review_failed (и отказ формы
- *    FIX-032: `status: ok`, `result_status: blocked`), не считает crashed,
- *    crashed_after_work, throttled, stopped, pending и запуски до `reset`; агент без
+ *  - граница считает empty, artifacts_failed и review_failed (провал модели над
+ *    задачей, решение владельца 2026-10-12), не считает refused (и отказ формы
+ *    FIX-032: `status: ok`, `result_status: blocked`), crashed, crashed_after_work,
+ *    throttled, stopped, pending и запуски до `reset`; агент без
  *    факта — оценка события, без неё — пропуск; граница не выше maxLevel − 1;
  *  - обход: бесплатные ≥ R' по возрастанию, платные ≥ R' по возрастанию, хвост по
  *    убыванию с бесплатными первыми; внутри уровня — не запускавшиеся, ранжир, список;
@@ -92,13 +93,12 @@ describe('нижняя граница тикета', () => {
     ];
     const graded = gradeRuns(events);
     assert.deepEqual(graded.map((r) => r.grade), ['refused', 'empty', 'artifacts_failed', 'review_failed']);
-    // Границу поднимает только реальная работа, не прошедшая контроль
-    // (решение владельца, 2026-10-12): refused и empty границу не поднимают.
+    // Границу поднимает провал модели над задачей (решение владельца, 2026-10-12):
+    // refused границу не поднимает; пустой результат — поднимает (модель не
+    // поняла задачу).
     const result = ticketFloor(graded, 'IMPL-1', scoreOf, bands);
     assert.equal(result.floor, 4);
     assert.equal(result.executorRuns, 4);
-    // refused границу не поднимает; пустой результат — поднимает (модель не
-    // поняла задачу, решение владельца 2026-10-12).
     assert.deepEqual(result.history, [
       { level: 1, outcome: 'empty' },
       { level: 3, outcome: 'artifacts_failed' }, { level: 4, outcome: 'review_failed' },
@@ -130,10 +130,13 @@ describe('нижняя граница тикета', () => {
 
   it('другой тикет не считается; агент без факта — оценка события, без неё — пропуск', () => {
     const graded = gradeRuns([
-      run('agent-c', { ticket: 'IMPL-2' }),
+      // Провал чужого тикета (empty — считаемая градация) отсекается только
+      // фильтром тикета: сломай фильтр — граница доехала бы до уровня agent-c.
+      run('agent-c', { ticket: 'IMPL-2', changed_files: 0 }),
       run('gone-agent', { score: 30 }), { type: 'verify', ticket: 'IMPL-1', status: 'failed', fail_reasons: ['x'] },
       run('lost-agent'), { type: 'verify', ticket: 'IMPL-1', status: 'failed', fail_reasons: ['y'] },
     ]);
+    assert.equal(graded[0].grade, 'empty');
     const byEvent = (r) => (Object.hasOwn(r, 'score') ? { known: true, score: r.score } : scoreOf(r));
     const result = ticketFloor(graded, 'IMPL-1', byEvent, bands);
     assert.equal(result.floor, 3);

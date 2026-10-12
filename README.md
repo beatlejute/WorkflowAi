@@ -875,8 +875,10 @@ claude-*, gpt-luna и gemini-flash-lite по цене каталога и deepse
    ступени, и курсор вращается внутри лучшей непустой ступени (раздел «Тег минимального
    уровня у места»).
 4. **Нижняя граница тикета** — из журнала запусков: запуски исполнителя этого тикета с
-   градациями `refused`, `empty`, `artifacts_failed`, `review_failed` (`reset`
-   учтён; `crashed`, `crashed_after_work`, `throttled`, `stopped`, `pending` не считаются).
+   градациями `empty`, `artifacts_failed`, `review_failed` (`reset`
+   учтён; `refused`, `crashed`, `crashed_after_work`, `throttled`, `stopped`, `pending` не
+   считаются — решение владельца 2026-10-12: границу поднимает провал модели над задачей,
+   а отказ процессом не является).
    Оценка запуска — текущий факт агента, агента в фактах нет — поле `score` события, нет и
    его — запуск пропускается с WARN. Граница — наибольший уровень таких запусков (без
    оценки — 1), не выше сильнейшего уровня выживших в начале попытки минус 1: после
@@ -915,8 +917,9 @@ claude-*, gpt-luna и gemini-flash-lite по цене каталога и deepse
 
 Пример — FIX-032 PulseProxy (нужен mcp, выжившие claude-haiku 16.9, claude-sonnet 38.2,
 claude-opus 50.8, N = 5): уровни haiku 1, sonnet 4, opus 5. При R = 1 запускается haiku; его
-`blocked` — sonnet в той же попытке, затем opus, затем `goto.blocked`. Следующий выбор, и в
-новом процессе, — граница 1: haiku выбывает, первым идёт sonnet.
+`blocked` — sonnet в той же попытке, затем opus, затем `goto.blocked`. В новом процессе
+граница не поднимается — отказ (`refused`) границу не поднимает (решение владельца
+2026-10-12), и попытка снова начинается с haiku.
 
 ### Контракт селектора
 
@@ -928,8 +931,8 @@ claude-opus 50.8, N = 5): уровни haiku 1, sonnet 4, opus 5. При R = 1 �
   "mode": "models", "stage": "execute-task",
   "ticket": {"id": "FIX-032", "type": "fix", "title": "…", "priority": 1, "complexity": "medium",
              "required_capabilities": ["mcp"], "tags": ["…"], "description": "<до 2000>", "dod": "<до 4000>",
-             "notes": "<до 1000>", "files": 5, "references": 3, "executor_runs": 1, "floor_level": 1,
-             "history": [{"level": 1, "outcome": "refused"}]},
+             "notes": "<до 1000>", "files": 5, "references": 3, "executor_runs": 1, "floor_level": 0,
+             "history": []},
   "levels": ["<рубрика 1>", "…", "<рубрика N>"],
   "candidates": [
     {"id": "free-kilo@kilo/qwen/qwen3.8-27b:free", "kind": "pool_member", "free": true, "level": 3,
