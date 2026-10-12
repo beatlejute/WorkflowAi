@@ -78,7 +78,7 @@ process.exitCode = Number(process.env.FAKE_KILO_EXIT || '0');
 const ENV_KEYS = ['PATH', 'FAKE_KILO_STDOUT', 'FAKE_KILO_STDERR', 'FAKE_KILO_EXIT', 'FAKE_KILO_COUNT'];
 
 /** Запуск адаптера с фейковым kilo первым в PATH; { code, out, err } дочернего процесса. */
-function runAdapter({ stdout = '', exit = 0, stderr = '' } = {}) {
+function runAdapter({ stdout = '', exit = 0, stderr = '', args = [] } = {}) {
   const dir = fakeKiloDir();
   const saved = {};
   for (const key of ENV_KEYS) saved[key] = process.env[key];
@@ -87,7 +87,7 @@ function runAdapter({ stdout = '', exit = 0, stderr = '' } = {}) {
   process.env.FAKE_KILO_STDERR = stderr;
   process.env.FAKE_KILO_EXIT = String(exit);
   try {
-    const r = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' });
+    const r = spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
     return { code: r.status, out: r.stdout, err: r.stderr };
   } finally {
     for (const key of ENV_KEYS) {
@@ -136,6 +136,66 @@ test('isFree есть — free=<значение>; isFree нет — free=-', ()
   const out = outLines(r.out).map((l) => JSON.parse(l));
   assert.equal(out[0].note, 'in=0 out=0 tools=true free=true');
   assert.equal(out[1].note, 'in=0 out=0 tools=true free=-');
+});
+
+test('--free-requesty-mcp includes only exact Requesty IDs with numeric zero prices and tools', () => {
+  const requesty = verboseEntry('requesty/gemma-4-31b-it', {
+    id: 'gemma-4-31b-it', providerID: 'requesty', cost: { input: 0, output: 0 },
+    capabilities: { toolcall: true, input: { image: true } },
+  });
+  const requestyEu = verboseEntry('requesty/leanstral-1-5@eu', {
+    id: 'leanstral-1-5@eu', providerID: 'requesty', cost: { input: 0, output: 0 },
+    capabilities: { toolcall: true },
+  });
+  const noTools = verboseEntry('requesty/laguna-xs.2', {
+    id: 'laguna-xs.2', providerID: 'requesty', cost: { input: 0, output: 0 },
+    capabilities: { toolcall: false },
+  });
+  const missingTools = verboseEntry('requesty/unknown-tools', {
+    id: 'unknown-tools', providerID: 'requesty', cost: { input: 0, output: 0 },
+    capabilities: {},
+  });
+  const paid = verboseEntry('requesty/gpt-5.4', {
+    id: 'gpt-5.4', providerID: 'requesty', cost: { input: 0.2, output: 1 },
+    capabilities: { toolcall: true },
+  });
+  const stringZero = verboseEntry('requesty/string-zero', {
+    id: 'string-zero', providerID: 'requesty', cost: { input: '0', output: 0 },
+    capabilities: { toolcall: true },
+  });
+  const otherProvider = verboseEntry('openrouter/model:free', {
+    id: 'model:free', providerID: 'openrouter', cost: { input: 0, output: 0 },
+    capabilities: { toolcall: true },
+  });
+  const mismatched = verboseEntry('requesty/listed-id', {
+    id: 'different-id', providerID: 'requesty', cost: { input: 0, output: 0 },
+    capabilities: { toolcall: true },
+  });
+
+  const r = runAdapter({
+    stdout: [requesty, requestyEu, noTools, missingTools, paid, stringZero, otherProvider, mismatched].join('\n') + '\n',
+    args: ['--free-requesty-mcp'],
+  });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.deepEqual(outLines(r.out).map((line) => JSON.parse(line)), [
+    { id: 'requesty/gemma-4-31b-it', capabilities: ['multimodal'], note: 'in=0 out=0 tools=true free=-' },
+    { id: 'requesty/leanstral-1-5@eu', note: 'in=0 out=0 tools=true free=-' },
+  ]);
+  assert.match(r.err, /different-id/);
+  assert.match(r.err, /skipping/);
+});
+
+test('--free-requesty-mcp re-evaluates current price each invocation; unknown flags fail', () => {
+  const entry = (input) => verboseEntry('requesty/model-a', {
+    id: 'model-a', providerID: 'requesty', cost: { input, output: 0 }, capabilities: { toolcall: true },
+  });
+  const freeNow = runAdapter({ stdout: `${entry(0)}\n`, args: ['--free-requesty-mcp'] });
+  const pricedNow = runAdapter({ stdout: `${entry(0.01)}\n`, args: ['--free-requesty-mcp'] });
+  const unknown = runAdapter({ args: ['--unknown-mode'] });
+  assert.equal(outLines(freeNow.out).length, 1);
+  assert.equal(pricedNow.out, '');
+  assert.equal(unknown.code, 1);
+  assert.match(unknown.err, /Unknown argument/);
 });
 
 test('id объекта не совпадает со строкой — WARN в stderr, в итоге строка из вывода kilo', () => {

@@ -1,3 +1,13 @@
+## [1.26.7] — 2026-10-12
+
+### Added
+
+- **Requesty free-model pool** (`configs/pipeline.yaml`, `configs/agent-health-rules.yaml`): dynamic kilo list filtered to Requesty models with numeric zero input/output prices and tool calls enabled; added as a medium-threshold QA candidate. The adapter reads current prices on each invocation. No quota endpoint was confirmed, so the pool has no quota gate.
+
+### Fixed
+
+- **Kilo model-list adapter** (`src/scripts/kilo-models-list.js`): supports the Requesty MCP filter and excludes models unless both prices are numeric zero and tool calls are supported.
+
 ## [1.26.6] — 2026-10-12
 
 ### Added

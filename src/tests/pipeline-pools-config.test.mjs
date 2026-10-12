@@ -26,7 +26,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from '../lib/js-yaml.mjs';
 import { validateConfig } from '../runner.mjs';
-import { isModelPool, healthRulesId, buildMemberAgent } from '../lib/model-pools.mjs';
+import { isModelPool, healthRulesId, buildMemberAgent, parsePlace } from '../lib/model-pools.mjs';
 import { loadRules, scanStderrForFatalRule } from '../lib/error-classifier.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -80,6 +80,25 @@ function stageLists(stage) {
 describe('записи пулов', () => {
   it('в конфиге есть хотя бы один пул', () => {
     requirePools(loadConfig().pipeline);
+  });
+
+  it('free-requesty использует Requesty MCP список, лимит, QA место и правила health', () => {
+    const { pipeline } = loadConfig();
+    const pool = pipeline.agents['free-requesty'];
+    assert.ok(pool && isModelPool(pool));
+    assert.deepEqual(pool.models.list, ['node', '.workflow/src/scripts/kilo-models-list.js', '--free-requesty-mcp']);
+    assert.deepEqual(pool.models.match, ['^requesty/.+$']);
+    assert.equal(pool.models.max_per_attempt, 9);
+    assert.equal(pool.models.gate, undefined);
+    assert.deepEqual(pool.capabilities, ['text', 'mcp']);
+
+    const qaAgents = pipeline.stages['execute-task'].agents_by_type.qa.agents;
+    assert.ok(qaAgents.some((place) => {
+      const parsed = parsePlace(place);
+      return parsed.id === 'free-requesty' && parsed.minLevel === 'medium';
+    }));
+    const rules = yaml.load(readFileSync(RULES_PATH, 'utf8'));
+    assert.equal(rules.agents['free-requesty'].extends, 'kilo-free');
   });
 
   it('конфиг с пулами проходит проверку раннера при старте', () => {
@@ -137,7 +156,7 @@ describe('места пулов', () => {
     const placed = new Set();
     for (const stage of Object.values(pipeline.stages)) {
       if (!stage || typeof stage !== 'object' || stage.model_io !== undefined) continue;
-      for (const list of stageLists(stage)) for (const id of list) placed.add(id);
+      for (const list of stageLists(stage)) for (const place of list) placed.add(parsePlace(place).id);
     }
     const unplaced = requirePools(pipeline).map(([id]) => id).filter((id) => !placed.has(id));
     assert.deepEqual(unplaced, [], `пулы без места в списке стадии: ${unplaced.join(', ')}`);

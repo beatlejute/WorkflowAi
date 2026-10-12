@@ -13,8 +13,9 @@
  * JSON-объект модели в несколько строк. Объект открывает строка `{` и закрывает
  * строка `}` без отступа (первая колонка) — вложенные скобки объекта всегда с
  * отступом или с хвостовой запятой, под это правило не попадают («Факты kilo
- * 7.7.9»). Модели не фильтруются (решение стейкхолдера 3: пул собирается маской,
- * встроенного фильтра «бесплатная» нет).
+ * 7.7.9»). Без аргументов модели не фильтруются (пулы строятся маской); опциональный
+ * `--free-requesty-mcp` выводит только Requesty с числовой ценой 0/0, `toolcall: true`
+ * и совпадающим listed/object ID — текущая политика free Requesty pool.
  *
  * `note` — `in=<cost.input> out=<cost.output> tools=<capabilities.toolcall>
  * free=<isFree или ->`, значения — как есть, без единиц (ТЗ В14).
@@ -56,7 +57,26 @@ function formatModel(idLine, obj) {
   return JSON.stringify(record);
 }
 
-async function main() {
+/** Requesty free MCP membership uses the owner-selected 0/0 price policy. */
+function isRequestyFreeMcpModel(idLine, obj) {
+  if (!idLine.startsWith('requesty/')) return false;
+  const hasIds = typeof obj.providerID === 'string' && typeof obj.id === 'string';
+  const computedId = hasIds ? `${obj.providerID}/${obj.id}` : null;
+  if (computedId !== idLine) {
+    console.warn(`[WARN] kilo-models-list: object id "${computedId}" does not match listed Requesty id "${idLine}", skipping`);
+    return false;
+  }
+  return obj.cost?.input === 0 && obj.cost?.output === 0 && obj.capabilities?.toolcall === true;
+}
+
+async function main(args = process.argv.slice(2)) {
+  const requestyFreeMcpOnly = args.includes('--free-requesty-mcp');
+  const unknownArgs = args.filter((arg) => arg !== '--free-requesty-mcp');
+  if (unknownArgs.length > 0) {
+    console.error(`Unknown argument(s): ${unknownArgs.join(', ')}`);
+    return 1;
+  }
+
   let output;
   try {
     output = await runKiloVerbose();
@@ -64,8 +84,14 @@ async function main() {
     console.error(err.message);
     return 1;
   }
-  for (const line of parseVerbose(output, { format: formatModel })) {
-    process.stdout.write(`${line}\n`);
+  if (requestyFreeMcpOnly) {
+    for (const { id, obj } of parseVerbose(output)) {
+      if (isRequestyFreeMcpModel(id, obj)) process.stdout.write(`${formatModel(id, obj)}\n`);
+    }
+  } else {
+    for (const line of parseVerbose(output, { format: formatModel })) {
+      process.stdout.write(`${line}\n`);
+    }
   }
   return 0;
 }

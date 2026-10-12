@@ -321,17 +321,18 @@ pipeline:
     #    один раз в начале попытки и перед каждым запуском участника, кроме запуска первым
     #    в попытке; закрытый пул выбывает из кандидатов попытки. Маршруты kilo/* счётчик аккаунта не тратят,
     #    gate у них нет.
-    #  - `mcp` у free-kilo и free-openrouter заявлен по решению владельца 2026-10-12:
-    #    замер kilo models --verbose показал tools=true у всех 10 и 14 текущих участников
-    #    соответственно. Оба состава динамические, поэтому новая модель без вызова
-    #    инструментов может попасть в пул и получить тикет с required_capabilities: [mcp];
-    #    владелец принимает этот риск. Проверенная на одном замере способность не является
-    #    гарантией для будущего состава пула.
+    #  - `mcp` у free-kilo, free-openrouter и free-requesty заявлен по решению владельца
+    #    2026-10-12: текущий замер kilo models --verbose показал tools=true у участников.
+    #    Все составы динамические, поэтому новая модель без вызова инструментов может попасть
+    #    в пул и получить тикет с required_capabilities: [mcp]; владелец принимает этот риск.
+    #    Проверенная на одном замере способность не является гарантией для будущего состава.
+    #  - у free-requesty нет подтверждённой квоты: Requesty сообщает dynamic numeric zero
+    #    input/output pricing и toolcall=true, но проверяемый quota endpoint не найден.
     # selector и scores у пулов нет: пулы стоят только в списках execute-task, где участников
     # вместе с остальными кандидатами ранжирует селектор стадии (jev-place), а оценки и
     # бесплатность даёт selection.scores. Селектор пула там не вызывался бы никогда —
     # validateConfig такой мёртвый конфиг отклоняет.
-    # Якорь &free_pool_args отдаёт обоим пулам один и тот же массив: раннер строит запись
+    # Якорь &free_pool_args отдаёт всем пулам один и тот же массив: раннер строит запись
     # участника копией, массив пула на месте не правит.
     free-kilo:
       command: "kilo"
@@ -364,6 +365,18 @@ pipeline:
         # 2026-10-10: та же логика лимита участников, что и у free-kilo.
         max_per_attempt: 8
         gate: ["node", ".workflow/src/scripts/free-quota-gate.js", "--url", "https://openrouter.ai/api/v1/key", "--key-file", "~/.workflow/secrets/openrouter.key", "--timeout", "10"]
+
+    free-requesty:
+      command: "kilo"
+      args: *free_pool_args
+      workdir: "."
+      capabilities: [text, mcp]
+      description: "Бесплатные модели Requesty по маске"
+      models:
+        list: ["node", ".workflow/src/scripts/kilo-models-list.js", "--free-requesty-mcp"]
+        match:
+          - '^requesty/.+$'
+        max_per_attempt: 9
 
     script-move:
       command: "node"
@@ -964,18 +977,19 @@ pipeline:
           agents: [gpt-sol, glm, gemini-flash, deepseek-pro]
           instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: правка скилов по описанию и DoD тикета."
         qa:
-          # Со способностью `mcp` здесь glm-free, glm-flash, gpt-luna, deepseek-flash и оба
+          # Со способностью `mcp` здесь glm-free, glm-flash, gpt-luna, deepseek-flash и три
           # бесплатных пула. Серверы kilo берёт из своего конфига, а не из проектного .mcp.json.
-          # Замер kilo models --verbose 2026-10-12: tools=true у всех 10 free-kilo и 14
-          # free-openrouter участников; состав динамический, владелец принял риск новых моделей
-          # без инструментов. `free-kilo[medium]` и `free-openrouter[medium]` — мягкие границы:
-          # подходящие сначала, неоценённые в середине, подтверждённо более слабые — резерв.
+          # Замер kilo models --verbose 2026-10-12 показал tools=true у участников; состав
+          # динамический, владелец принял риск новых моделей без инструментов.
+          # `free-kilo[medium]`, `free-openrouter[medium]` и `free-requesty[medium]` — мягкие
+          # границы: подходящие сначала, неоценённые в середине, подтверждённо более слабые — резерв.
           # Бесплатный OpenRouter пул дополнительно закрывается по дневной квоте (50/сутки).
+          # Подтверждённого quota endpoint Requesty нет — free-requesty без gate.
           # Остальные в списке (gemini-flash-lite, gpt-sol) mcp не заявляют.
           # Список расширен вечером 2026-10-11: на типе qa оставалось два фиксированных исполнителя
           # (glm-free и gpt-luna), и постоянный запрет одной модели оставлял тикет без исполнителя
           # (no_capable_agent → blocked/; охраняет pipeline-mcp-capability.test.mjs).
-          agents: [glm-free, glm-flash, gpt-luna, "free-kilo[medium]", "free-openrouter[medium]", gemini-flash-lite, gpt-sol, deepseek-flash]
+          agents: [glm-free, glm-flash, gpt-luna, "free-kilo[medium]", "free-openrouter[medium]", "free-requesty[medium]", gemini-flash-lite, gpt-sol, deepseek-flash]
           instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: по описанию и DoD тикета напиши и реально запусти тесты и проверки: каждый случай тикета — отдельный тест против продукта (модуль, сборка, запущенное приложение в среде из тикета, плана или shared), значения в отчёте — измеренные, расхождение с ожиданием — в «### Найденные дефекты»."
         arch:
           agents: [gpt-sol, glm]
