@@ -92,6 +92,7 @@ describe('записи пулов', () => {
     assert.equal(pool.models.gate, undefined);
     assert.deepEqual(pool.capabilities, ['text', 'mcp']);
 
+    assert.ok(pipeline.stages['execute-task'].agents.includes('free-requesty'));
     const qaAgents = pipeline.stages['execute-task'].agents_by_type.qa.agents;
     assert.ok(qaAgents.some((place) => {
       const parsed = parsePlace(place);
@@ -99,6 +100,28 @@ describe('записи пулов', () => {
     }));
     const rules = yaml.load(readFileSync(RULES_PATH, 'utf8'));
     assert.equal(rules.agents['free-requesty'].extends, 'kilo-free');
+  });
+
+  it('free-groq uses the live-price Groq MCP filter, safe cap, placements, and health rules', () => {
+    const { pipeline } = loadConfig();
+    const pool = pipeline.agents['free-groq'];
+    assert.ok(pool && isModelPool(pool));
+    assert.deepEqual(pool.models.list, ['node', '.workflow/src/scripts/kilo-models-list.js', '--free-groq-mcp']);
+    assert.deepEqual(pool.models.match, ['^groq/.+$']);
+    assert.equal(pool.models.max_per_attempt, 1, '0 eligible live models requires the minimum valid pool cap');
+    assert.equal(pool.models.gate, undefined);
+    assert.deepEqual(pool.args, ['-m', '{model}', '--agent', 'code', '--print-logs', '--log-level', 'ERROR', 'run', '--auto']);
+    assert.equal(pool.workdir, '.');
+    assert.deepEqual(pool.capabilities, ['text', 'mcp']);
+
+    assert.ok(pipeline.stages['execute-task'].agents.includes('free-groq'));
+    const qaAgents = pipeline.stages['execute-task'].agents_by_type.qa.agents;
+    assert.ok(qaAgents.some((place) => {
+      const parsed = parsePlace(place);
+      return parsed.id === 'free-groq' && parsed.minLevel === 'medium';
+    }));
+    const rules = yaml.load(readFileSync(RULES_PATH, 'utf8'));
+    assert.equal(rules.agents['free-groq'].extends, 'kilo-free');
   });
 
   it('конфиг с пулами проходит проверку раннера при старте', () => {

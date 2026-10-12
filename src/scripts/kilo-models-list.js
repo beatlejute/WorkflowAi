@@ -13,9 +13,9 @@
  * JSON-объект модели в несколько строк. Объект открывает строка `{` и закрывает
  * строка `}` без отступа (первая колонка) — вложенные скобки объекта всегда с
  * отступом или с хвостовой запятой, под это правило не попадают («Факты kilo
- * 7.7.9»). Без аргументов модели не фильтруются (пулы строятся маской); опциональный
- * `--free-requesty-mcp` выводит только Requesty с числовой ценой 0/0, `toolcall: true`
- * и совпадающим listed/object ID — текущая политика free Requesty pool.
+ * 7.7.9»). Без аргументов модели не фильтруются (пулы строятся маской); опциональные
+ * `--free-requesty-mcp` и `--free-groq-mcp` выводят только модели указанного провайдера
+ * с числовой ценой 0/0, `toolcall: true` и точным совпадением listed/object ID.
  *
  * `note` — `in=<cost.input> out=<cost.output> tools=<capabilities.toolcall>
  * free=<isFree или ->`, значения — как есть, без единиц (ТЗ В14).
@@ -27,8 +27,8 @@
  *  - id объекта (`providerID + "/" + id`) не совпал со строкой id — WARN в
  *    stderr, в итог идёт строка id;
  *  - объект не разобрался (испорченный JSON) — WARN в stderr, модель пропущена;
- *  - у объекта нет `}`, а следом идёт объект следующей модели (строка `{` в первой
- *    колонке) — WARN в stderr, модель пропущена, следующая разбирается как обычно.
+ *  - у объекта нет `}`, а следом идёт объект следующей модели (строка `{` без отступа)
+ *    — WARN в stderr, модель пропущена, следующая разбирается как обычно.
  * Сбой самого `kilo` — фатальный: адаптер завершается кодом 1, причина в stderr.
  */
 
@@ -57,25 +57,34 @@ function formatModel(idLine, obj) {
   return JSON.stringify(record);
 }
 
-/** Requesty free MCP membership uses the owner-selected 0/0 price policy. */
-function isRequestyFreeMcpModel(idLine, obj) {
-  if (!idLine.startsWith('requesty/')) return false;
+/** Filter current zero-price, tool-capable models for one exact provider. */
+function isFreeMcpModel(idLine, obj, provider) {
+  if (!idLine.startsWith(`${provider}/`)) return false;
   const hasIds = typeof obj.providerID === 'string' && typeof obj.id === 'string';
   const computedId = hasIds ? `${obj.providerID}/${obj.id}` : null;
   if (computedId !== idLine) {
-    console.warn(`[WARN] kilo-models-list: object id "${computedId}" does not match listed Requesty id "${idLine}", skipping`);
+    console.warn(`[WARN] kilo-models-list: object id "${computedId}" does not match listed ${provider} id "${idLine}", skipping`);
     return false;
   }
   return obj.cost?.input === 0 && obj.cost?.output === 0 && obj.capabilities?.toolcall === true;
 }
 
 async function main(args = process.argv.slice(2)) {
-  const requestyFreeMcpOnly = args.includes('--free-requesty-mcp');
-  const unknownArgs = args.filter((arg) => arg !== '--free-requesty-mcp');
-  if (unknownArgs.length > 0) {
-    console.error(`Unknown argument(s): ${unknownArgs.join(', ')}`);
+  const filters = new Map([
+    ['--free-requesty-mcp', 'requesty'],
+    ['--free-groq-mcp', 'groq'],
+  ]);
+  const selected = args.filter((arg) => filters.has(arg));
+  const unknown = args.filter((arg) => !filters.has(arg));
+  if (unknown.length > 0) {
+    console.error(`Unknown argument(s): ${unknown.join(', ')}`);
     return 1;
   }
+  if (selected.length > 1) {
+    console.error(`Conflicting filter arguments: ${selected.join(', ')}`);
+    return 1;
+  }
+  const provider = selected.length ? filters.get(selected[0]) : null;
 
   let output;
   try {
@@ -84,9 +93,9 @@ async function main(args = process.argv.slice(2)) {
     console.error(err.message);
     return 1;
   }
-  if (requestyFreeMcpOnly) {
+  if (provider) {
     for (const { id, obj } of parseVerbose(output)) {
-      if (isRequestyFreeMcpModel(id, obj)) process.stdout.write(`${formatModel(id, obj)}\n`);
+      if (isFreeMcpModel(id, obj, provider)) process.stdout.write(`${formatModel(id, obj)}\n`);
     }
   } else {
     for (const line of parseVerbose(output, { format: formatModel })) {

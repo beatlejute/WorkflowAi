@@ -321,13 +321,19 @@ pipeline:
     #    один раз в начале попытки и перед каждым запуском участника, кроме запуска первым
     #    в попытке; закрытый пул выбывает из кандидатов попытки. Маршруты kilo/* счётчик аккаунта не тратят,
     #    gate у них нет.
-    #  - `mcp` у free-kilo, free-openrouter и free-requesty заявлен по решению владельца
-    #    2026-10-12: текущий замер kilo models --verbose показал tools=true у участников.
-    #    Все составы динамические, поэтому новая модель без вызова инструментов может попасть
-    #    в пул и получить тикет с required_capabilities: [mcp]; владелец принимает этот риск.
-    #    Проверенная на одном замере способность не является гарантией для будущего состава.
-    #  - у free-requesty нет подтверждённой квоты: Requesty сообщает dynamic numeric zero
-    #    input/output pricing и toolcall=true, но проверяемый quota endpoint не найден.
+    #  - `mcp` у free-kilo, free-openrouter, free-requesty и free-groq заявлен по решению владельца:
+    #    kilo models --verbose показывает toolcall=true у участников, а составы динамические.
+    #    Free-requesty и free-groq дополнительно отбираются только при числовой цене 0/0 и
+    #    точном совпадении ID строки и объекта; будущий состав будет проверяться на каждом запуске.
+    #    Для Groq текущий живой каталог показал 0 подходящих моделей из 16: бесплатные модели
+    #    сейчас не поддерживают tools, а tool-capable модели платные. Место пула пока пустое;
+    #    max_per_attempt: 1 — минимально допустимое значение, пока подходящих моделей нет.
+    #    Решение о mcp остаётся динамической возможностью: проверенная способность не гарантирует
+    #    состав будущего каталога.
+    #  - у free-requesty и free-groq нет подтверждённой квоты; проверяемые quota endpoints
+    #    не установлены, поэтому у обоих пулов gate отсутствует.
+    #  - у free-requesty Requesty сообщает dynamic numeric zero input/output pricing;
+    #    у free-groq фильтр оценивает current catalog pricing на каждом запуске.
     # selector и scores у пулов нет: пулы стоят только в списках execute-task, где участников
     # вместе с остальными кандидатами ранжирует селектор стадии (jev-place), а оценки и
     # бесплатность даёт selection.scores. Селектор пула там не вызывался бы никогда —
@@ -377,6 +383,19 @@ pipeline:
         match:
           - '^requesty/.+$'
         max_per_attempt: 9
+
+    free-groq:
+      command: "kilo"
+      args: *free_pool_args
+      workdir: "."
+      capabilities: [text, mcp]
+      description: "Бесплатные модели Groq по текущей цене и поддержке инструментов"
+      models:
+        list: ["node", ".workflow/src/scripts/kilo-models-list.js", "--free-groq-mcp"]
+        match:
+          - '^groq/.+$'
+        # Сейчас live-фильтр возвращает 0 моделей; 1 — минимально допустимый лимит пула.
+        max_per_attempt: 1
 
     script-move:
       command: "node"
@@ -965,7 +984,7 @@ pipeline:
           - "change needing mcp/browser checks, or debugging with a known cause"
           - "unknown root cause, several modules, repeat after a failed attempt"
           - "regression after others failed, architecture, ambiguous DoD"
-      agents: [free-kilo, free-openrouter, glm-free, gpt-luna, gemini-flash-lite, glm-flash, gpt-sol, deepseek-flash]
+      agents: [free-kilo, free-openrouter, free-requesty, free-groq, glm-free, gpt-luna, gemini-flash-lite, glm-flash, gpt-sol, deepseek-flash]
       # instructions типа — содержание работы, а не скил. Скил стадии раннер передаёт агенту в
       # WORKFLOW_RAILS_SKILL: по нему хук ведёт состояние рельс, по его терминалу раннер
       # проверяет финальный ответ, `start` другого скила рельсы отклоняют (src/rails/README.md §5).
@@ -977,19 +996,20 @@ pipeline:
           agents: [gpt-sol, glm, gemini-flash, deepseek-pro]
           instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: правка скилов по описанию и DoD тикета."
         qa:
-          # Со способностью `mcp` здесь glm-free, glm-flash, gpt-luna, deepseek-flash и три
+          # Со способностью `mcp` здесь glm-free, glm-flash, gpt-luna, deepseek-flash и четыре
           # бесплатных пула. Серверы kilo берёт из своего конфига, а не из проектного .mcp.json.
-          # Замер kilo models --verbose 2026-10-12 показал tools=true у участников; состав
-          # динамический, владелец принял риск новых моделей без инструментов.
-          # `free-kilo[medium]`, `free-openrouter[medium]` и `free-requesty[medium]` — мягкие
-          # границы: подходящие сначала, неоценённые в середине, подтверждённо более слабые — резерв.
+          # Динамические фильтры Requesty/Groq требуют цены 0/0 и tools=true; текущий Groq
+          # каталог не даёт ни одного кандидата. У остальных состав также динамический.
+          # `free-kilo[medium]`, `free-openrouter[medium]`, `free-requesty[medium]` и
+          # `free-groq[medium]` — мягкие границы: подходящие сначала, неоценённые в середине,
+          # подтверждённо более слабые — резерв.
           # Бесплатный OpenRouter пул дополнительно закрывается по дневной квоте (50/сутки).
-          # Подтверждённого quota endpoint Requesty нет — free-requesty без gate.
+          # Подтверждённых quota endpoints Requesty и Groq нет — пулы без gate.
           # Остальные в списке (gemini-flash-lite, gpt-sol) mcp не заявляют.
           # Список расширен вечером 2026-10-11: на типе qa оставалось два фиксированных исполнителя
           # (glm-free и gpt-luna), и постоянный запрет одной модели оставлял тикет без исполнителя
           # (no_capable_agent → blocked/; охраняет pipeline-mcp-capability.test.mjs).
-          agents: [glm-free, glm-flash, gpt-luna, "free-kilo[medium]", "free-openrouter[medium]", "free-requesty[medium]", gemini-flash-lite, gpt-sol, deepseek-flash]
+          agents: [glm-free, glm-flash, gpt-luna, "free-kilo[medium]", "free-openrouter[medium]", "free-requesty[medium]", "free-groq[medium]", gemini-flash-lite, gpt-sol, deepseek-flash]
           instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: по описанию и DoD тикета напиши и реально запусти тесты и проверки: каждый случай тикета — отдельный тест против продукта (модуль, сборка, запущенное приложение в среде из тикета, плана или shared), значения в отчёте — измеренные, расхождение с ожиданием — в «### Найденные дефекты»."
         arch:
           agents: [gpt-sol, glm]

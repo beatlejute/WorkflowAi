@@ -198,6 +198,66 @@ test('--free-requesty-mcp re-evaluates current price each invocation; unknown fl
   assert.match(unknown.err, /Unknown argument/);
 });
 
+test('--free-groq-mcp requires exact Groq ID, numeric 0/0 prices, and tool support', () => {
+  const entry = (id, objId, cost, toolcall = true) => verboseEntry(id, {
+    id: objId, providerID: 'groq', cost, capabilities: { toolcall },
+  });
+  const good = entry('groq/groq/model-a', 'groq/model-a', { input: 0, output: 0 });
+  const stringZero = entry('groq/string-zero', 'string-zero', { input: '0', output: 0 });
+  const missingInput = entry('groq/missing-input', 'missing-input', { output: 0 });
+  const missingOutput = entry('groq/missing-output', 'missing-output', { input: 0 });
+  const paid = entry('groq/paid', 'paid', { input: 0.01, output: 0 });
+  const noTools = entry('groq/no-tools', 'no-tools', { input: 0, output: 0 }, false);
+  const missingTools = verboseEntry('groq/missing-tools', {
+    id: 'missing-tools', providerID: 'groq', cost: { input: 0, output: 0 }, capabilities: {},
+  });
+  const mismatched = entry('groq/listed-id', 'different-id', { input: 0, output: 0 });
+  const otherProvider = verboseEntry('requesty/model-b', {
+    id: 'model-b', providerID: 'requesty', cost: { input: 0, output: 0 }, capabilities: { toolcall: true },
+  });
+  const r = runAdapter({
+    stdout: [good, stringZero, missingInput, missingOutput, paid, noTools, missingTools, mismatched, otherProvider].join('\n') + '\n',
+    args: ['--free-groq-mcp'],
+  });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.deepEqual(outLines(r.out).map((line) => JSON.parse(line)), [
+    { id: 'groq/groq/model-a', note: 'in=0 out=0 tools=true free=-' },
+  ]);
+  assert.match(r.err, /different-id/);
+  assert.match(r.err, /skipping/);
+});
+
+test('--free-groq-mcp re-evaluates prices; unknown and conflicting flags fail closed', () => {
+  const entry = (input, output = 0) => verboseEntry('groq/model-a', {
+    id: 'model-a', providerID: 'groq', cost: { input, output }, capabilities: { toolcall: true },
+  });
+  const freeNow = runAdapter({ stdout: `${entry(0)}\n`, args: ['--free-groq-mcp'] });
+  const pricedNow = runAdapter({ stdout: `${entry(0, 0.01)}\n`, args: ['--free-groq-mcp'] });
+  const unknown = runAdapter({ args: ['--unknown-mode'] });
+  const conflict = runAdapter({ args: ['--free-requesty-mcp', '--free-groq-mcp'] });
+  assert.equal(outLines(freeNow.out).length, 1);
+  assert.equal(pricedNow.out, '');
+  assert.equal(unknown.code, 1);
+  assert.match(unknown.err, /Unknown argument/);
+  assert.equal(conflict.code, 1);
+  assert.match(conflict.err, /Conflicting filter/);
+  assert.equal(conflict.out, '');
+});
+
+// Current catalog may contain free non-tool models or tool-capable paid models; neither
+// category can enter a provider pool. The live metadata check is mirrored by the CLI test.
+test('Groq free tool pool does not admit free models without tools or paid models with tools', () => {
+  const r = runAdapter({
+    stdout: [
+      verboseEntry('groq/allam-2-7b', { id: 'allam-2-7b', providerID: 'groq', cost: { input: 0, output: 0 }, capabilities: { toolcall: false } }),
+      verboseEntry('groq/llama-3.1-8b-instant', { id: 'llama-3.1-8b-instant', providerID: 'groq', cost: { input: 0.05, output: 0.08 }, capabilities: { toolcall: true } }),
+    ].join('\n') + '\n',
+    args: ['--free-groq-mcp'],
+  });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.equal(r.out, '');
+});
+
 test('id объекта не совпадает со строкой — WARN в stderr, в итоге строка из вывода kilo', () => {
   const entry = verboseEntry('prov-a/vendor-a/model-e', {
     id: 'vendor-a/other-model', providerID: 'prov-a', cost: { input: 0, output: 0 }, capabilities: { toolcall: true },
