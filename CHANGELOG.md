@@ -2,11 +2,12 @@
 
 ### Added
 
-- **Requesty free-model pool** (`configs/pipeline.yaml`, `configs/agent-health-rules.yaml`): dynamic kilo list filtered to Requesty models with numeric zero input/output prices and tool calls enabled; added as a medium-threshold QA candidate. The adapter reads current prices on each invocation. No quota endpoint was confirmed, so the pool has no quota gate.
+- **Бесплатные пулы Requesty и Groq** (`configs/pipeline.yaml`, `configs/agent-health-rules.yaml`): динамические списки kilo — только модели с числовой ценой 0/0, `toolcall: true` и точным совпадением id строки и объекта; оба пула — кандидаты execute-task без тега и кандидаты QA с мягким порогом `[medium]`. Подтверждённых endpoint'ов квоты нет — gate у обоих пулов нет. Живой каталог Groq сейчас не даёт ни одного подходящего (у моделей с нулевой ценой `tools=false`, у моделей с инструментами цена ненулевая) — настроенный пул пока не даёт кандидатов, лимит попытки — минимальный допустимый (1).
 
 ### Fixed
 
-- **Kilo model-list adapter** (`src/scripts/kilo-models-list.js`): supports the Requesty MCP filter and excludes models unless both prices are numeric zero and tool calls are supported.
+- **Адаптер списка моделей kilo** (`src/scripts/kilo-models-list.js`): режимы `--free-requesty-mcp` и `--free-groq-mcp` — нулевые числовые цены, включённые вызовы инструментов, совпадение id строки с id объекта; неизвестные и конфликтующие флаги — ошибка.
+- **Оценки GLM не находились из-за написания производителя** (`src/lib/model-facts.mjs`): каталог оценок пишет производителя `z-ai`, а kilo называет его модели `zai` — строгое сравнение вендора оставляло glm-flash и glm-free без оценки, и повышенная граница тикета их отсеивала. Сравнения вендора (семейство R3, псевдоним `~…-latest`, проверка неоднозначности, R4, голое имя) не зависят от написания: канон даёт карта алиасов производителей. Замер на живом кэше 2026-10-12: `zai/glm-5.3-flash` → оценка 41.8 по `z-ai/glm-5.3-flash-20260826`, `zai/glm-4.7-flash` → 14.9. Регресс — `scripts-model-scores-facts.test.mjs`.
 
 ## [1.26.6] — 2026-10-12
 

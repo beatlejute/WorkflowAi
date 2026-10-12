@@ -77,6 +77,10 @@ const CATALOG = {
     // model-pair неоднозначен (вариант не делает производителя другим).
     rec('vendor-p/model-pair', 'vendor-p/model-pair-20260101'),
     rec('vendor-q/model-pair:free', 'vendor-q/model-pair:free-20260101'),
+    // Производитель в фиде — z-ai, а kilo называет его модели zai (GLM, 2026-10-12):
+    // семейство ищется при обоих написаниях, запись версии — при сохранённом токене.
+    rec('z-ai/model-glide', 'z-ai/model-glide-20260826'),
+    rec('z-ai/model-glide-4-7', 'z-ai/model-glide-4-7-20260119'),
   ],
 };
 const bench = (slug, intelligence, coding = null) => ({ model_permaslug: slug, intelligence_index: intelligence, coding_index: coding, agentic_index: null });
@@ -96,6 +100,8 @@ const BENCHMARKS = {
     bench('vendor-e/m-4.5-x-20251001', 16.9),
     bench('vendor-e/m-4.5-x-20260301', 20),
     bench('vendor-f/model-max-20260801', 45),
+    bench('z-ai/model-glide-20260826', 41.8, 71.5),
+    bench('z-ai/model-glide-4-7-20260119', 30.2),
   ],
   meta: META,
 };
@@ -209,11 +215,12 @@ describe('model-scores: режим фактов', () => {
     return { ...result, hits, out, get: (id, host = null) => byId[`${id}|${host ?? ''}`] };
   };
 
-  it('оценка: прямая запись, маршрут, без производителя, R2, датированный id, псевдоним, семейство, CLI с датой, R4', async () => {
+  it('оценка: прямая запись, маршрут, без производителя, R2, датированный id, псевдоним, семейство, CLI с датой, R4, написание производителя', async () => {
     const ids = [
       ['vendor-a/model-one'], ['route-x/vendor-a/model-one'], ['model-solo-5'], ['model-twin'],
       ['vendor-b/model-pro'], ['vendor-b/model-pro-0501'], ['vendor-c/model-flash'], ['vendor-d/model-lite'],
       ['m-x-4-5-20251001'], ['vendor-f/model-max'],
+      ['zai/model-glide'], ['route-x/zai/model-glide'], ['zai/model-glide-4-7'],
     ];
     const r = await facts(ids);
     assert.equal(r.exitCode, 0, r.stderr);
@@ -233,6 +240,10 @@ describe('model-scores: режим фактов', () => {
     assert.deepEqual(score('vendor-d/model-lite'), [25, 'vendor-d/model-v3-lite-20260601']);
     assert.deepEqual(score('m-x-4-5-20251001'), [16.9, 'vendor-e/m-4.5-x-20251001']);
     assert.deepEqual(score('vendor-f/model-max'), [45, 'vendor-f/model-max-20260801']);
+    // Фид пишет z-ai, запрос — zai: запись всё равно находится (GLM, 2026-10-12).
+    assert.deepEqual(score('zai/model-glide'), [41.8, 'z-ai/model-glide-20260826']);
+    assert.deepEqual(score('route-x/zai/model-glide'), [41.8, 'z-ai/model-glide-20260826']);
+    assert.deepEqual(score('zai/model-glide-4-7'), [30.2, 'z-ai/model-glide-4-7-20260119']);
   });
 
   it('бесплатность: kilo, :free, цена каталога, неизвестно; хост claude — по цене', async () => {

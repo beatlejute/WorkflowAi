@@ -71,6 +71,18 @@ export const LEVELS = Object.freeze(['low', 'medium', 'high']);
 
 const isAlias = (id) => id.startsWith('~');
 const isNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+const PROVIDER_ALIASES = new Map([['z-ai', 'zai']]);
+const normalizeProvider = (provider) => PROVIDER_ALIASES.get(String(provider).toLowerCase()) ?? String(provider).toLowerCase();
+// Варианты написания производителя: сам, канон и обратное канону. Каталог оценок и имена
+// моделей у агентов пишут одного производителя по-разному (z-ai в фиде OpenRouter, zai
+// в именах kilo) — сравнения вендора не должны зависеть от написания.
+const vendorVariants = (provider) => {
+  const lower = String(provider).toLowerCase();
+  const canonical = normalizeProvider(lower);
+  const variants = new Set([lower, canonical]);
+  for (const [from, to] of PROVIDER_ALIASES) if (normalizeProvider(to) === canonical) variants.add(from);
+  return [...variants];
+};
 
 /** Части id модели: маршрут, производитель, имя, имя без варианта, id без маршрута. */
 export function splitModelId(id) {
@@ -189,7 +201,7 @@ export function directRecord(id, index) {
   }
   if (!String(id).includes('/')) {
     const matches = index.records.filter((r) => r.id.split('/').pop() === id);
-    if (new Set(matches.map((r) => r.vendor)).size === 1) return matches.sort(newestFirst)[0];
+    if (new Set(matches.map((r) => normalizeProvider(r.vendor))).size === 1) return matches.sort(newestFirst)[0];
   }
   return null;
 }
@@ -205,20 +217,23 @@ function newestOfSlug(slug, index, alsoId = null) {
 function familyRecord(id, index, warn) {
   const { vendor, base } = splitModelId(id);
   if (vendor) {
-    const alias = index.byId.get(`~${vendor}/${base}-latest`);
+    const alias = vendorVariants(vendor)
+      .map((spelling) => index.byId.get(`~${spelling}/${base}-latest`))
+      .find((found) => found !== undefined);
     const target = typeof alias?.meta?.alias_target === 'string' ? alias.meta.alias_target : null;
     const record = target ? newestOfSlug(target, index, target) : null;
     if (record) return { record, exact: false };
   }
   const ignoreVersions = !hasVersionToken(base);
   const key = familyKey(base, { ignoreVersions });
-  const members = index.records.filter((r) => (!vendor || r.vendor === vendor)
+  const vendors = vendor ? new Set(vendorVariants(vendor).map(normalizeProvider)) : null;
+  const members = index.records.filter((r) => (!vendors || vendors.has(normalizeProvider(r.vendor)))
     && (familyKey(r.name, { ignoreVersions }) === key
       || (r.slug && familyKey(r.slug.split('/').pop(), { ignoreVersions, shortDate: false }) === key)));
   if (members.length === 0) return null;
-  const vendors = [...new Set(members.map((r) => r.vendor))];
-  if (vendors.length > 1) {
-    warn?.(`model "${id}" is ambiguous in the catalog (vendors ${vendors.join(', ')}) — no score`);
+  const memberVendors = [...new Set(members.map((r) => normalizeProvider(r.vendor)))];
+  if (memberVendors.length > 1) {
+    warn?.(`model "${id}" is ambiguous in the catalog (vendors ${memberVendors.join(', ')}) — no score`);
     return null;
   }
   members.sort(newestFirst);
@@ -238,7 +253,7 @@ function scoreOf(record, index) {
   if (own && isNumber(own.intelligence)) return { resolved: record.slug, row: own, sibling: false };
   const key = familyKey(record.name, { ignoreVersions: true });
   const older = index.records
-    .filter((r) => r.vendor === record.vendor && r.slug && r.slug !== record.slug
+    .filter((r) => normalizeProvider(r.vendor) === normalizeProvider(record.vendor) && r.slug && r.slug !== record.slug
       && familyKey(r.name, { ignoreVersions: true }) === key
       && (!record.date || !r.date || r.date <= record.date))
     .sort(newestFirst);
