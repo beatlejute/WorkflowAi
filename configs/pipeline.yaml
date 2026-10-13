@@ -290,6 +290,17 @@ pipeline:
       capabilities: [text, mcp]
       description: "Kilo GLM"
 
+    # pi (pi-coding-agent) поверх удалённого Ollama корпсети: Qwen3-Coder 30B на CPU.
+    # Обёртка снимает машинный HTTP(S)_PROXY — 10.x через прокси недостижим; промпт
+    # агента идёт через stdin. Рельс скила не ведёт: работает по инструкции стадии,
+    # как обычный CLI-агент без хуков. Медленный (CPU): таймаут держит стадия.
+    pi-qwen:
+      command: "node"
+      args: [".workflow/src/scripts/pi-agent.mjs", "--provider", "ollama-remote", "--model", "qwen3-coder:128k-cpu"]
+      workdir: "."
+      capabilities: [text]
+      description: "Qwen3-Coder 30B через pi (удалённый Ollama, без прокси)"
+
     glm:
       command: "kilo"
       args: ["-m", "zai/glm-5.3", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
@@ -984,7 +995,7 @@ pipeline:
           - "change needing mcp/browser checks, or debugging with a known cause"
           - "unknown root cause, several modules, repeat after a failed attempt"
           - "regression after others failed, architecture, ambiguous DoD"
-      agents: [free-kilo, free-openrouter, free-requesty, free-groq, glm-free, gpt-luna, gemini-flash-lite, glm-flash, gpt-sol, deepseek-flash]
+      agents: [free-kilo, free-openrouter, free-requesty, free-groq, glm-free, pi-qwen, gpt-luna, gemini-flash-lite, glm-flash, gpt-sol, deepseek-flash]
       # instructions типа — содержание работы, а не скил. Скил стадии раннер передаёт агенту в
       # WORKFLOW_RAILS_SKILL: по нему хук ведёт состояние рельс, по его терминалу раннер
       # проверяет финальный ответ, `start` другого скила рельсы отклоняют (src/rails/README.md §5).
