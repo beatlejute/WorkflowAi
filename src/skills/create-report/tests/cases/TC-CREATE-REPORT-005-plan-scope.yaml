@@ -22,28 +22,28 @@ assertions:
   static:
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "P0R2\\[\"П0 ПРАВИЛО: Область отчёта — один план"
+      pattern: 'P0R1\["[^"\r\n]*Область отчёта — один план'
       reason: "Область отчёта — правило ядра: отчёт привязан к плану, а не к доске."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "P0R2[^\\n]*parent_plan"
+      pattern: 'P0R1\["[^"\r\n]*parent_plan'
       reason: "Критерий принадлежности тикета отчёту назван полем, а не на словах."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "P0R2[^\\n]*(вся доска|всей доске)[^\\n]*отдельной секцией"
+      pattern: 'P0R1\["[^"\r\n]*(вся доска|всей доске)[^"\r\n]*отдельной секцией'
       reason: "Числа по всей доске допускаются только отдельной секцией — смешивать множества нельзя."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "P0R7\\[\"П0 ПРАВИЛО: Полнота данных внутри области"
+      pattern: 'P0R1\["[^"\r\n]*Полнота данных внутри области'
       reason: "Полнота данных сохранена, но ограничена областью отчёта."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "P0R7[^\\n]*без привязки к плану"
+      pattern: 'P0R1\["[^"\r\n]*без привязки к плану'
       reason: "Тикет без parent_plan виден отдельной строкой, а не растворяется в числах."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "P0R2 --> P0R7"
-      reason: "Оба правила стоят в цепочке этапа 0 — агент проходит их до выбора ветки."
+      pattern: "P0E1 --> P0R1 --> P0R3 --> P0R5 --> P0S1"
+      reason: "Область и полнота данных объединены в первом правиле до выбора ветки."
     - kind: skill_contains
       file: "workflows/standard.md"
       pattern: "P10S0\\[\"П10 ШАГ: Определи область отчёта"

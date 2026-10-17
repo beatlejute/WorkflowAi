@@ -60,11 +60,11 @@ export function extractPlanId(parentPlan) {
 
 // Конец секции — следующий заголовок или конец текста. Прежде третьей альтернативой
 // стоял `\z`, но в JS-регэкспах такого якоря нет: без флага u это просто буква «z».
-// Проверено запуском 2026-09-24: секция критериев, стоящая последней, не находилась
-// вовсе (completed: false при всех [x]), а секция с буквой z в тексте обрезалась на
-// ней — «- [x] size ok» превращалось в «- [x] si», и пункты после этого места не
-// считались. Невыполненный пункт после буквы z давал completed: true, и тикет с
-// пройденным ревью уходил в irrelevant/dod_completed, хотя критерий не выполнен.
+// Секция критериев, стоящая последней, тогда не находилась вовсе (completed: false при
+// всех [x]), а секция с буквой z в тексте обрезалась на ней — «- [x] size ok» превращалось
+// в «- [x] si», и пункты после этого места не считались. Невыполненный пункт после буквы z
+// давал completed: true, и тикет с пройденным ревью уходил в irrelevant/dod_completed,
+// хотя критерий не выполнен.
 // Без флага m `$` — ровно конец текста.
 export function getDodCompletion(content) {
   const dodSectionMatch = content.match(/## Критерии готовности.*?\n([\s\S]*?)(?=\n## |\n# |$)/i);
@@ -165,10 +165,13 @@ export async function checkRelevance(ticketPath) {
   if (parentPlan) {
     const planId = extractPlanId(parentPlan);
     if (planId) {
-      const planPath = path.join(WORKFLOW_DIR, "plans", "current", `${planId}.md`);
-      if (fs.existsSync(planPath)) {
+      const planPaths = ["current", "archive"].map((directory) =>
+        path.join(WORKFLOW_DIR, "plans", directory, `${planId}.md`),
+      );
+      const existingPlanPaths = planPaths.filter((candidate) => fs.existsSync(candidate));
+      if (existingPlanPaths.length === 1) {
         try {
-          const planContent = fs.readFileSync(planPath, "utf8");
+          const planContent = fs.readFileSync(existingPlanPaths[0], "utf8");
           const { frontmatter: planFm } = parseFrontmatter(planContent);
           const planStatus = planFm.status;
           if (["completed", "archived", "cancelled"].includes(planStatus)) {
@@ -177,6 +180,12 @@ export async function checkRelevance(ticketPath) {
         } catch (e) {
           // fail-safe: treat as relevant
         }
+      } else if (existingPlanPaths.length > 1) {
+        return {
+          verdict: "relevant",
+          reason: "plan_ambiguous",
+          warning: `Multiple matching plan files found for ${planId}; treating as relevant (fail-safe).`,
+        };
       } else {
         // fail-safe: treat as relevant
       }
@@ -221,7 +230,7 @@ export async function checkRelevance(ticketPath) {
   return { verdict: "relevant", reason: "all_checks_passed" };
 }
 
-// IMPL-89: Replace manual markdown-write with appendReviewEntry from review-section.mjs.
+// Ручная запись markdown заменена на appendReviewEntry из review-section.mjs.
 export function addSkippedReview(ticketPath, reason) {
   const date = new Date().toISOString().slice(0, 10);
   const r = appendReviewEntry(ticketPath, {

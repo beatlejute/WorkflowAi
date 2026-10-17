@@ -379,3 +379,98 @@ test('mark-blocked: Несколько тикетов - накопление з�
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
+
+// ============================================================================
+// Группа: Промпт human-ветки mark-human-rejected (ticket_id + reason, без attempts)
+// ============================================================================
+
+/**
+ * Промпт стадии mark-human-rejected — ровно те поля, что задаёт ветка отказа
+ * (rejected/timeout) в configs/pipeline.yaml: ticket_id и reason. Числа попыток в нём
+ * нет, потому что тикет ждёт человека, а не исполнителя, и счётчик попыток исполнения
+ * его не считает. Раньше скрипт требовал третий аргумент и на этом промпте падал
+ * «недостаточно аргументов»: тикет уходил в blocked/ без причины и без алерта.
+ */
+function humanRejectPrompt(ticketId, reason) {
+  return [
+    'mark-human-rejected', '', '', 'Context:',
+    `  ticket_id: ${ticketId}`,
+    `  reason: ${reason}`,
+  ].join('\n');
+}
+
+test('mark-blocked: отказ человека — причина из промпта уходит в blocked_reason', () => {
+  const { tmpDir, ticketsDir } = createTestEnv();
+  const ticketId = 'HUMAN-401';
+  createTicketFile(ticketsDir, 'ready', ticketId, { type: 'human' });
+
+  const result = runMarkBlocked([humanRejectPrompt(ticketId, 'human_gate_rejected')], tmpDir);
+
+  assert.strictEqual(result.code, 0, `стадия обязана пройти: ${result.stderr}`);
+
+  const fm = parseFrontmatter(path.join(ticketsDir, 'ready', `${ticketId}.md`));
+  assert.strictEqual(fm.blocked_reason, 'human_gate_rejected', 'причина отказа — в поле, которое читают доска и MCP');
+  assert.strictEqual(fm.auto_blocked_attempts, null, 'числа попыток у human-тикета нет');
+
+  const alert = JSON.parse(
+    fs.readFileSync(path.join(tmpDir, '.workflow', 'state', 'alerts.jsonl'), 'utf8').trim(),
+  );
+  assert.strictEqual(alert.reason, 'human_gate_rejected');
+  assert.strictEqual(alert.attempts, null);
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test('mark-blocked: истечение ожидания — причина из промпта уходит в blocked_reason', () => {
+  const { tmpDir, ticketsDir } = createTestEnv();
+  const ticketId = 'HUMAN-402';
+  createTicketFile(ticketsDir, 'ready', ticketId, { type: 'human' });
+
+  const result = runMarkBlocked([humanRejectPrompt(ticketId, 'human_gate_timeout')], tmpDir);
+
+  assert.strictEqual(result.code, 0, `стадия обязана пройти: ${result.stderr}`);
+
+  const fm = parseFrontmatter(path.join(ticketsDir, 'ready', `${ticketId}.md`));
+  assert.strictEqual(fm.blocked_reason, 'human_gate_timeout', 'причина истечения ожидания — в blocked_reason');
+  assert.strictEqual(fm.auto_blocked_attempts, null);
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test('mark-blocked: без attempts причина пишется как есть, без приписки о попытках', () => {
+  const { tmpDir, ticketsDir } = createTestEnv();
+  const ticketId = 'HUMAN-403';
+  createTicketFile(ticketsDir, 'ready', ticketId, { type: 'human' });
+
+  // Два аргумента в прямой форме вызова: id тикета и причина. Третий аргумент-заглушка
+  // здесь не нужен — проверка «мало аргументов» его не требует.
+  const result = runMarkBlocked([ticketId, '--reason=human_gate_rejected'], tmpDir);
+
+  assert.strictEqual(result.code, 0, `вызов с id и причиной обязан проходить: ${result.stderr}`);
+  const fm = parseFrontmatter(path.join(ticketsDir, 'ready', `${ticketId}.md`));
+  assert.strictEqual(fm.blocked_reason, 'human_gate_rejected', 'приписки «(попыток: …)» без счётчика быть не должно');
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test('mark-blocked: прежняя ветка (review_error) по-прежнему называет число попыток', () => {
+  const { tmpDir, ticketsDir } = createTestEnv();
+  const ticketId = 'IMPL-404';
+  createTicketFile(ticketsDir, 'ready', ticketId);
+
+  // Промпт ветки max_reached стадии increment-review-errors: три поля, attempts из счётчика.
+  const prompt = [
+    'mark-blocked', '', '', 'Context:',
+    `  ticket_id: ${ticketId}`,
+    '  attempts: 3',
+    '  reason: review_error',
+  ].join('\n');
+  const result = runMarkBlocked([prompt], tmpDir);
+
+  assert.strictEqual(result.code, 0, `стадия обязана пройти: ${result.stderr}`);
+  const fm = parseFrontmatter(path.join(ticketsDir, 'ready', `${ticketId}.md`));
+  assert.strictEqual(fm.blocked_reason, 'review_error (попыток: 3)', 'разбор трёх полей не должен был измениться');
+  assert.strictEqual(fm.auto_blocked_attempts, 3);
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});

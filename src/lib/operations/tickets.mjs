@@ -18,7 +18,7 @@ const VALID_STATUSES = [
 // Таблица допустимых переходов
 const VALID_TRANSITIONS = {
   backlog: ["ready", "blocked", "done"],
-  ready: ["in-progress", "review", "backlog"],
+  ready: ["in-progress", "review", "backlog", "blocked"],
   "in-progress": ["done", "blocked", "review"],
   blocked: ["ready"],
   review: ["done", "ready", "in-progress", "blocked"],
@@ -29,13 +29,11 @@ const VALID_TRANSITIONS = {
 /**
  * Ставит машинную метку начала работы `started_at` при входе тикета в in-progress/.
  *
- * created_at тикета пишет модель декомпозиции, а часов у неё нет: у PulseProxy
- * PLAN-020 все 36 тикетов получили «2026-09-30T00:00:00Z» (полночь из будущего),
- * у ListeningGlass PLAN-001 — «2026-09-29T18:00:00+03:00». Гейт file_unchanged
- * брал эту метку точкой отсчёта, а при метке из будущего откатывался на updated_at,
- * который переписывается на каждом повторе, — правка прошлой попытки считалась
- * «неизменённой», 7 ложных отказов 2026-09-29/30. started_at ставит код в момент
- * первого входа в in-progress/, повторы его не сдвигают.
+ * created_at тикета пишет модель декомпозиции, а часов у неё нет: дата выходит либо
+ * полночью, либо из будущего. Гейт file_unchanged брал эту метку точкой отсчёта, а при
+ * метке из будущего откатывался на updated_at, который переписывается на каждом
+ * повторе, — правка прошлой попытки считалась «неизменённой» и гейт отказывал.
+ * started_at ставит код в момент первого входа в in-progress/, повторы его не сдвигают.
  *
  * - Метка ставится только при target === 'in-progress'; уход из колонки её не
  *   трогает — функцию зовут на любом переходе.
@@ -71,12 +69,11 @@ const CLOCK_SKEW_TOLERANCE_MS = 60 * 1000;
  * (дальше допуска на расхождение часов) значение заменяется текущим временем, валидное
  * прошлое не меняется, completed_at не трогается.
  *
- * Поля времени тикета пишет модель, а часов у неё нет: PulseProxy PLAN-020 2026-09-29 —
- * у всех 36 тикетов created_at «2026-09-30T00:00:00Z», полночь из будущего. Правило то
- * же, что у stampTicketTimes в verify-atomicity.js (стадия пайплайна с --activate); эта
- * функция — для тикетов, которые туда не попадают: тикеты доработки decompose-gaps и
- * тикеты плана после обхода check-atomicity-limit. Её зовёт move-to-ready.js при
- * переносе из backlog/.
+ * Поля времени тикета пишет модель, а часов у неё нет: дата выходит полночью или из
+ * будущего. Правило то же, что у stampTicketTimes в verify-atomicity.js (стадия
+ * пайплайна с --activate); эта функция — для тикетов, которые туда не попадают: тикеты
+ * доработки decompose-gaps и тикеты плана после обхода check-atomicity-limit. Её зовёт
+ * move-to-ready.js при переносе из backlog/.
  *
  * Значение не строкой и не датой (число из YAML) читается как текст даты — как его
  * прочтёт текстовая копия правила в verify-atomicity.js.
@@ -218,11 +215,10 @@ function assertValidTransition(from, to) {
 /**
  * Открывает manual-gate, ждущие этот тикет.
  *
- * Раньше хук жил только в CLI-скрипте `src/scripts/move-ticket.js`, а все
- * прочие потребители (MCP `move_ticket`/`resolve_human_ticket`, VS Code-расширение)
- * двигали тикет мимо него. Раннер ждёт решения в approval-файле до
- * `manual-gate-human.timeout` (сутки), после чего уводит тикет в blocked, —
- * поэтому хук должен срабатывать на любом перемещении, не только через CLI.
+ * Хук зовётся на любом перемещении тикета, не только через CLI `src/scripts/move-ticket.js`:
+ * тикет двигают и MCP `move_ticket`/`resolve_human_ticket`, и VS Code-расширение, а раннер
+ * ждёт решения в approval-файле до `manual-gate-human.timeout` (сутки), после чего уводит
+ * тикет в blocked, — мимо хука гейт не откроется.
  *
  * Ошибка хука не должна фейлить само перемещение: тикет уже переехал.
  *
@@ -253,9 +249,9 @@ export async function approveOpenGates(root, id, target) {
         // Решение вписывается заменой файла целиком. Прямая запись обрезала
         // approval-файл до нуля, и раннер в poll-цикле гейта читал пустую строку:
         // readApprovalFile отвечает на это «corrupt approval file» и уводит
-        // стадию в goto.error ровно в тот момент, когда человек нажал approve
-        // (инцидент QA-37-003). Ретраи на стороне чтения (25 и 50 мс) — страховка,
-        // а не решение: под нагрузкой они не успевают.
+        // стадию в goto.error ровно в тот момент, когда человек нажал approve.
+        // Ретраи на стороне чтения (25 и 50 мс) — страховка, а не решение:
+        // под нагрузкой они не успевают.
         await replaceFileAtomic(filePath, JSON.stringify(data, null, 2), {
           tmpPath: approvalTempPath(join(root, '.workflow')),
         });
@@ -313,6 +309,7 @@ export async function moveTicket(projectRoot, id, target) {
   // Обновление frontmatter
   const now = new Date().toISOString();
   frontmatter.updated_at = now;
+  frontmatter.status = target;
   stampStartedAt(frontmatter, target, now);
 
   // Если переход в done, добавляем completed_at
@@ -320,15 +317,35 @@ export async function moveTicket(projectRoot, id, target) {
     frontmatter.completed_at = now;
   }
 
-  // Fallback: если тикет идёт в done из review, но агент не записал секцию "## Ревью" — дописываем
-  if (
-    target === "done" &&
-    from === "review" &&
-    getLastReviewStatus(content) === null
-  ) {
-    const date = now.slice(0, 16).replace("T", " ");
-    const reviewSection = `\n## Ревью\n\n| Дата | Статус | Самари |\n|------|--------|--------|\n| ${date} | ✅ passed | Pipeline fallback: агент не записал секцию ревью |\n`;
-    body = body.trimEnd() + "\n" + reviewSection;
+  // Последняя строка «## Ревью» — вердикт, по которому тикет читает и человек, и метрики.
+  const lastReview = getLastReviewStatus(content);
+
+  // Провальное ревью закрытию не подлежит — та же проверка, что в CLI-пути
+  // (src/scripts/move-ticket.js): без неё тикет с вердиктом ❌ failed уезжал в done/ молча,
+  // а completed_at выключал откат done/ → backlog у pick-next-task.
+  if (target === "done" && lastReview === "failed") {
+    throw {
+      code: "REVIEW_FAILED",
+      id,
+      from,
+      to: target,
+      error:
+        `Ревью тикета ${id} провалено (последняя строка «## Ревью» — ❌ failed): ` +
+        "закрытие в done/ отменено, устраните причины или проведите ревью заново",
+    };
+  }
+
+  // Секции «## Ревью» нет: вердикт passed стадии ревью уходит наружу и при неудачной записи
+  // строки (apply-review.js), либо тикет в done/ двигает человек. Вердикт не выдумываем:
+  // passed, failed и skipped — утверждения о ревью, а его не было. Пустая секция с заметкой
+  // читается как «ревью не было» (getLastReviewStatus → null), и поэтому не становится ни
+  // пропуском (check-relevance.js: skipped — тикет неактуален), ни пройденным ревью в метриках.
+  if (target === "done" && from === "review" && lastReview === null) {
+    body = body.trimEnd() + "\n\n## Ревью\n\nРевью не записано: вердикта в тикете нет — " +
+      "тикет закрыт без пройденного ревью.\n";
+    console.warn(
+      `move_ticket: ${id} — ревью не записано (вердикта в тикете не было), в «## Ревью» добавлена заметка`,
+    );
   }
 
   // Если переход из blocked, удаляем blocked_reason
@@ -346,7 +363,7 @@ export async function moveTicket(projectRoot, id, target) {
 
   // Перемещение файла. Сначала переезд, потом содержимое: тикет всё время лежит
   // ровно в одной колонке. rename на свободное имя проходит и когда исходный файл
-  // держит открытым читатель (проверено запуском на NTFS).
+  // держит открытым читатель.
   try {
     await fs.rename(sourcePath, targetPath);
   } catch (e) {
@@ -426,8 +443,8 @@ function checkDependencies(projectRoot, dependencies) {
  * `plans/<current|archive>/PLAN-NNN.md`. ID плана (`PLAN-001`, `7`) превращается в путь,
  * если файл плана есть; путь и ID без файла остаются как пришли. Часть скриптов сверяет
  * `parent_plan` с путём дословно (check-plan-templates.js: тикеты плана из шаблона).
- * ListeningGlass 2026-09-30: тикет, заведённый через MCP с `plan_id: PLAN-001`, получил
- * `parent_plan: PLAN-001`, соседние тикеты плана — `plans/current/PLAN-001.md`.
+ * Тикет, заведённый через MCP с `plan_id` вместо пути, получает `parent_plan` без пути,
+ * тогда как соседние тикеты плана ссылаются на `plans/current/PLAN-NNN.md`.
  */
 function planReference(root, ref) {
   const text = String(ref ?? '').trim();
@@ -494,8 +511,7 @@ export async function createTicket(projectRoot, data) {
   // у тикета с `dod_format: 2`: без поля их не исполняют ни гейт move-to-ready, ни ревью
   // (ревью уходит модели), check-ticket-dod.js сообщает `dod_format_missing`. Поле
   // ставится по телу, если вызывающий его не задал; тело формата 2 с пунктом без полной
-  // записи — ошибка до записи файла. ListeningGlass 2026-09-30: тикет с двумя записями
-  // check, заведённый через MCP, вышел без поля — его дописали руками.
+  // записи — ошибка до записи файла.
   const dodItems = parseDodChecks(body);
   const dodFormat = data.dod_format
     ?? (dodItems.some((item) => item.error !== 'no_form') ? 2 : undefined);

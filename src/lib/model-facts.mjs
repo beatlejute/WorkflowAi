@@ -56,9 +56,9 @@
  *     бесплатна при обоих нулях (`openrouter_price`); новейший член семейства и цель
  *     псевдонима `~…-latest` цену не дают;
  *  4. иначе платная (`unknown`).
- * Цены kilo (`cost.*`) не читаются: `kilo models --verbose` 2026-09-28 даёт
- * `cost.input = cost.output = 0` платным openai/gpt-5.6-luna, -terra и -sol без
- * `isFree` — по цене kilo три платных агента стали бы бесплатными.
+ * Цены kilo (`cost.*`) не читаются: `kilo models --verbose` даёт
+ * `cost.input = cost.output = 0` платным моделям без `isFree` — по цене kilo
+ * платный агент стал бы бесплатным.
  */
 
 const VERSION_TOKEN = /^v?\d+(\.\d+)*$/;

@@ -79,35 +79,35 @@ assertions:
       reason: "Прежняя привязка тикета тестирования к DoD не возвращается."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: 'P3R9\["П3 ПРАВИЛО: Доказательность\. 1\) Проверяется продукт'
+      pattern: 'P3R7\["[^"\r\n]*П3 ПРАВИЛО: Доказательность\. 1\) Проверяется продукт'
       reason: "Правило о проверяемом продукте — узел этапа выполнения."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: 'P3R9\["[^"]*приложение в среде, которую называют тикет, план или \.workflow/shared/'
+      pattern: 'P3R7\["[^"]*приложение в среде, которую называют тикет, план или \.workflow/shared/'
       reason: "Среда проверки — названная тикетом, планом или shared, а не пользовательская."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: 'P3R9\["[^"]*Заглушка по P3R8 — копия кода продукта в тесте'
+      pattern: 'P3R7\["[^"]*Заглушка по P3R7 — копия кода продукта в тесте'
       reason: "Копия кода продукта в тесте — заглушка."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: 'P3R9\["[^"]*симуляция вместо самого проверяемого объекта'
+      pattern: 'P3R7\["[^"]*симуляция вместо самого проверяемого объекта'
       reason: "Симуляция вместо проверяемого объекта — заглушка."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: 'P3R9\["[^"]*тест без утверждения о названном свойстве'
+      pattern: 'P3R7\["[^"]*тест без утверждения о названном свойстве'
       reason: "Тест без утверждения о свойстве — заглушка."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: 'P3R9\["[^"]*литерал вместо значения, прочитанного из ответа, хранилища или состояния'
+      pattern: 'P3R7\["[^"]*литерал вместо значения, прочитанного из ответа, хранилища или состояния'
       reason: "Литерал вместо измерения — заглушка."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: 'P3R8 --> P3R9 --> P3S1'
+      pattern: 'P3R1 --> P3R4 --> P3R7 --> P3S1'
       reason: "Правило о проверяемом продукте читается сразу после правила о заглушках."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: 'P3R2\["[^"]*4\) пункт тикета тестирования при ограничении окружения, доказанном по P4R3'
+      pattern: 'P3R1\["[^"]*4\) пункт тикета тестирования при ограничении окружения, доказанном по P4R3'
       reason: "Доказанное ограничение окружения — неотмеченный пункт и blocked, а не «не применимо»."
     - kind: skill_contains
       file: "SKILL.md"
@@ -136,7 +136,7 @@ assertions:
     - kind: skill_contains
       file: "algorithms/execution-strategy.md"
       pattern: 'У тикета тестирования доказанное ограничение окружения — `status: blocked` с неотмеченным пунктом'
-      reason: "Стратегия не противоречит P4R3 и P3R2."
+      reason: "Стратегия не противоречит P4R3 и P3R1."
 
 execution:
   timeout_s: 1200

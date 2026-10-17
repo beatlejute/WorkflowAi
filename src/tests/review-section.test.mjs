@@ -121,6 +121,56 @@ test('запись: секция есть — строка встаёт посл
   });
 });
 
+test('запись: при двух секциях строка встаёт в последнюю — ту же, что читает вердикт', () => {
+  const before = `---\nid: "IMPL-001"\n---\n\n${review('| 2026-09-23 | ❌ failed | нет | a |')}\n## Заметки\n\nтекст\n\n${review('| 2026-09-25 | ❌ failed | нет | b |')}`;
+  withTicket(before, (file) => {
+    assert.deepEqual(appendReviewEntry(file, ENTRY), { ok: true });
+    const content = fs.readFileSync(file, 'utf8');
+    assert.equal(getLastReviewStatus(content), 'passed', 'вердикт читается из последней секции');
+    const sections = content.split('## Ревью').slice(1);
+    assert.equal(sections.length, 2, 'секций по-прежнему две');
+    assert.match(sections[0], /\| 2026-09-23 \| ❌ failed \|/, 'первая секция не задета');
+    assert.doesNotMatch(sections[0], /2026-09-24/, 'строка не ушла в первую секцию');
+    assert.match(sections[1], /\| 2026-09-24 \| ✅ passed \| всё сходится \| claude-sonnet \|/);
+  });
+});
+
+test('чтение: подраздел ### Ревью секцией не считается', () => {
+  const content = `---\nid: "IMPL-001"\n---\n\n## Приложение\n\n### Ревью\n\n${HEADER}\n${SEP}\n| 2026-09-24 | ✅ passed | ок | a |\n`;
+  assert.equal(quiet(() => getLastReviewStatus(content)), null, 'вердикт из подраздела не читается');
+});
+
+test('запись: подраздел ### Ревью не принимается за секцию — строка встаёт в последнюю настоящую', () => {
+  // Подраздел идёт последним: шаблон писателя без привязки к началу строки принимал его
+  // за секцию (совпадали вторые два символа `#`) и писал строку ревью в подраздел, тогда
+  // как читатель читал настоящую `## Ревью` — свежий passed оставался невидимым.
+  const before = `---\nid: "IMPL-001"\n---\n\n${review('| 2026-09-23 | ❌ failed | нет | a |')}\n## Заметки\n\nхвост\n\n${review('| 2026-09-25 | ❌ failed | нет | b |')}\n## Приложение\n\n### Ревью\n\nподраздел, не секция\n`;
+  withTicket(before, (file) => {
+    assert.deepEqual(appendReviewEntry(file, ENTRY), { ok: true });
+    const content = fs.readFileSync(file, 'utf8');
+    assert.deepEqual(content.match(/^##\s+Ревью\s*$/gm).length, 2, 'секций второго уровня по-прежнему две');
+    assert.match(content, /### Ревью\n\nподраздел, не секция\n/, 'подраздел не тронут');
+    assert.match(content, /\| 2026-09-25 \| ❌ failed \| нет \| b \|\n\| 2026-09-24 \| ✅ passed \|/,
+      'строка встала в последнюю настоящую секцию');
+    assert.doesNotMatch(content.split('## Ревью')[1], /2026-09-24/, 'строка не ушла в первую секцию');
+    assert.equal(getLastReviewStatus(content), 'passed', 'вердикт читается из последней настоящей секции');
+  });
+});
+
+test('запись: последняя секция без таблицы — пересоздаётся она, а не первая', () => {
+  const before = `---\nid: "IMPL-001"\n---\n\n${review('| 2026-09-23 | ❌ failed | нет | a |')}\n\n## Ревью\n\nРевью не записано: вердикта в тикете нет.\n`;
+  withTicket(before, (file) => {
+    assert.deepEqual(appendReviewEntry(file, ENTRY), { ok: true });
+    const content = fs.readFileSync(file, 'utf8');
+    assert.equal(getLastReviewStatus(content), 'passed');
+    const sections = content.split('## Ревью').slice(1);
+    assert.equal(sections.length, 2, 'секций по-прежнему две');
+    assert.match(sections[0], /\| 2026-09-23 \| ❌ failed \|/, 'первая секция не задета');
+    assert.doesNotMatch(sections[0], /2026-09-24/, 'строка не ушла в первую секцию');
+    assert.match(sections[1], /\| 2026-09-24 \| ✅ passed \|/, 'таблица встала в последнюю секцию');
+  });
+});
+
 test('запись: секция без таблицы — таблица создаётся заново', () => {
   withTicket('---\nid: "IMPL-001"\n---\n\n## Ревью\n\nпока пусто\n', (file) => {
     appendReviewEntry(file, { ...ENTRY, status: 'failed', agent: undefined });

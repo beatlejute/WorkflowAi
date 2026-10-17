@@ -310,8 +310,8 @@ export function validateRailsConfig(obj) {
       pushError(errors, 'bad-type', 'output', 'output должен быть объектом');
     } else {
       // Четыре списка регулярок выходного слоя: требования и запреты, для терминала и
-      // для узла-паузы. `*_forbids` добавлены 2026-09-23 (часть инвариантов скила — запрет
-      // на форму ответа, а не требование наличия).
+      // для узла-паузы. `*_forbids` — часть инвариантов скила: запрет на форму ответа,
+      // а не требование наличия.
       for (const key of ['final_requires', 'final_forbids', 'pause_requires', 'pause_forbids']) {
         if (obj.output[key] === undefined) continue;
         if (!isStringArray(obj.output[key])) {

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { pickNext, moveTicket, getNextId, createTicket } from '../lib/operations/tickets.mjs';
-import { parseFrontmatter } from '../lib/utils.mjs';
+import { parseFrontmatter, getLastReviewStatus } from '../lib/utils.mjs';
 
 describe('operations/tickets.mjs', () => {
   let projectRoot;
@@ -294,6 +294,65 @@ blocked_reason: "Waiting for dependency"
       // Verify blocked_reason was removed
       const readyContent = readFileSync(join(projectRoot, '.workflow', 'tickets', 'ready', 'IMPL-001.md'), 'utf8');
       assert.equal(readyContent.includes('blocked_reason'), false, 'Should remove blocked_reason');
+    });
+
+    test('TC8: moveTicket review → done без вердикта в «## Ревью» пишет заметку, а не passed', async () => {
+      const ticketPath = join(projectRoot, '.workflow', 'tickets', 'review', 'IMPL-001.md');
+      writeFileSync(ticketPath, `---
+id: IMPL-001
+title: Task One
+priority: 1
+type: impl
+created_at: "2026-04-24T00:00:00Z"
+updated_at: "2026-04-24T00:00:00Z"
+completed_at: ""
+---
+## Task One`);
+
+      await moveTicket(projectRoot, 'IMPL-001', 'done');
+
+      const content = readFileSync(join(projectRoot, '.workflow', 'tickets', 'done', 'IMPL-001.md'), 'utf8');
+      assert.match(content, /Ревью не записано/, 'Заметка должна прямо называть причину');
+      assert.equal(/✅\s*passed/.test(content), false, 'Строки passed в тикете быть не должно');
+      // Вердикта нет вовсе: иначе несостоявшееся ревью читалось бы как пройденное или
+      // как пропуск (check-relevance.js: skipped → тикет неактуален).
+      assert.equal(getLastReviewStatus(content), null, 'Ревью не должно читаться как вердикт');
+      assert.equal(/⏭️|skipped/.test(content), false, 'Отметки skipped быть не должно');
+    });
+
+    test('TC9: moveTicket review → done с последней строкой ❌ failed отклоняется', async () => {
+      const ticketPath = join(projectRoot, '.workflow', 'tickets', 'review', 'IMPL-001.md');
+      writeFileSync(ticketPath, `---
+id: IMPL-001
+title: Task One
+priority: 1
+type: impl
+created_at: "2026-04-24T00:00:00Z"
+updated_at: "2026-04-24T00:00:00Z"
+completed_at: ""
+---
+## Task One
+
+## Ревью
+
+| Дата | Статус | Самари | Агент |
+|------|--------|--------|-------|
+| 2026-04-24 15:32 | ❌ failed | Не пройдено | reviewer |`);
+
+      try {
+        await moveTicket(projectRoot, 'IMPL-001', 'done');
+        assert.fail('Should have thrown an error');
+      } catch (error) {
+        assert.equal(error.code, 'REVIEW_FAILED', 'Should throw REVIEW_FAILED error');
+        assert.match(error.error, /провалено/, 'Сообщение должно называть причину');
+      }
+
+      assert.equal(existsSync(ticketPath), true, 'Тикет должен остаться в review/');
+      assert.equal(
+        existsSync(join(projectRoot, '.workflow', 'tickets', 'done', 'IMPL-001.md')),
+        false,
+        'В done/ тикет попасть не должен'
+      );
     });
   });
 

@@ -99,11 +99,35 @@ export function loadWritePolicy(root) {
   }
   return {
     canonical, infrastructure: [installedRails], protectedPaths, maintenance,
+    testBudget: parseTestBudget(raw.test_budget),
     // Свободная правка независимых скилов — прерогатива скила-коуча (правило
     // проекта «изменения скилов только через коуча на рельсах»); список можно
-    // переопределить политикой authoritative_skills (ревью 2026-10-05, второй раунд).
+    // переопределить политикой authoritative_skills.
     authorities: absoluteStrings(raw.authoritative_skills) ?? ['coach'],
   };
+}
+
+function parseTestBudget(value) {
+  if (value === undefined) return null;
+  const fields = ['session', 'runtime_id', 'skill', 'action', 'expires_at', 'additional_calls'];
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).some((field) => !fields.includes(field))
+    || fields.some((field) => !Object.hasOwn(value, field))) {
+    throw new WritePolicyError('test_budget: требуется объект с точной схемой разрешения');
+  }
+  if (typeof value.session !== 'string' || !/^[A-Za-z0-9_-]+$/.test(value.session)
+    || typeof value.runtime_id !== 'string' || !/^[a-f0-9]{64}$/.test(value.runtime_id)
+    || value.skill !== 'coach' || value.action !== 'run_tests') {
+    throw new WritePolicyError('test_budget: некорректная привязка к сессии, runtime или действию');
+  }
+  const expiry = typeof value.expires_at === 'string' ? Date.parse(value.expires_at) : NaN;
+  if (!Number.isFinite(expiry) || new Date(expiry).toISOString() !== value.expires_at) {
+    throw new WritePolicyError('test_budget.expires_at: требуется точное UTC-время');
+  }
+  if (!Number.isSafeInteger(value.additional_calls) || value.additional_calls < 1 || value.additional_calls > 10) {
+    throw new WritePolicyError('test_budget.additional_calls: требуется целое число от 1 до 10');
+  }
+  return { ...value };
 }
 
 function absoluteStrings(value) {
@@ -161,7 +185,7 @@ function classifyTargets(root, targets, kind, cwd, callerSkill) {
     }
     const maintenance = policy.maintenance.some((allowed) => key(real) === key(allowed));
     // Общий inode (hardlink) — потенциальная алиас-запись в канон: realpath его не
-    // раскрывает, поэтому без явного разрешения — fail-closed (ревью 2026-10-05).
+    // раскрывает, поэтому без явного разрешения — fail-closed.
     // Новый файл (ENOENT) общим быть не может; иная ошибка stat — отказ.
     let sharedInode = false;
     try { sharedInode = lstatSync(target.real).nlink > 1; } catch (error) { sharedInode = error.code !== 'ENOENT'; }
@@ -179,7 +203,7 @@ function classifyTargets(root, targets, kind, cwd, callerSkill) {
     const independent = editWriteShell && authoritative && localSkill(root, display, real, policy);
     // Отказ «не независимая копия» — для Edit/Write и для shell без скила сессии:
     // у делегата executor правил стадии нет, его shell-запись в дерево скилов
-    // закрывается здесь (ревью 2026-10-05, третий раунд); у shell-команды сессии
+    // закрывается здесь; у shell-команды сессии
     // скила область решает режим стадии, защита канона/protected выше уже сработала.
     if (lexicalSkill && !independent && !maintenance
       && (kind === 'edit' || kind === 'write' || callerSkill == null)) {

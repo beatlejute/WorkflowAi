@@ -16,7 +16,7 @@ canary: "echo RAILS_CANARY"
 write_scope:
   - "**"
 allow_temp: true
-# Каталог скилов закрыт целиком (узел P0R2): прогон 2026-09-25 (TC-DEEP-RESEARCH-001, kilo-free,
+# Каталог скилов закрыт целиком (узел P0R1): прогон 2026-09-25 (TC-DEEP-RESEARCH-001, kilo-free,
 # trial 1) писал отчёт в .workflow/src/skills/deep-research/reports/ — в проекте этот путь ведёт
 # в общую копию скилов ~/.workflow/skills, которую читают все проекты и перезаписывает обновление.
 # Сюда же входят собственные гарды (принцип 17). Ядро рельс агент тоже не снимает.

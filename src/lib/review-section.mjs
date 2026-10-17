@@ -3,6 +3,25 @@ import fs from 'node:fs';
 // а replaceFileAtomicSync вызывается во время работы, не при загрузке модуля.
 import { replaceFileAtomicSync } from './utils.mjs';
 
+/**
+ * Секция ревью: заголовок второго уровня в начале строки.
+ *
+ * Читатель (getLastReviewStatus) и писатель (appendReviewEntry) обязаны находить ровно
+ * одно и то же множество секций: разойдись шаблоны — строка вердикта уйдёт в одну
+ * секцию, а читаться будет из другой, и по вердикту решается судьба тикета (move-ticket.js
+ * закрывает тикет, check-relevance.js проверяет актуальность). Привязка к началу строки
+ * обязательна: без неё `### Ревью` — подраздел внутри чужой секции — принимается за
+ * секцию ревью (совпадают его вторые два символа `#`), и вердикт пишется в подраздел,
+ * пока читатель читает настоящую `## Ревью`.
+ *
+ * Тот же шаблон нужен третьему писателю — normalizeReviewAgentId в src/runner.mjs
+ * (правит колонку «Агент»): шаблон экспортируется, чтобы «та же секция» было буквально
+ * одним выражением, а не ещё одной копией.
+ *
+ * Группа 1 — секция целиком, включая заголовок; группа 2 — её тело.
+ */
+export const REVIEW_SECTION_RE = /(?:^|\n)\s*(##\s+Ревью\s*\r?\n([\s\S]*?))(?=\r?\n##\s+|$)/gi;
+
 export function getLastReviewStatus(content) {
   if (typeof content !== 'string') {
     console.warn('getLastReviewStatus: content is not a string');
@@ -10,15 +29,14 @@ export function getLastReviewStatus(content) {
   }
 
   // Find ALL ## Ревью sections, use the LAST one (most recent fallback/agent write)
-  const reviewSectionRegex = /(?:^|\n)\s*##\s+Ревью\s*\r?\n([\s\S]*?)(?=\r?\n##\s+|$)/gi;
-  const matches = [...content.matchAll(reviewSectionRegex)];
+  const matches = [...content.matchAll(REVIEW_SECTION_RE)];
   if (matches.length === 0) {
     console.warn('getLastReviewStatus: ## Review section not found');
     return null;
   }
   const reviewSectionMatch = matches[matches.length - 1];
 
-  const sectionBody = reviewSectionMatch[1];
+  const sectionBody = reviewSectionMatch[2];
   const lines = sectionBody.split('\n');
   let headerLine = null;
   for (let i = 0; i < lines.length; i++) {
@@ -92,7 +110,7 @@ const STATUS_DISPLAY = {
 
 /**
  * Append a review entry to the ## Ревью section of a ticket.
- * Column order (canonical, since 2026-05-02): Дата | Статус | Самари | Агент.
+ * Column order (canonical): Дата | Статус | Самари | Агент.
  * Auto-creates section if missing. Does NOT migrate legacy headers — those are handled by reorder script.
  */
 export function appendReviewEntry(ticketPath, entry) {
@@ -110,8 +128,19 @@ export function appendReviewEntry(ticketPath, entry) {
   const agentDisplay = agent || 'unknown';
   const newRow = `| ${date} | ${statusDisplay} | ${summary} | ${agentDisplay} |`;
 
-  const reviewSectionRegex = /(##\s+Ревью\s*\r?\n[\s\S]*?(?=\r?\n##\s+|$))/i;
-  const match = content.match(reviewSectionRegex);
+  // Правится последняя секция «## Ревью» — та же, которую читает getLastReviewStatus
+  // (`matches[matches.length - 1]`). При двух секциях строка уходила бы в первую, а вердикт
+  // читался бы из последней: по нему закрывают тикет (move-ticket.js) и проверяют
+  // актуальность (check-relevance.js), и свежий passed остался бы невидимым.
+  const matches = [...content.matchAll(REVIEW_SECTION_RE)];
+  const match = matches[matches.length - 1];
+  // Замена — по границам последней секции: String.replace с флагом /g заменил бы все
+  // секции, без флага — первую. Совпадение шаблона шире группы 1 на ведущий перевод
+  // строки, поэтому начало секции — не match.index, а конец совпадения минус длина группы.
+  const replaceSection = (text) => {
+    const end = match.index + match[0].length;
+    return content.slice(0, end - match[1].length) + text + content.slice(end);
+  };
 
   let newContent;
   if (!match) {
@@ -145,7 +174,7 @@ export function appendReviewEntry(ticketPath, entry) {
     if (headerIndex === -1) {
       // Section exists but no table — recreate
       const newSection = `## Ревью\n\n${HEADER_NEW}\n${SEP_NEW}\n${newRow}\n`;
-      newContent = content.replace(reviewSectionRegex, newSection);
+      newContent = replaceSection(newSection);
     } else {
       // Append after last data row
       let lastDataIdx = headerIndex + 1; // sep line
@@ -159,22 +188,21 @@ export function appendReviewEntry(ticketPath, entry) {
       lines.splice(lastDataIdx + 1, 0, newRow);
       const newBody = lines.join('\n');
       const newSection = `## Ревью\n\n${newBody}`;
-      newContent = content.replace(reviewSectionRegex, newSection.endsWith('\n') ? newSection : newSection + '\n');
+      newContent = replaceSection(newSection.endsWith('\n') ? newSection : newSection + '\n');
     }
   }
 
   // Публикация — общим помощником, а не своим temp + rename. Своя версия на NTFS
   // падала EPERM, как только тикет держал открытым любой другой читатель (скан доски,
-  // MCP get_ticket): rename поверх открытого файла там запрещён, а повторов не было.
-  // Проверено запуском 2026-09-24: при открытом дескрипторе чтения appendReviewEntry
-  // возвращал WRITE_ERROR, строка ревью терялась. Цена: у check-relevance пропадала
-  // отметка skipped (addSkippedReview бросает, main ловит и только пишет в лог, вердикт
-  // уходит без отметки в тикете), у verify-artifacts — строка вердикта; а тикет без
+  // MCP get_ticket): rename поверх открытого файла там запрещён. При таком отказе
+  // appendReviewEntry возвращал WRITE_ERROR, строка ревью терялась. Цена: у check-relevance
+  // пропадала отметка skipped (addSkippedReview бросает, main ловит и только пишет в лог,
+  // вердикт уходит без отметки в тикете), у verify-artifacts — строка вердикта; а тикет без
   // строки ревью getLastReviewStatus читает как «ревью не было», и авто-коррекция
-  // pick-next-task переносит закрытый тикет из done/ в backlog/ (правило done: null). У помощника лестница повторов и
-  // слышимый запасной путь
-  // (src/lib/utils.mjs, replaceFileAtomicSync), а имя временного файла укладывается в
-  // лимит длины компонента пути — своя версия этого бюджета не держала.
+  // pick-next-task переносит закрытый тикет из done/ в backlog/ (правило done: null). У
+  // помощника лестница повторов и слышимый запасной путь (src/lib/utils.mjs,
+  // replaceFileAtomicSync), а имя временного файла укладывается в лимит длины компонента
+  // пути — своя версия этого бюджета не держала.
   try {
     replaceFileAtomicSync(ticketPath, newContent);
     return { ok: true };

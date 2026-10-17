@@ -3,7 +3,7 @@
 /**
  * sync-ticket-status.js — Приводит frontmatter.status тикетов в соответствие с папкой.
  *
- * Разовая миграция для FIX-69: до фикса move-ticket.js обновлял только
+ * Разовая миграция: без синхронизации move-ticket.js обновлял только
  * updated_at/completed_at и не трогал status, поэтому в done/ накапливались тикеты
  * со `status: ready` и `status: in-progress`. Потребители frontmatter
  * (MCP get_ticket_stats, check-conditions, валидатор VS Code расширения) видели
@@ -20,7 +20,7 @@
  * Запуск:
  *   node sync-ticket-status.js              # dry-run, только отчёт
  *   node sync-ticket-status.js --apply      # записать изменения
- *   node sync-ticket-status.js --project D:\Dev\PulseProxy --apply
+ *   node sync-ticket-status.js --project <путь к проекту> --apply
  *
  * Выводит результат:
  *   ---RESULT---

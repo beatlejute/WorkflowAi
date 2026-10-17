@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, unlinkSync, linkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { classifyWrites, WritePolicyError } from '../rails/write-policy.mjs';
+import { classifyWrites, loadWritePolicy, WritePolicyError } from '../rails/write-policy.mjs';
 import { realpathDeep } from '../rails/paths.mjs';
 
 function fixture(fn) {
@@ -17,8 +17,11 @@ function fixture(fn) {
   writeFileSync(join(skill, 'rails.yaml'), 'version: 1');
   writeFileSync(join(canon, 'SKILL.md'), '# canonical');
   const policy = join(root, '.workflow', 'rails-policy.yaml');
-  const configure = (maintenance) => writeFileSync(policy, JSON.stringify({
-    version: 1, canonical_skill_roots: [canon], ...(maintenance ? { maintenance } : {}),
+  const configure = (maintenance, testBudget) => writeFileSync(policy, JSON.stringify({
+    version: 1,
+    canonical_skill_roots: [canon],
+    ...(maintenance ? { maintenance } : {}),
+    ...(testBudget !== undefined ? { test_budget: testBudget } : {}),
   }));
   configure();
   const target = (display) => ({ display, real: realpathDeep(display) });
@@ -124,4 +127,50 @@ test('независимая копия и новый скил открываю�
 test('shell без скила сессии (executor) в независимую копию — отказ (ревью 2026-10-05, третий раунд)', () => fixture(({ root, skill, target }) => {
   const t = target(join(skill, 'SKILL.md'));
   assert.throws(() => classifyWrites(root, [t], 'shell', root, null), /не является независимой локальной копией/);
+}));
+
+test('test_budget: отсутствует по умолчанию и принимается только с точной схемой', () => fixture(({ root, configure }) => {
+  assert.equal(loadWritePolicy(root).testBudget, null);
+  const grant = {
+    session: 'sess-123',
+    runtime_id: 'a'.repeat(64),
+    skill: 'coach',
+    action: 'run_tests',
+    expires_at: '2999-01-01T00:00:00.000Z',
+    additional_calls: 1,
+  };
+  configure(undefined, grant);
+  assert.deepEqual(loadWritePolicy(root).testBudget, grant);
+}));
+
+test('test_budget: неизвестные/отсутствующие поля и неверные значения fail closed', () => fixture(({ root, configure }) => {
+  const valid = {
+    session: 'sess-123',
+    runtime_id: 'a'.repeat(64),
+    skill: 'coach',
+    action: 'run_tests',
+    expires_at: '2999-01-01T00:00:00.000Z',
+    additional_calls: 1,
+  };
+  const invalid = [
+    { ...valid, owner: 'not-a-policy-field' },
+    Object.fromEntries(Object.entries(valid).filter(([key]) => key !== 'session')),
+    { ...valid, session: 'session/escape' },
+    { ...valid, runtime_id: 'A'.repeat(64) },
+    { ...valid, runtime_id: 'a'.repeat(63) },
+    { ...valid, skill: 'execute-task' },
+    { ...valid, action: 'shell' },
+    { ...valid, expires_at: '2999-01-01T00:00:00Z' },
+    { ...valid, expires_at: 'not-a-date' },
+    { ...valid, additional_calls: 0 },
+    { ...valid, additional_calls: 11 },
+    { ...valid, additional_calls: 1.5 },
+    { ...valid, additional_calls: '1' },
+    null,
+    [],
+  ];
+  for (const grant of invalid) {
+    configure(undefined, grant);
+    assert.throws(() => loadWritePolicy(root), WritePolicyError, JSON.stringify(grant));
+  }
 }));

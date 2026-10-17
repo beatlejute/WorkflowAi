@@ -41,8 +41,7 @@ import { rubricLevels } from '../lib/rubric-levels.mjs';
 
 // Секции промпта CLI-судьи. Вывод исполнителя — жадно, до ПОСЛЕДНЕГО `## Task`
 // перед постоянным хвостом промпта: вывод или файл тикета со своим заголовком
-// `## Task` иначе обрезал бы данные и попадал бы в вопрос. Разбор пилота
-// 2026-09-24 брал первый `## Task`; в 284 записях перемера это не встречалось.
+// `## Task` иначе обрезал бы данные и попадал бы в вопрос.
 const PROMPT_SECTIONS = /## Rubric\s*\n([\s\S]*?)\n## Target Agent Output\s*\n([\s\S]*)\n## Task\s*\n([\s\S]*?)\n\s*Please evaluate the output/;
 const QUESTION_ID = 'verdict';
 

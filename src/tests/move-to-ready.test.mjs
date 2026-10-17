@@ -345,6 +345,38 @@ test('human-тикет с dod_format: 2 — как раньше: в ready/ бе�
   assert.equal(ran('human-ran'), false, 'проверка human-тикета запускалась');
 });
 
+test('каталог и frontmatter.status совпадают после ready и blocked без потери причины и тела', () => {
+  putTicket('STATUS-MISSING', {
+    dod: ['- [ ] Критерий', checkLine(RED)],
+    extraFrontmatter: ['owner: "team"']
+  });
+  putTicket('STATUS-HUMAN', {
+    type: 'human',
+    dod: ['- [ ] Критерий'],
+    extraFrontmatter: ['status: backlog']
+  });
+  putTicket('STATUS-BLOCKED', {
+    dod: ['- [ ] Критерий', checkLine(GREEN)],
+    extraFrontmatter: ['status: ready']
+  });
+
+  const { output } = moveToReady(['STATUS-MISSING', 'STATUS-HUMAN', 'STATUS-BLOCKED']);
+
+  assert.equal(columnOf('STATUS-MISSING'), 'ready', output);
+  assert.equal(frontmatterOf('STATUS-MISSING').status, 'ready');
+  assert.equal(frontmatterOf('STATUS-MISSING').owner, 'team');
+  assert.equal(columnOf('STATUS-HUMAN'), 'ready', output);
+  assert.equal(frontmatterOf('STATUS-HUMAN').status, 'ready');
+  assert.equal(columnOf('STATUS-BLOCKED'), 'blocked', output);
+  assert.equal(frontmatterOf('STATUS-BLOCKED').status, 'blocked');
+  assert.equal(frontmatterOf('STATUS-BLOCKED').blocked_reason, 'check_green_before_start: пункт 1');
+  for (const id of ['STATUS-MISSING', 'STATUS-HUMAN', 'STATUS-BLOCKED']) {
+    const content = fs.readFileSync(path.join(tickets, columnOf(id), `${id}.md`), 'utf8');
+    assert.match(parseFrontmatter(content).body, new RegExp(`# ${id}`));
+    assert.match(content, /## Критерии готовности/);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Предупреждения гейта и метки времени
 // ---------------------------------------------------------------------------

@@ -29,9 +29,9 @@ pipeline:
   #     capabilities: <string[]> — возможности агента (text, multimodal, mcp, ...);
   #                                 mcp — агент работает с MCP-серверами проекта
   #     description:  <string>   — описание агента (опционально)
-  #     rails_host:   kilo|claude — CLI, в котором хук рельс видит инструменты агента
+  #     rails_host:   kilo|claude|pi — CLI, в котором хук рельс видит инструменты агента
   #                                 (опционально; по умолчанию — по команде: `kilo … run`,
-  #                                 `claude`). Нужен обёртке с другим именем команды: без
+  #                                 `claude`, `pi`). Нужен обёртке с другим именем команды: без
   #                                 хоста ответ без единого вызова инструмента на скиле с
   #                                 рельсами не отклоняется (src/rails/README.md §11).
   #     models:       <object>   — пул моделей по маске (опционально; README, «Пулы моделей»).
@@ -63,11 +63,10 @@ pipeline:
   # ===========================================================================
   agents:
     # mcp у агентов claude: claude подключает серверы из .mcp.json проекта, разрешённые в
-    # .claude/settings.local.json (enabledMcpjsonServers). Проверено 2026-09-27 в PulseProxy:
-    # `claude -p` находит инструменты mcp__playwright__* через ToolSearch. kilo .mcp.json
-    # не читает (`kilo mcp list` показывает только серверы своего конфига), поэтому у
-    # kilo-агентов mcp нет. Доступность серверов перед тикетами типов из mcp_require_for
-    # проверяет стадия check-mcp.
+    # .claude/settings.local.json (enabledMcpjsonServers), и находит их инструменты сам.
+    # kilo .mcp.json не читает (`kilo mcp list` показывает только серверы своего конфига),
+    # поэтому у kilo-агентов mcp нет. Доступность серверов перед тикетами типов из
+    # mcp_require_for проверяет стадия check-mcp.
     claude-haiku:
       command: "claude"
       args: ["--model", "claude-haiku-4-5-20251001", "--permission-mode", "bypassPermissions", "-p"]
@@ -86,8 +85,7 @@ pipeline:
       command: "claude"
       args: ["--model", "claude-opus-5", "--permission-mode", "bypassPermissions", "-p"]
       workdir: "."
-      # Цена вызова судьи тестов скилов — для оценки перед прогоном: замер 2026-09-22,
-      # 207 вызовов claude-opus-4-7 ($0.222). Для claude-opus-5 цена не измерена.
+      # Оценка цены одного вызова — preFlight считает по ней стоимость прогона.
       cost_per_call: 0.222
       capabilities: [text, multimodal, mcp]
       description: "Claude Opus — мощная модель, поддержка изображений"
@@ -96,9 +94,8 @@ pipeline:
     # командой, как остальные (README, «Судья тестов скилов»). Скрипт получает промпт
     # судьи через stdin и отвечает баллом и уверенностью; ключ читает сам из файла
     # --key-file, в переменных окружения его нет. Уверенность ниже escalate_below и
-    # ответ без балла — оценку даёт escalate_to. Цена — среднее пилота 2026-09-24
-    # ($0.000086 за вызов); escalation_share — доля переоценки при 0.8 в перемере
-    # 2026-09-26 (83 из 284; pass/fail 94.7%, на оставшихся 100%).
+    # ответ без балла — оценку даёт escalate_to. cost_per_call — оценка цены вызова,
+    # escalation_share — доля переоценки при пороге escalate_below.
     jev:
       command: "node"
       args: [".workflow/src/scripts/decisions-judge.js", "--model", "typesafe/jev-1.13", "--url", "https://openrouter.ai/api/alpha/decisions", "--key-file", "~/.workflow/secrets/openrouter.key"]
@@ -109,7 +106,7 @@ pipeline:
       escalation_share: 0.292
       cost_per_call: 0.0001
       # Обёртка ничего в проекте не читает: промпт из stdin, ключ из файла. Поэтому
-      # запись годится для стадии ревью по evidence (review-result, PLAN-002).
+      # запись годится для стадии ревью по evidence.
       tool_less: true
       capabilities: [text]
       description: "Jev (TypeSafe) через OpenRouter — судья тестов скилов и модель ревью по evidence"
@@ -127,9 +124,9 @@ pipeline:
       capabilities: [text]
       description: "GLM 4.7 Flash через OpenRouter decisions — основной судья тестов скилов"
 
-    # Эскалация судьи (решение владельца 2026-10-06): вместо claude-opus — Sol через
-    # kilo. Обёртка kilo-judge: без инструментов, промпт из stdin, ответ — балл и
-    # уверенность. Цена не замерялась — preFlight берёт дефолт $0.02/вызов.
+    # Эскалация судьи: вместо claude-opus — Sol через kilo. Обёртка kilo-judge: без
+    # инструментов, промпт из stdin, ответ — балл и уверенность. Цена в конфиге не
+    # задана — preFlight берёт дефолт $0.02/вызов.
     sol-judge:
       command: "node"
       args: [".workflow/src/scripts/kilo-judge.js", "--model", "openai/gpt-6.1-sol", "--timeout", "240"]
@@ -149,18 +146,15 @@ pipeline:
     # auth, no_key, bad_request, usage, bad_prompt: тот же вызов не пройдёт). Сбой и после
     # повтора, ответ без уровня или селектор нездоров — старт обхода по complexity тикета:
     # simple — нижний уровень выживших, medium — средний, complex — верхний; тикет без
-    # complexity — лестница от слабых (2026-09-30 PulseProxy: 12 сбоев из 50, QA-177
-    # complex ушёл на уровень 1). Раннер вызывает его не больше двух раз на попытку и
+    # complexity — лестница от слабых. Раннер вызывает его не больше двух раз на попытку и
     # снимает каждый вызов через 60 с. Отдельный id от селектора пула:
-    # сбой одного не помечает нездоровым другого. Цена вызова с ~35 кандидатами не
-    # измерена — cost_usd печатается в строке SELECT_MODEL.
-    # Селектор участника пула (models.selector, агент jev-select 1.16) из поставляемого
-    # конфига убран: пулы стоят только в списках execute-task, где пул селектора не зовут.
-    # Путь селектора пула в коде остался — для стадий без selection и конфигов проекта.
-    # --timeout 45: запрос models — два вопроса (уровень и порядок) по ~40 кандидатам; первый
-    # живой ответ 2026-09-28 пришёл за 35 с, при 15 с второй вызов оборвался по времени и
-    # выбор ушёл в лестницу снизу вверх. Потолок процесса селектора в раннере — 60 с
-    # (SELECTOR_TIMEOUT_MS).
+    # сбой одного не помечает нездоровым другого. Цена в конфиге не задана — cost_usd
+    # печатается в строке SELECT_MODEL.
+    # Селектор участника пула (models.selector) из поставляемого конфига убран: пулы стоят
+    # только в списках execute-task, где пул селектора не зовут. Путь селектора пула в коде
+    # остался — для стадий без selection и конфигов проекта.
+    # --timeout 45: запрос models — два вопроса (уровень и порядок) по ~40 кандидатам.
+    # Потолок процесса селектора в раннере — 60 с (SELECTOR_TIMEOUT_MS).
     jev-place:
       command: "node"
       args: [".workflow/src/scripts/decisions-select.js", "--model", "typesafe/jev-1.13", "--url", "https://openrouter.ai/api/alpha/decisions", "--key-file", "~/.workflow/secrets/openrouter.key", "--timeout", "45", "--level-quantile", "0.5"]
@@ -171,11 +165,9 @@ pipeline:
       description: "Jev (TypeSafe) через OpenRouter — выбор модели стадии под тикет"
 
     # Claude без инструментов для пунктов DoD со скриншотами (visual) в стадии ревью по
-    # evidence. Решение стейкхолдера 2026-09-26: скриншоты оценивает Claude Haiku.
-    # Обёртка claude-judge.js запускает claude без инструментов, MCP и пользовательских
-    # настроек в пустом временном каталоге и передаёт изображения из промпта блоками
-    # base64 — модель видит только вопрос, evidence и изображения (проверено запуском
-    # 2026-09-26: верный скриншот — 5, чужой — 2).
+    # evidence. Обёртка claude-judge.js запускает claude без инструментов, MCP и
+    # пользовательских настроек в пустом временном каталоге и передаёт изображения из
+    # промпта блоками base64 — модель видит только вопрос, evidence и изображения.
     claude-haiku-vision:
       command: "node"
       args: [".workflow/src/scripts/claude-judge.js", "--model", "claude-haiku-4-5-20251001"]
@@ -186,10 +178,7 @@ pipeline:
       description: "Claude Haiku без инструментов — оценка пунктов DoD со скриншотами в стадии ревью"
 
     # Судья пунктов DoD со скриншотами на kilo-модели: аналог claude-judge.js, но
-    # картинки агент открывает сам инструментом чтения (gpt-5.6-luna, multimodal по
-    # метаданным kilo). Решение стейкхолдера 2026-10-04: Claude недоступен (аккаунт на
-    # холде), скриншоты в review-result оценивает gpt-luna. Проверено запуском
-    # 2026-10-04: красный квадрат — score 5, синий против рубрики «красный» — score 1.
+    # картинки агент открывает сам инструментом чтения (multimodal по метаданным kilo).
     # Вердикт — только строка VERDICT финального ответа; ненулевой exit kilo — отказ.
     # kilo ищется по PATH (bin/@kilocode/cli/bin/kilo рядом с лаунчером), перекрывается
     # --kilo/KILO_BIN.
@@ -202,7 +191,7 @@ pipeline:
       capabilities: [text, multimodal]
       description: "GPT Luna через kilo — оценка пунктов DoD со скриншотами в стадии ревью"
 
-    gpt-deepseek-vision:
+    deepseek-vision:
       command: "node"
       args: [".workflow/src/scripts/kilo-judge.js", "--model", "deepseek/deepseek-flash", "--timeout", "240"]
       workdir: "."
@@ -211,7 +200,7 @@ pipeline:
       capabilities: [text, multimodal]
       description: "deepseek-flash через kilo — оценка пунктов DoD со скриншотами в стадии ревью"
 
-    gpt-glm-vision:
+    glm-vision:
       command: "node"
       args: [".workflow/src/scripts/kilo-judge.js", "--model", "zai/glm-4.6v-flash", "--timeout", "240"]
       workdir: "."
@@ -221,19 +210,17 @@ pipeline:
       description: "glm через kilo — оценка пунктов DoD со скриншотами в стадии ревью"
 
     # multimodal у gpt-агентов — по метаданным kilo: `kilo models --verbose` даёт
-    # capabilities.input.image: true у openai/gpt-5.6-luna, -terra и -sol (2026-09-28).
-    # mcp — у gpt-luna, deepseek-flash и glm-free (2026-10-11, решение стейкхолдера): серверы kilo берёт из
-    # своего конфига (~/.config/kilo/kilo.jsonc), проектный .mcp.json он не читает;
-    # `kilo mcp list` показывает playwright connected. Остальным kilo-агентам способность не
-    # заявлена: она утверждает, что агент доводит работу инструментом, а проверено это пока
-    # только про эти две модели.
-    gpt-luna:
+    # capabilities.input.image: true. mcp — у агентов, которым он заявлен: серверы kilo
+    # берёт из своего конфига (~/.config/kilo/kilo.jsonc), проектный .mcp.json он не
+    # читает; `kilo mcp list` показывает доступные серверы. Остальным kilo-агентам
+    # способность не заявлена: она утверждает, что агент доводит работу инструментом.
+    old-gpt-luna:
       command: "kilo"
       args: ["-m", "openai/gpt-6-luna", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
       workdir: "."
       capabilities: [text, multimodal, mcp]
       description: "Kilo GPT"
-            
+
     gpt-terra:
       command: "kilo"
       args: ["-m", "openai/gpt-5.6-terra", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
@@ -290,17 +277,6 @@ pipeline:
       capabilities: [text, mcp]
       description: "Kilo GLM"
 
-    # pi (pi-coding-agent) поверх удалённого Ollama корпсети: Qwen3-Coder 30B на CPU.
-    # Обёртка снимает машинный HTTP(S)_PROXY — 10.x через прокси недостижим; промпт
-    # агента идёт через stdin. Рельс скила не ведёт: работает по инструкции стадии,
-    # как обычный CLI-агент без хуков. Медленный (CPU): таймаут держит стадия.
-    pi-qwen:
-      command: "node"
-      args: [".workflow/src/scripts/pi-agent.mjs", "--provider", "ollama-remote", "--model", "qwen3-coder:128k-cpu"]
-      workdir: "."
-      capabilities: [text]
-      description: "Qwen3-Coder 30B через pi (удалённый Ollama, без прокси)"
-
     glm:
       command: "kilo"
       args: ["-m", "zai/glm-5.3", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
@@ -308,8 +284,24 @@ pipeline:
       capabilities: [text]
       description: "Kilo GLM"
 
-    # Роутер kilo — агент target_agents тестов скилов execute-task и deep-research
-    # (PLAN-004, решение 4); в списках стадий его нет: там бесплатные модели — пулы ниже.
+    pi-qwen:
+      command: "pi"
+      args: ["--provider", "ollama-remote", "--model", "qwen3-coder:128k-cpu", "--print", "--mode", "text", "--no-session"]
+      prompt_stdin: true
+      workdir: "."
+      capabilities: [text]
+      description: "Qwen3-Coder 30B через pi (удалённый Ollama, без прокси)"
+
+    gpt-luna:
+      command: "pi"
+      args: ["--provider", "openai", "--model", "gpt-6-luna", "--print", "--mode", "text", "--no-session"]
+      prompt_stdin: true
+      workdir: "."
+      capabilities: [text, multimodal, mcp]
+      description: "Pi GPT"
+
+    # Роутер kilo — агент target_agents тестов скилов execute-task и deep-research;
+    # в списках стадий его нет: там бесплатные модели — пулы ниже.
     kilo-free:
       command: "kilo"
       args: ["-m", "kilo/kilo-auto/free", "--agent", "code", "--print-logs", "--log-level", "ERROR", "run", "--auto"]
@@ -317,10 +309,9 @@ pipeline:
       capabilities: [text]
       description: "Kilo free"
 
-    # Пулы бесплатных моделей (PLAN-004, README «Пулы моделей»): место в списке стадии, на
+    # Пулы бесплатных моделей (README «Пулы моделей»): место в списке стадии, на
     # которое раннер ставит конкретную модель `<пул>@<полный id>` из вывода адаптера
-    # kilo-models-list.js. Маски и порядок — предложение плана (П10), утверждает
-    # стейкхолдер. Состав задаёт только маска: встроенного фильтра «бесплатная» нет, и
+    # kilo-models-list.js. Состав задаёт только маска: встроенного фильтра «бесплатная» нет, и
     # платная модель, попавшая в маску, видна в строке POOL лога.
     #  - kilo/stealth/space-bunny-alpha названа явно: суффикса `:free` у неё нет, выражение
     #    закреплено `^…$`, платных соседей kilo/stealth/* оно не захватит;
@@ -328,25 +319,25 @@ pipeline:
     #    просмотром вперёд: единственная модель `:free` без вызова инструментов;
     #  - free-openrouter тратит дневной счётчик бесплатных запросов аккаунта OpenRouter
     #    (50/сутки): шлагбаум gate читает GET /api/v1/key и при `remaining: 0` закрывает
-    #    место пула до 00:00 UTC (П14). На execute-task (selection) шлагбаум опрашивается
+    #    место пула до 00:00 UTC. На execute-task (selection) шлагбаум опрашивается
     #    один раз в начале попытки и перед каждым запуском участника, кроме запуска первым
     #    в попытке; закрытый пул выбывает из кандидатов попытки. Маршруты kilo/* счётчик аккаунта не тратят,
     #    gate у них нет.
-    #  - `mcp` у free-kilo, free-openrouter, free-requesty и free-groq заявлен по решению владельца:
+    #  - `mcp` у free-kilo, free-openrouter, free-requesty и free-groq заявлен по метаданным kilo:
     #    kilo models --verbose показывает toolcall=true у участников, а составы динамические.
-    #    Free-requesty и free-groq дополнительно отбираются только при числовой цене 0/0 и
-    #    точном совпадении ID строки и объекта; будущий состав будет проверяться на каждом запуске.
-    #    Для Groq текущий живой каталог показал 0 подходящих моделей из 16: бесплатные модели
-    #    сейчас не поддерживают tools, а tool-capable модели платные. Место пула пока пустое;
-    #    max_per_attempt: 1 — минимально допустимое значение, пока подходящих моделей нет.
-    #    Решение о mcp остаётся динамической возможностью: проверенная способность не гарантирует
-    #    состав будущего каталога.
+    #    Free-requesty и free-groq отбираются только при числовой цене 0/0 и точном
+    #    совпадении ID строки и объекта; состав проверяется на каждом запуске.
+    #    Фильтр Groq требует tools у бесплатной модели, а такие в каталоге отсутствуют:
+    #    бесплатные модели tools не поддерживают, а tool-capable модели платные. Место пула
+    #    может быть пустым; max_per_attempt: 1 — минимально допустимое значение, пока
+    #    подходящих моделей нет. Способность mcp остаётся динамической: проверенный состав
+    #    не гарантирует состав будущего каталога.
     #  - у free-requesty и free-groq нет подтверждённой квоты; проверяемые quota endpoints
     #    не установлены, поэтому у обоих пулов gate отсутствует.
     #  - у free-requesty Requesty сообщает dynamic numeric zero input/output pricing;
     #    у free-groq фильтр оценивает current catalog pricing на каждом запуске.
     # selector и scores у пулов нет: пулы стоят только в списках execute-task, где участников
-    # вместе с остальными кандидатами ранжирует селектор стадии (jev-place), а оценки и
+    # вместе с остальными кандидатами ранжирует селектор стадии, а оценки и
     # бесплатность даёт selection.scores. Селектор пула там не вызывался бы никогда —
     # validateConfig такой мёртвый конфиг отклоняет.
     # Якорь &free_pool_args отдаёт всем пулам один и тот же массив: раннер строит запись
@@ -363,9 +354,8 @@ pipeline:
           - '^kilo/stealth/space-bunny-alpha$'
           - '^kilo/nvidia/nemotron-3-ultra-550b-a55b:free$'
           - '^kilo/[^/]+/[^/]+:free$'
-        # Пул из 10-14 моделей с независимыми квотами: лимит участников за попытку
-        # меньше размера пула бросает пул, не перебирая остальных — лимит должен
-        # позволять обойти весь пул.
+        # Пул с независимыми квотами: лимит участников за попытку меньше размера пула
+        # бросает пул, не перебирая остальных — лимит должен позволять обойти весь пул.
         max_per_attempt: 8
 
     free-openrouter:
@@ -379,7 +369,7 @@ pipeline:
         match:
           - '^openrouter/nvidia/nemotron-3-ultra-550b-a55b:free$'
           - '^openrouter/(?!nvidia/nemotron-3\.5-content-safety:free$)[^/]+/[^/]+:free$'
-        # 2026-10-10: та же логика лимита участников, что и у free-kilo.
+        # Та же логика лимита участников, что и у free-kilo.
         max_per_attempt: 8
         gate: ["node", ".workflow/src/scripts/free-quota-gate.js", "--url", "https://openrouter.ai/api/v1/key", "--key-file", "~/.workflow/secrets/openrouter.key", "--timeout", "10"]
 
@@ -405,7 +395,7 @@ pipeline:
         list: ["node", ".workflow/src/scripts/kilo-models-list.js", "--free-groq-mcp"]
         match:
           - '^groq/.+$'
-        # Сейчас live-фильтр возвращает 0 моделей; 1 — минимально допустимый лимит пула.
+        # Live-фильтр может вернуть пустой состав; 1 — минимально допустимый лимит пула.
         max_per_attempt: 1
 
     script-move:
@@ -515,7 +505,7 @@ pipeline:
     script-verify-atomicity:
       command: "node"
       # --activate: план переводит в active только стадия пайплайна; агент декомпозиции,
-      # запуская скрипт для самопроверки, план не трогает (PulseProxy PLAN-020, 2026-09-29)
+      # запуская скрипт для самопроверки, план не трогает
       args: [".workflow/src/skills/decompose-plan/scripts/verify-atomicity.js", "--activate"]
       workdir: "."
       description: "Машинная проверка атомарности тикетов после декомпозиции"
@@ -611,7 +601,7 @@ pipeline:
             required_capabilities: "$result.required_capabilities"
             target: in-progress
             # evidence_file предыдущего тикета: контекст раннера между тикетами не очищается,
-            # и исполнитель читал чужой файл evidence (PulseProxy, 2026-09-27, шесть сессий).
+            # и исполнитель прочитал бы чужой файл evidence.
             evidence_file: ""
         human_ready:
           stage: manual-gate-human
@@ -707,7 +697,7 @@ pipeline:
     # Декомпозирует план на тикеты в backlog/
     # На входе ОБЯЗАТЕЛЬНО: plan_file и id_ranges_json (выделенные стадией
     # allocate-ticket-ids). id_ranges_json — это JSON-строка вида
-    # {"QA":26,"HUMAN":2,...}; декомпозитор парсит её сам (гейт нумерации P10G3
+    # {"QA":26,"HUMAN":2,...}; декомпозитор парсит её сам (гейт нумерации
     # в workflows/decompose.md). Передача именно строки, а не объекта, обусловлена тем, что
     # runner workflow-ai при подстановке $context.* в instructions применяет
     # неявный toString() — объекты превращаются в "[object Object]".
@@ -805,7 +795,7 @@ pipeline:
         error: create-report
 
     # Работы нет — отчёт, только если доска изменилась с прошлого: иначе каждый запуск
-    # писал новый отчёт на той же доске (2026-09-28 PulseProxy, REPORT-024…026 подряд).
+    # писал бы новый отчёт на той же доске.
     check-report-needed:
       description: "Нужен ли новый отчёт: доска изменилась с последнего отчёта?"
       agent: script-check-report-needed
@@ -860,7 +850,7 @@ pipeline:
             required_capabilities: "$result.required_capabilities"
             target: in-progress
             # evidence_file предыдущего тикета: контекст раннера между тикетами не очищается,
-            # и исполнитель читал чужой файл evidence (PulseProxy, 2026-09-27, шесть сессий).
+            # и исполнитель прочитал бы чужой файл evidence.
             evidence_file: ""
         human_ready:
           stage: manual-gate-human
@@ -983,7 +973,7 @@ pipeline:
       # agents_by_type ниже наследуют выбор; `selection: false` у типа — прежний курсор.
       # Опоры градации (README, «Тег минимального уровня у места»): градация считается по
       # оценкам этих двух моделей — GLM 5.2 задаёт начало высокого уровня, Haiku 4.5 —
-      # начало среднего (owner, 2026-10-11). Меняется опора — меняется и градация, правок
+      # начало среднего. Меняется опора — меняется и градация, правок
       # в коде не нужно. Поправки из своей практики — файл конфига, живой через junction.
       selection:
         selector: jev-place
@@ -999,9 +989,6 @@ pipeline:
       # instructions типа — содержание работы, а не скил. Скил стадии раннер передаёт агенту в
       # WORKFLOW_RAILS_SKILL: по нему хук ведёт состояние рельс, по его терминалу раннер
       # проверяет финальный ответ, `start` другого скила рельсы отклоняют (src/rails/README.md §5).
-      # Прежние «Твоя роль: coach» / «Твоя роль: manual-testing» (b86303d, 2026-04-15, замена
-      # агентов claude-coach / claude-qa с именем скила в аргументах) агенты принимали за скил:
-      # прогон PulseProxy 2026-09-27, QA-тикеты — старт manual-testing вместо execute-task.
       agents_by_type:
         coach:
           agents: [gpt-sol, glm, gemini-flash, deepseek-pro]
@@ -1009,17 +996,17 @@ pipeline:
         qa:
           # Со способностью `mcp` здесь glm-free, glm-flash, gpt-luna, deepseek-flash и четыре
           # бесплатных пула. Серверы kilo берёт из своего конфига, а не из проектного .mcp.json.
-          # Динамические фильтры Requesty/Groq требуют цены 0/0 и tools=true; текущий Groq
-          # каталог не даёт ни одного кандидата. У остальных состав также динамический.
+          # Динамические фильтры Requesty/Groq требуют цены 0/0 и tools=true; фильтр Groq
+          # может не дать ни одного кандидата. У остальных состав также динамический.
           # `free-kilo[medium]`, `free-openrouter[medium]`, `free-requesty[medium]` и
           # `free-groq[medium]` — мягкие границы: подходящие сначала, неоценённые в середине,
           # подтверждённо более слабые — резерв.
           # Бесплатный OpenRouter пул дополнительно закрывается по дневной квоте (50/сутки).
           # Подтверждённых quota endpoints Requesty и Groq нет — пулы без gate.
           # Остальные в списке (gemini-flash-lite, gpt-sol) mcp не заявляют.
-          # Список расширен вечером 2026-10-11: на типе qa оставалось два фиксированных исполнителя
-          # (glm-free и gpt-luna), и постоянный запрет одной модели оставлял тикет без исполнителя
-          # (no_capable_agent → blocked/; охраняет pipeline-mcp-capability.test.mjs).
+          # Список содержит несколько независимых mcp-исполнителей: запрет одной модели не
+          # оставляет тикет без исполнителя (no_capable_agent → blocked/; охраняет
+          # pipeline-mcp-capability.test.mjs).
           agents: [glm-free, glm-flash, gpt-luna, "free-kilo[medium]", "free-openrouter[medium]", "free-requesty[medium]", "free-groq[medium]", gemini-flash-lite, gpt-sol, deepseek-flash]
           instructions: "Скил этого запуска — execute-task: пройди его граф рельс от входа до терминального узла, финальный ответ — только там. Тип тикета описывает содержание работы, а не скил: по описанию и DoD тикета напиши и реально запусти тесты и проверки: каждый случай тикета — отдельный тест против продукта (модуль, сборка, запущенное приложение в среде из тикета, плана или shared), значения в отчёте — измеренные, расхождение с ожиданием — в «### Найденные дефекты»."
         arch:
@@ -1081,12 +1068,17 @@ pipeline:
       goto:
         # Одобрение — только «продолжить»: скрипт проверяет, передан ли результат
         # (тикет в review/done/archive), иначе ветка заканчивается ожиданием человека
-        # вместо холостого цикла pick → gate (дефект 2026-10-04, ~1360 переходов).
+        # вместо холостого цикла pick → gate.
         approved: human-gate-route
+        # Ветки отказа уводят тикет в blocked/ через mark-human-rejected, поэтому причина
+        # обязана попасть в blocked_reason скрипта mark-blocked — иначе тикет встанет
+        # без объяснения. Числа попыток тут нет: тикет ждёт человека, а не исполнителя,
+        # и счётчика попыток исполнения у него не бывает.
         rejected:
           stage: mark-human-rejected
           params:
             ticket_id: "$context.ticket_id"
+            reason: "human_gate_rejected"
         timeout:
           stage: mark-human-rejected
           params:
@@ -1098,7 +1090,7 @@ pipeline:
     # 2e. human-gate-route / review-failure-route
     # Детерминированные маршруты после human-ворот и после отказа ревью:
     # human-тикет не возвращается молча в ready/ и не отдаётся агентской
-    # переделке — решает человек (дефект 2026-10-04: цикл ~1360 переходов).
+    # переделке — решает человек.
     # -------------------------------------------------------------------------
     human-gate-route:
       description: "Проверить передачу human-результата после открытия gate"
@@ -1176,9 +1168,15 @@ pipeline:
     # сразу failed → increment-task-attempts, без вызова дорогой модели.
     # Критерии failed: result_filled==false | dod_completion_pct==0 | missing_files.
     # Runner нормализует ok→passed, fail→failed через STATUS_ALIASES.
-    # Исходы по тикетам dod_format: 2 (PLAN-002): all_green — все пункты DoD
+    # Исходы по тикетам dod_format: 2: all_green — все пункты DoD
     # закрыты зелёными проверками → move-ticket done без модели; passed и default →
     # review-result с evidence_file и required_capabilities из результата.
+    # not_executed — проверки пунктов DoD не удалось ИСПОЛНИТЬ (предел времени, отказ
+    # исполнителя, незапустившийся процесс), и это единственная причина провала: не
+    # результат работы, а среда. Повтор с тем же входом упрётся в тот же предел,
+    # поэтому попытка исполнения не тратится: сразу mark-blocked с причиной, называющей
+    # пункт, исход проверки и её команду. Рядом с настоящим провалом пункта статус
+    # остаётся failed — провал работы под проблему среды не маскируется.
     # legacy (тикет без dod_format: 2, а также тикет executor_type: human с файлами
     # проекта вне своей области — context.files, маски пунктов visual, пути после -- в
     # проверках check; warnings: human_out_of_scope_changes) и error →
@@ -1188,7 +1186,7 @@ pipeline:
     # задают — без пустого значения в промпт review-result-legacy попал бы файл
     # evidence предыдущего тикета прогона. Пустое значение в промпт не попадает.
     # required_capabilities задают переходы pick-* выбранного тикета; ветка error
-    # его обнуляет (PLAN-002, задача 16) — review-result-legacy выбирает агента
+    # его обнуляет — review-result-legacy выбирает агента
     # без фильтра по способностям тикета, ветка legacy фильтр сохраняет.
     # -------------------------------------------------------------------------
     verify-artifacts:
@@ -1214,6 +1212,17 @@ pipeline:
             ticket_id: "$context.ticket_id"
             attempt: "$counter.task_attempts"
             evidence_file: ""
+        # Среда, а не работа: счётчик попыток исполнения не трогается
+        # (increment-task-attempts в этом пути нет), тикет блокируется сразу.
+        # $result.not_executed предпроверка печатает в RESULT-блоке — номер пункта,
+        # исход проверки и её команду. attempts передаётся, чтобы причина в blocked_reason
+        # назвала номер попытки; без него mark-blocked пишет причину как есть.
+        not_executed:
+          stage: mark-blocked
+          params:
+            ticket_id: "$context.ticket_id"
+            attempts: "$counter.task_attempts"
+            reason: "dod_items_not_executed: $result.not_executed"
         failed:
           stage: review-failure-route
           params:
@@ -1235,7 +1244,7 @@ pipeline:
 
     # -------------------------------------------------------------------------
     # 4. review-result
-    # Ревью тикета dod_format: 2 по собранным evidence (PLAN-002): prepare-review.js
+    # Ревью тикета dod_format: 2 по собранным evidence: prepare-review.js
     # задаёт вопросы по пунктам prose и visual, модель отвечает уровнем по шкале,
     # apply-review.js выносит вердикт и пишет строку ревью. В списке — только агенты
     # без инструментов (kind: http или tool_less: true): модель видит только evidence.
@@ -1244,20 +1253,18 @@ pipeline:
     # Неуверенная оценка (уверенность ниже min_confidence, уверенного провала нет)
     # провалом не считается, пока в попытке есть другой агент списка: пункты
     # переоценивает он, строку ревью пишет тот, кто вынес вердикт (раннер,
-    # REVIEW_UNCERTAIN). ListeningGlass 2026-09-29: уровень 5 из 5 при уверенности
-    # 0.79 засчитывался провалом, и Opus четыре раза переделывал готовую работу.
+    # REVIEW_UNCERTAIN).
     # При error (модель ревью не ответила: bad_request, сеть, неразобранный ответ) —
     # increment-review-errors: ревью повторяется, попытка исполнения не тратится.
-    # До 2026-09-28 error тоже вёл в increment-task-attempts: у PulseProxy QA-160 судья
-    # пять раз упал «Too many images», и готовую работу пять раз переделывали заново.
     # -------------------------------------------------------------------------
     review-result:
       description: "Оценить прозаические пункты и пункты со скриншотами по собранным evidence"
       # Порядок судей: основной — Jev; переоценка неуверенных пунктов идёт к
-      # следующему агенту списка; при его error фолбэка к третьему нет (вердикт
-      # остаётся у первого). Все судьи — tool_less: модель видит только evidence,
-      # deepseek-flash с инструментами в этой роли не применим.
-      agents: [jev, glm-4-7-judge, gpt-glm-vision, gpt-deepseek-vision, gpt-luna-vision]
+      # следующему агенту списка; если переоценка не дала вердикта (сбой, отказ
+      # модели, кандидаты исчерпаны) — стадия завершается ошибкой ревью
+      # (re_review_failed), а не отклонением тикета. Все судьи — tool_less: модель
+      # видит только evidence, deepseek-flash с инструментами в этой роли не применим.
+      agents: [jev, glm-4-7-judge, glm-vision, deepseek-vision, gpt-luna-vision]
       counter: task_attempts
       model_io:
         prepare: ".workflow/src/skills/review-result/scripts/prepare-review.js"
@@ -1285,11 +1292,10 @@ pipeline:
 
     # -------------------------------------------------------------------------
     # 4'. review-result-legacy
-    # Прежнее ревью агентом со скилом review-result — для тикетов без
+    # Ревью агентом со скилом review-result — для тикетов без
     # dod_format: 2, для тикета человека с файлами вне своей области
     # (human_out_of_scope_changes, ветка legacy verify-artifacts) и для ветки error
-    # предпроверки (PLAN-002). Копия записи review-result, какой она была до PLAN-002:
-    # агенты, скил, счётчик, переходы.
+    # предпроверки. Отдельный список агентов, скил, счётчик и переходы.
     # -------------------------------------------------------------------------
     review-result-legacy:
       description: "Проверить результат выполнения на соответствие DoD тикета (тикеты без dod_format: 2, тикет человека с правками вне своей области)"
@@ -1414,8 +1420,7 @@ pipeline:
       # раннер ей не передаёт — ни в промпт, ни в выбор агента, ни в журнал запусков и
       # историю работы тикета; при пустом plan_id и заданном report_id — plan_id из
       # related_plan отчёта (runner.mjs, stageContext). Контекст раннера между стадиями не
-      # очищается: 2026-09-29/30 create-report, analyze-report и decompose-gaps шли с
-      # последним тикетом (HUMAN-003 в ListeningGlass, QA-180 в PulseProxy).
+      # очищается: эти стадии могли идти с последним тикетом.
       scope: plan
       goto:
         default:
@@ -1424,8 +1429,8 @@ pipeline:
             report_id: "$result.report_id"
         # blocked — все агенты стадии нездоровы по health-реестру (all_unhealthy) или агент
         # ответил status: blocked. Это не фатально — завершаем пайплайн, отчёт не создан, но
-        # данные не теряются. Прежний повод — required_capabilities предыдущего тикета
-        # (no_capable_agent, 2026-04-20) — снят scope: plan.
+        # данные не теряются. При scope: plan required_capabilities предыдущего тикета стадии
+        # не передаются — повод no_capable_agent снят.
         blocked: end
         error:
           stage: increment-create-report-attempts
@@ -1520,14 +1525,11 @@ pipeline:
       description: "Декомпозировать недочёты из отчёта в новые тикеты"
       agents: [glm-flash, gpt-luna, deepseek-flash]
       skill: decompose-gaps
-      # plan_id, которого требует скил (узлы P0R2 и P0Q1), при запуске без --plan — из
+      # plan_id, которого требует скил, при запуске без --plan — из
       # related_plan отчёта report_id; см. create-report.
       scope: plan
       # Без новых тикетов check-conditions → empty → check-report-needed: доска та же, после
-      # разбора было разбиение — unchanged, конец. Прежняя стадия check-decompose-result
-      # (1.16.3) читала поле created_tickets блока RESULT, а список без отступа под ключом
-      # парсер RESULT теряет: 2026-09-28 PulseProxy, созданные FIX-032 и QA-163 прочитаны
-      # как «тикетов нет», и пайплайн завершился, не взяв их в работу.
+      # разбора было разбиение — unchanged, конец.
       goto:
         default: check-conditions
 
@@ -1544,7 +1546,7 @@ pipeline:
   # Переменные, доступные всем stages через $context.*.
   # Runner автоматически обновляет context через params в goto-переходах.
   # Начальные значения задаются здесь или через CLI:
-  #   node runner.mjs --plan PLAN-003
+  #   node runner.mjs --plan <plan-id>
   # ===========================================================================
   context:
     plan_id: ""              # ID плана (задаётся при запуске)
@@ -1596,9 +1598,8 @@ pipeline:
   execution:
     max_steps: 1500
     delay_between_stages: 5
-    # 2026-10-11: 1800 → 7200. Декомпозиция большого плана (HegelCodec PLAN-001, 110 задач)
-    # не укладывалась в получасовую стадию: агент создал 32 тикета за 30 минут и был снят по
-    # таймауту. Ключ общий для всех стадий с CLI-агентами — отдельного лимита на стадию у
-    # раннера нет, поэтому вместе с декомпозицией удлиняется и потолок для остальных стадий.
+    # Ключ общий для всех стадий с CLI-агентами — отдельного лимита на стадию у раннера
+    # нет: декомпозиция большого плана может идти дольше получасового потолка, и вместе
+    # с ней удлиняется потолок для остальных стадий.
     timeout_per_stage: 7200
     log_file: ".workflow/logs/pipeline.log"

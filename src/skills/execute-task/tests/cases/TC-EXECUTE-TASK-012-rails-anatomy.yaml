@@ -98,8 +98,49 @@ assertions:
       reason: "Карта переноса фиксирует базовую версию, от которой считается покрытие фраз-инвариантов."
     - kind: skill_contains
       file: "rails-migration.yaml"
-      pattern: "entries:[\\s\\S]*target: P0R2"
+      pattern: "entries:[\\s\\S]*target: P0R1"
       reason: "Служебные заголовки прозы переехали в лейблы узлов, решение по каждой фразе записано в карте."
+
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: "P0E1 --> P0R1 --> P0R4 --> P0R7 --> P0S1"
+      reason: "P0 rules remain in three ordered groups with stable heads."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P0R1\["[^"]*Запрещено создавать файлы тикетов[^"]*Обнаруженный дефект фиксируется'
+      reason: "P0R1 preserves the scope, artifact-ban, and defect-recording rules."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P0R4\["[^"]*Перемещать тикет или менять его статус[^"]*Любое поле frontmatter[^"]*Секцию «Ревью»'
+      reason: "P0R4 preserves movement, frontmatter, and review-section rules."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P0R7\["[^"]*Не создавай вспомогательные файлы[^"]*Тикеты вне in-progress/[^"]*Принципы работы'
+      reason: "P0R7 preserves scope, ticket-location, and working-principle rules."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: "P3E1 --> P3R1 --> P3R4 --> P3R7 --> P3S1"
+      reason: "P3 rules remain in three ordered groups with stable heads."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R1\["[^"]*Подход определяется содержимым тикета[^"]*Инкрементальная запись обязательна[^"]*НЕ создавай дубль-чеклист'
+      reason: "P3R1 preserves approach, incremental recording, and no-duplicate-checklist rules."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R4\["[^"]*Перед вставкой кода[^"]*Тесты на маппинг или парсинг данных[^"]*Configured paths и cleanup'
+      reason: "P3R4 preserves insertion, real-source fixtures, and configured-path rules."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P3R7\["[^"]*Пункт DoD с проверкой visual[^"]*Каждый результат[^"]*Доказательность'
+      reason: "P3R7 preserves visual evidence, result completeness, and evidence rules."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P2R2\["[^"]*Обязательный вход отсутствует или не читается, включая permission denied'
+      reason: "The mandatory-input guard remains intact."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P2S1\["[^"]*parent_plan разрешай точно'
+      reason: "The exact parent_plan resolution rule remains intact."
 
 execution:
   timeout_s: 60

@@ -153,6 +153,35 @@ test('existing unlinked report stays board scoped even with a ready active plan'
   assert.throws(() => prepareReportInput(root, { report_id: 'REPORT-001', plan_id: 'PLAN-001' }, 'analyze-report'), /binding/);
 });
 
+test('report input rejects non-mapping report frontmatter with the report filename', (t) => {
+  const root = project(t);
+  for (const frontmatter of ['null', '- item', 'scalar', '2026-10-16']) {
+    fs.writeFileSync(path.join(root, '.workflow/reports/REPORT-001.md'), `---\n${frontmatter}\n---\n`);
+    assert.throws(
+      () => prepareReportInput(root, { report_id: 'REPORT-001' }, 'analyze-report'),
+      /Invalid report frontmatter: REPORT-001\.md/,
+    );
+  }
+});
+
+test('report input rejects non-string and empty plan statuses with the plan filename', (t) => {
+  const root = project(t);
+  const plan = path.join(root, '.workflow/plans/current/PLAN-001.md');
+  for (const status of ['[]', '{}', '""', 'null']) {
+    fs.writeFileSync(plan, `---\nid: PLAN-001\nstatus: ${status}\n---\n`);
+    assert.throws(() => prepareReportInput(root, {}), /Invalid plan status: PLAN-001\.md/);
+  }
+});
+
+test('report input rejects non-mapping plan frontmatter with the plan filename', (t) => {
+  const root = project(t);
+  const plan = path.join(root, '.workflow/plans/current/PLAN-001.md');
+  for (const frontmatter of ['[]', '2026-10-16']) {
+    fs.writeFileSync(plan, `---\n${frontmatter}\n---\n`);
+    assert.throws(() => prepareReportInput(root, {}), /Invalid plan frontmatter: PLAN-001\.md/);
+  }
+});
+
 test('verified empty board analysis completes without invoking plan closure', async (t) => {
   const root = project(t);
   fs.unlinkSync(path.join(root, '.workflow/plans/current/PLAN-001.md'));

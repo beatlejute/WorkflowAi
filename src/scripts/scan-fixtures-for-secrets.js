@@ -6,9 +6,9 @@ import { findProjectRoot } from 'workflow-ai/lib/find-root.mjs';
 import { printResult } from 'workflow-ai/lib/utils.mjs';
 
 // Корень проекта нужен только для путей по умолчанию и относительного --path. Поиск при импорте
-// ронял сканер без .workflow/ даже на абсолютном --path: в чистом клоне — «Could not find
-// .workflow/» и ни строки ---RESULT--- (проверено запуском 2026-09-25). Тесты сканера на CI
-// ubuntu в тот день падали именно без ---RESULT--- (parseOutput → null).
+// роняет сканер без .workflow/ даже на абсолютном --path: в чистом клоне — «Could not find
+// .workflow/» и ни строки ---RESULT---. Тесты сканера на CI падают именно без ---RESULT---
+// (parseOutput → null).
 let projectDir = null;
 function getProjectDir() {
   if (projectDir === null) projectDir = findProjectRoot();

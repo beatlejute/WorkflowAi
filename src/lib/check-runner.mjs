@@ -1,6 +1,5 @@
 /**
- * Исполнитель проверок пунктов DoD и разбор их записи в тикете (PLAN-002,
- * «Формат записи проверки», «Ограничения исполнителя проверок»).
+ * Исполнитель проверок пунктов DoD и разбор их записи в тикете.
  *
  * Проверка — вложенная строка под пунктом DoD тикета с `dod_format: 2`:
  *   - [ ] Текст критерия
@@ -14,7 +13,9 @@
  *   - операторы оболочки вне кавычек (`;`, `&`, `|`, `<`, `>`) и подстановки
  *     (`` ` ``, `$(`) вне одинарных кавычек — отказ; команда разбирается в argv
  *     и запускается без оболочки;
- *   - рабочий каталог — корень проекта, таймаут — 120 с, stdout и stderr в
+ *   - рабочий каталог — корень проекта, предел времени проверки — CHECK_TIMEOUT_MS
+ *     (переопределяется переменной окружения WORKFLOW_CHECK_TIMEOUT_MS или
+ *     аргументом timeoutMs runCheck), stdout и stderr в
  *     результате — по 4000 символов, в памяти — не больше CHECK_CAPTURE_LIMIT
  *     байт каждого потока.
  * Нарушение даёт `denied`, процесс не запускается. checkStartProblem называет без
@@ -34,11 +35,20 @@ import path from 'node:path';
 import { hasExecuteTaskRun } from './agent-history.mjs';
 
 export const CHECK_TIMEOUT_MS = 120_000;
+// Переменная окружения, переопределяющая предел по умолчанию: положительное число
+// миллисекунд. Аргумент timeoutMs сильнее её, она — сильнее CHECK_TIMEOUT_MS;
+// нечисловое или неположительное значение оставляет предел по умолчанию; значение
+// сверх CHECK_TIMEOUT_CEILING_MS приводится к потолку.
+export const CHECK_TIMEOUT_ENV = 'WORKFLOW_CHECK_TIMEOUT_MS';
+// Потолок задержки setTimeout: миллисекунды до 2^31-1 включительно. Большее число
+// Node принимает, печатает предупреждение TimeoutOverflowWarning и ставит таймер на
+// 1 мс — исправная проверка снималась бы как неисполненная. Значение сверх потолка
+// выполняется как «дольше любой проверки», а не как мгновенный таймер.
+export const CHECK_TIMEOUT_CEILING_MS = 2 ** 31 - 1;
 export const CHECK_OUTPUT_LIMIT = 4000;
 // Сколько байт каждого потока держится целиком для сверки ожидания. Без предела
 // вывод длиннее предельной строки V8 (0x1fffffe8 символов) ронял вызывающий
-// процесс: ERR_STRING_TOO_LONG из обработчика close шёл мимо промиса runCheck
-// (проверено запуском на 600 МБ stdout).
+// процесс: ERR_STRING_TOO_LONG из обработчика close шёл мимо промиса runCheck.
 export const CHECK_CAPTURE_LIMIT = 16 * 1024 * 1024;
 // Сверх предела поток держит только хвост для evidence: символ UTF-16 занимает в
 // UTF-8 не больше 3 байт, запас — на символ, разрезанный в начале хвоста.
@@ -129,9 +139,9 @@ function npmViolation(args) {
 
 // git: подкоманда — первым аргументом, поэтому глобальные опции (`-c`, `-C`)
 // не проходят. `-O`/`--open-files-in-pager` у `git grep` запускает указанную
-// программу через оболочку — это другой исполняемый файл. git принимает и
+// программу через оболочку — это другой исполняемый файл. git 2.52 принимает и
 // однозначное начало длинной опции (`--open=`, `--op=`), и цифры перед `O` в
-// связке коротких (`-3O`) — проверено запуском на git 2.52.
+// связке коротких (`-3O`).
 const GIT_PAGER_OPTION = '--open-files-in-pager';
 
 function gitViolation(args) {
@@ -146,7 +156,7 @@ function gitViolation(args) {
 
 // rg: `--pre <программа>` прогоняет каждый файл через указанную программу,
 // `--hostname-bin <программа>` запускает её за именем хоста для гиперссылок.
-// Начало длинной опции rg 14.1.1 не принимает (проверено запуском).
+// Начало длинной опции rg 14.1.1 не принимает.
 const RG_PROGRAM_OPTIONS = ['--pre', '--hostname-bin'];
 
 function commandViolation(argv) {
@@ -200,7 +210,7 @@ function parseExpect(expect) {
 }
 
 // npm на Windows — npm.cmd, а .cmd без оболочки не запускается (spawn бросает
-// EINVAL, а имя `npm` без расширения даёт ENOENT — проверено запуском). Поэтому
+// EINVAL, а имя `npm` без расширения даёт ENOENT). Поэтому
 // повторяется то, что делает сам npm.cmd: node.exe рядом с ним (иначе node из
 // PATH) исполняет node_modules/npm/bin/npm-cli.js. Ветку npm.cmd с префиксом
 // глобальной установки (npm-prefix.js) это не повторяет.
@@ -220,7 +230,7 @@ function resolveExecutable(argv) {
 
 // Где spawn без оболочки находит исполняемый файл: каталоги PATH по порядку; на
 // Windows имя без расширения — с .com или .exe, а файл без расширения, .cmd и файл
-// в рабочем каталоге не запускаются (проверено запуском).
+// в рабочем каталоге не запускаются.
 function findOnPath(file) {
   const windows = process.platform === 'win32';
   const names = windows && !path.extname(file) ? [`${file}.com`, `${file}.exe`] : [file];
@@ -244,8 +254,8 @@ function executableFound(argv) {
 }
 
 // Дерево целиком: `npm test` запускает дочерний node, и без этого он пережил бы
-// таймаут, держа открытыми трубы вывода (проверено запуском на Windows: после
-// kill() одного npm close пришёл, лишь когда внук доработал).
+// таймаут, держа открытыми трубы вывода (после kill() одного npm close приходил,
+// лишь когда внук доработал).
 function killTree(child) {
   if (!child.pid) return;
   if (process.platform === 'win32') {
@@ -315,8 +325,8 @@ function spawnCheck(argv, projectRoot, timeoutMs, captureLimit) {
 
     child.stdout.on('data', chunk => stdout.push(chunk));
     child.stderr.on('data', chunk => stderr.push(chunk));
-    // ENOENT приходит событием error, за ним — close с отрицательным кодом
-    // (проверено запуском); отчёт даёт первое из них.
+    // ENOENT приходит событием error, за ним — close с отрицательным кодом;
+    // отчёт даёт первое из них.
     child.on('error', error => finish({ spawnError: error.code || error.message }));
     child.on('close', code => finish({ exitCode: code }));
     timer = setTimeout(() => {
@@ -374,39 +384,64 @@ export function availableCheckTools() {
 }
 
 /**
+ * Предел времени проверки по умолчанию: `CHECK_TIMEOUT_ENV`, если в переменной
+ * положительное число (сверх потолка таймера — потолок), иначе CHECK_TIMEOUT_MS.
+ * Читается при каждом вызове, а не при импорте: значение переменной можно задать
+ * и после загрузки модуля.
+ */
+function defaultTimeoutMs() {
+  const fromEnv = Number(process.env[CHECK_TIMEOUT_ENV]);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? cappedTimeoutMs(fromEnv) : CHECK_TIMEOUT_MS;
+}
+
+// Значение сверх потолка таймера приводится к потолку: в setTimeout его отдать
+// нельзя — Node ставит таймер на 1 мс (см. CHECK_TIMEOUT_CEILING_MS). Остальные
+// значения остаются как есть — нечисловое, нулевое и отрицательное разбирает
+// вызывающий (переменная — по умолчанию, аргумент — как передан).
+function cappedTimeoutMs(value) {
+  return Number.isFinite(value) && value > CHECK_TIMEOUT_CEILING_MS ? CHECK_TIMEOUT_CEILING_MS : value;
+}
+
+/**
  * Исполняет проверку пункта DoD.
  *
  * @param {object} params
  * @param {string} params.check - команда
  * @param {string} params.expect - ожидание
  * @param {string} params.projectRoot - корень проекта, рабочий каталог команды
- * @param {number} [params.timeoutMs] - таймаут, по умолчанию CHECK_TIMEOUT_MS
+ * @param {number} [params.timeoutMs] - предел времени, по умолчанию CHECK_TIMEOUT_MS
+ *   или CHECK_TIMEOUT_ENV; аргумент сильнее переменной, значение сверх
+ *   CHECK_TIMEOUT_CEILING_MS приводится к потолку таймера
  * @param {number} [params.captureLimit] - байт каждого потока в памяти, по умолчанию
  *   CHECK_CAPTURE_LIMIT
- * @returns {Promise<{status: 'passed'|'failed'|'timeout'|'denied', exit_code: number|null,
- *   stdout: string, stderr: string, duration_ms: number, reason: string|null}>}
- *   `denied` — нарушены ограничения, процесс не запускался; `failed` — ожидание не
- *   выполнено или процесс не стартовал (`reason: spawn_failed: <код>`). stdout и
+ * @returns {Promise<{status: 'passed'|'failed'|'timeout'|'denied'|'spawn_failed',
+ *   exit_code: number|null, stdout: string, stderr: string, duration_ms: number,
+ *   reason: string|null}>}
+ *   `denied` — нарушены ограничения, процесс не запускался; `timeout` — проверка не
+ *   уложилась в предел времени; `spawn_failed` — процесс не удалось запустить
+ *   (исполняемого файла нет, отказ ОС; `reason: spawn_failed: <код>`), команда не
+ *   исполнялась; `failed` — ожидание не выполнено. stdout и
  *   stderr усечены до CHECK_OUTPUT_LIMIT символов с пометкой; ожидание сверяется
  *   с полным выводом. stdout длиннее captureLimit байт целиком не хранится, и
  *   ожидание вида stdout даёт `failed` с причиной `stdout_too_large: <байт>`.
  */
-export async function runCheck({ check, expect, projectRoot, timeoutMs = CHECK_TIMEOUT_MS, captureLimit = CHECK_CAPTURE_LIMIT }) {
+export async function runCheck({ check, expect, projectRoot, timeoutMs = defaultTimeoutMs(), captureLimit = CHECK_CAPTURE_LIMIT }) {
   const denied = reason => ({ status: 'denied', exit_code: null, stdout: '', stderr: '', duration_ms: 0, reason });
 
   const prepared = prepareCheck(check, expect);
   if (prepared.error) return denied(prepared.error);
   const { argv, expectation } = prepared;
 
-  const run = await spawnCheck(argv, projectRoot, timeoutMs, captureLimit);
+  const limitMs = cappedTimeoutMs(timeoutMs);
+  const run = await spawnCheck(argv, projectRoot, limitMs, captureLimit);
   const report = {
     exit_code: run.exitCode,
     stdout: clip(run.stdout),
     stderr: clip(run.stderr),
     duration_ms: run.durationMs
   };
-  if (run.timedOut) return { status: 'timeout', ...report, reason: `timeout_ms: ${timeoutMs}` };
-  if (run.spawnError) return { status: 'failed', ...report, reason: `spawn_failed: ${run.spawnError}` };
+  if (run.timedOut) return { status: 'timeout', ...report, reason: `timeout_ms: ${limitMs}` };
+  if (run.spawnError) return { status: 'spawn_failed', ...report, reason: `spawn_failed: ${run.spawnError}` };
   if (expectation.readsStdout && run.stdout.overflow) {
     return { status: 'failed', ...report, reason: `stdout_too_large: ${run.stdout.totalBytes}` };
   }
@@ -552,9 +587,9 @@ const GREP_VALUE_LONG = new Set(['--after-context', '--before-context', '--conte
 
 /**
  * Пути поиска `git grep`, для которых git читает .gitignore: без --untracked
- * --no-exclude-standard файл из .gitignore поиск не видит (проверено запуском на git 2.52:
- * `git grep --untracked` — exit 1, с `--no-exclude-standard` — exit 0; `--no-exclude-standard`
- * без `--untracked` — fatal). `--no-index` .gitignore не читает, если нет `--exclude-standard`.
+ * --no-exclude-standard файл из .gitignore поиск не видит (`git grep --untracked` — exit 1,
+ * с `--no-exclude-standard` — exit 0; `--no-exclude-standard` без `--untracked` — fatal).
+ * `--no-index` .gitignore не читает, если нет `--exclude-standard`.
  *
  * Пути — слова после `--`; без `--` — слова после шаблона (ревизию среди них check-ignore
  * проверит как путь). Слова между шаблоном и `--` — ревизии: поиск по дереву коммита,
@@ -632,24 +667,22 @@ function gitGrepIgnoredPaths(argv, projectRoot) {
  * Проверки с пометкой `regression` (существующие тесты) зелёные по определению и
  * не запускаются, но, как и остальные, не должны быть отклонены исполнителем или
  * остаться без исполняемого файла (checkStartProblem); пункты prose и visual не
- * проверяются. Статус `failed` — ожидаемое состояние.
+ * проверяются. Статусы `failed` и `spawn_failed` — ожидаемое состояние.
  *
  * Гейт зовёт move-to-ready.js, а автор тикета — scripts/check-ticket-dod.js до того, как
- * тикет попадёт на доску: 2026-09-28 тикет доработки PulseProxy FIX-031 был записан с
- * проверками через `|` и проверкой, зелёной до начала, и гейт сразу отправил его в blocked/.
+ * тикет попадёт на доску: иначе тикет с проверками через `|` и проверкой, зелёной до
+ * начала, гейт отправил бы сразу в blocked/.
  *
  * Тикет, который исполнитель уже брал (строка execute-task в «Истории работы»,
  * hasExecuteTaskRun), проверки не запускает: зелёные пункты — его прежняя работа, а не
- * пустой критерий. Так тикет возвращается из backlog/, куда его отправил check-conditions
- * при невыполненных зависимостях. 2026-09-28 PulseProxy DOCS-10: отчёт написан в прошлых
- * прогонах, тикету добавили зависимости, check-conditions вернул его в backlog/, и при
- * повторном входе гейт отправил его в blocked/ за шесть зелёных проверок.
+ * пустой критерий, и гейт отправил бы его в blocked/ за прежние зелёные проверки. Так
+ * тикет возвращается из backlog/, куда его отправил check-conditions при невыполненных
+ * зависимостях.
  *
  * Предупреждения — в массив `warnings`, если вызывающий его передал; тикет они не
  * блокируют и в список причин не входят. Сейчас это путь поиска `git grep` под .gitignore
  * (gitGrepIgnoredPaths): такой поиск файла не видит, и запись не закроется, пока путь под
- * .gitignore. ListeningGlass 2026-09-30: после добавления research/, spikes/, prototype/ и
- * qa/ в .gitignore записи `git grep -q --untracked` по этим каталогам дают exit 1. Узел
+ * .gitignore (записи `git grep -q --untracked` по таким каталогам дают exit 1). Узел
  * P10S7 create-plan велит проверять путь `git check-ignore -q` при записи, но .gitignore
  * меняют и после — тогда защита только здесь.
  *

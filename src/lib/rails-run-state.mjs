@@ -5,10 +5,9 @@
  *
  * Раннер тестов даёт агенту песочницу и ищет состояние его сессии там. Нет
  * состояния — хук не записал его в песочнице: агент не вызывал инструментов,
- * хуков рельс в песочнице нет, хук упал или агент работал не в песочнице.
- * Последнее случилось 2026-09-23 и 2026-09-25: `kilo run` 7.7.x брал каталог из
- * унаследованного PWD и писал состояние рельс в настоящий проект (см.
- * lib/agent-env.mjs). Раньше любой такой случай молча отключал output-check;
+ * хуков рельс в песочнице нет, хук упал или агент работал не в песочнице (kilo run
+ * 7.7.x берёт каталог из унаследованного PWD и пишет состояние рельс в настоящий
+ * проект, см. lib/agent-env.mjs). Такой случай раньше молча отключал output-check;
  * теперь раннер сообщает о нём, а побег в настоящий проект различает отдельно.
  *
  * Здесь же — повтор по вердикту рельс: продолжение сессии хоста агента
@@ -24,8 +23,8 @@ import { loadSkillGraph } from '../rails/graph.mjs';
 
 /**
  * Все состояния сессий rails с данным `run` в корне `root` (порядок каталога). Сессий у
- * одного запуска бывает больше одной: в журнале PulseProxy 2026-09-27 у двух запусков kilo —
- * по две сессии `ses_…` с общим `run` (переменные окружения процесса видят и субагенты).
+ * одного запуска бывает больше одной: переменные окружения процесса видят и субагенты,
+ * поэтому две сессии `ses_…` с общим `run` — обычный случай.
  */
 export function railsStatesByRun(root, run) {
   if (!root || !run) return [];
@@ -50,9 +49,23 @@ export function railsStatesByRun(root, run) {
   return found;
 }
 
-/** Файл состояния сессии rails с данным `run` в корне `root` (первый по порядку каталога), или null. */
+/** Результат поиска состояния сессии rails по `run` и, при наличии, точной identity. */
+export function resolveRailsStateByRun(root, run, session) {
+  const states = railsStatesByRun(root, run);
+  if (session !== undefined && session !== null) {
+    const matches = states.filter((state) => state.session === session);
+    if (matches.length === 1) return { status: 'unique', state: matches[0], states };
+    if (matches.length > 1 || states.length > 0) return { status: 'ambiguous', state: null, states };
+    return { status: 'missing', state: null, states };
+  }
+  if (states.length === 1) return { status: 'unique', state: states[0], states };
+  if (states.length > 1) return { status: 'ambiguous', state: null, states };
+  return { status: 'missing', state: null, states };
+}
+
+/** Единственное состояние сессии rails с данным `run` в корне `root`, иначе null. */
 export function findRailsStateByRun(root, run) {
-  return railsStatesByRun(root, run)[0] ?? null;
+  return resolveRailsStateByRun(root, run).state;
 }
 
 /**
@@ -66,9 +79,12 @@ export function findRailsStateByRun(root, run) {
  *   escaped — в песочнице его нет, а в настоящем проекте есть.
  */
 export function railsEngagement({ sandboxRoot, projectRoot, run }) {
-  const state = findRailsStateByRun(sandboxRoot, run);
-  if (state) return { state, engaged: true, escaped: false };
-  return { state: null, engaged: false, escaped: Boolean(findRailsStateByRun(projectRoot, run)) };
+  const local = resolveRailsStateByRun(sandboxRoot, run);
+  if (local.status === 'unique') return { state: local.state, engaged: true, escaped: false };
+  if (local.status === 'ambiguous') return { state: null, engaged: false, escaped: false, ambiguous: true };
+  const external = resolveRailsStateByRun(projectRoot, run);
+  if (external.status === 'ambiguous') return { state: null, engaged: false, escaped: true, ambiguous: true };
+  return { state: null, engaged: false, escaped: external.status === 'unique' };
 }
 
 /**
@@ -87,24 +103,25 @@ export function railsNotEngagedMessage({ who, escaped, projectRoot }) {
 }
 
 /**
- * Хост рельс агента — CLI, в котором хук рельс видит вызовы инструментов: 'kilo', 'claude'
- * или null (хука рельс у такого агента нет). `agent.rails_host` задаёт хост явно — для
+ * Хост рельс агента — CLI, в котором хук рельс видит вызовы инструментов: 'kilo', 'claude',
+ * 'pi' или null (хука рельс у такого агента нет). `agent.rails_host` задаёт хост явно — для
  * обёртки с другим именем команды.
  *
  * @param {{command?: string, args?: string[], rails_host?: string}} agent
- * @returns {'kilo'|'claude'|null}
+ * @returns {'kilo'|'claude'|'pi'|null}
  */
 export function railsHost(agent) {
   const explicit = agent?.rails_host;
-  if (explicit === 'kilo' || explicit === 'claude') return explicit;
+  if (explicit === 'kilo' || explicit === 'claude' || explicit === 'pi') return explicit;
   return commandHost(agent);
 }
 
-/** Хост по самой команде агента (`kilo … run`, `claude`), без явного `rails_host`. */
+/** Хост по самой команде агента (`kilo … run`, `claude`, `pi`), без явного `rails_host`. */
 function commandHost(agent) {
   if (isKiloRun(agent)) return 'kilo';
   const base = path.win32.basename(String(agent?.command ?? ''));
-  return /^claude(?:\.cmd|\.exe|\.ps1)?$/i.test(base) ? 'claude' : null;
+  if (/^claude(?:\.cmd|\.exe|\.ps1)?$/i.test(base)) return 'claude';
+  return /^pi(?:\.cmd|\.exe|\.ps1)?$/i.test(base) ? 'pi' : null;
 }
 
 // Флаги сессии в записи агента: с любым из них раннер своё продолжение не добавляет —
@@ -123,7 +140,7 @@ const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
  * поле `session`: его пишет хук хоста), или null — продолжить нельзя.
  *
  * Хост — по команде агента, как в railsHost, но без явного `rails_host`: у обёртки с другим
- * именем команды флаги продолжения неизвестны. Проверено запуском 2026-09-27:
+ * именем команды флаги продолжения неизвестны. Продолжение сессии хоста:
  *  - claude 2.1.278: `claude --resume <id> … -p` с промптом через stdin продолжает ту же
  *    сессию — ответ помнит прежний разговор, `session_id` в ответе и во входе хуков
  *    (`SessionStart` с `source: "resume"`, `PreToolUse`) прежний, значит и состояние рельс
@@ -151,6 +168,10 @@ export function resumeSessionArgs(agent, sessionId) {
     const i = args.indexOf('run');
     return [...args.slice(0, i + 1), '--session', sessionId, ...args.slice(i + 1)];
   }
+  // pi намеренно без продолжения: рабочие записи запускают его с `--no-session`, а такая
+  // сессия после выхода не возобновляется (у pi для этого отдельные `--session`,
+  // `--session-id`, `--session-dir`). Сбойный ответ pi повторяется в новой сессии с начала
+  // графа — как в тестах скилов; продолжение потребовало бы сменить запись агента.
   return null;
 }
 
@@ -183,15 +204,23 @@ function claudeRailsHookScripts(settingsPath) {
  * Стоят ли рабочие хуки рельс, которые увидит агент хоста `host`, запущенный в `cwd`:
  * kilo — загрузчик `<cwd>/.kilo/plugin/workflow-rails.js` и ядро, на которое он ссылается
  * (`<cwd>/.workflow/src/rails/kilo-plugin.mjs`, §9.2); claude — запись `_workflow_rails` в
- * настройках пользователя или проекта, скрипт которой существует (§9.1). Одной записи мало:
+ * настройках пользователя или проекта, скрипт которой существует (§9.1); pi — загрузчик
+ * расширения в каталоге агента и ядро, на которое он ссылается (§9.3). Одной записи мало:
  * хук на удалённый скрипт падает, вызовы проходят без состояния, и раннер принял бы исправного
- * агента за молчащего (ревью 2026-09-25).
+ * агента за молчащего.
  *
  * @param {string|null} host
  * @param {string} cwd
- * @param {{userSettingsPath?: string}} [opts] путь настроек Claude пользователя (для тестов)
+ * @param {{userSettingsPath?: string, piExtensionsDir?: string, env?: object}} [opts] пути настроек
+ *   Claude пользователя и каталога расширений pi (для тестов), `env` — окружение
+ *   запускаемого агента: каталог агента pi из него берётся так же, как его берёт сам pi
+ *   (в машинном `agent.env` он бывает задан агенту, но не процессу раннера)
  */
-export function railsHooksPresent(host, cwd, { userSettingsPath = path.join(os.homedir(), '.claude', 'settings.json') } = {}) {
+export function railsHooksPresent(host, cwd, {
+  userSettingsPath = path.join(os.homedir(), '.claude', 'settings.json'),
+  piExtensionsDir: piDir,
+  env = process.env,
+} = {}) {
   if (host === 'kilo') {
     return fs.existsSync(path.join(cwd, '.kilo', 'plugin', 'workflow-rails.js'))
       && fs.existsSync(path.join(cwd, '.workflow', 'src', 'rails', 'kilo-plugin.mjs'));
@@ -200,7 +229,80 @@ export function railsHooksPresent(host, cwd, { userSettingsPath = path.join(os.h
     return [userSettingsPath, path.join(cwd, '.claude', 'settings.local.json'), path.join(cwd, '.claude', 'settings.json')]
       .some((file) => claudeRailsHookScripts(file).some((script) => fs.existsSync(path.resolve(cwd, script))));
   }
+  if (host === 'pi') {
+    return piRailsExtensionInstalled({ dir: piDir || piExtensionsDir(env) });
+  }
   return false;
+}
+
+/**
+ * Каталог расширений pi: `<каталог агента>/extensions`, где каталог агента —
+ * `PI_CODING_AGENT_DIR` или `~/.pi/agent` (так же считает сам pi). Проектный
+ * `<cwd>/.pi/extensions` здесь не проверяется: pi берёт его только в доверенном проекте,
+ * а неинтерактивный запуск доверие подтвердить не может — расширение оттуда не загрузится.
+ *
+ * @param {object} [env]
+ * @returns {string}
+ */
+export function piExtensionsDir(env = process.env) {
+  const override = env && typeof env.PI_CODING_AGENT_DIR === 'string' ? env.PI_CODING_AGENT_DIR.trim() : '';
+  const agentDir = override || path.join(os.homedir(), '.pi', 'agent');
+  return path.join(agentDir, 'extensions');
+}
+
+/**
+ * Есть ли pi на машине: каталог его настроек `~/.pi` существует или `PI_CODING_AGENT_DIR`
+ * задан явно. Проверка нужна регистрации рельс — расширение pi ставится только туда, где
+ * pi уже используется; иначе на машине без pi заводился бы чужой каталог настроек.
+ * Каталог агента pi создаёт сам при первом запуске (configDir `.pi` из его package.json).
+ *
+ * @param {object} [env]
+ * @returns {boolean}
+ */
+export function piInstalled(env = process.env) {
+  const override = env && typeof env.PI_CODING_AGENT_DIR === 'string' ? env.PI_CODING_AGENT_DIR.trim() : '';
+  if (override) return true;
+  return fs.existsSync(path.join(os.homedir(), '.pi'));
+}
+
+/**
+ * Стоит ли расширение рельс для pi: в каталоге расширений есть загрузчик
+ * `workflow-rails.(ts|js)`, и ядро, на которое он ссылается, существует.
+ *
+ * Загрузчик — файл с одной строкой `export { default } from "<путь>"`. Динамический импорт
+ * ядра из расширения не годится: pi после такого импорта не завершается сам — стадия
+ * снималась бы по таймауту.
+ *
+ * @param {{dir?: string}} [opts]
+ * @returns {boolean}
+ */
+export function piRailsExtensionInstalled({ dir = piExtensionsDir() } = {}) {
+  return piLoaderFiles(dir).some((file) => {
+    const target = piLoaderTarget(file);
+    return target !== null && fs.existsSync(path.resolve(dir, target));
+  });
+}
+
+/** Файлы загрузчика расширения рельс в каталоге `dir`. */
+function piLoaderFiles(dir) {
+  return ['workflow-rails.ts', 'workflow-rails.js'].map((name) => path.join(dir, name));
+}
+
+/**
+ * Путь ядра рельс из текста загрузчика (`export { default } from "<путь>"`); нет строки — null.
+ * Группа пути запрещает только ту кавычку, которой путь обрамлён (обратная ссылка на
+ * захваченную кавычку): апостроф внутри пути (домашний каталог вида O'Brien) иначе обрывал
+ * бы разбор на нём, и загрузчик считался бы ссылающимся на несуществующий путь.
+ */
+function piLoaderTarget(file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+  const m = /export\s*\{\s*default\s*\}\s*from\s*(["'])((?:(?!\1).)*)\1/.exec(text);
+  return m ? m[2] : null;
 }
 
 function terminalText(config) {
@@ -208,17 +310,15 @@ function terminalText(config) {
   return terminal.length > 0 ? `Финальный ответ — только в ${terminal.join(', ')}.` : 'Финальный ответ — только в терминальном узле графа.';
 }
 
-// Прогон PulseProxy 2026-09-27: повторы claude-haiku в новой сессии дважды ответили за два
-// хода без единого вызова инструмента — напечатали команду goto текстом ответа.
+// Повтор в новой сессии может ответить без единого вызова инструмента — напечатать команду
+// goto текстом ответа; текст напоминает, что переход делает только вызов инструмента.
 const RUN_COMMANDS_TEXT = 'Команды рельс выполняй инструментом shell: команда, напечатанная в ответе, перехода не делает.';
 
 /**
  * Вердикт повтора, когда хуки рельс на месте, а состояния сессии нет: за весь запуск агент
  * не вызвал ни одного инструмента под рельсами — финальный ответ дан без процедуры скила.
- * Прогон deep-research 2026-09-25: gpt-luna во всех трёх попытках ответила отчётом без
- * единого вызова инструмента, output-check не запускался, одна попытка прошла. Повтор —
- * новая сессия (продолжать нечего: id сессии хоста знает только состояние рельс), граф — с
- * первого узла.
+ * Повтор — новая сессия (продолжать нечего: id сессии хоста знает только состояние рельс),
+ * граф — с первого узла.
  */
 export function railsNotEngagedVerdict({ skill, config }) {
   return `RAILS: предыдущий ответ отклонён — скил «${skill}» идёт по рельсам, а за весь запуск не было `
@@ -238,9 +338,7 @@ export function railsNotEngagedVerdict({ skill, config }) {
  * запуска, `{ticket}`); без `root` стражи не проверяются.
  *
  * По умолчанию повтор — новая сессия: её рельсы начинаются с `entry`, а прежний узел —
- * узел другой сессии. Прогон PulseProxy 2026-09-27: новой сессии сказали «Числишься в
- * P7S1», её `goto P7S2` рельсы отклонили («нет ребра из P0E1 в P7S2»), два других повтора
- * напечатали команду текстом и ответили без процедуры скила. Поэтому для новой сессии
+ * узел другой сессии, и `goto` из него новый граф отклонит. Поэтому для новой сессии
  * вердикт говорит правду: где остановилась прошлая сессия, что граф — заново командой
  * `start`, и что сделанное осталось только в файлах.
  *

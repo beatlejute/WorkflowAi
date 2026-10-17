@@ -85,7 +85,7 @@ describe('runStatsTable: date bounds and result semantics', () => {
       starts: 1, estimated_starts: 0, process_ok: 1, process_statuses: { ok: 1 },
       executor_starts: 1, executor_graded: 1, executor_ungraded: 0,
       executor_grades: Object.fromEntries(GRADES.map((grade) => [grade, grade === 'accepted' ? 1 : 0])),
-      open_starts: 0,
+      open_starts: 0, rails_unverified: 0,
     }]);
   });
 

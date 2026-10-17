@@ -1,7 +1,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, readFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -24,8 +24,12 @@ const PROJECT_ROOT = mkdtempSync(join(tmpdir(), 'verify-artifacts-'));
 mkdirSync(join(PROJECT_ROOT, '.workflow'), { recursive: true });
 process.on('exit', () => rmSync(PROJECT_ROOT, { recursive: true, force: true }));
 
-function runScript(ticketPath, cwd = PROJECT_ROOT) {
-  const out = execFileSync('node', [SCRIPT, ticketPath], { encoding: 'utf8', cwd });
+function runScript(ticketPath, cwd = PROJECT_ROOT, env = null) {
+  const out = execFileSync('node', [SCRIPT, ticketPath], {
+    encoding: 'utf8',
+    cwd,
+    env: env ? { ...process.env, ...env } : process.env,
+  });
   const block = out.match(/---RESULT---([\s\S]*?)---RESULT---/);
   assert.ok(block, `verify-artifacts не выдал RESULT-блок:\n${out}`);
   const fields = {};
@@ -131,7 +135,12 @@ test('verify-artifacts: файл с mtime между started_at и updated_at п
   }
 });
 
-test('verify-artifacts: файл с mtime до started_at валит (ghost execution — агент не трогал файл)', () => {
+// mtime файла старше started_at — признак невыполненной работы, но не доказательство:
+// файл мог не меняться по существу (правка лежала в дереве с прошлого тикета) или тикет
+// его вовсе не трогает. Вердикт валит провал проверки DoD, а не время файла. Признак
+// остаётся в отчёте (`unchanged_files`) и в предупреждениях, а призрачное выполнение
+// называет маркер [GHOST-EXECUTION] (тесты ниже).
+test('verify-artifacts: файл с mtime до started_at — признак есть, вердикт не валится', () => {
   const tmpDir = join(PROJECT_ROOT, '.tmp-verify-artifacts-ghost');
   rmSync(tmpDir, { recursive: true, force: true });
   mkdirSync(tmpDir, { recursive: true });
@@ -155,12 +164,14 @@ test('verify-artifacts: файл с mtime до started_at валит (ghost exec
 
   try {
     const result = runScript(ticketPath);
-    assert.equal(result.status, 'failed', 'Ожидался failed по unchanged');
+    assert.equal(result.status, 'legacy', `unchanged не валит вердикт: ${result.fail_reasons || ''}`);
+    assert.doesNotMatch(result.fail_reasons || '', /file_unchanged/);
     assert.match(
       result.unchanged_files || '',
       /deliverable\.txt/,
       'deliverable должен быть в unchanged_files'
     );
+    assert.match(result.warnings || '', /file_unchanged=.*deliverable\.txt/, 'признак назван в предупреждениях');
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -307,9 +318,11 @@ test('verify-artifacts: регресс — валидный started_at в про
 
   try {
     const result = runScript(ticketPath);
-    assert.equal(result.status, 'failed', 'Ожидался failed по unchanged');
+    assert.equal(result.status, 'legacy', 'unchanged не валит вердикт');
     assert.match(result.unchanged_files || '', /deliverable\.txt/);
-    assert.equal(result.warnings, undefined, 'при валидных метках предупреждений быть не должно');
+    // Валидные метки: предупреждений точки отсчёта нет, есть только признак по файлу.
+    assert.match(result.warnings || '', /file_unchanged=.*deliverable\.txt/);
+    assert.doesNotMatch(result.warnings || '', /проверка file_unchanged пропущена/);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -637,8 +650,8 @@ test('verify-artifacts: D4 пропускает тикеты без UI/конт�
 // ---------------------------------------------------------------------------
 
 /** Полный stdout скрипта: маркер печатается вне RESULT-блока. */
-function runScriptRaw(ticketPath) {
-  return execFileSync('node', [SCRIPT, ticketPath], { encoding: 'utf8', cwd: PROJECT_ROOT });
+function runScriptRaw(ticketPath, cwd = PROJECT_ROOT) {
+  return execFileSync('node', [SCRIPT, ticketPath], { encoding: 'utf8', cwd });
 }
 
 /** Строка маркера, если она есть. */
@@ -667,7 +680,8 @@ test('ghost-маркер: файл не трогали — маркер в stdou
   });
 
   try {
-    const line = ghostLine(runScriptRaw(ticketPath));
+    const stdout = runScriptRaw(ticketPath);
+    const line = ghostLine(stdout);
 
     assert.ok(line, 'маркер не напечатан');
     // Токен — первое слово строки и отделён пробелом: ровно то, что ищет
@@ -676,6 +690,12 @@ test('ghost-маркер: файл не трогали — маркер в stdou
     assert.match(line, /ticket=QA-903/);
     assert.match(line, /reason=file_unchanged/);
     assert.match(line, /unchanged_files=[^\s]*deliverable\.txt/);
+
+    // Маркер и вердикт независимы: тем же прогоном признак призрака выставляется
+    // (файл не тронут), но вердикт валит провал проверки DoD, а не время файла.
+    const block = stdout.match(/---RESULT---([\s\S]*?)---RESULT---/)[1];
+    assert.match(block, /status: legacy/, 'unchanged не валит вердикт');
+    assert.match(block, /unchanged_files: [^\n]*deliverable\.txt/);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -883,6 +903,98 @@ ${summary}
     assert.match(reviewRow, /\| script-verify-artifacts \|$/);
   });
 
+  test('повтор прогона: строка вердикта идёт в последнюю секцию «## Ревью», а не пропускается', () => {
+    const ticketPath = makeDod2Ticket('IMPL-830', { dod: GREEN });
+
+    const first = runScript(reviewTicket('IMPL-830'), root);
+    assert.equal(first.status, 'all_green', `fail_reasons=${first.fail_reasons || ''}`);
+    assert.equal(first.review_note_written, 'true');
+
+    // Вторая секция «## Ревью» — её пишет агент стадии ревью после первого прогона.
+    // Вердикт читается из последней секции, поэтому и строка повтора обязана идти туда:
+    // иначе строка прошлого прогона в первой секции отменяла бы запись, а move-ticket
+    // отказал бы закрыть тикет по вердикту из последней секции.
+    appendFileSync(
+      ticketPath,
+      '\n## Ревью\n\n| Дата | Статус | Самари | Агент |\n|------|--------|--------|-------|\n| 2026-09-24 | ❌ failed | агент стадии ревью | reviewer |\n',
+      'utf8'
+    );
+
+    const second = runScript(reviewTicket('IMPL-830'), root);
+    assert.equal(second.status, 'all_green', `fail_reasons=${second.fail_reasons || ''}`);
+    assert.equal(second.review_note_written, 'true', 'повтор не должен молча пропускаться');
+
+    const ticket = readFileSync(ticketPath, 'utf8');
+    assert.equal(getLastReviewStatus(ticket), 'passed', 'вердикт читается из последней секции');
+    const sections = ticket.split('## Ревью').slice(1);
+    assert.equal(sections.length, 2, 'секций по-прежнему две');
+    const passedRows = (section) => section.split('\n').filter((line) => line.includes('✅ passed')).length;
+    assert.equal(passedRows(sections[0]), 1, 'в первой секции осталась только строка первого прогона');
+    assert.equal(passedRows(sections[1]), 1, 'строка повтора — в последней секции');
+  });
+
+  test('файл не менялся после started_at, проверки DoD зелёные → вердикт не failed, признак в отчёте и предупреждениях', () => {
+    makeDod2Ticket('IMPL-831', { dod: GREEN });
+    // Правка лежала в рабочем дереве ещё до начала тикета (её сделал предыдущий тикет)
+    // либо тикет этот файл по существу не меняет: mtime файла старше started_at тикета.
+    const deliverable = join(root, 'out', 'IMPL-831.txt');
+    const old = new Date('2026-04-20T00:00:00Z');
+    utimesSync(deliverable, old, old);
+
+    const result = runScript(reviewTicket('IMPL-831'), root);
+
+    // Пункт DoD закрывает исполненная зелёная проверка — вердикт решает она, а не время файла.
+    assert.equal(result.status, 'all_green', `fail_reasons=${result.fail_reasons || ''}`);
+    assert.equal(result.dod_check_failed, '0');
+    assert.doesNotMatch(result.fail_reasons || '', /file_unchanged/);
+    // Признак остаётся в отчёте, предупреждениях и evidence — просто не валит.
+    assert.equal(result.unchanged_files, 'out/IMPL-831.txt');
+    assert.match(result.warnings || '', /file_unchanged=out\/IMPL-831\.txt/);
+    assert.deepEqual(readEvidence('IMPL-831').legacy_gates.unchanged_files, ['out/IMPL-831.txt']);
+  });
+
+  test('проверка DoD красная, файл тоже не менялся → failed по существу, а не по времени файла', () => {
+    makeDod2Ticket('IMPL-832', {
+      dod: [GREEN, '- [x] Второй скрипт завершается без ошибки', '  - check: `node -e "process.exit(3)"`, expect: `exit 0`'].join('\n'),
+    });
+    const deliverable = join(root, 'out', 'IMPL-832.txt');
+    const old = new Date('2026-04-20T00:00:00Z');
+    utimesSync(deliverable, old, old);
+
+    const result = runScript(reviewTicket('IMPL-832'), root);
+
+    assert.equal(result.status, 'failed', `fail_reasons=${result.fail_reasons || ''}`);
+    assert.match(result.fail_reasons, /dod_items_failed=2/);
+    assert.doesNotMatch(
+      result.fail_reasons,
+      /file_unchanged/,
+      'причина — провал проверки, а не время файла'
+    );
+    assert.equal(result.unchanged_files, 'out/IMPL-832.txt');
+  });
+
+  test('ghost-маркер: неизменённый файл при зелёных проверках — маркер печатается, вердикт all_green', () => {
+    makeDod2Ticket('IMPL-833', { dod: GREEN });
+    const deliverable = join(root, 'out', 'IMPL-833.txt');
+    const old = new Date('2026-04-20T00:00:00Z');
+    utimesSync(deliverable, old, old);
+
+    const stdout = runScriptRaw(reviewTicket('IMPL-833'), root);
+    const line = ghostLine(stdout);
+
+    // Признак призрака живёт независимо от вердикта: эту строку читают детекторы
+    // workflow-mcp (list_ghost_executions и health-детектор ghost-execution).
+    assert.ok(line, 'маркер не напечатан');
+    assert.match(line, /reason=file_unchanged/);
+    assert.match(line, /unchanged_files=[^\s]*IMPL-833\.txt/);
+
+    // Тем же прогоном: проверки DoD зелёные, файл не менялся — вердикт пропускает работу,
+    // а признак остаётся в отчёте. Провалом файл не считается.
+    const block = stdout.match(/---RESULT---([\s\S]*?)---RESULT---/)[1];
+    assert.match(block, /status: all_green/);
+    assert.match(block, /unchanged_files: out\/IMPL-833\.txt/);
+  });
+
   test('одна красная проверка → failed, пункт с кодом возврата в evidence', () => {
     makeDod2Ticket('IMPL-802', {
       dod: [GREEN, '- [x] Второй скрипт завершается без ошибки', '  - check: `node -e "process.exit(3)"`, expect: `exit 0`'].join('\n'),
@@ -981,18 +1093,132 @@ ${summary}
     assert.deepEqual([item.status, item.images], ['image_missing', []]);
   });
 
-  test('проверка вне ограничений исполнителя → denied, тикет failed', () => {
+  test('проверка вне ограничений исполнителя → denied, статус not_executed (среда, не работа)', () => {
     makeDod2Ticket('IMPL-806', {
       dod: '- [x] Сервис отвечает\n  - check: `curl https://example.com`, expect: `exit 0`',
     });
 
     const result = runScript(reviewTicket('IMPL-806'), root);
 
-    assert.equal(result.status, 'failed');
+    // Отказ исполнителя — «не удалось исполнить» и единственная причина провала:
+    // отдельный статус уводит тикет в блокировку без попытки исполнения.
+    assert.equal(result.status, 'not_executed');
     assert.equal(result.dod_check_failed, '1');
+    assert.match(result.fail_reasons, /dod_items_not_executed=1/);
+    assert.doesNotMatch(result.fail_reasons, /dod_items_failed/);
+    assert.match(result.issues, /не удалось исполнить/);
+    // Причина для blocked_reason называет пункт, исход проверки и команду.
+    assert.match(result.not_executed, /пункт 1 — denied: executable_not_allowed: curl/);
+    assert.match(result.not_executed, /команда: `curl https:\/\/example\.com`/);
     const item = readEvidence('IMPL-806').items[0];
     assert.equal(item.status, 'denied');
     assert.match(item.reason, /executable_not_allowed: curl/);
+  });
+
+  test('проверку не удалось запустить → spawn_failed, статус not_executed', () => {
+    // NUL в аргументе spawn отклоняет синхронно (ERR_INVALID_ARG_VALUE) — так проверка
+    // не стартует при существующем исполняемом файле: команда не исполнялась.
+    makeDod2Ticket('IMPL-817', {
+      dod: '- [x] Скрипт завершается без ошибки\n  - check: `node -e "process.exit(0)\u0000"`, expect: `exit 0`',
+    });
+
+    const result = runScript(reviewTicket('IMPL-817'), root);
+
+    // Процесс не запустился — среда, а не результат работы: статус класса среды.
+    assert.equal(result.status, 'not_executed');
+    assert.equal(result.dod_check_failed, '1');
+    assert.match(result.fail_reasons, /dod_items_not_executed=1/);
+    assert.doesNotMatch(result.fail_reasons, /dod_items_failed/);
+    assert.match(result.issues, /не удалось исполнить/);
+    // Код незапуска — в причине блокировки, а не только в evidence.
+    assert.match(result.not_executed, /пункт 1 — spawn_failed: /);
+    assert.match(result.not_executed, /команда: `node -e/);
+    const item = readEvidence('IMPL-817').items[0];
+    assert.equal(item.status, 'spawn_failed');
+    assert.match(item.reason, /^spawn_failed: /);
+    assert.equal(item.exit_code, null);
+  });
+
+  test('проверка не уложилась в предел времени → «не удалось исполнить», вердикт не passed', () => {
+    makeDod2Ticket('IMPL-816', {
+      dod: [
+        GREEN,
+        '- [x] Полный прогон тестов зелёный',
+        '  - check: `node -e "setTimeout(() => process.exit(0), 8000)"`, expect: `exit 0`',
+      ].join('\n'),
+    });
+
+    // Предел проверки общий для всех проверок тикета, поэтому берётся с запасом к запуску
+    // node (сотни миллисекунд): при 300 мс «не исполнилась» оказывалась и зелёная первая
+    // проверка, и ожидание «не исполнился только пункт 2» становилось случайным.
+    // Аргумент/переменная — настройка без правки кода.
+    const result = runScript(reviewTicket('IMPL-816'), root, { WORKFLOW_CHECK_TIMEOUT_MS: '3000' });
+
+    // Приёмка не становится passed, и вердикт — класс среды: настоящих провалов в
+    // тикете нет, а предел времени повтором не лечится.
+    assert.equal(result.status, 'not_executed', `fail_reasons=${result.fail_reasons || ''}`);
+    // Причина названа отдельно от «проверка не совпала с ожиданием»: неисполненные пункты
+    // перечисляются списком индексов, и зелёного первого в списке быть не должно.
+    const notExecuted = /dod_items_not_executed=([\d,]+)/.exec(result.fail_reasons || '')?.[1] ?? '';
+    assert.equal(notExecuted, '2', `не исполнились пункты: ${notExecuted || 'ни один'}`);
+    assert.doesNotMatch(result.fail_reasons, /dod_items_failed/, 'предел времени — не провал пункта');
+    assert.match(result.issues, /не удалось исполнить/);
+    // Предел времени назван в причине блокировки вместе с командой пункта.
+    assert.match(result.not_executed, /пункт 2 — timeout: timeout_ms: 3000/);
+    assert.match(result.not_executed, /команда: `node -e "setTimeout/);
+
+    const item = readEvidence('IMPL-816').items[1];
+    assert.equal(item.status, 'timeout');
+    assert.match(item.reason, /timeout_ms: 3000/);
+  });
+
+  test('несколько неисполненных проверок → в причине блокировки перечислены все, каждая со своим исходом', () => {
+    makeDod2Ticket('IMPL-819', {
+      dod: [
+        GREEN,
+        '- [x] Сервис отвечает\n  - check: `curl https://example.com`, expect: `exit 0`',
+        '- [x] Процесс стартует\n  - check: `node -e "process.exit(0)\u0000"`, expect: `exit 0`',
+      ].join('\n'),
+    });
+
+    const result = runScript(reviewTicket('IMPL-819'), root);
+
+    assert.equal(result.status, 'not_executed');
+    assert.match(result.fail_reasons, /dod_items_not_executed=2,3/);
+    // Каждый пункт — со своим исходом и своей командой: по одной строке на первый
+    // неисполненный пункт второй не починить.
+    assert.match(result.not_executed, /пункт 2 — denied: executable_not_allowed: curl/);
+    assert.match(result.not_executed, /пункт 3 — spawn_failed: /);
+    assert.match(result.not_executed, /команда: `curl https:\/\/example\.com`; пункт 3/);
+  });
+
+  test('настоящий провал пункта рядом с неисполненной проверкой → failed, а не not_executed', () => {
+    makeDod2Ticket('IMPL-818', {
+      dod: [
+        GREEN,
+        '- [x] Скрипт падает с кодом 1',
+        '  - check: `node -e "process.exit(1)"`, expect: `exit 0`',
+        '- [x] Полный прогон тестов зелёный',
+        '  - check: `node -e "setTimeout(() => process.exit(0), 8000)"`, expect: `exit 0`',
+      ].join('\n'),
+    });
+
+    const result = runScript(reviewTicket('IMPL-818'), root, { WORKFLOW_CHECK_TIMEOUT_MS: '3000' });
+
+    // Проверка исполнилась и не совпала — это доказательство невыполнения работы.
+    // Проблема среды (пункт 3 не уложился в предел) статус не меняет: иначе провал
+    // работы замаскировался бы под среду и тикет ушёл бы в blocked вместо переделки.
+    assert.equal(result.status, 'failed', `fail_reasons=${result.fail_reasons || ''}`);
+    assert.match(result.fail_reasons, /dod_items_failed=2/);
+    assert.match(result.fail_reasons, /dod_items_not_executed=3/);
+    assert.match(result.issues, /не пройдены пункты DoD/);
+    assert.match(result.issues, /не удалось исполнить/);
+    // Оба класса видны и в evidence, и в причине блокировки — среда не теряется,
+    // даже когда вердикт выносит настоящий провал.
+    assert.equal(readEvidence('IMPL-818').items[1].status, 'failed');
+    assert.equal(readEvidence('IMPL-818').items[2].status, 'timeout');
+    assert.match(result.not_executed, /пункт 3 — timeout: timeout_ms: 3000/);
+    assert.doesNotMatch(result.not_executed, /пункт 2/);
   });
 
   test('пункт без записи проверки → failed без запуска', () => {
@@ -1288,7 +1514,7 @@ ${files.map((file) => `- \`${file}\``).join('\n')}
     assert.equal(result.status, 'all_green', `fail_reasons=${result.fail_reasons || ''}`);
   });
 
-  test('каталог, где всё старое, — по-прежнему unchanged', () => {
+  test('каталог, где всё старое, — по-прежнему unchanged, но вердикт не валит', () => {
     const stale = join(root, 'stale');
     mkdirSync(stale, { recursive: true });
     writeFileSync(join(stale, 'old.js'), 'old', 'utf8');
@@ -1299,8 +1525,10 @@ ${files.map((file) => `- \`${file}\``).join('\n')}
 
     const result = runScript(ticketPath, root);
 
-    assert.equal(result.status, 'failed');
+    // Зелёная проверка DoD закрывает пункт; mtime каталога вердикт не валит.
+    assert.equal(result.status, 'all_green', `fail_reasons=${result.fail_reasons || ''}`);
     assert.match(result.unchanged_files || '', /stale/);
+    assert.match(result.warnings || '', /file_unchanged=.*stale/);
   });
 
   test('путь самого тикета на доске в «Изменённых файлах» — не missing', () => {
@@ -1380,9 +1608,10 @@ describe('verify-artifacts: база file_unchanged — started_at', () => {
       fileMtime: at(-5),
     });
 
-    assert.equal(result.status, 'failed', `fail_reasons=${result.fail_reasons || ''}`);
+    assert.equal(result.status, 'legacy', `fail_reasons=${result.fail_reasons || ''}`);
     assert.match(result.unchanged_files || '', /deliverable\.txt/);
-    assert.equal(result.warnings, undefined, `при валидной started_at предупреждений нет: ${result.warnings}`);
+    assert.match(result.warnings || '', /file_unchanged=.*deliverable\.txt/);
+    assert.doesNotMatch(result.warnings || '', /пропущена/, 'при валидной started_at пропуска проверки нет');
   });
 
   test('регресс PLAN-020: файл изменён в попытке 1 после started_at, в попытке 2 updated_at свежее — не unchanged', () => {
@@ -1446,7 +1675,7 @@ describe('verify-artifacts: база file_unchanged — started_at', () => {
       fileMtime: new Date('2026-04-20T00:00:00Z'),
     });
 
-    assert.equal(result.status, 'failed', `fail_reasons=${result.fail_reasons || ''}`);
+    assert.equal(result.status, 'legacy', `fail_reasons=${result.fail_reasons || ''}`);
     assert.match(result.unchanged_files || '', /deliverable\.txt/);
   });
 });

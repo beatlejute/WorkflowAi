@@ -93,7 +93,7 @@ assertions:
     - kind: skill_contains
       file: "rails.yaml"
       pattern: "final_forbids:[\\s\\S]*default\\|ok\\|done\\|skipped"
-      reason: "Чужой статус в блоке результата запрещён выходным слоем (узел P0R2)."
+      reason: "Чужой статус в блоке результата запрещён выходным слоем (узел P0R1)."
 
     # 4. Перенос содержимого без потерь
     - kind: skill_contains
@@ -102,7 +102,7 @@ assertions:
       reason: "Карта переноса фиксирует базовую версию, от которой считается покрытие фраз-инвариантов."
     - kind: skill_contains
       file: "rails-migration.yaml"
-      pattern: "entries:[\\s\\S]*target: P0R3"
+      pattern: "entries:[\\s\\S]*target: P0R1"
       reason: "Служебные заголовки прозы переехали в лейблы узлов, решение по каждой фразе записано в карте."
 
 execution:

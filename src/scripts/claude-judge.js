@@ -12,7 +12,7 @@
  *   node claude-judge.js --model <id> [--command <исполняемый файл claude>] [--arg <аргумент>]…
  *     [--timeout <с>]   промпт — из stdin (агент с `prompt_stdin: true`) или последним аргументом
  *
- * Изоляция модели (проверено запуском claude 2026-09-26):
+ * Изоляция модели:
  *  - `--tools ""` и `--strict-mcp-config` — у модели нет ни одного инструмента
  *    (init отдаёт `tools: []`);
  *  - `--setting-sources project` в пустом временном каталоге — без пользовательских
@@ -51,8 +51,8 @@ const DEFAULT_TIMEOUT_S = 180;
 // перед постоянным хвостом промпта.
 const PROMPT_SECTIONS = /## Rubric\s*\n[\s\S]*?\n## Target Agent Output\s*\n([\s\S]*)\n## Task\s*\n[\s\S]*?\n\s*Please evaluate the output/;
 // Строка перед путями: `Изображения:`, у вопроса по частям — с пометкой части
-// `Изображения (часть 1 из 2: …):` (раннер, _askCommandAgent). Без пометки в шаблоне
-// судья терял снимки частей: PulseProxy QA-160, 2026-09-28, `images: 0` в обеих частях.
+// `Изображения (часть 1 из 2: …):` (раннер, _askCommandAgent). Без пометки части шаблон
+// судьи снимки частей не находил — `images: 0`.
 const IMAGES_HEADER = /^Изображения(?: \(.*\))?:$/;
 const NEUTRAL_AT = '＠';
 

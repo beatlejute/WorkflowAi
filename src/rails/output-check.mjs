@@ -19,9 +19,9 @@ const POSITION_MISSING_PREFIX = 'position:';
 
 /**
  * Запрещённый паттерн в финальном ответе: `output.final_forbids` (и `pause_forbids`).
- * Добавлено 2026-09-23 при переводе execute-task: часть инвариантов скила — запреты на
- * форму ответа («не перечисляй пункты DoD в stdout», «не декларируй self-check»), а
- * выходной слой умел только требовать наличие. Элемент `missing[]` отличим по префиксу.
+ * Дополняет `final_requires`: часть инвариантов скила — запреты на форму ответа
+ * («не перечисляй пункты DoD в stdout», «не декларируй self-check»), а не требования
+ * наличия. Элемент `missing[]` отличим по префиксу.
  */
 const FORBIDDEN_MISSING_PREFIX = 'forbidden:';
 
@@ -69,7 +69,7 @@ export function check(text, config, state) {
       .filter((field) => !new RegExp(`^${field}: [^\\r\\n\\s][^\\r\\n]*$`, 'm').test(value))
       .map((field) => `suspension:${field}`);
     if (/\bverdict\s*=\s*pass\b/i.test(value)) missing.push('suspension:verdict=pass');
-    // Приписанный RESULT «status: pass» не превращает приостановку в успех (ревью 2026-10-05).
+    // Приписанный RESULT «status: pass» не превращает приостановку в успех.
     if (/^status:\s*pass\b/m.test(value)) missing.push('suspension:result-pass');
     return { ok: missing.length === 0, missing, outcome: outcome[1] };
   }
@@ -137,7 +137,7 @@ export function check(text, config, state) {
  * хвостовые `assistant`-строки с тем же `message.id`, что у последней
  * (пока назад по файлу id совпадает), и их text-блоки склеиваются в порядке
  * файла. Если у последней записи `message.id` нет (не Claude Code формат,
- * либо старый транскрипт) — берётся только она, как раньше.
+ * либо старый транскрипт) — берётся только она.
  *
  * Нечитаемый файл или отсутствие ассистентских сообщений — пустая строка
  * (терпимо, как остальные читатели состояния в этом репозитории).

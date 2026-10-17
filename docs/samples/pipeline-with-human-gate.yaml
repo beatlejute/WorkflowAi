@@ -166,6 +166,7 @@ stages:
         stage: mark-human-rejected
         params:
           ticket_id: "$context.ticket_id"
+          reason: "human_gate_rejected"
       timeout:
         stage: mark-human-rejected
         params:

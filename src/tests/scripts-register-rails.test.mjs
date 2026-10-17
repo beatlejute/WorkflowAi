@@ -67,6 +67,13 @@ function tmp(prefix) {
   trash.push(dir);
   return dir;
 }
+
+// Регистрация рельс ставит расширение pi в каталог агента на машине
+// (`~/.pi/agent/extensions`, register-rails.js). Каталог изолируется на весь файл —
+// так тест не тронет настоящие настройки pi, даже запущенный в одиночку без
+// преднагрузки `_rails-home.mjs` (она ставит ту же переменную для всего набора).
+const PI_AGENT_DIR = tmp('reg-rails-pi-agent-');
+process.env.PI_CODING_AGENT_DIR = PI_AGENT_DIR;
 after(() => {
   // rmSync рекурсивно снимает junction как ссылку и не выедает её цель
   // (проверено запуском на этой машине: файл в цели junction пережил удаление дерева).
@@ -422,8 +429,8 @@ test('userSettingsPath: ровно <домашний каталог>/.claude/set
 // ~/.claude настройки тесту запрещено.
 // ---------------------------------------------------------------------------
 
-function runCli(args, { globalDir, home = null, cwd = PROJECT_ROOT } = {}) {
-  const env = { ...process.env, WORKFLOW_HOME: globalDir };
+function runCli(args, { globalDir, home = null, cwd = PROJECT_ROOT, extraEnv = {} } = {}) {
+  const env = { ...process.env, WORKFLOW_HOME: globalDir, ...extraEnv };
   if (home) {
     env.USERPROFILE = home;
     env.HOME = home;
@@ -452,8 +459,24 @@ test('CLI: позиционный аргумент — корень проект
   assert.match(r.stdout, /junction:/, 'человек должен увидеть, где теперь лежит ссылка на ядро');
   assert.match(r.stdout, /claude:/, 'человек должен увидеть, в какой файл настроек попали хуки');
   assert.match(r.stdout, /kilo:/, 'человек должен увидеть путь загрузчика Kilo');
-  assert.match(r.stdout, /Перезапусти сессию/, 'без перезапуска сессии хуки не загрузятся — об этом обязано быть сказано');
+  assert.match(r.stdout, /pi:/, 'человек должен увидеть, куда легло расширение рельс для pi');
+  assert.match(r.stdout, /Перезапусти сессию/, 'без перезапуска сессии хуки не загрузится — об этом обязано быть сказано');
   assert.ok(existsSync(join(root, '.claude', 'settings.local.json')), 'хуки обязаны появиться в указанном проекте');
+});
+
+// Без pi на машине расширение не ставится: чужой каталог настроек не заводим.
+test('CLI: без pi на машине расширение рельс для pi не пишется', () => {
+  const globalDir = makeGlobalDir();
+  const root = makeProject();
+  const home = tmp('reg-rails-cli-nopi-');
+  const agentDir = join(home, 'pi-agent');
+
+  const r = runCli([root], { globalDir, home, extraEnv: { PI_CODING_AGENT_DIR: '' } });
+
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /pi на машине нет/);
+  assert.ok(!existsSync(agentDir), `каталог настроек pi не должен создаваться (${agentDir})`);
+  assert.ok(!existsSync(join(home, '.pi')), 'каталог .pi в подменённом доме не должен появляться');
 });
 
 test('CLI: --umbrella называет каталог-зонтик, а не пользователя', () => {

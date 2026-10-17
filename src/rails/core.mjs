@@ -34,7 +34,7 @@ import { appendDenial, appendEvent } from './journal.mjs';
 import { realpathDeep, isInside, matchesGlob } from './paths.mjs';
 import { explainShellWrites, shellAbsolutePath } from './actions.mjs';
 import { nestedScripts, scanCommand, toSingleQuoted } from './shell-scan.mjs';
-import { classifyWrites } from './write-policy.mjs';
+import { classifyWrites, loadWritePolicy } from './write-policy.mjs';
 import { pinnedRuntime } from './runtime-snapshot.mjs';
 import { readHandoff } from './handoff.mjs';
 import { launchOrigin, sameLaunch } from './launch-origin.mjs';
@@ -42,9 +42,9 @@ import { withLifecycleLock } from './lifecycle-lock.mjs';
 
 // --- cli.mjs: узнаём вызов служебной команды (§7.4.1) -----------------------
 //
-// Разбор строки команды — только через shell-scan.mjs (2026-09-22, ЗАДАЧА B2): три
-// наивных трекера кавычек и регулярка для `--quote` не знали `\"` внутри "…", `'\''`
-// и подстановок — ревью показало ложный allow, при котором хук сам создавал инъекцию
+// Разбор строки команды — только через shell-scan.mjs: три наивных
+// трекера кавычек и регулярка для `--quote` не знали `\"` внутри "…", `'\''`
+// и подстановок — это давало ложный allow, при котором хук сам создавал инъекцию
 // (`--quote '… --quote "$(touch PWNED)"'` переписывался так, что shell выполнял $(…)).
 //
 // «Команда — вызов cli.mjs» — это ВСЯ команда целиком, не подстрока: каждый сегмент
@@ -54,8 +54,8 @@ import { withLifecycleLock } from './lifecycle-lock.mjs';
 // с литеральным каталогом и `&&`/`;`/переводом строки после него (раннер и агенты
 // префиксуют `cd "<workdir>" &&`, а цитата P0R4 содержит «git commit» — без этого вызов
 // уходил в deny_shell по тексту цитаты). Путь cli.mjs и каталог cd — литералы
-// (literalPath), интерпретатор — `node` без каталога, под PowerShell в команде нет `--%`
-// (ЗАДАЧА B3, 2026-09-22); если после cd есть не только `&&`, путь обязан вести к cli.mjs
+// (literalPath), интерпретатор — `node` без каталога, под PowerShell в команде нет `--%`;
+// если после cd есть не только `&&`, путь обязан вести к cli.mjs
 // проекта и от каталога cd, и от ctx.cwd (cliBaseDirs); `..` под POSIX — только если логический
 // и физический подъём ведут в один каталог (dotDotClimbsReal). Иначе `cli.mjs status && git commit`
 // проходил бы коротким замыканием мимо deny_shell. Всё, что shell выполнил бы помимо
@@ -64,11 +64,11 @@ import { withLifecycleLock } from './lifecycle-lock.mjs';
 // вложенность — делает команду НЕ cli-вызовом: она идёт по общим правилам
 // (canary/deny_shell/write_scope/stage_actions). Ложный отказ здесь допустим, ложное
 // разрешение — нет. Под PowerShell кавычками считаются и типографские ‘ ’ ‚ ‛ “ ” „
-// (ревью B2, раунд 2: `--quote 'лейбл с ’; git commit …'` проходил одним токеном).
-// CR (ревью B2, раунд 3, 2026-09-22): сканер считал `\r` пробелом — `status<CR>git commit
+// (иначе `--quote 'лейбл с ’; git commit …'` проходил бы одним токеном).
+// CR: сканер считал `\r` пробелом — `status<CR>git commit
 // <CR>ni PWNED` под PowerShell был одним cli-сегментом, а PowerShell выполнял все четыре
 // statement'а; под bash `>&1<CR>PWNED` проходил как безвредный `>&1`, а bash создавал
-// файл. Теперь CR под PowerShell — разделитель, под bash — символ слова, и любой токен
+// файл. CR под PowerShell — разделитель, под bash — символ слова, и любой токен
 // с CR/LF вне кавычек не инертен (см. tokenIsInert).
 
 const CLI_SUBCOMMANDS = ['start', 'goto', 'status', 'reset', 'report', 'check', 'coverage', 'selfcheck', 'complete', 'exit', 'relinquish'];
@@ -76,24 +76,24 @@ const CLI_SUBCOMMANDS = ['start', 'goto', 'status', 'reset', 'report', 'check', 
 // репозитории есть свой `src/cli.mjs`, не имеющий отношения к рельсам.
 const CLI_PATH_RE = /(?:^|[\\/])rails[\\/]cli\.mjs$/;
 // Интерпретатор перед путём — только node: `rm rails/cli.mjs status` — тоже «путь +
-// подкоманда», но это rm. Только имя без каталога (поиск по PATH): ЗАДАЧА B3, 2026-09-22 —
-// якорь `…/node` пропускал `.workflow/work/node .workflow/src/rails/cli.mjs status`, и bash
+// подкоманда», но это rm. Только имя без каталога (поиск по PATH): якорь `…/node` пропускал
+// `.workflow/work/node .workflow/src/rails/cli.mjs status`, и bash
 // запускал скрипт агента из write_scope коротким замыканием (проверено запуском).
 const NODE_NAME_RE = /^node(?:\.exe)?$/i;
-// Префикс присваивания окружения перед node (POSIX; ЗАДАЧА B3, 2026-09-22): только переменные,
+// Префикс присваивания окружения перед node (POSIX): только переменные,
 // которые читает cli.mjs и которые не меняют, какой код выполнится и куда он пишет (не
 // NODE_OPTIONS/PATH/WORKFLOW_HOME), значение — литерал без `/`, `~`, шаблонов.
 const ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
 const CLI_ENV_NAMES = new Set(['WORKFLOW_RAILS_SKILL', 'WORKFLOW_RAILS_SESSION', 'WORKFLOW_RAILS_RUN']);
 const CLI_ENV_VALUE_RE = /^[A-Za-z0-9._:-]*$/;
-// Файл cli.mjs — только из этого проекта (ревью B2, раунд 3, 2026-09-22, pre-existing):
+// Файл cli.mjs — только из этого проекта:
 // якорь `rails/cli.mjs` принимал любой каталог, и `node .workflow/work/rails/cli.mjs
 // status` — файл, который агент вправе создать внутри write_scope, — получал allow как
 // cli-вызов (произвольный JS в обход всех правил). Путь (от cwd или от каталога
 // `cd`-префикса) обязан лексически указывать на `<root>/.workflow/src/rails/cli.mjs`
 // либо совпадать с ним по realpath (junction-цепочка `.workflow/src/rails` → `~/.workflow/rails`).
 // Без `root` (прямой вызов analyzeCliCommand из тестов) остаётся только лексический якорь.
-// `<root>/src/rails/cli.mjs` больше не канон (ревью B3, раунд 1, 2026-09-22): он принимался
+// `<root>/src/rails/cli.mjs` — не канон: он принимался
 // лексически в любом проекте и без проверки существования, а у analyze-report write_scope "**" —
 // агент кладёт свой src/rails/cli.mjs и получает короткое замыкание. В самом workflowAi
 // `.workflow/src/rails` — junction на `src/rails`, и `node src/rails/cli.mjs` проходит по realpath.
@@ -101,7 +101,7 @@ const CLI_CANONICAL = [['.workflow', 'src', 'rails', 'cli.mjs']];
 // Компонент `..` в пути (оба разделителя).
 const DOT_DOT_RE = /(^|[\\/])\.\.(?:[\\/]|$)/;
 
-// Регистр на win32 сворачивается только у ASCII (ревью B3 r2, 2026-09-22, проверено запуском):
+// Регистр на win32 сворачивается только у ASCII (проверено запуском):
 // JS toLowerCase сводит KELVIN SIGN U+212A к `k`, а NTFS считает `.wor\u212Aflow` отдельным
 // именем — копия cli.mjs в `.wor\u212Aflow/src/rails` лексически совпадала с каноном и
 // запускалась коротким замыканием. Прочие совпадения имён, которые знает NTFS, сверяются по
@@ -118,14 +118,14 @@ const PATH_PARTS_RE = process.platform === 'win32' ? /[\\/]+/ : /\/+/;
 
 // true — каждый `..` в rels (по очереди от start) ведёт в один каталог и логически (текст пути),
 // и физически: каталог, из которого поднимаемся, сам не ссылка (lstat), и родитель его realpath —
-// realpath его текстового родителя. Ревью B3 r2 (2026-09-22, MEDIUM, проверено запуском Git
+// realpath его текстового родителя (проверено запуском Git
 // Bash): после `cd` в junction msys отдаёт node.exe ФИЗИЧЕСКИЙ каталог (цель ссылки; `pwd` — lnk,
 // `pwd -P` и process.cwd() — цель), node сворачивает `..` от него, и `cd ./.workflow/work/lnk &&
 // node ../../../.workflow/src/rails/cli.mjs status` запускал копию из цели, а хук сворачивал `..`
 // от логического lnk. Linux-ядро тоже даёт физический cwd (не проверено: Linux не запускался).
 // Не текстовое «realpath(cur) === cur»: короткие имена 8.3 (TEMP раннера GitHub) и /var →
 // /private/var (macOS) не ссылки на пути подъёма, а realpath их переписывает — был бы ложный отказ.
-// Ревью B3 r3 (2026-09-22, MEDIUM, проверено запуском): msys-ссылка Git Bash для Windows не
+// Проверено запуском: msys-ссылка Git Bash для Windows не
 // симлинк — при MSYS=winsymlinks:sys это обычный файл с атрибутом System, при winsymlinks:lnk —
 // файл `.lnk`. lstat видит файл, а bash через такую ссылку переходит, и `..` ведёт в родителя
 // ЦЕЛИ. Поэтому «не каталог» (stat) тоже считается ссылкой. Любая ошибка lstat/stat, включая
@@ -167,9 +167,9 @@ function dotDotClimbsReal(start, rels) {
 
 // Проверка «путь — это cli.mjs проекта» для classifyCli: (pathValue, cdDir) → boolean.
 // Под PowerShell на win32 Set-Location и запущенный из него node поднимаются по `..` логически
-// (проверено запуском ревью B3 r2: node получает каталог junction, не цель) — там `..`
+// (проверено запуском: node получает каталог junction, не цель) — там `..`
 // проверяется только по realpath свёрнутого пути; под POSIX — ещё и dotDotClimbsReal. pwsh вне
-// Windows (дочерний процесс получает каталог через chdir) не проверен — как POSIX (2026-09-22).
+// Windows (дочерний процесс получает каталог через chdir) не проверен — как POSIX.
 function makeCliPathCheck(scope, dialect) {
   if (!scope || !scope.root) return () => true;
   const cwd = scope.cwd || scope.root;
@@ -193,8 +193,8 @@ function makeCliPathCheck(scope, dialect) {
 }
 // Справа от `|` в cli-сегменте допустимы только фильтры, которые читают stdout и ни при
 // каких аргументах не пишут в файл и не выполняют команд (tee/sed/awk/xargs/
-// ForEach-Object — не сюда). Ревью B2, раунд 2 (2026-09-22): `sort -o FILE`, `uniq IN OUT`
-// и `less -o FILE` создают файл по любому пути — короткое замыкание обходило write_scope
+// ForEach-Object — не сюда). `sort -o FILE`, `uniq IN OUT`
+// и `less -o FILE` создают файл по любому пути — короткое замыкание обошло бы write_scope
 // (проверено запуском: маркер создавался); исключены. Под PowerShell `sort` — Sort-Object,
 // но uniq.exe из Git — писатель; в PS-список — только Sort-Object по полному имени.
 const PIPE_FILTERS = new Set(['head', 'tail', 'cat', 'grep', 'wc', 'cut', 'tr', 'more', 'findstr']);
@@ -213,7 +213,7 @@ const PS_STOP_PARSING_STRIP_RE = /['"‘’‚‛“”„`]/g;
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 
 // Путь (каталог `cd` или путь к cli.mjs), который shell передаст как написано, — или null.
-// ЗАДАЧА B3, 2026-09-22 (ревью B2 r3, MEDIUM): `cd $PWD/.workflow/work/copy && node
+// `cd $PWD/.workflow/work/copy && node
 // .workflow/src/rails/cli.mjs status` давал cdDir = null, путь резолвился от ctx.cwd, а shell
 // запускал копию cli.mjs из write_scope. Не литерал (проверено запуском bash 5.2 msys и
 // powershell.exe 5.1): раскрытия и подстановки; `~` в начале (bash — $HOME, `~+` — $PWD;
@@ -224,12 +224,12 @@ const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 // (`env:`, диско-относительное `C:x` — у PowerShell свой текущий каталог на каждом диске).
 // msys-путь Git Bash `/c/…` на win32 под POSIX — только каталог cd (cdDir): его переводит в
 // `C:/…` сам msys (builtin cd). Аргумент node.exe msys переводит, лишь пока не заданы
-// MSYS_NO_PATHCONV/MSYS2_ARG_CONV_EXCL (ревью B3 r2, 2026-09-22, проверено запуском: с
+// MSYS_NO_PATHCONV/MSYS2_ARG_CONV_EXCL (проверено запуском: с
 // MSYS_NO_PATHCONV=1 node получает `/c/Windows` и открывает `C:\c\Windows`, а `cd /c/Windows`
 // по-прежнему в C:/Windows) — путь cli.mjs вида `/…` неоднозначен. Прочие `/…` под msys
 // (`/tmp`, `/usr` — каталоги Git) неоднозначны. Под PowerShell `/c/…` не переводится — путь от
 // корня диска.
-// Ревью B3, раунд 1 (2026-09-22, проверено запуском): бэктик — escape-символ wildcard'ов
+// Бэктик — escape-символ wildcard'ов
 // Set-Location даже в '…' (`cd 'j``k'` переходит в j`k, а хук резолвил j``k — junction на
 // .workflow/src — и признавал копию cli.mjs «своей»), поэтому бэктик в пути не литерал (в обоих
 // диалектах, для каталога cd и пути cli.mjs). msys-путь с `..` — не литерал: Git Bash
@@ -288,7 +288,7 @@ function cliPathIndex(command, pathOk, dialect) {
 
 // Токен не даёт shell'у сделать ничего, кроме передачи аргумента cli.mjs: без
 // подстановок, не heredoc, редирект — только из безвредного списка. CR/LF в
-// незакавыченной части (ревью B2, раунд 3): под PowerShell приклеенный `\`<CR>` —
+// незакавыченной части: под PowerShell приклеенный `\`<CR>` —
 // буквальный CR в слове, а LF за ним — новый statement; под msys-bash CR удаляется
 // (`>&1<CR>X` → `>&1X`, файл). Что shell сделает с таким словом — зависит от сборки
 // shell'а, поэтому оно не инертно: ложный отказ допустим, ложное разрешение — нет.
@@ -308,10 +308,10 @@ function isPipeFilter(token, dialect) {
 }
 
 // Каталог первого сегмента `cd <dir>` или null: ровно два токена, каталог — литерал
-// (literalPath; ЗАДАЧА B3, 2026-09-22 — раньше годился любой инертный токен, в том числе
+// (literalPath: иначе годился бы любой инертный токен, в том числе
 // `$PWD/…`, и путь cli.mjs резолвился не от того каталога, куда перейдёт shell).
-// POSIX: относительный каталог, не начинающийся с `./`/`../`, bash ищет по CDPATH (ревью B3,
-// раунд 1, 2026-09-22, проверено запуском: `CDPATH=../other bash -c 'cd src'` переходит в
+// POSIX: относительный каталог, не начинающийся с `./`/`../`, bash ищет по CDPATH
+// (`CDPATH=../other bash -c 'cd src'` переходит в
 // ../other/src) — CDPATH shell'а агента хуку не известен, такой каталог не литерал.
 function cdTarget(segment, dialect) {
   if (segment.commands.length !== 1) return null;
@@ -324,13 +324,13 @@ function cdTarget(segment, dialect) {
 }
 
 // После cd-префикса — только `&&`, `;` или перевод строки: за `||` следующий сегмент
-// выполняется, лишь если cd НЕ удался, то есть в прежнем каталоге (ЗАДАЧА B3, 2026-09-22).
+// выполняется, лишь если cd НЕ удался, то есть в прежнем каталоге.
 const CD_SEPARATORS = new Set(['&&', ';', '\n']);
 
 // Каталоги, от которых резолвится путь cli.mjs (null — ctx.cwd). cd может не удаться, а
 // следующий сегмент — выполниться в прежнем каталоге: после `;`/перевода строки (bash и
 // PowerShell) и за `||` дальше по цепочке (`cd X && A || B`: B — в прежнем каталоге, если cd
-// упал). Ревью B3, раунд 1 (2026-09-22, проверено запуском): `cd nope/../..; node
+// упал). `cd nope/../..; node
 // src/rails/cli.mjs status` — хук резолвил путь от свёрнутого `nope/../..`, bash же отказывал
 // в cd («No such file or directory») и запускал копию из write_scope в прежнем каталоге;
 // PowerShell `cd src; …` без src/ — то же (Set-Location PathNotFound). Поэтому каталог cd
@@ -354,7 +354,7 @@ function classifyCli(scan, dialect, { strict, scope }) {
   for (let i = 1; i < segs.length; i += 1) {
     if (!SEGMENT_SEPARATORS.has(segs[i].sepBefore)) return null;
   }
-  // Хвостовой `&` (фон), `)` — не «просто список cli-вызовов» (ревью B2, раунд 2).
+  // Хвостовой `&` (фон), `)` — не «просто список cli-вызовов».
   if (scan.trailingSep !== null && !SEGMENT_SEPARATORS.has(scan.trailingSep)) return null;
   // Первый сегмент `cd …` без литерального каталога не пропускается: он проверяется как
   // cli-сегмент и отклоняет команду целиком.
@@ -442,16 +442,16 @@ function injectSession(command, scan, cli, sessionId, dialect, scope) {
   return out;
 }
 
-// --- переписывание `--quote "…"` при бэктиках/$ в ДВОЙНЫХ кавычках (инцидент 2026-09-22) --
+// --- переписывание `--quote "…"` при бэктиках/$ в ДВОЙНЫХ кавычках ---
 //
 // Лейблы узлов содержат бэктики (`` `.workflow/reports/` ``) и «$X». Агент печатает
 // `--quote "…из `.workflow/reports/`, оценку…"` — в bash ` … ` внутри двойных кавычек
 // выполняется как подкоманда, а `$X` раскрывается в пустоту: до cli.mjs долетает
 // испорченная цитата, goto отклоняется quote-mismatch. Хук видит команду ДО shell
 // (PreToolUse/tool.execute.before) — переписывает такие аргументы в одинарные кавычки
-// с тем же буквальным текстом, какой агент напечатал. Условия (ЗАДАЧА B2, 2026-09-22,
-// после ревью первой версии — она искала `--quote` регуляркой без контекста кавычек и
-// переписывала совпадение ВНУТРИ '…', открывая внешнюю кавычку и отдавая shell'у $(…)):
+// с тем же буквальным текстом, какой агент напечатал. Условия (первая версия искала `--quote`
+// регуляркой без контекста кавычек и переписывала совпадение ВНУТРИ '…', открывая внешнюю
+// кавычку и отдавая shell'у $(…)):
 //  - только токен `--quote "…"` / `--quote="…"` ВЕРХНЕГО уровня cli-сегмента (не внутри
 //    '…', $'…', подстановок — там это текст, его не трогаем);
 //  - значение — одна часть в двойных кавычках с неэкранированными ` или $ (POSIX);
@@ -520,14 +520,13 @@ function rewriteQuoteArgs(command, scan, dialect, scope) {
 export function analyzeCliCommand(command, shell, sessionId, scope) {
   if (typeof command !== 'string') return { isCli: false, command };
   const dialect = shell === 'powershell' ? 'powershell' : 'posix';
-  // PowerShell `--%` (stop-parsing; ЗАДАЧА B3, 2026-09-22, проверено запуском powershell.exe
-  // 5.1): дальше PowerShell не разбирает кавычки ('…' уходят в argv буквально — переписанная
+  // PowerShell `--%` (stop-parsing): дальше PowerShell не разбирает кавычки ('…' уходят в argv буквально — переписанная
   // --quote рассыпалась), но `|` внутри '…' делит конвейер, а бэктик вне кавычек экранирует:
   // `--% --quote 'a | ni PWNED | echo `'` сканер видит одним литералом, PowerShell выполняет
   // `ni`. `'--%'`, `"--%"` и `` `--% `` 5.1 тоже обрабатывает особо. Сканер этой модели не
   // знает — любой `--%` в тексте команды под PowerShell делает её не cli-вызовом.
-  // Ревью B3, раунд 1 (2026-09-22, HIGH, проверено запуском powershell.exe 5.1): stop-parsing
-  // включают и токены, чей текст не содержит `--%`, — -'-%', -"-%", -`-%, --`%, --'%', -"-"%,
+  // Stop-parsing включают и токены, чей текст не содержит `--%`, —
+  // -'-%', -"-%", -`-%, --`%, --'%', -"-"%,
   // `-`-%, -''-%, -""-% (значение токена после снятия кавычек и бэктиков равно `--%`); сканер
   // видел в них инертные слова, и `status -'-%' 'x | ni PWNED | echo `'` проходил коротким
   // замыканием. Проверяем текст без кавычек (и типографских) и бэктиков — ложный отказ для
@@ -545,7 +544,7 @@ export function analyzeCliCommand(command, shell, sessionId, scope) {
     const out = sessionId ? injectSession(rewritten.command, rewritten.scan, cli, sessionId, dialect, scope) : rewritten.command;
     return { isCli: true, command: out };
   } catch (err) {
-    // Ревью B2, раунд 2 (2026-09-22): исключение разбора (RangeError на строке из тысяч
+    // Исключение разбора (RangeError на строке из тысяч
     // `"$(`) доезжало до catch-all в decide() и превращалось в allow всей команды —
     // вместе с `git commit` в её начале. Не разобрали — значит не cli: общие правила.
     try {
@@ -666,7 +665,7 @@ function shellCwd(action, ctx) {
   if (action?.workdir === undefined) return ctx?.cwd;
   if (typeof action.workdir !== 'string' || action.workdir.length === 0) return undefined;
   // Kilo принимает workdir и в записи Git Bash (`/d/Dev/x`): как путь Windows он дал бы
-  // `C:\d\Dev\x` — не тот каталог (ревью 2026-09-24). Прочие `/…` не вычислить — undefined.
+  // `C:\d\Dev\x` — не тот каталог. Прочие `/…` не вычислить — undefined.
   const abs = shellAbsolutePath(action.workdir);
   if (abs === null) return undefined;
   return abs === undefined ? resolveMaybeRelative(action.workdir, ctx?.cwd) : resolvePathAbs(abs);
@@ -690,12 +689,12 @@ function collectWriteTargets(action, ctx) {
     });
   }
   if (action.kind === 'shell') {
-    // ЗАДАЧА C2 (2026-09-22): cwd/dialect — detectShellWrites сама отслеживает cd,
+    // cwd/dialect — detectShellWrites сама отслеживает cd,
     // переменные и диалект и отдаёт пути абсолютными (от каталога после cd); без
     // ctx.cwd — относительными, их разрешает resolveMaybeRelative ниже.
     // Объединение по вариантам текста (с CR и без — commandTextVariants): цели только
     // добавляются, отказов от этого больше, разрешений — нет.
-    // Каталог запуска — shellCwd: у Kilo bash он задаётся аргументом workdir (2026-09-24).
+    // Каталог запуска — shellCwd: у Kilo bash он задаётся аргументом workdir.
     // opaque — команду исполнитель берёт не из вызова (background_process restart Kilo).
     if (action.opaque) {
       const display = `${action.tool ?? 'shell'}: команда не видна хуку`;
@@ -740,13 +739,11 @@ const NESTED_WHY_RE = /^(?:bash|sh|dash|zsh|ksh|powershell|pwsh): /;
 
 // Окружение для `$NAME` в команде shell-инструмента. В Bash-инструменте Claude Code на Windows
 // TMPDIR задан и совпадает с временным каталогом (TMP) в записи Git Bash, а в окружении хука
-// его нет — наблюдалось запуском 2026-10-01 (Claude Code 2.1.285: в Bash `TMPDIR=/c/Users/…/Temp`,
-// в PowerShell-инструменте `$env:TMPDIR` пуст). Откуда значение, не проверено: /etc/profile Git
-// for Windows сам ставит TMPDIR=TMP в login-shell (`env -u TMPDIR bash -lc 'echo $TMPDIR'` даёт
-// `C:/Users/…/Temp`, без -l — пусто; shell Bash-инструмента не login, проверено запуском), так
-// что оно может идти от профиля, а не от Claude Code; если профиль пользователя переопределит
-// TMPDIR, значение здесь будет неверным. Без этого
-// `npm test > "$TMPDIR/base.txt"` давал «?» (инцидент 2026-09-29, PulseProxy, P3S1, две сессии).
+// его нет, поэтому без подстановки `npm test > "$TMPDIR/base.txt"` даёт «?». Откуда значение,
+// не проверено: /etc/profile Git for Windows сам ставит TMPDIR=TMP в login-shell
+// (`env -u TMPDIR bash -lc 'echo $TMPDIR'` даёт `C:/Users/…/Temp`, без -l — пусто; shell
+// Bash-инструмента не login, проверено запуском), так что оно может идти от профиля, а не от
+// Claude Code; если профиль пользователя переопределит TMPDIR, значение здесь будет неверным.
 // Что в TMPDIR у bash Kilo — не проверено: для него «?» остаётся; в PowerShell `$TMPDIR` —
 // переменная сессии, а не окружения, и тоже остаётся «?».
 function shellEnv(action, dialect) {
@@ -794,9 +791,9 @@ function currentNodeLabel(state, graph) {
 }
 
 // Канарейка живости: команда считается канарейкой, если она И ЕСТЬ канарейка, либо если
-// канарейка стоит отдельной простой командой внутри составной. Инцидент 2026-09-23 (коуч,
-// узел P0S1): сравнивалась вся строка целиком, поэтому `echo RAILS_CANARY 2>&1 | tail -2;
-// node …` выполнился — проба живости молча прошла, а узел графа велит по этому признаку
+// канарейка стоит отдельной простой командой внутри составной. Если сравнивать всю строку
+// целиком, `echo RAILS_CANARY 2>&1 | tail -2;
+// node …` выполнится — проба живости молча пройдёт, а узел графа велит по этому признаку
 // остановиться и сообщить человеку «рельсы выключены». Сверяются токены начала простой
 // команды, поэтому дописанный редирект канарейку не прячет, а текст канарейки внутри цитаты
 // (`--quote "echo RAILS_CANARY"`) отказа не вызывает: там это один токен-слово.
@@ -836,7 +833,7 @@ function sameCanary(command, canary, dialect) {
 }
 
 // Тексты команды для общих правил (canary, deny_shell, stage_actions, detectShellWrites):
-// как написано и без CR. Ревью B2, раунд 3 (2026-09-22): msys-bash (Git for Windows)
+// как написано и без CR. msys-bash (Git for Windows)
 // молча удаляет CR из текста `-c` — `gi<CR>t commit` выполняет `git commit`, `tou<CR>ch X`
 // создаёт файл (проверено запуском обоих бинарников), а регулярки по сырому тексту этого
 // не видят. Под Linux-bash CR — символ слова (`gi<CR>t` — «команда не найдена»), под
@@ -887,7 +884,7 @@ function ruleMatches(action, rule, root, editRealPath) {
 
 function decideNoSkillMode(root, action, ctx) {
   if (action?.kind === 'edit' || action?.kind === 'write') {
-    // apply_patch Kilo правит несколько файлов — проверяется каждый путь, а не первый (ревью 2026-09-24).
+    // apply_patch Kilo правит несколько файлов — проверяется каждый путь, а не первый.
     const paths = Array.isArray(action.paths) ? action.paths : (action.path ? [action.path] : []);
     const skillsDir = join(root, '.workflow', 'src', 'skills');
     const real = paths
@@ -950,18 +947,17 @@ function denyAndLog({ root, ctx, state, action, what, why, allowedText }) {
   return { decision: 'deny', reason };
 }
 
-// Что именно не дало вычислить путь записи (actions.explainShellWrites): токен и что сделать.
-// Инцидент 2026-09-30: отказ «похожа на запись» токена не называл, и агент не узнавал
-// настоящую ошибку (`2>$null` в bash, `\"` в конце пути, незаданная переменная).
+// Что именно не дало вычислить путь записи (actions.explainShellWrites): токен и что сделать —
+// отказ «похожа на запись» называет токен, иначе агент не узнаёт настоящую ошибку (`2>$null`
+// в bash, `\"` в конце пути, незаданная переменная).
 function markerDetail(t) {
   return Array.isArray(t?.why) && t.why.length > 0 ? `: ${t.why.join('; ')}` : '';
 }
 
-// Отказ write_scope называет, куда путь ведёт на самом деле и какой корень проекта верен.
-// Инцидент 2026-09-30 (PulseProxy IMPL-119, IMPL-124; ListeningGlass IMPL-006): исполнители
-// Kilo писали Edit/Write по угаданному корню (`/d/Dev/…`, `/workdir/…`, `/workspace/…`), получали
-// «путь вне write_scope» и доходили до конца процедуры с пустым Result. Путь `/d/…` не
-// переводится: Kilo 7.7.9 в write/edit берёт его как есть, и из D:\Dev запись уходит в
+// Отказ write_scope называет, куда путь ведёт на самом деле и какой корень проекта верен:
+// исполнитель может писать Edit/Write по угаданному корню (`/d/Dev/…`, `/workdir/…`,
+// `/workspace/…`) и дойти до конца процедуры с пустым Result. Путь `/d/…` не
+// переводится: Kilo 7.7.x в write/edit берёт его как есть, и из D:\Dev запись уходит в
 // D:\d\Dev\… (проверено запуском node) — это та же цель, что видит гард.
 function writeScopeWhy(action, t, root) {
   const norm = (p) => (process.platform === 'win32' ? p.replace(/\//g, '\\').toLowerCase() : p);
@@ -994,13 +990,13 @@ function canaryAndLog({ root, ctx, state, action, allowedText }) {
 }
 
 // Вызов `cli.mjs goto` внутри составной команды: цикла, условия, группы `{…}`, подоболочки,
-// подстановки, `bash -c '…'`, scriptblock'а PowerShell. Ревью 2026-10-01 (журналы PulseProxy и
-// ListeningGlass): `for pair in "P5E1|…" …; do n="${pair%%|*}"; …; node .workflow/src/rails/cli.mjs
+// подстановки, `bash -c '…'`, scriptblock'а PowerShell: `for pair in "P5E1|…" …; do
+// n="${pair%%|*}"; …; node .workflow/src/rails/cli.mjs
 // goto "$n" --quote "$q"; done` и такие же пачки P0R2…P0R9 у execute-task и P1E1… у Kilo проходили
 // узлы, не выполняя их. Такой вызов analyzeCliCommand cli-вызовом не считает: хук не вставляет
 // --session (без него goto берёт WORKFLOW_RAILS_SESSION или единственную сессию проекта, при двух
 // и более — отказ, см. cli.mjs resolveSessionId) и не переписывает --quote с ` и $ в "…".
-// Временная мера до решения владельца о переходах по одному: отказ с подсказкой. Список cli-вызовов
+// Ответ — отказ с подсказкой; список cli-вызовов
 // верхнего уровня (`goto A && goto B`, `cd … && goto …`) это правило не трогает — он распознан
 // как cli на шаге 1.
 const GOTO_LEAD_POSIX = new Set(['do', 'then', 'else', 'elif', 'if', 'while', 'until', '{', '!', 'time']);
@@ -1045,7 +1041,7 @@ function gotoInCompound(text, dialect, nested = 0) {
         // префикс-присваивание, в том числе со значением из подстановки (`n="$x" node …`)
         while (j < t.length && t[j].parts?.[0]?.kind === 'bare' && ASSIGNMENT_RE.test(t[j].parts[0].raw ?? '')) j += 1;
       } else {
-        // `$result = node … goto …` (журнал ListeningGlass, Kilo, цикл for по P0R5…P2S1) и `& node …`
+        // `$result = node … goto …` (присваивание) и `& node …`
         if (t[1]?.value === '=' && /^\$/.test(t[0]?.parts?.[0]?.raw ?? '')) j = 2;
         if (t[j]?.value === '&') j += 1;
       }
@@ -1076,13 +1072,12 @@ function decideSkillMode({ root, action, ctx, state, config, graph, unrestricted
     denyAndLog({ root, ctx, state, action, what, why, allowedText: describeAllowed(state, graph, config, guardCtx) });
 
   // 1. cli.mjs — служебная команда: allow; испорченные shell'ом ` / $ в `--quote "…"`
-  // переписаны в одинарные кавычки (2026-09-22), при отсутствии --session он вставлен —
+  // переписаны в одинарные кавычки, при отсутствии --session он вставлен —
   // обе правки в одном updatedCommand (analyzeCliCommand, разбор — shell-scan.mjs).
   if (action?.kind === 'shell') {
     const cli = analyzeCliCommand(action.command, action.shell, ctx?.sessionId, { root, cwd: shellCwd(action, ctx) });
     if (cli.isCli) {
-      // Пачка goto одной командой (решение владельца 2026-10-03, после слияния цепочек
-      // правил — 1.25.0): список `goto A && goto B` проходит узлы, не выполняя их —
+      // Пачка goto одной командой: список `goto A && goto B` проходит узлы, не выполняя их —
       // узлы объявляются раньше, чем сделана их работа. Каждый переход — отдельной
       // командой, после того, что велит текущий узел. Один goto среди прочих cli-сегментов
       // (status, report) разрешён. Сегменты — &&, ||, ;, перевод строки (SEGMENT_SEPARATORS).
@@ -1105,10 +1100,7 @@ function decideSkillMode({ root, action, ctx, state, config, graph, unrestricted
   const shellTexts = action?.kind === 'shell' ? commandTextVariants(action.command) : [];
 
   // 2. Канарейка — проверка живости, а не отказ: событие `canary` в журнале, state.denials не
-  // растёт, приписки «N-й отказ за сессию» нет. Анализ журналов 2026-09-30: канарейка давала
-  // 332 из 1786 записей «отказов» PulseProxy и 48 из 156 ListeningGlass, выводила P0S1/P0E1 в
-  // лидеры отказов по узлу, а у коуча — «P0S1: 20 в одной сессии», что проверка B1 читает как
-  // дефект формулировки узла.
+  // растёт, приписки «N-й отказ за сессию» нет — иначе канарейка раздувала бы отказы по узлу.
   if (action?.kind === 'shell' && config.canary && shellTexts.some((text) => sameCanary(text, config.canary, action.shell))) {
     return canaryAndLog({ root, ctx, state, action, allowedText: describeAllowed(state, graph, config, guardCtx) });
   }
@@ -1164,7 +1156,7 @@ function decideSkillMode({ root, action, ctx, state, config, graph, unrestricted
     }
     const inScope = unrestricted.has(t.real)
       || (config.write_scope || []).some((pattern) => matchesGlob(t.real, pattern, root));
-    // followLinks: false — ссылки внутри os.tmpdir() не нужны, а обход %TEMP% стоил до 9 с (2026-09-22).
+    // followLinks: false — ссылки внутри os.tmpdir() не нужны, а полный обход %TEMP% слишком дорог.
     // Внутри корня проекта allow_temp не действует: изолированные workdir тестов живут в %TEMP%,
     // и без этого исключения вся песочница (тикеты, планы) становилась бы записываемой.
     const inTemp = Boolean(config.allow_temp)
@@ -1177,7 +1169,7 @@ function decideSkillMode({ root, action, ctx, state, config, graph, unrestricted
 
   // 7. stage_actions.
   // Все цели правки: apply_patch Kilo меняет несколько файлов, правило этапа срабатывает,
-  // если под него попадает любой из них (ревью 2026-09-24; прежде смотрели только первый).
+  // если под него попадает любой из них.
   const editRealPaths = (action?.kind === 'edit' || action?.kind === 'write')
     ? targets.filter((t) => !t.marker && !unrestricted.has(t.real)).map((t) => t.real)
     : [];
@@ -1193,6 +1185,8 @@ function decideSkillMode({ root, action, ctx, state, config, graph, unrestricted
   // deny от следующего правила B: отклонённое действие «съедает» потолок.
   const nodeLabel = currentNodeLabel(state, graph);
   const matchedRuleNames = [];
+  const effectiveLimits = new Map();
+  let budgetUse = null;
   for (const [name, rule] of Object.entries(config.stage_actions || {})) {
     if (!matchesRule(rule)) continue;
 
@@ -1209,24 +1203,56 @@ function decideSkillMode({ root, action, ctx, state, config, graph, unrestricted
       );
     }
     const key = `action:${name}`;
-    const count = (state.counters && state.counters[key]) || 0;
-    if (typeof rule.max_per_session === 'number' && count >= rule.max_per_session) {
+    const count = state.counters?.[key] ?? 0;
+    let limit = rule.max_per_session;
+    if (state.skill === 'coach' && name === 'run_tests') {
+      let grant;
+      try {
+        grant = loadWritePolicy(root).testBudget;
+      } catch (error) {
+        return deny(describeWhat(action), `не удалось прочитать разрешение бюджета проверок: ${error.message}`);
+      }
+      if (grant && grant.session === state.session && grant.runtime_id === state.runtime?.id
+        && grant.skill === state.skill && Date.now() < Date.parse(grant.expires_at)) {
+        if (!Number.isSafeInteger(limit) || limit < 0 || !Number.isSafeInteger(count) || count < 0
+          || !Number.isSafeInteger(limit + grant.additional_calls)) {
+          return deny(describeWhat(action), 'некорректный предел или счётчик бюджета проверок');
+        }
+        limit += grant.additional_calls;
+        if (count >= rule.max_per_session && count < limit) {
+          budgetUse = {
+            type: 'test_budget_use', session: state.session, runtime_id: state.runtime.id,
+            skill: state.skill, node: state.node, action: name,
+            base_max: rule.max_per_session, additional_calls: grant.additional_calls,
+            effective_max: limit, count_before: count, count_after: count + 1,
+            expires_at: grant.expires_at,
+          };
+        }
+      }
+    }
+    if (typeof limit === 'number' && count >= limit) {
       return deny(
         describeWhat(action),
-        `потолок действия «${name}»: ${rule.max_per_session} за сессию исчерпан — выход к человеку`
+        `потолок действия «${name}»: ${limit} за сессию исчерпан — выход к человеку`
       );
     }
+    effectiveLimits.set(name, limit);
     matchedRuleNames.push(name);
   }
+  if (budgetUse && Date.now() >= Date.parse(budgetUse.expires_at)) {
+    return deny(describeWhat(action), 'разрешение бюджета проверок истекло до расходования');
+  }
   for (const name of matchedRuleNames) {
-    checkActionLimit(state, name, config.stage_actions[name].max_per_session);
+    checkActionLimit(state, name, effectiveLimits.get(name));
   }
 
-  // 8. allow.
+  // Дополнительный допуск выдаётся только после сохранения расхода и аудита.
   try {
-    saveState(root, state); // могли измениться counters (checkActionLimit) или это только что созданное состояние.
-  } catch {
-    // сохранение состояния не должно ронять decide()
+    saveState(root, state);
+    if (budgetUse) appendEvent(root, budgetUse);
+  } catch (error) {
+    if (budgetUse) return deny(describeWhat(action), `не удалось сохранить расход бюджета проверок: ${error.message}`);
+    // Обычные действия сохраняют прежнее поведение при ошибке записи состояния.
   }
   const node = state.node;
   const label = graph.node(node)?.label ?? '';
@@ -1264,7 +1290,7 @@ function decideInProject(root, action, ctx) {
   const targets = cli?.isCli ? [] : collectWriteTargets(action, ctx);
   // Физическая классификация целей edit/write и shell-записей (редирект, cat > …):
   // канон/protected — fail-closed и для роли executor, и в режиме скила. Без этого
-  // shell-редирект в канонический файл обходил бы защиту (ревью 2026-10-05). В G0
+  // shell-редирект в канонический файл обходил бы защиту. В G0
   // (сессии рельс нет) правки скилов ведёт сам G0-гард «только через коуча» —
   // классификация там не нужна.
   const editWrite = action?.kind === 'edit' || action?.kind === 'write';
@@ -1304,12 +1330,11 @@ function decideInProject(root, action, ctx) {
     if (base.decision === 'deny') return base;
     // Остальное — через физическую классификацию: защищённое состояние (в том
     // числе файлы разрешений), канон и общий inode закрыты и у завершённой
-    // сессии — иначе нейтральный режим открывал бы запись в защищённый каталог
-    // (ревью 2026-10-06, blocker).
+    // сессии — иначе нейтральный режим открывал бы запись в защищённый каталог.
     classify();
     // cli-вызов — с подставленным --session: без него `start` поверх
     // завершённой host-сессии создал бы случайную новую сессию вместо отказа
-    // cmdStart (ревью 2026-10-06, major).
+    // cmdStart.
     if (cli?.isCli && cli.command !== action.command) {
       return { decision: 'allow', updatedCommand: cli.command };
     }
@@ -1349,7 +1374,7 @@ function decideInProject(root, action, ctx) {
   }
 
   // Независимые локальные скилы открывает только авторизованный скил (коуч) —
-  // имя скила сессии передаётся в физическую классификацию (ревью 2026-10-05).
+  // имя скила сессии передаётся в физическую классификацию.
   const { unrestricted } = classify(state.skill);
   const { config, graph } = loadSkillRuntime(root, state.skill, state);
 
@@ -1379,10 +1404,9 @@ function decideInProject(root, action, ctx) {
 // --- песочница тестов скилов ------------------------------------------------------
 //
 // run-skill-tests кладёт агентам кейса (исполнителю и судье) WORKFLOW_SANDBOX_ROOT —
-// корень их изолированного workdir. 2026-09-23 агенты тестов create-plan и
-// decompose-plan записали планы и тикеты в настоящий проект (PLAN-003/004/007,
-// IMPL-41, QA-18): у этих скилов ещё не было rails.yaml, а режим без скила запись
-// не ограничивает. Проверка песочницы не зависит ни от скила, ни от роли, ни от cwd
+// корень их изолированного workdir. Без этой проверки агент теста мог бы записать
+// планы и тикеты в настоящий проект (режим без скила запись не ограничивает).
+// Проверка песочницы не зависит ни от скила, ни от роли, ни от cwd
 // агента и идёт до них. Запись внутри песочницы — дальше по обычным правилам.
 //
 // Разрешено писать: внутрь песочницы (по realpath — сквозь junction'ы
@@ -1395,11 +1419,11 @@ function decideInProject(root, action, ctx) {
 // инструменты с параметром project пишут в любой проект по его пути.
 const SANDBOX_MCP_READONLY = new Set(['cross_project_search', 'aggregate_metrics']);
 // Встроенные инструменты Kilo, которые запускают работу вне взгляда хука (другой агент,
-// отложенный запуск): что и куда она запишет, проверить нельзя (ревью 2026-09-24).
+// отложенный запуск): что и куда она запишет, проверить нельзя.
 const SANDBOX_DENY_OTHER = new Set(['agent_manager', 'cron_create', 'schedule_wakeup']);
 // Создание ссылок в песочнице запрещено целиком: ссылка, созданная и использованная одной
 // командой, на момент проверки ещё не существует, и realpath цели записи остаётся внутри
-// песочницы (ревью 2026-09-24: `New-Item -ItemType Junction … ; Set-Content j\…` дописал
+// песочницы (например, `New-Item -ItemType Junction … ; Set-Content j\…` дописал бы
 // файл в проект). Ложный отказ на слове в тексте команды допустим, ложное разрешение — нет.
 const SANDBOX_LINK_RES = [
   /\bmklink\b/i,
@@ -1456,7 +1480,7 @@ function decideSandbox(sandboxRoot, action, ctx) {
       return { decision: 'deny', reason: sandboxDenyReason(sandboxRoot, `команда похожа на запись, но путь не удалось определить${markerDetail(t)} — в песочнице пиши явным путём`) };
     }
     // Жёсткая ссылка неотличима от файла по realpath: запись в неё меняет и файл вне
-    // песочницы (ревью 2026-09-24). Существующий файл с несколькими именами — отказ.
+    // песочницы. Существующий файл с несколькими именами — отказ.
     try {
       const st = statSync(t.real);
       if (st.isFile() && st.nlink > 1) {
@@ -1528,7 +1552,7 @@ export function decide({ action, ctx } = {}) {
   } catch {
     // §7.1: нет корня проекта по cwd. Сессия могла стартовать из каталога-зонтика
     // (D:\Dev) над проектами — тогда корень берётся от пути цели edit/write
-    // (регистрация хука на уровне зонтика, 2026-09-22). Нет и его — allow без текста.
+    // (регистрация хука на уровне зонтика). Нет и его — allow без текста.
     root = null;
     if (action?.kind === 'edit' || action?.kind === 'write') {
       // Корень — от первого пути, ведущего в проект (у apply_patch путей несколько).

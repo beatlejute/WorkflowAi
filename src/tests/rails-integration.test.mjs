@@ -73,6 +73,7 @@ function runRunner(args, cwd = PROJECT_ROOT) {
   return new Promise((resolve) => {
     const proc = spawn(process.execPath, [RUNNER_PATH, ...args], {
       cwd,
+      env: { ...process.env, WORKFLOW_RAILS_WORKDIR_HOOKS: 'always' },
       stdio: ['ignore', 'pipe', 'pipe']
     });
     let stdout = '';

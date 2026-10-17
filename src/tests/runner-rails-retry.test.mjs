@@ -49,6 +49,8 @@ import { loadState } from '../rails/state.mjs';
 import { relinquish } from '../rails/handoff.mjs';
 import { essentialStateDigest } from '../rails/completion.mjs';
 import { setKiloDbPathCache } from '../lib/kilo-models.mjs';
+import { readRunEvents, runStatsTable } from '../lib/agent-runs.mjs';
+import { agentEnvPath } from '../lib/agent-env.mjs';
 
 const BASE = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-rails-retry-'));
 after(() => {
@@ -117,8 +119,10 @@ function wrapper(name) {
 
 const CLAUDE = wrapper('claude');
 const KILO = wrapper('kilo');
+const PI = wrapper('pi');
 const CLAUDE_ARGS = ['--model', 'model-a', '--permission-mode', 'bypassPermissions', '-p'];
 const KILO_ARGS = ['-m', 'prov/model-a', '--agent', 'code', 'run', '--auto'];
+const PI_ARGS = ['--print', '--no-session'];
 
 let seq = 0;
 
@@ -185,6 +189,32 @@ async function callAgent(project, agent, { promptStdin = true, context = {} } = 
   try {
     const record = { workdir: '.', ...(promptStdin ? { prompt_stdin: true } : {}), ...agent };
     const result = await executor.callAgent(record, ORIGINAL_PROMPT, 'stage-1', SKILL, 'agent-a');
+    return { result, logger };
+  } finally {
+    if (saved === undefined) delete process.env.FAKE_HOST_CTL; else process.env.FAKE_HOST_CTL = saved;
+  }
+}
+
+/**
+ * Прогон стадии через executeWithFallback — событие `run` журнала запусков пишется здесь,
+ * а не в callAgent. Тот же конфиг, что и у одиночного вызова, но с одной стадией.
+ */
+async function runStage(project, agents = ['agent-a']) {
+  const logger = makeLogger();
+  const record = { command: CLAUDE, args: CLAUDE_ARGS, prompt_stdin: true, workdir: '.', capabilities: ['text'] };
+  const config = {
+    pipeline: {
+      name: 'rails-retry', version: '1.0',
+      agents: Object.fromEntries(agents.map((id) => [id, { ...record }])),
+      stages: {},
+      execution: { timeout_per_stage: 30, snapshot_paths: ['src'] },
+    },
+  };
+  const executor = new StageExecutor(config, { ticket_id: 'IMPL-1' }, {}, {}, null, logger, project.root);
+  const saved = process.env.FAKE_HOST_CTL;
+  process.env.FAKE_HOST_CTL = project.ctl;
+  try {
+    const result = await executor.executeWithFallback('stage-1', { agents, skill: SKILL });
     return { result, logger };
   } finally {
     if (saved === undefined) delete process.env.FAKE_HOST_CTL; else process.env.FAKE_HOST_CTL = saved;
@@ -375,18 +405,75 @@ describe('StageExecutor.callAgent — повтор по вердикту рел�
     assert.ok(warns(logger).some((l) => l.includes('сессия новая — хост агента сессию не продолжает')), logText(logger));
   });
 
-  test('две сессии рельс у запуска — id сессии не однозначен: повтор в новой сессии', async () => {
-    const project = makeProject({ kind: 'kilo', calls: [{ node: 'P1E1', marker: false, extraSession: true }, { node: 'P1S1', marker: true }] });
-    const { result, logger } = await callAgent(project, { command: KILO, args: KILO_ARGS });
-
-    assert.equal(calls(project), 2);
-    const [first, retry] = [call(project, 1), call(project, 2)];
-    assert.ok(!retry.args.includes('--session'), retry.args.join(' '));
-    assert.notEqual(retry.run, first.run);
-    assert.match(retry.prompt, /это новая сессия/);
-    assert.equal(result.railsRetrySession, 'new');
-    assert.ok(warns(logger).some((l) => l.includes('сессия новая — сессий рельс у запуска: 2')), logText(logger));
+  test('две сессии у initial run — fail-closed без retry и completion', async () => {
+    const project = makeProject({ kind: 'kilo', calls: [{ node: 'P1S1', marker: true, extraSession: true }] });
+    await assert.rejects(callAgent(project, { command: KILO, args: KILO_ARGS }), (error) => {
+      assert.equal(error.code, 'RAILS_STATE_AMBIGUOUS');
+      assert.match(error.message, /ambiguous session state/);
+      return true;
+    });
+    assert.equal(calls(project), 1, 'ambiguity does not spawn a retry');
+    assert.equal(stateFiles(project).length, 2);
   });
+
+  test('initial run ambiguity does not fall back to another stage agent', async () => {
+    const project = makeProject({ kind: 'kilo', calls: [{ node: 'P1S1', marker: true, extraSession: true }] });
+    await assert.rejects(runStage(project, ['agent-a', 'agent-b']), (error) => {
+      assert.equal(error.code, 'RAILS_STATE_AMBIGUOUS');
+      return true;
+    });
+    assert.equal(calls(project), 1, 'second stage agent must not spawn');
+    assert.equal(fs.existsSync(path.join(project.ctl, 'call-2.json')), false, 'no outer fallback call is recorded');
+    assert.equal(stateFiles(project).length, 2);
+  });
+
+  test('same-session retry resolves its exact state despite a subagent state', async () => {
+    const project = makeProject({ kind: 'claude', calls: [
+      { node: 'P1E1', marker: false },
+      { node: 'P1S1', marker: true, extraSession: true },
+    ] });
+    const { result } = await callAgent(project, { command: CLAUDE, args: CLAUDE_ARGS });
+    assert.equal(calls(project), 2);
+    assert.equal(result.railsRetrySession, 'same');
+    assert.equal(result.railsRetryVerdict.ok, true);
+    assert.equal(stateFiles(project).length, 2);
+  });
+
+  test('same-session retry identity mismatch does not choose a sibling state', async () => {
+    const project = makeProject({ kind: 'claude', calls: [
+      { node: 'P1E1', marker: false },
+      { node: 'P1S1', marker: true, extraSession: true },
+    ] });
+    const executor = new StageExecutor({ pipeline: { agents: {}, stages: {} } }, {}, {}, {}, null, makeLogger(), project.root);
+    let count = 0;
+    executor._callAgentTracked = async (_agent, _prompt, _stage, _skill, _id, env) => {
+      count++;
+      const dir = path.join(project.root, '.workflow', 'state', 'rails');
+      fs.mkdirSync(dir, { recursive: true });
+      const session = count === 1 ? 'known-session' : 'different-session';
+      if (count === 2) fs.rmSync(path.join(dir, 'known-session.json'));
+      const state = { version: 1, session, run: env.WORKFLOW_RAILS_RUN, skill: SKILL,
+        node: count === 1 ? 'P1E1' : 'P1S1', started: '2026-10-07T00:00:00Z',
+        updated: '2026-10-07T00:00:00Z', history: [], counters: {}, flags: {}, denials: {} };
+      fs.writeFileSync(path.join(dir, `${session}.json`), JSON.stringify(state));
+      loadSkillRuntime(project.root, SKILL, state);
+      return { output: count === 1 ? 'incomplete' : 'RAILS: P1S1\n---RESULT---\nstatus: passed\n---RESULT---', stderr: '', parsed: null };
+    };
+    await assert.rejects(executor.callAgent({ command: CLAUDE, args: CLAUDE_ARGS }, ORIGINAL_PROMPT, 'stage-1', SKILL, 'agent-a'),
+      (error) => error.code === 'RAILS_STATE_AMBIGUOUS');
+    assert.equal(count, 2);
+  });
+
+  test('retry run ambiguity stops without another retry or success', async () => {
+    const project = makeProject({ kind: 'claude', calls: [
+      { node: 'P1E1', marker: false },
+      { node: 'P1S1', marker: true, extraSession: true },
+    ] });
+    await assert.rejects(callAgent(project, { command: CLAUDE, args: [...CLAUDE_ARGS, '--no-session-persistence'] }),
+      (error) => error.code === 'RAILS_STATE_AMBIGUOUS');
+    assert.equal(calls(project), 2, 'ambiguous retry does not trigger another spawn');
+  });
+
 
   test('повтор тоже нарушил output-check — предупреждение, ответ отдан стадии, третьего запуска нет', async () => {
     const project = makeProject({ kind: 'claude', calls: [{ node: 'P1E1', marker: false }, { node: 'P1E1', marker: false }] });
@@ -509,6 +596,35 @@ describe('StageExecutor.callAgent — повтор по вердикту рел�
     assert.deepEqual(runs.map((r) => r.result_status), [undefined, 'passed']);
   });
 
+  // Приём ответа, дважды не прошедшего выходной слой рельс, стадию не меняет (маршрут — по
+  // переходам), но факт обязан дойти до данных: событие run с rails_unverified: true и счётчик
+  // того же имени в сводке запусков. Иначе приём виден только строкой лога.
+  test('два нарушения output-check подряд — событие run с rails_unverified, ответ стадии как обычный', async () => {
+    const project = makeProject({ kind: 'claude', calls: [{ node: 'P1E1', marker: false }, { node: 'P1E1', marker: false }] });
+    const { result } = await runStage(project);
+
+    assert.equal(result.status, 'passed', 'статус ответа не подменяется — маршрут по переходам стадии');
+    assert.equal(calls(project), 2, 'первый запуск и один повтор');
+    const events = readRunEvents(project.root);
+    const runs = events.filter((e) => e.type === 'run');
+    assert.deepEqual(runs.map((r) => [r.agent, r.status]), [['agent-a', 'ok']]);
+    assert.equal(runs[0].rails_unverified, true, JSON.stringify(runs[0]));
+    assert.equal(runStatsTable(events).totals.rails_unverified, 1, 'счётчик виден в сводке запусков');
+  });
+
+  test('ответ из терминального узла (output-check пройден) — признака rails_unverified нет', async () => {
+    const project = makeProject({ kind: 'claude', calls: VIOLATE_THEN_FIX });
+    const { result } = await runStage(project);
+
+    assert.equal(result.status, 'passed');
+    assert.equal(calls(project), 2);
+    const events = readRunEvents(project.root);
+    const runs = events.filter((e) => e.type === 'run');
+    assert.deepEqual(runs.map((r) => [r.agent, r.status]), [['agent-a', 'ok']]);
+    assert.ok(!('rails_unverified' in runs[0]), JSON.stringify(runs[0]));
+    assert.equal(runStatsTable(events).totals.rails_unverified, 0);
+  });
+
   // Страж ребра P1E1 → P1S2 по файлу тикета запуска (ревью стража 2026-09-27): закрытое ребро
   // вердикт не должен рекламировать готовой командой — слабые модели её копируют.
   const GUARD_RAILS = [
@@ -555,6 +671,52 @@ describe('StageExecutor.callAgent — повтор по вердикту рел�
       assert.deepEqual([call(without, 1).ticket, call(without, 2).ticket], [null, null]);
     } finally {
       if (saved !== undefined) process.env.WORKFLOW_RAILS_TICKET = saved;
+    }
+  });
+});
+
+// Каталог агента pi (`PI_CODING_AGENT_DIR`) задан только машинным agent.env: его видит
+// запускаемый агент (buildAgentEnv), а окружение раннера — нет. Проверка хуков обязана
+// смотреть туда же, куда смотрит агент: иначе расширение в этом каталоге не находится, и
+// ответ без единого вызова под рельсами принимается как обычный — без повтора и без
+// признака rails_unverified.
+describe('StageExecutor.callAgent — хост pi', () => {
+  test('каталог агента из agent.env: расширение на месте — ответ без рельс отклонён и повторён', async () => {
+    const project = makeProject({
+      kind: 'pi',
+      calls: [{ noState: true, marker: false }, { node: 'P1S1', marker: true }],
+    });
+    const agentDir = fs.mkdtempSync(path.join(BASE, 'pi-agent-'));
+    const extensions = path.join(agentDir, 'extensions');
+    const core = path.join(BASE, 'pi-rails', 'pi-extension.mjs');
+    fs.mkdirSync(path.dirname(core), { recursive: true });
+    fs.writeFileSync(core, 'export default function () {}\n', 'utf8');
+    fs.mkdirSync(extensions, { recursive: true });
+    fs.writeFileSync(
+      path.join(extensions, 'workflow-rails.ts'),
+      `export { default } from "${core.split('\\').join('/')}";\n`,
+      'utf8'
+    );
+
+    const envFile = agentEnvPath();
+    const saved = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf8') : null;
+    fs.mkdirSync(path.dirname(envFile), { recursive: true });
+    fs.writeFileSync(envFile, `PI_CODING_AGENT_DIR=${agentDir}\n`, 'utf8');
+    try {
+      const { result, logger } = await callAgent(project, { command: PI, args: PI_ARGS });
+
+      assert.equal(calls(project), 2, `первый запуск и повтор: ${logText(logger)}`);
+      assert.match(call(project, 2).prompt, /^RAILS: /, 'повтор идёт с вердиктом рельс');
+      assert.equal(result.railsRetried, true);
+      assert.equal(result.railsRetrySession, 'new', 'pi сессию не продолжает — повтор новой сессией');
+      assert.ok(
+        !warns(logger).some((l) => l.includes('хуков рельс для агента')),
+        `расширение в каталоге агента должно быть найдено: ${logText(logger)}`
+      );
+    } finally {
+      if (saved === null) fs.rmSync(envFile, { force: true });
+      else fs.writeFileSync(envFile, saved, 'utf8');
+      fs.rmSync(agentDir, { recursive: true, force: true });
     }
   });
 });

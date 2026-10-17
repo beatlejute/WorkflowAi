@@ -16,7 +16,7 @@ import { packageVersion as pipelineVersion } from './lib/package-version.mjs';
 import { appendAgentRun, classifyAgentResult } from './lib/agent-history.mjs';
 import { buildAgentEnv } from './lib/agent-env.mjs';
 import {
-  findRailsStateByRun, railsStatesByRun, railsHost, railsHooksPresent, resumeSessionArgs,
+  resolveRailsStateByRun, railsStatesByRun, railsHost, railsHooksPresent, resumeSessionArgs,
   railsNotEngagedVerdict, outputCheckVerdict,
 } from './lib/rails-run-state.mjs';
 import { isKiloRun, kiloRunTitle, withKiloTitle, requestedKiloModel, kiloDbPath, readKiloRun, formatKiloModels, kiloAgentLabel } from './lib/kilo-models.mjs';
@@ -42,14 +42,13 @@ import { LEVELS, levelRank } from './lib/model-facts.mjs';
 // Как часто, пока kilo-агент работает, смотреть в базу kilo, какие модели ответили.
 const KILO_MODELS_POLL_MS = 15000;
 // Строка HEARTBEAT в лог прогона, пока работает процесс агента (_callAgentOnce). Во время
-// агента раннер иначе молчит: AGENT_MODELS пишется только при смене подписи kilo, и
-// 2026-09-29/30 в логе PulseProxy 30 пауз дольше 10 минут, самая длинная 1785 с, — момент
-// смерти раннера по логу и по mtime лога (last_log_at в workflow-mcp) не восстановить.
-// Строка идёт только пока взведён таймаут запуска агента: детектор stuck в workflow-mcp
-// (тишина лога дольше `timeout` стадии, по умолчанию 300 с, плюс запас) во время агента,
-// которого раннер ещё не снял, больше не срабатывает, а после таймаута раннера лог молчит,
-// как прежде. Двоеточия в строке нет: разбор лога workflow-mcp (parsers/pipeline-log.mjs)
-// принял бы её за строку блока Context шага.
+// агента раннер иначе молчит: AGENT_MODELS пишется только при смене подписи kilo, и момент
+// смерти раннера по логу и по mtime лога (last_log_at в workflow-mcp) не восстановить —
+// без строки длинная пауза неотличима от смерти. Строка идёт только пока взведён таймаут
+// запуска агента: детектор stuck в workflow-mcp (тишина лога дольше `timeout` стадии,
+// по умолчанию 300 с, плюс запас) во время агента, которого раннер ещё не снял, больше не
+// срабатывает, а после таймаута раннера лог молчит. Двоеточия в строке нет: разбор лога
+// workflow-mcp (parsers/pipeline-log.mjs) принял бы её за строку блока Context шага.
 const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 // Повторы финального чтения базы kilo после выхода агента (_trackKiloModels).
 const KILO_FINAL_READ_RETRIES = 3;
@@ -65,6 +64,7 @@ import { ModelClientError, assertModelUrl, redactNetworkDetail, imageBatches } f
 import { buildCliJudgePrompt, parseJudgeScore, parseJudgeExtras } from './lib/skill-judge.mjs';
 import { RUBRIC_LEVEL_COUNT } from './lib/rubric-levels.mjs';
 import { parseFrontmatter, normalizePlanId, checkPlanReadiness } from './lib/utils.mjs';
+import { REVIEW_SECTION_RE } from './lib/review-section.mjs';
 import { prepareReportInput } from './lib/report-input.mjs';
 
 // Ошибка клиента безынструментного агента или класс ошибки в ответе агента с
@@ -86,6 +86,18 @@ const MODEL_ERROR_HEALTH = Object.freeze({
 // аргументы обёртки или промпт (decisions-select.js: usage, bad_prompt). Остальные сбои —
 // сеть, таймаут, 5xx, выход без класса — повторяются один раз.
 const SELECTOR_NO_RETRY_CLASSES = new Set(['auth', 'no_key', 'bad_request', 'usage', 'bad_prompt']);
+
+// Признак сбоя провайдера в тексте обоснования ответа судьи: строка лога кило о
+// разрыве потока (`message="stream error"`, configs/agent-health-rules.yaml) или
+// ошибка транспорта AI SDK (`AI_APICallError`). Обёртка судьи собирает `reason` из
+// хвоста своего вывода (kilo-judge.js), и на перегрузке провайдера туда попадает
+// эта строка лога: балл в ответе есть, обоснования по существу — нет.
+const PROVIDER_ERROR_IN_ANSWER = /message="stream error"|AI_APICallError/;
+
+/** Есть ли в тексте обоснования признак сбоя провайдера. */
+function answerCarriesProviderError(reason) {
+  return typeof reason === 'string' && PROVIDER_ERROR_IN_ANSWER.test(reason);
+}
 
 /**
  * `complexity` из frontmatter тикета — `simple`, `medium` или `complex`
@@ -183,16 +195,16 @@ function commandAgentQuestions(input) {
 }
 
 // ============================================================================
-// Audit-log helpers (used by executeWithFallback hook — IMPL-83)
+// Audit-log helpers (used by executeWithFallback hook)
 // ============================================================================
 
 /**
  * Время строки «Истории работы»: местное время ISO 8601 со смещением зоны
- * (`2026-10-01T03:12:45+05:00`). До 2026-10-01 — местное время без зоны
- * (`2026-10-01 03:12:45`): исполнители переписывали его в Result с меткой Z (сдвиг до 5 ч),
- * а разбор сопоставлял историю с UTC журнала запусков по сдвигу пояса. Читатели истории
- * берут оба вида: parseAgentHistory — ячейку как есть, calc-metrics.js скила create-report
- * — через Date (строка со смещением — абсолютное время, без зоны — местное).
+ * (`2026-10-01T03:12:45+05:00`). Старые строки — местное время без зоны
+ * (`2026-10-01 03:12:45`); исполнители переписывали их в Result с меткой Z (сдвиг до 5 ч),
+ * поэтому читатели истории берут оба вида: parseAgentHistory — ячейку как есть, а
+ * calc-metrics.js скила create-report — через Date (строка со смещением — абсолютное время,
+ * без зоны — местное).
  */
 function formatLocalIsoDateTime(d) {
   const pad = n => String(n).padStart(2, '0');
@@ -204,7 +216,7 @@ function formatLocalIsoDateTime(d) {
 // ============================================================================
 // Rails integration (src/rails/README.md §11) — окружение целевого агента
 // стадии и output-check по завершении. Ядро rails (граф/состояние/хуки) —
-// отдельный пакет работ; здесь только интеграция раннера (wp5).
+// отдельный пакет работ; здесь только интеграция раннера.
 // ============================================================================
 
 function railsYamlExists(root, skill) {
@@ -231,19 +243,18 @@ const CLOSED_TICKET_COLUMNS = new Set(['done', 'archive']);
 
 // Статусы стадии, после которых прогон, ушедший в end, кончается не успехом, а строкой
 // «Pipeline stopped: … stuck» (PipelineRunner.run). stuck — check-report-needed: план
-// стоит на тикетах в blocked/, разбиение их не сняло, нужно решение человека. До
-// 2026-10-01 такой прогон кончался «Pipeline completed successfully!» (2026-09-30
-// PulseProxy, DOCS-014 в blocked/ из-за write_deny) — ни строки о том, что план стоит.
+// стоит на тикетах в blocked/, разбиение их не сняло, нужно решение человека. Без
+// этого такой прогон кончался бы «Pipeline completed successfully!» — ни строки о том,
+// что план стоит.
 const STUCK_END_STATUSES = new Set(['stuck']);
 
 // Ключи контекста, которые описывают текущий тикет: их ставят переходы тикетных стадий
 // поставляемого configs/pipeline.yaml (pick-*.found, verify-artifacts, mark-blocked и т.д.;
 // ready_tickets — check-conditions.has_ready). Контекст раннера между стадиями не
-// очищается, и стадия уровня плана (`scope: plan`) без отсечки получала последний тикет:
-// 2026-09-29/30 create-report, analyze-report и decompose-gaps шли с ticket_id HUMAN-003
-// и task_type fix (ListeningGlass), QA-180 (PulseProxy) — в промпте, в журнале запусков и
-// строками истории работы закрытого тикета; 2026-04-20 устаревший required_capabilities
-// заблокировал create-report и analyze-report (no_capable_agent).
+// очищается, и стадия уровня плана (`scope: plan`) без отсечки получала бы последний
+// тикет: его ticket_id и task_type попадали бы в промпт, в журнал запусков и строками
+// истории работы закрытого тикета, а устаревший required_capabilities блокировал бы
+// стадию плана (no_capable_agent).
 const TICKET_CONTEXT_KEYS = Object.freeze([
   'ticket_id', 'task_type', 'required_capabilities', 'target', 'attempt', 'attempts', 'reason',
   'evidence_file', 'ready_tickets',
@@ -253,8 +264,8 @@ const TICKET_CONTEXT_KEYS = Object.freeze([
  * План отчёта: `related_plan` из frontmatter `.workflow/reports/<reportId>.md`,
  * нормализованный normalizePlanId (`plans/current/PLAN-020.md` → `PLAN-020`), — как
  * latestReport в scripts/check-report-needed.js, включая разбор строкой, когда YAML отчёта
- * не читается (PulseProxy REPORT-012). Id не вида `REPORT-<число>` (его пишет агент в
- * RESULT), нет файла или поля — null.
+ * не читается. Id не вида `REPORT-<число>` (его пишет агент в RESULT), нет файла или
+ * поля — null.
  */
 function reportPlanId(projectRoot, reportId) {
   if (typeof reportId !== 'string' || !/^REPORT-\d+$/.test(reportId)) return null;
@@ -273,7 +284,7 @@ function reportPlanId(projectRoot, reportId) {
   }
 }
 
-// IMPL-86: normalize agent_id in last row of ## Ревью section
+// normalize agent_id in last row of ## Ревью section
 // Re-writes the agent column if it differs from expectedAgent. Other columns untouched.
 // Returns { ok: true, changed: boolean } or { ok: false, code, error }.
 function normalizeReviewAgentId(ticketPath, expectedAgent) {
@@ -285,11 +296,18 @@ function normalizeReviewAgentId(ticketPath, expectedAgent) {
     return { ok: false, code: 'READ_ERROR', error: err.message };
   }
 
-  const sectionRegex = /(##\s+Ревью\s*\r?\n)([\s\S]*?)(?=\r?\n##\s+|$)/i;
-  const match = content.match(sectionRegex);
+  // Секция — та же, что читают getLastReviewStatus и правит appendReviewEntry: общий
+  // шаблон REVIEW_SECTION_RE (привязка к началу строки, берётся последняя секция). Свой
+  // шаблон без привязки принимал за секцию подраздел `### Ревью` (совпадали его вторые два
+  // символа `#`), и колонка «Агент» правилась в подразделе, пока вердикт читался из настоящей
+  // секции. Взятие первого совпадения вместо последнего разводило писателя с читателем и на
+  // двух секциях второго уровня.
+  const matches = [...content.matchAll(REVIEW_SECTION_RE)];
+  const match = matches[matches.length - 1];
   if (!match) return { ok: false, code: 'NO_SECTION' };
 
   const sectionBody = match[2];
+  const sectionHeader = match[1].slice(0, match[1].length - sectionBody.length);
   const lines = sectionBody.split('\n');
   let headerIdx = -1;
   for (let i = 0; i < lines.length; i++) {
@@ -324,8 +342,11 @@ function normalizeReviewAgentId(ticketPath, expectedAgent) {
   cells[agentColIdx] = expectedAgent;
   lines[lastDataIdx] = `| ${cells.join(' | ')} |`;
 
-  const newSection = match[1] + lines.join('\n');
-  const newContent = content.replace(sectionRegex, newSection);
+  // Замена — по границам последней секции: String.replace с шаблоном без флага /g заменил бы
+  // первую секцию (и подошёл бы под подраздел), с /g — все сразу.
+  const newSection = sectionHeader + lines.join('\n');
+  const end = match.index + match[0].length;
+  const newContent = content.slice(0, end - match[1].length) + newSection + content.slice(end);
 
   const dir = path.dirname(ticketPath);
   const tmp = path.join(dir, `.${path.basename(ticketPath)}.normagent.${process.pid}.${Date.now()}`);
@@ -660,11 +681,10 @@ class PromptBuilder {
   /**
    * Строка промпта с каталогом скила стадии — вторая строка, сразу после имени скила:
    * `Файлы скила: .workflow/src/skills/<skill>/ — начни с …/SKILL.md; …`. Без неё агент
-   * искал файлы скила по имени, а каталог скила в проекте — ссылка на канон, и поиск через
-   * неё файл не находит: 2026-09-30 стратегию исполнения execute-task прочитали 2 сессии из
-   * 16. Только у стадии со `skill` без `model_io` (промпт стадии с model_io читают скрипты
-   * prepare и apply, а не модель) и только если каталог есть в проекте: несуществующий путь
-   * агенту не называется.
+   * ищет файлы скила по имени, а каталог скила в проекте — ссылка на канон, и поиск через
+   * неё файл не находит. Только у стадии со `skill` без `model_io` (промпт стадии с model_io
+   * читают скрипты prepare и apply, а не модель) и только если каталог есть в проекте:
+   * несуществующий путь агенту не называется.
    * @returns {string|null}
    */
   skillFilesLine(stage) {
@@ -765,18 +785,43 @@ class ResultParser {
   };
 
   /**
-   * Нормализует статус: приводит синонимы к каноническому значению
+   * Нормализует статус: приводит синонимы к каноническому значению.
+   *
+   * Значение блока RESULT может нести пояснение после статуса (`blocked — причина`,
+   * `blocked: причина`). Целиком такое значение не совпадает ни с синонимом, ни с
+   * ключом перехода стадии: стадия молча уходит по ветке `default`, и отказ
+   * исполнителя читается как успех — тикет едет в ревью вместо блокировки.
+   *
+   * Пояснение отделяется только по разделителю, которого не бывает внутри статуса:
+   * тире, двоеточие, точка с запятой, запятая, точка или пробел. Дефис и подчёркивание
+   * остаются частью слова: без дефиса в классе значение с дефисом в ключе и пояснением
+   * (`needs-review — причина`) не совпадает с шаблоном вовсе, возвращается целиком — и
+   * стадия, у которой ключ перехода `needs-review`, уходит по ветке `default`.
+   * Неизвестное значение без пояснения возвращается как есть, с исходным регистром:
+   * стадия обязана увидеть свой ключ, а не подмену.
+   *
    * @param {string} status
    * @returns {string}
    */
   normalizeStatus(status) {
-    const lower = status.toLowerCase();
-    const canonical = ResultParser.STATUS_ALIASES[lower];
-    if (canonical) {
-      console.log(`[ResultParser] Normalized status: "${status}" → "${canonical}"`);
-      return canonical;
+    const raw = String(status ?? '').trim();
+    const alias = ResultParser.STATUS_ALIASES[raw.toLowerCase()];
+    if (alias) {
+      console.log(`[ResultParser] Normalized status: "${raw}" → "${alias}"`);
+      return alias;
     }
-    return status;
+    const withReason = /^([\p{L}\p{N}_-]+)\s*(?:[—–;:,.]|\s)\s*\S/u.exec(raw);
+    if (withReason && withReason[1] !== raw) {
+      const head = withReason[1];
+      const canonical = ResultParser.STATUS_ALIASES[head.toLowerCase()];
+      if (canonical) {
+        console.log(`[ResultParser] Normalized status: "${raw}" → "${canonical}"`);
+        return canonical;
+      }
+      console.log(`[ResultParser] Status "${raw}" reduced to "${head}" — пояснение отброшено`);
+      return head;
+    }
+    return raw;
   }
 
   /**
@@ -804,9 +849,8 @@ class ResultParser {
 
     // Незакрытый финальный блок: последний маркер без пары, после него — строка status.
     // Рельсы такой ответ принимают (final_requires execute-task — маркер и status, без
-    // закрывающего маркера), а парсер видел «нет RESULT»: 2026-09-25 PulseProxy, gpt-luna
-    // через kilo выполнил IMPL-107 и завершил ответ так — запуск ушёл в ошибку. Хвост
-    // берётся только при нечётном числе маркеров и со строкой status: одиночный маркер
+    // закрывающего маркера), а парсер иначе видел бы «нет RESULT» и уводил запуск в ошибку.
+    // Хвост берётся только при нечётном числе маркеров и со строкой status: одиночный маркер
     // из эха тикета или лога перед закрытым блоком не перехватывает результат.
     if (count % 2 === 1) {
       const tail = output.substring(markerPositions[count - 1] + marker.length).trim();
@@ -873,7 +917,7 @@ class ResultParser {
         const value = topLevelMatch[2].trim();
 
         if (value !== '') {
-          // Однострочное key: value — как прежде
+          // Однострочное key: value
           if (key === 'status') {
             status = value;
           } else {
@@ -1201,12 +1245,11 @@ class FileGuard {
 // ============================================================================
 // StageExecutor — выполняет stages через вызов CLI-агентов
 // ============================================================================
-// FIX-16. stderr агента писался в pipeline-лог построчно и без ограничения
-// длины. При ошибке LLM-провайдера (AI_APICallError) туда попадает
-// сериализованный request body с промптами: наблюдались строки по 74–232 КБ и
-// логи до 9.9 МБ, а list_ghost_executions в workflow-mcp отдавал 5.5 МБ, потому
-// что excerpt захватывал такую строку целиком. Заодно это утечка содержимого
-// контекста агентов в логи. Режем head+tail, как уже делает error-classifier.
+// stderr агента пишется в pipeline-лог построчно и без ограничения длины. При
+// ошибке LLM-провайдера (AI_APICallError) туда попадает сериализованный request
+// body с промптами — это утечка содержимого контекста агентов в логи, а excerpt
+// в list_ghost_executions захватывает такую строку целиком. Режем head+tail, как
+// уже делает error-classifier.
 const STDERR_LOG_LINE_LIMIT = 2048;
 
 export function truncateStderrLine(line, limit = STDERR_LOG_LINE_LIMIT) {
@@ -1251,8 +1294,8 @@ class StageExecutor {
     // .workflow/state/model-io/ привязывает вызов к запуску и его логу.
     this.pipelineRunId = options.runId || null;
 
-    // Таймауты вызовов пула моделей (src/lib/model-pools.mjs): агент-селектор — 60 с (П4),
-    // шлагбаум — 15 с (П14); тесты их уменьшают.
+    // Таймауты вызовов пула моделей (src/lib/model-pools.mjs): агент-селектор — 60 с,
+    // шлагбаум — 15 с; тесты их уменьшают.
     this.selectorTimeoutMs = options.selectorTimeoutMs ?? SELECTOR_TIMEOUT_MS;
     this.gateTimeoutMs = options.gateTimeoutMs ?? GATE_TIMEOUT_MS;
     // Период строки HEARTBEAT во время агента (HEARTBEAT_INTERVAL_MS); тесты его уменьшают.
@@ -1418,7 +1461,7 @@ class StageExecutor {
    * Место курсора среди выживших _stageSurvivors: курсор resolveAgent и выбор модели
    * стадии, когда ни у одного выжившего нет оценки (_resolveGoverned). У стадии с
    * model_io (судьи ревью) курсор всегда на первом доступном месте списка —
-   * переключение на следующего только по сбою агента (решение владельца 2026-10-12).
+   * переключение на следующего только по сбою агента.
    * У остальных курсор вращается по `cursorPlaces` (первая ступень тега,
    * _orderPlacesByTier), без неё — по всем местам.
    * Участников места-пула при заданном `tierOf` упорядочивает ступень, затем признак «уже
@@ -1429,10 +1472,10 @@ class StageExecutor {
     const { places, attempt, effectiveStage, isPool, poolOf } = survivors;
 
     // Стадия обмена с моделью (судьи ревью и подобные): агент — всегда первый
-    // доступный из списка (решение владельца 2026-10-12). Сдвиг по номеру попытки
-    // тикета отдавал судью по счётчику сгоревших попыток: основной судья (Jev)
-    // не судил тикеты с историей, хотя был доступен. Внутри попытки сбой агента
-    // продвигает список дальше (excludeAgents), следующая попытка снова с первого.
+    // доступный из списка. Сдвиг по номеру попытки тикета отдавал судью по
+    // счётчику сгоревших попыток: основной судья не судил тикеты с историей,
+    // хотя был доступен. Внутри попытки сбой агента продвигает список дальше
+    // (excludeAgents), следующая попытка снова с первого.
     // Исполнительные стадии без выбора сохраняют ротацию по кругу
     // (attempt - 1) % length (по первой ступени при теге).
     const rota = survivors.cursorPlaces ?? places;
@@ -1579,7 +1622,7 @@ class StageExecutor {
     const afterCapabilities = agentIds.filter(covers);
 
     // Фильтр по health-реестру: unhealthy-агенты с неистёкшим TTL пропускаются.
-    // Реестр персистентный между attempt'ами (план rev.3, решение 6.5). У места-пула —
+    // Реестр персистентный между attempt'ами. У места-пула —
     // и id пула, и его участники (ключ участника — маршрут `<пул>@<id>`).
     const healthy = (agentId) => {
       if (!isHealthy(this.projectRoot, agentId)) return false;
@@ -1590,13 +1633,12 @@ class StageExecutor {
     };
     const afterHealth = afterCapabilities.filter(healthy);
 
-    // Фильтр по запретам моделей из журнала запусков (PLAN-003) — только на стадии
-    // исполнителя: одна модель стоит и у исполнителя, и у судьи ревью, и запрет за
-    // провалы исполнителя не должен снимать судью (решение 2026-09-26, «Только
-    // исполнитель»). Ключ модели — тот же, что у события run (configuredModelKey):
-    // роутер kilo по ключу роутера не отсеивается, его модели отсеивает остановка
-    // в опросе базы kilo (_trackKiloModels). Место-пул под запретом, когда запрещены
-    // модели всех его здоровых участников.
+    // Фильтр по запретам моделей из журнала запусков — только на стадии исполнителя:
+    // одна модель стоит и у исполнителя, и у судьи ревью, и запрет за провалы
+    // исполнителя не должен снимать судью. Ключ модели — тот же, что у события run
+    // (configuredModelKey): роутер kilo по ключу роутера не отсеивается, его модели
+    // отсеивает остановка в опросе базы kilo (_trackKiloModels). Место-пул под
+    // запретом, когда запрещены модели всех его здоровых участников.
     const banned = new Map();
     const bans = stage.skill === EXECUTOR_SKILL && afterHealth.length > 0 ? this._loadBans(stageId) : null;
     const notBanned = (id) => {
@@ -1662,7 +1704,7 @@ class StageExecutor {
   }
 
   /**
-   * Мягкий фильтр 5 выбора участника пула (PLAN-004, П9): участники, модель которых
+   * Мягкий фильтр 5 выбора участника пула: участники, модель которых
    * ещё не запускалась на тикете контекста (нет события run журнала с тем же `ticket`
    * и `model` = ключ участника), в порядке маски; таких нет — все кандидаты как есть.
    * Журнал — сырые события: `reset` на фильтр не влияет. Без тикета в контексте или
@@ -1684,8 +1726,8 @@ class StageExecutor {
   }
 
   /**
-   * Шлагбаум места-пула `models.gate` (PLAN-004, П14, раздел плана «Шлагбаум пула») —
-   * перед каждым запуском участника пула, до селектора. Команда запускается по правилам
+   * Шлагбаум места-пула `models.gate` — перед каждым запуском участника пула, до
+   * селектора. Команда запускается по правилам
    * команды списка (runPoolCommand: корень проекта, buildAgentEnv, shell на Windows кроме
    * `node`) со своим таймаутом. Ответ — RESULT `status: open|closed`, `remaining: <число>`
    * и выход 0. Это не roll-call: модель не вызывается.
@@ -1747,9 +1789,9 @@ class StageExecutor {
   }
 
   /**
-   * Ранжир участников места-пула агентом-селектором `models.selector` (PLAN-004, П1,
-   * П15, раздел плана «Селектор»). Вызов — при всех условиях: у пула задан селектор, в
-   * контексте есть тикет, кандидатов не меньше двух, селектор здоров по health-реестру.
+   * Ранжир участников места-пула агентом-селектором `models.selector`. Вызов — при
+   * всех условиях: у пула задан селектор, в контексте есть тикет, кандидатов не меньше
+   * двух, селектор здоров по health-реестру.
    * Иначе вызова нет — null, порядок маски.
    *
    * Селектору — первые SELECTOR_MAX_CANDIDATES кандидатов в порядке маски: промпт
@@ -1931,7 +1973,7 @@ class StageExecutor {
     };
 
     // Тег минимального уровня места (`place[level]`, lib/model-pools.mjs) — мягкая
-    // ступень очереди обхода (решение владельца), без отсева: уровень подтверждён и не
+    // ступень очереди обхода, без отсева: уровень подтверждён и не
     // ниже требуемого (или тега нет) — ступень 0 (прежний порядок); уровень неизвестен —
     // ступень 1 (середина: неоценённые — обычно свежие модели); уровень подтверждён и
     // ниже требуемого — ступень 2 (последний резерв). Ключ уровня — базовый id места
@@ -1984,9 +2026,9 @@ class StageExecutor {
       this.logger.warn(`selection: failed run of "${agent}" on ${ticket} has no score (agent not in stage facts) — not counted in floor`, stageId);
     }
     // Потолок границы — сильнейший уровень выживших в начале попытки, заморожен с полосами:
-    // после провала на верхнем уровне верхний уровень берётся снова (решение 6), но
-    // исчерпанные в попытке сильные уровни не открывают слабые — ни после отказа
-    // (эскалация), ни после сбоев.
+    // после провала на верхнем уровне верхний уровень берётся снова, но исчерпанные в
+    // попытке сильные уровни не открывают слабые — ни после отказа (эскалация), ни после
+    // сбоев.
     sel.maxLevel ??= Math.max(...ids.map(level));
     const floor = capFloor(Math.max(floorInfo.floor, sel.escalationFloor), sel.maxLevel);
     const above = ids.filter((id) => level(id) > floor);
@@ -2093,9 +2135,9 @@ class StageExecutor {
     const ladder = (fallback, ranking = [], cost = null) => ({ R: lowest, ranking, mode: 'ladder', requiredLevel: null, fallback, cost });
     const ticketPath = ticket ? findTicketPathForId(ticket, this.projectRoot) : null;
     // Уровня не назвал селектор — старт по complexity тикета, а не с самого низкого:
-    // 2026-09-29/30 PulseProxy селектор срывался 12 раз из 50 (сеть до прокси), и каждый
-    // тикет шёл лестницей с уровня 1 — QA-177 (complex) достался claude-haiku. Квантиль
-    // селектора (--level-quantile) это не меняет: он действует, только когда ответ есть.
+    // иначе каждый тикет шёл бы лестницей с уровня 1, и сложный тикет достался бы
+    // слабейшему агенту. Квантиль селектора (--level-quantile) это не меняет: он
+    // действует, только когда ответ есть.
     const byComplexity = (fallback, ranking = [], cost = null) => {
       const complexity = ticketComplexity(ticketPath);
       const available = [...new Set(above.map(level))].sort((a, b) => a - b);
@@ -2167,7 +2209,7 @@ class StageExecutor {
   /**
    * Выполняет stage с fallback-логикой: при пустом artifact diff делает retry с другим агентом.
    *
-   * Каждый запуск агента пишется в журнал запусков (src/lib/agent-runs.mjs, PLAN-003):
+   * Каждый запуск агента пишется в журнал запусков (src/lib/agent-runs.mjs):
    * до старта — запись открытого запуска `.workflow/state/agent-run-open.json`, после
    * вызова в любой ветке — событие `run` с тем же `run_key`, затем запись удаляется.
    * Статус запуска определяется один раз и идёт и в событие, и в строку истории
@@ -2179,15 +2221,14 @@ class StageExecutor {
    * артефактах: сделанное записано в тикет по правилу скила исполнителя
    * «Инкрементальная запись обязательна», следующий запуск продолжает с записанного.
    * Тот же агент заново не запускается: модель выбирает его роутер, и перезапуск
-   * запрещённую модель не обходит — прогон PulseProxy 2026-09-27: роутер трижды
-   * подряд выбрал ту же запрещённую модель, 11,5 минуты впустую. Агент при этом не
-   * помечается нездоровым: в следующей попытке тикета он снова в списке.
+   * запрещённую модель не обходит. Агент при этом не помечается нездоровым: в
+   * следующей попытке тикета он снова в списке.
    *
    * Место-пул (resolveAgent отдаёт `pool` и `poolCandidates`): перед каждым запуском
-   * участника — шлагбаум пула (_poolGate, П14), `closed` закрывает место, и стадия берёт
+   * участника — шлагбаум пула (_poolGate), `closed` закрывает место, и стадия берёт
    * следующее место списка без запуска участников и селектора. При первом выборе
    * участника места в попытке кандидатов ранжирует агент-селектор пула
-   * (_poolSelectorOrder, П15) — один вызов на место в попытке, пул в списке дважды —
+   * (_poolSelectorOrder) — один вызов на место в попытке, пул в списке дважды —
    * тоже один. Следующий участник того же места — следующий по ранжиру среди
    * кандидатов, которых отдал resolveAgent (фильтры участника уже применены), кандидаты
    * вне ранжира — после него в порядке маски.
@@ -2212,9 +2253,16 @@ class StageExecutor {
     // бросают, а возвращают стадии как status: error с error_class.
     let lastModelFailure = null;
     // Последний неуверенный ответ стадии model_io (apply → status: uncertain), который
-    // переоценивает следующий агент. Переоценка не дала вердикта (агентов не осталось,
-    // сбой модели или процесса) — вердикт выносит apply по этому ответу (settleUncertain).
+    // переоценивает следующий агент. Переоценивать некому (агентов не осталось) —
+    // вердикт выносит apply по этому ответу (settleUncertain).
     let uncertain = null;
+    // Переоценка началась и вердикта не дала: судья ответил невердиктом (error),
+    // упал или был снят, а переоценивать больше некого. Вердикт по неуверенному
+    // ответу тогда не выносится — иначе «неуверен» стал бы «не прошло». Стадия
+    // завершается ошибкой и уходит путём сбоя ревью (goto.error →
+    // increment-review-errors), как при любом несостоявшемся ревью. Отказ живого
+    // судьи по существу (status: failed) — не сбой: он и есть отклоняющий вердикт.
+    let reReviewFailed = null;
     // Остановка пайплайна вердикта не выносит: apply без флага записал бы провал, которого
     // не давал ни один агент (строка ревью, evidence, событие review).
     const settleUncertain = async () => {
@@ -2222,7 +2270,42 @@ class StageExecutor {
         throw Object.assign(new Error(`Stage "${stageId}" stopped before verdict on uncertain answer`), { code: 'STOPPED' });
       }
       const u = uncertain;
+      const failure = reReviewFailed;
       uncertain = null;
+      reReviewFailed = null;
+      if (failure) {
+        // Переоценка не состоялась по инфраструктурной причине — это сбой ревью,
+        // а не отказ исполнителя: вердикта по неуверенному ответу нет, стадия идёт
+        // путём сбоя ревью (error_class/reason re_review_failed, счётчик
+        // review_error_attempts, повтор ревью или блокировка review_error).
+        const message = failure.message
+          || `re-review by "${failure.agentId}" did not produce a verdict (status=${failure.status})`;
+        if (this.logger) {
+          const who = failure.agentId ? `"${failure.agentId}"` : '(следующего судьи не стало)';
+          this.logger.error(
+            `REVIEW_UNCERTAIN re-review by ${who} gave status=${failure.status} — ревью не состоялось, вердикта нет`,
+            stageId,
+          );
+        }
+        const failed = {
+          status: 'error',
+          output: '',
+          stderr: message,
+          exitCode: -1,
+          result: {
+            error_class: 're_review_failed',
+            reason: 're_review_failed',
+            error: message,
+            agent: failure.agentId,
+            uncertain_agent: u.agentId,
+          },
+          modelIo: u.result.modelIo,
+          agentId: u.agentId,
+          runModel: u.runModel,
+        };
+        if (this.logger) this.logger.stageComplete(stageId, failed.status, failed.exitCode);
+        return failed;
+      }
       const final = await this._applyModelIoVerdict(u.result, u.prompt, stageId, u.effectiveStage, u.agentId, u.agent, u.request);
       final.agentId = u.agentId;
       final.runModel = u.runModel;
@@ -2274,7 +2357,13 @@ class StageExecutor {
 
       if (resolved.blocked) {
         // При остановке settleUncertain бросает STOPPED — вердикта нет.
-        if (uncertain) return settleUncertain();
+        if (uncertain) {
+          // Неуверенный ответ остался без переоценки: судья, к которому она шла,
+          // закончился сбоем (падение, запрет модели), и агентов больше нет — это
+          // сбой ревью, а не отказ исполнителя (см. reReviewFailed).
+          reReviewFailed = { status: 'unavailable', agentId: null, message: resolved.reason || 'no judge left for re-review' };
+          return settleUncertain();
+        }
         const exhausted = resolved.blocked === 'all_unhealthy' || resolved.blocked === 'all_banned';
         // all_unhealthy после исчерпания списка в текущей attempt (lastErr есть) —
         // re-throw, чтобы стадия ушла в goto.error и inc-counter. Без lastErr —
@@ -2309,7 +2398,7 @@ class StageExecutor {
           continue;
         }
       } else if (resolved.pool && !this.stopRequested) {
-        // Шлагбаум — перед каждым запуском участника, до селектора (П14). Закрытое место
+        // Шлагбаум — перед каждым запуском участника, до селектора. Закрытое место
         // держит health-реестр; id пула в excludeAgents закрывает место и в этой попытке,
         // если запись реестра не удалась, — иначе цикл выбирал бы его снова.
         if (await this._poolGate(resolved.pool, stageId) === 'closed') {
@@ -2407,15 +2496,16 @@ class StageExecutor {
           status, exitCode: callResult.exitCode, changedPaths, stopRequested, resultStatus: result.status,
           kiloModels: result.kiloModels, modelIoModel: result.modelIo?.model,
           crashTtlMs: result.modelError ? ttlToMs(MODEL_ERROR_HEALTH[result.modelError.class]?.ttl) : null,
+          railsUnverified: result.railsUnverified === true,
         });
         // Агент и модель запуска — для события ревью стадии (PipelineRunner.recordStageEvent).
         result.agentId = agentId;
         result.runModel = event.model;
 
-        // IMPL-83: audit-log hook (success path)
+        // audit-log hook (success path)
         await this._auditAgentRun(stageId, effectiveStage, agentId, { ...callResult, status, changedPaths });
 
-        // IMPL-86: normalize agent_id in ## Ревью after review-result stage.
+        // normalize agent_id in ## Ревью after review-result stage.
         // Стадия с model_io пропускается: строку ревью с id агента пишет её скрипт
         // применения (WORKFLOW_MODEL_AGENT), а на выходах без строки (prepare закрыл
         // стадию сам, ошибка обмена) нормализация переписала бы агента чужой, прежней строки.
@@ -2436,10 +2526,9 @@ class StageExecutor {
 
         // Неуверенная оценка ревью: уверенность ниже min_confidence, уверенного провала нет —
         // apply строку ревью не пишет, оценку в этой же попытке даёт следующий агент стадии.
-        // Прежде неуверенность засчитывалась провалом, и задачу переделывали заново:
-        // ListeningGlass 2026-09-29, IMPL-002 — уровень 5 из 5 при уверенности 0.79, Opus
-        // четыре раза выполнял готовую работу. Следующего агента не стало между проверкой
-        // и выбором (health-реестр) — вердикт выносит apply по тому же ответу без переоценки.
+        // Если засчитывать неуверенность провалом, задачу переделывали бы заново. Следующего
+        // агента не стало между проверкой и выбором (health-реестр) — вердикт выносит apply
+        // по тому же ответу без переоценки.
         if (run.modelIo && result.status === 'uncertain') {
           triedInThisAttempt.push(agentId);
           uncertain = { result, prompt, effectiveStage, agentId, agent, runModel: event.model, request: this._readModelIoRequest(result) };
@@ -2457,11 +2546,12 @@ class StageExecutor {
           lastModelFailure = null;
           continue;
         }
-        // Переоценка без вердикта (ошибка шага модели или apply у следующего агента) —
-        // сначала оставшиеся судьи списка (решение владельца 2026-10-12: переключение
-        // по сбою судьи); вердикт по неуверенному ответу — только когда переоценить
-        // некому. Без этого ошибка переоценки вела в increment-review-errors, и та же
-        // пара агентов крутилась до mark-blocked.
+        // Переоценка без вердикта (ошибка шага модели или apply у судьи) — сначала
+        // оставшиеся судьи списка; когда переоценивать некому, вердикта по
+        // неуверенному ответу нет: это сбой ревью, а не провал работы (см.
+        // reReviewFailed). Уходить в error — верный исход: счётчик review_error_attempts
+        // и повтор ревью ограничены (max → mark-blocked review_error), а вердикт не
+        // подменяется чужим «не прошло».
         if (uncertain && run.modelIo && !this.stopRequested && result.status !== 'passed' && result.status !== 'failed') {
           if (result.status === 'error') {
             triedInThisAttempt.push(agentId);
@@ -2479,17 +2569,20 @@ class StageExecutor {
               continue;
             }
           }
-          if (this.logger) {
-            this.logger.info(`REVIEW_UNCERTAIN re-review by "${agentId}" gave status=${result.status} — verdict by "${uncertain.agentId}"`, stageId);
-          }
+          // Переоценить больше некого — переоценка не состоялась.
+          reReviewFailed = {
+            status: result.status,
+            agentId,
+            message: result.result?.error || result.result?.reason || '',
+          };
           return settleUncertain();
         }
 
-        // Эскалация (решение 3): агент сам ответил `status: blocked` (у blocked раннера
+        // Эскалация: агент сам ответил `status: blocked` (у blocked раннера
         // всегда есть blocked_reason) — в этой же попытке следующий кандидат строго
         // сильнее уровнем; событие run уже записано с result_status: blocked (gradeOf —
         // refused). Сделанное записано в тикет, как после MODEL_BANNED. Сильнее нет —
-        // blocked уходит стадии, в goto.blocked, как раньше.
+        // blocked уходит стадии, в goto.blocked.
         if (governed && sel.escalateOn.has('blocked') && result.status === 'blocked' && !result.blocked_reason) {
           const from = resolved.selection.level;
           triedInThisAttempt.push(agentId);
@@ -2511,13 +2604,13 @@ class StageExecutor {
           }
         }
 
-        // Судья не отработал (решение владельца 2026-10-12): обмен завершился ошибкой
-        // без вердикта (судья упал, провайдер недоступен) — ревью в этой же попытке
-        // ведёт следующий агент списка. Условие — статус самого обмена: классификатор
-        // может назвать запуск ok при выходе 0 с RESULT status: error, а сетевые и
-        // auth-классы — не ok. Старт всегда с первого (model_io без сдвига по попыткам),
-        // вперёд — только по сбою. no_key — не «судья не отработал», а его неверная
-        // настройка: переключение не поможет, стадия завершается ошибкой, как раньше.
+        // Судья не отработал: обмен завершился ошибкой без вердикта (судья упал,
+        // провайдер недоступен) — ревью в этой же попытке ведёт следующий агент списка.
+        // Условие — статус самого обмена: классификатор может назвать запуск ok при
+        // выходе 0 с RESULT status: error, а сетевые и auth-классы — не ok. Старт всегда
+        // с первого (model_io без сдвига по попыткам), вперёд — только по сбою. no_key —
+        // не «судья не отработал», а его неверная настройка: переключение не поможет,
+        // стадия завершается ошибкой.
         const judgeMisconfigured = result.modelError?.class === 'no_key';
         if (run.modelIo && result.status === 'error' && !judgeMisconfigured && !this.stopRequested) {
           triedInThisAttempt.push(agentId);
@@ -2575,7 +2668,7 @@ class StageExecutor {
           status = 'aborted';
         } else if (banned) {
           status = 'model_banned';
-        } else if (err.code === 'REPORT_NOT_READY' || err.code === 'RAILS_INCOMPLETE' || err.code === 'RAILS_SUSPENDED' || err.code === 'RAILS_RUNTIME_LOST' || err.code === 'RAILS_OUT_OF_SCOPE' || err.code === 'RAILS_HANDOFF_INVALID') {
+        } else if (err.code === 'REPORT_NOT_READY' || err.code === 'RAILS_INCOMPLETE' || err.code === 'RAILS_SUSPENDED' || err.code === 'RAILS_RUNTIME_LOST' || err.code === 'RAILS_OUT_OF_SCOPE' || err.code === 'RAILS_HANDOFF_INVALID' || err.code === 'RAILS_STATE_AMBIGUOUS') {
           // Скил брошен без итога или приостановлен владельцем, либо потеряно закрепление
           // рантайма (callAgent), хост вышел с кодом 0. stderr kilo — лог его
           // инструментов: «403» и «network» там — текст проекта, и ни класс
@@ -2590,7 +2683,7 @@ class StageExecutor {
           kiloModels: err.kiloModels, crashTtlMs: ttlToMs(classification?.ttl),
         });
 
-        // IMPL-83: audit-log hook (failure path)
+        // audit-log hook (failure path)
         await this._auditAgentRun(stageId, effectiveStage, agentId, { ...callResult, status, changedPaths });
 
         // Агента убила остановка пайплайна: это не его сбой — без пометки в
@@ -2616,9 +2709,9 @@ class StageExecutor {
         const diffResult = snapshotEnabled ? diff(before, after) : null;
         const diffEmpty = snapshotEnabled && isEmpty(diffResult);
 
-        if (err.code === 'RAILS_SUSPENDED' || err.code === 'RAILS_RUNTIME_LOST' || err.code === 'RAILS_OUT_OF_SCOPE' || err.code === 'RAILS_HANDOFF_INVALID') {
+        if (err.code === 'RAILS_SUSPENDED' || err.code === 'RAILS_RUNTIME_LOST' || err.code === 'RAILS_OUT_OF_SCOPE' || err.code === 'RAILS_HANDOFF_INVALID' || err.code === 'RAILS_STATE_AMBIGUOUS') {
           // Приостановка владельцем или потеря закреплённого рантайма — не отказ
-          // агента: ни повтор, ни передача другому исполнителю (дизайн 2026-10-05).
+          // агента: ни повтор, ни передача другому исполнителю.
           if (this.logger) this.logger.warn(`rails: ${err.code} — без fallback на другого агента`, stageId);
           throw err;
         }
@@ -2641,7 +2734,12 @@ class StageExecutor {
               stageId
             );
           }
-          if (uncertain) return settleUncertain();
+          if (uncertain) {
+            // Судья переоценки упал с правками артефактов: вердикта по неуверенному
+            // ответу нет — это сбой ревью, а не отказ исполнителя (см. reReviewFailed).
+            reReviewFailed = { status, agentId, message: stderr || `agent exited ${exitCode}` };
+            return settleUncertain();
+          }
           throw err;
         }
 
@@ -2738,9 +2836,13 @@ class StageExecutor {
    * `changedPaths` — изменённые файлы запуска (_runChangedPaths): в событии их число
    * (`changed_files`), а у запуска со сбоем (error, timeout, network_error — failedRunChanges)
    * с изменениями — и сами пути (`changed_paths`, не больше FAILED_RUN_PATHS_MAX).
+   *
+   * `railsUnverified` — ответ запуска принят стадией, дважды не пройдя выходной слой
+   * рельс (StageExecutor.callAgent): в событии — `rails_unverified: true`, у остальных
+   * запусков поля нет (значение истинно только в этом случае).
    * @returns {object} событие (поле `model` — ключ модели запуска)
    */
-  _closeAgentRun(run, { status, exitCode, changedPaths, stopRequested, resultStatus = null, kiloModels = null, modelIoModel = null, crashTtlMs = null }) {
+  _closeAgentRun(run, { status, exitCode, changedPaths, stopRequested, resultStatus = null, kiloModels = null, modelIoModel = null, crashTtlMs = null, railsUnverified = false }) {
     const { ts, ...record } = run.record;
     const event = { type: 'run', ...record, status, started_at: ts };
     try {
@@ -2755,6 +2857,7 @@ class StageExecutor {
       const failedChanges = failedRunChanges(status, changedPaths);
       if (failedChanges) event.changed_paths = failedChanges.paths;
       if (typeof resultStatus === 'string' && resultStatus) event.result_status = resultStatus;
+      if (railsUnverified) event.rails_unverified = true;
       if (stopRequested) event.stop_requested = true;
       else if (isCrashStatus(event)) event.crash_ttl_ms = crashTtlMs ?? CRASH_TTL_DEFAULT_MS;
       const written = appendRunEvent(this.projectRoot, event);
@@ -2785,7 +2888,7 @@ class StageExecutor {
   }
 
   /**
-   * IMPL-83: Audit-log hook — строка истории работы тикета. Статус — `callResult.status`
+   * Audit-log hook — строка истории работы тикета. Статус — `callResult.status`
    * (его определяет executeWithFallback один раз для истории и журнала), без него —
    * класс classifyAgentResult. `callResult.changedPaths` — изменённые файлы запуска
    * (_runChangedPaths): у запуска со сбоем (failedRunChanges) они идут в колонку
@@ -2809,9 +2912,8 @@ class StageExecutor {
       if (!ticketPath) {
         ticketPath = findTicketPathForId(ticketId, this.projectRoot);
         // Закрытый тикет стадии не исполняет: ticket_id в контексте остался от прошлого
-        // тикета. 2026-09-29/30 строки create-report, analyze-report и decompose-gaps
-        // дописаны в done/HUMAN-003 (ListeningGlass) и в QA-180 (PulseProxy, затем
-        // archive/). Перемещение в done/ стадией move-* — выше, по parsedResult.to.
+        // тикета, и история работы дописалась бы в закрытый тикет. Перемещение в done/
+        // стадией move-* — выше, по parsedResult.to.
         if (ticketPath && CLOSED_TICKET_COLUMNS.has(path.basename(path.dirname(ticketPath)))) {
           if (this.logger) this.logger.info(`audit-log: ${ticketId} is closed (${path.basename(path.dirname(ticketPath))}) — no history row for stage ${stageId}`, stageId);
           return;
@@ -3092,8 +3194,8 @@ class StageExecutor {
     } catch (err) {
       // Внезапная смерть процесса судьи (не ModelClientError) — сбой шага модели:
       // та же graceful-обработка, что у ошибок обмена, и переключение на следующего
-      // агента попытки (решение владельца 2026-10-12). Ошибки prepare и apply
-      // остаются исключениями стадии: у них другой шаг, и переключение судьи не поможет.
+      // агента попытки. Ошибки prepare и apply остаются исключениями стадии: у них
+      // другой шаг, и переключение судьи не поможет.
       if (!(err instanceof ModelClientError)) {
         if (signal.aborted) throw new ModelClientError('aborted', `stage stopped during model call: ${err.message}`);
         timing.model_ms = Date.now() - started;
@@ -3157,15 +3259,17 @@ class StageExecutor {
    *
    * До первого запуска — проверка входа (commandAgentQuestions): вопрос не с пятью
    * уровнями — bad_request. Ответ без балла или с `error_class` — ModelClientError с
-   * классом из ответа (без него — unparsed). Остановка пайплайна — aborted. Сбой
-   * процесса агента бросается как есть.
+   * классом из ответа (без него — unparsed). Балл есть, но обоснование несёт признак
+   * сбоя провайдера (answerCarriesProviderError) — тоже ModelClientError, класс
+   * `server`: оценка такого ответа не подтверждена и вердиктом не становится.
+   * Остановка пайплайна — aborted. Сбой процесса агента бросается как есть.
    */
   async _askCommandAgent(agent, agentId, input, stageId, skillId, signal) {
     const questions = commandAgentQuestions(input);
     const data = typeof input.data === 'string' ? input.data : JSON.stringify(input.data ?? null, null, 2);
     // Изображений больше лимита одного запроса (buildImageParts) — вопрос задаётся по частям
     // (imageBatches, lib/model-client.mjs), ответ вопроса — худший уровень частей. Иначе судья
-    // падал `Too many images` до вызова модели: PulseProxy QA-160, 2026-09-28, 12 снимков.
+    // падал бы `Too many images` до вызова модели.
     const batches = imageBatches(Array.isArray(input.images) ? input.images : []);
     const imageParts = batches.length > 0 ? batches : [[]];
     const imageText = (part, index) => {
@@ -3211,12 +3315,21 @@ class StageExecutor {
             ? `question ${question.id}${partLabel}: ${errorClass}: ${redactNetworkDetail(extras.error || '')}`
             : `question ${question.id}${partLabel}: agent output has no score 1..${RUBRIC_LEVEL_COUNT}`);
         }
+        const answerReason = typeof result.result?.reason === 'string' ? result.result.reason : null;
+        // Обоснование с признаком сбоя провайдера — не вердикт: оценка такого ответа
+        // не подтверждена. Путь — как у ошибки модели: класс `server` помечает агента
+        // и отдаёт оценку следующему судье (executeWithFallback), а неверная оценка не
+        // записывается.
+        if (answerCarriesProviderError(answerReason)) {
+          throw new ModelClientError('server',
+            `question ${question.id}${partLabel}: judge reason is a provider error: ${redactNetworkDetail(answerReason)}`);
+        }
         partAnswers.push({
           output,
           level: score,
           confidence: extras.confidence,
           probabilities: extras.probabilities,
-          reason: typeof result.result?.reason === 'string' ? result.result.reason : null,
+          reason: answerReason,
         });
         model = model ?? extras.model;
         if (extras.cost_usd === null) costKnown = false;
@@ -3449,10 +3562,9 @@ class StageExecutor {
 
       // Ранний kill по фатальному правилу — через арбитр с grace-окном: match
       // снимает процесс, только если ограничение осталось в последних строках
-      // stderr (решение владельца, Telegram975 2026-10-10): агент, сам повторивший
-      // запрос после 429 и продолживший работу, не снимается — 429 из середины
-      // уходит из хвоста, и таймер отменяется. Молчащий retry-цикл на HTTP 429
-      // по-прежнему снимается, не дожидаясь timeout_per_stage (1800s).
+      // stderr: агент, сам повторивший запрос после 429 и продолживший работу, не
+      // снимается — 429 из середины уходит из хвоста, и таймер отменяется. Молчащий
+      // retry-цикл на HTTP 429 по-прежнему снимается, не дожидаясь timeout_per_stage (1800s).
       const fatalArbiter = createFatalStderrArbiter(healthRules, rulesId, (match) => {
         if (earlyKilled || timedOut) return;
         earlyKilled = true;
@@ -3586,14 +3698,13 @@ class StageExecutor {
 
         // Детекция silent-failure: CLI-агент (kilo и т.п.) auto-rejected permission-
         // запросы, exit=0, структурированного RESULT нет. Без этой проверки pipeline
-        // получает status=default и идёт дальше, а стейдж фактически не выполнен
-        // (см. incident 2026-04-22: create-report/analyze-report в PulseProxy).
+        // получает status=default и идёт дальше, а стейдж фактически не выполнен.
         // Маппим в ошибку, чтобы executeWithFallback переключился на следующего агента.
         // Считается только строка, которую kilo 7.7.9 печатает перед каждым авто-отказом
         // (и для субагента): «permission requested: <что> (<шаблоны>); auto-rejecting».
-        // Прежний шаблон искал ещё «permission denied» и «rejected permission» где угодно
-        // в stderr и ловил текст скила execute-task, который рельсы печатают там на шагах:
-        // 2026-09-25 PulseProxy kilo-free и gpt-luna получили 6 и 7 «отказов», которых не было.
+        // Широкий шаблон («permission denied», «rejected permission» где угодно в stderr)
+        // ловил текст скила execute-task, который рельсы печатают там на шагах, и давал
+        // ложные «отказы» — поэтому ищем только эту строку.
         if (code === 0 && !result.parsed && stderr) {
           const rejectMatches = stderr.match(/permission requested: [^\n]*; auto-rejecting/gi) || [];
           if (rejectMatches.length > 0) {
@@ -3659,17 +3770,16 @@ class StageExecutor {
    * запуска, — а промпт — только вердикт «числишься в <узел>, переходы оттуда», всегда через
    * stdin: исходный промпт и сделанное агент помнит. Иначе повтор — новая сессия с новым
    * `run`, и вердикт говорит правду: рельсы новой сессии — с `start`, сделанное — в
-   * файлах; исходный промпт идёт после вердикта. Прогон PulseProxy 2026-09-27: новой
-   * сессии говорили «Числишься в <узел прошлой сессии>», и повторы claude-haiku либо
-   * проходили граф и работу заново, либо печатали команду goto текстом без единого
-   * вызова инструмента.
+   * файлах; исходный промпт идёт после вердикта. Если новой сессии назвать узел прошлой
+   * сессии, повторы либо проходят граф и работу заново, либо печатают команду goto
+   * текстом без единого вызова инструмента — поэтому вердикт новой сессии называет `start`.
    *
    * Состояния с этим `run` нет, а хуки рельс для хоста агента на месте
    * (railsHost/railsHooksPresent) — агент не вызвал ни одного инструмента под
    * рельсами: это нарушение, повтор в новой сессии с вердиктом «пройди граф от
-   * start». Прежде такой ответ проходил молча (прогон deep-research 2026-09-25:
-   * gpt-luna без единого вызова инструмента). Хуков нет или хост не claude/kilo —
-   * повтором не обосновать: предупреждение в лог, ответ как есть.
+   * start». Без этой ветки такой ответ проходит молча: агент отработал без единого
+   * вызова инструмента. Хуков нет или хост не claude/kilo — повтором не обосновать:
+   * предупреждение в лог, ответ как есть.
    *
    * Ответ повтора тоже проходит output-check (`railsRetryVerdict` результата). Нарушение
    * и повтор без состояния — предупреждение в лог, а ответ всё равно отдаётся стадии:
@@ -3682,10 +3792,8 @@ class StageExecutor {
    * `fallbackParse` дал бы ему `default` (успех) по словам текста. Такой ответ — сбой
    * запуска: ошибка с кодом `RAILS_INCOMPLETE` и кодом выхода -1, как у PERMISSION_REJECTED.
    * executeWithFallback пишет запуск статусом `error` и берёт следующего агента стадии,
-   * если файлы снимка не менялись, иначе стадия уходит в goto.error. Прогон PulseProxy
-   * 2026-09-28: бесплатная модель остановила DOCS-10 в узле P3R3 без итога, стадия
-   * получила `default`, запуск в истории тикета — `ok`, недоделку поймали только
-   * проверки DoD.
+   * если файлы снимка не менялись, иначе стадия уходит в goto.error. Иначе стадия получила
+   * бы `default`, запуск в истории тикета — `ok`, и недоделку поймали бы только проверки DoD.
    *
    * `bannedCheck` — проверка ответивших моделей kilo-агента по запретам журнала
    * запусков (_callAgentTracked): и у первого вызова, и у повтора рельс.
@@ -3704,8 +3812,17 @@ class StageExecutor {
     const result = await this._callAgentTracked(agent, prompt, stageId, skillId, agentId, railsEnv, { bannedCheck });
 
     // Состояние ищется до проверки живого rails.yaml: удаление живого файла не
-    // отключает проверку закреплённого рантайма запуска (ревью 2026-10-05).
-    const state = findRailsStateByRun(this.projectRoot, runId);
+    // отключает проверку закреплённого рантайма запуска.
+    const resolution = resolveRailsStateByRun(this.projectRoot, runId);
+    if (resolution.status === 'ambiguous') {
+      const error = new Error(`rails: ambiguous session state for run ${runId}; output-check stopped without retry`);
+      error.code = 'RAILS_STATE_AMBIGUOUS';
+      error.exitCode = -1;
+      error.stdout = result.output || '';
+      error.stderr = result.stderr || '';
+      throw error;
+    }
+    const state = resolution.state;
     if (!state && !railsYamlExists(this.projectRoot, skillId)) return result;
 
     const skillDir = path.join(this.projectRoot, '.workflow', 'src', 'skills', skillId);
@@ -3713,8 +3830,8 @@ class StageExecutor {
     if (state) {
       // Конфиг — из закреплённого рантайма запуска: живой rails.yaml могли изменить
       // во время работы агента, а полномочия хуков остались прежними — итог обязан
-      // проверяться тем же набором правил (ревью 2026-10-05). Повреждённое
-      // закрепление — не «пропустить проверку»: остановка с кодом, как RAILS_INCOMPLETE.
+      // проверяться тем же набором правил. Повреждённое закрепление — не «пропустить
+      // проверку»: остановка с кодом, как RAILS_INCOMPLETE.
       try {
         ({ config } = loadSkillRuntime(this.projectRoot, skillId, state));
       } catch (err) {
@@ -3738,9 +3855,13 @@ class StageExecutor {
     if (!state) {
       const host = railsHost(agent);
       const agentCwd = path.resolve(this.projectRoot, agent.workdir || '.');
-      if (!host || !railsHooksPresent(host, agentCwd)) {
+      // Хуки ищутся в окружении запускаемого агента, а не раннера: каталог агента pi
+      // (PI_CODING_AGENT_DIR) бывает задан только в машинном agent.env — его получает
+      // агент (buildAgentEnv, lib/agent-env.mjs), окружение раннера его не видит.
+      const agentEnv = buildAgentEnv(process.env, null, { cwd: agentCwd });
+      if (!host || !railsHooksPresent(host, agentCwd, { env: agentEnv })) {
         if (this.logger) {
-          const whose = host ? `(${host}) в ${agentCwd}` : '(хост не claude/kilo)';
+          const whose = host ? `(${host}) в ${agentCwd}` : '(хост не claude/kilo/pi)';
           this.logger.warn(`rails: состояния сессии нет, а хуков рельс для агента ${whose} нет — output-check не выполнен`, stageId);
         }
         return result;
@@ -3750,10 +3871,10 @@ class StageExecutor {
       this.checkDurableHandoff(state, result);
       verdict = checkRailsOutput(result.output || '', config, state);
       if (verdict.ok && !verdict.outcome) {
-        // Проверенный финальный ответ в терминале — подтверждение завершения
-        // (дефект 2026-10-06: положительный результат проверки не сохранялся,
-        // и завершённая сессия не могла выйти из роли штатно). recordCompletion
-        // сам проверяет терминал/приостановку/целостность runtime и не бросает.
+        // Проверенный финальный ответ в терминале — подтверждение завершения: без
+        // сохранения положительного результата проверки завершённая сессия не могла
+        // бы выйти из роли штатно. recordCompletion сам проверяет
+        // терминал/приостановку/целостность runtime и не бросает.
         const completion = recordCompletion({ root: this.projectRoot, state, source: 'runner', answer: result.output || '' });
         if (!completion.ok) {
           this.checkDurableHandoff(state, result);
@@ -3782,8 +3903,8 @@ class StageExecutor {
       }
       if (verdict.ok && verdict.outcome) {
         // Приостановка RAILS_OUTCOME (blocked/needs_user) — не успех и не повод для
-        // повтора или передачи другому исполнителю: работа ждёт владельца
-        // (дизайн 2026-10-05, ревью: прежде возвращалась стадии как успешный ответ).
+        // повтора или передачи другому исполнителю: работа ждёт владельца, иначе такой
+        // ответ вернулся бы стадии как успешный.
         if (this.logger) {
           this.logger.warn(`rails: агент приостановил работу (${verdict.outcome}) — без повтора, стадия завершается ошибкой ожидания`, stageId);
         }
@@ -3811,7 +3932,7 @@ class StageExecutor {
       // Промпт — всегда через stdin (prompt_stdin): из терминального узла переходов нет, вердикт —
       // одна строка, а однострочный промпт _callAgentOnce кладёт в командную строку, на Windows —
       // через cmd.exe без кавычек, и шаблоны rails.yaml из вердикта (`|`, `>`, `^`) cmd.exe
-      // исполнял как свой синтаксис: повтор падал, не запустив хост (ревью 2026-09-27).
+      // исполнял как свой синтаксис: повтор падал, не запустив хост.
       // Продолжение с промптом через stdin проверено запуском (resumeSessionArgs).
       retryAgent = { ...agent, args: resumeArgs, prompt_stdin: true };
       retryRun = runId;
@@ -3847,9 +3968,16 @@ class StageExecutor {
     // Ответ повтора — через тот же output-check. Третьего запуска нет: нарушение — в лог,
     // ответ — стадии, ответ без ---RESULT--- — сбой запуска (почему так — в JSDoc выше).
     // Та же сессия — её собственное состояние: за повтор у запуска могла появиться сессия субагента.
-    const retryState = resumeArgs
-      ? railsStatesByRun(this.projectRoot, retryRun).find((s) => s.session === state.session) ?? null
-      : findRailsStateByRun(this.projectRoot, retryRun);
+    const retryResolution = resolveRailsStateByRun(this.projectRoot, retryRun, resumeArgs ? state.session : undefined);
+    if (retryResolution.status === 'ambiguous') {
+      const error = new Error(`rails: ambiguous session state for retry run ${retryRun}; output-check stopped`);
+      error.code = 'RAILS_STATE_AMBIGUOUS';
+      error.exitCode = -1;
+      error.stdout = retryResult.output || '';
+      error.stderr = retryResult.stderr || '';
+      throw error;
+    }
+    const retryState = retryResolution.state;
     if (retryState) {
       this.checkDurableHandoff(retryState, retryResult);
       try {
@@ -3869,8 +3997,8 @@ class StageExecutor {
     retryResult.railsRetryVerdict = retryVerdict;
     if (retryVerdict.ok && !retryVerdict.outcome) {
       // Проверенный ответ повтора в терминале — подтверждение завершения, как и
-      // у первого ответа: без него штатный выход этой сессии недоступен
-      // (ревью 2026-10-06, major; kilo-плагин Stop-пути не имеет).
+      // у первого ответа: без него штатный выход этой сессии недоступен —
+      // kilo-плагин Stop-пути не имеет.
       if (retryState) {
         const completion = recordCompletion({ root: this.projectRoot, state: retryState, source: 'runner', answer: retryResult.output || '' });
         if (!completion.ok) {
@@ -3900,7 +4028,7 @@ class StageExecutor {
       throw error;
     }
     if (retryVerdict.ok && retryVerdict.outcome) {
-      // Приостановка и в ответе повтора — не успех (ревью 2026-10-05, второй раунд).
+      // Приостановка и в ответе повтора — не успех.
       retryResult.railsSuspended = retryVerdict.outcome;
       if (this.logger) {
         this.logger.warn(`rails: повтор приостановил работу (${retryVerdict.outcome}) — без новых запусков`, stageId);
@@ -3928,6 +4056,11 @@ class StageExecutor {
       if (retryResult.kiloModels) err.kiloModels = retryResult.kiloModels;
       throw err;
     }
+    // Ответ отдаётся стадии как обычно (маршрут — по переходам), но признак кладётся в
+    // результат: иначе приём ответа, дважды не прошедшего процедуру скила, виден только
+    // строкой лога и не доходит ни до журнала запусков, ни до статистики. Поле ведёт
+    // _closeAgentRun (rails_unverified события run) и счётчик runStatsTable.
+    retryResult.railsUnverified = true;
     if (this.logger) this.logger.warn(`rails: ${what} — ответ принят без процедуры скила, дальше — по переходам стадии`, stageId);
     return retryResult;
   }
@@ -4072,12 +4205,12 @@ class StageExecutor {
             }
             return { label: null, models: null, last: null };
           }
-          // Сразу после снятия процесса база kilo может не отдать шаги: живой прогон
-          // 2026-09-27 — опрос видел модель, а чтение через 200 мс после taskkill дало
-          // «модели нет», хотя шаг в базе есть (прочитан позже). Пока чтение не удалось
-          // (null: база не читается или сессии нет) или не дало того, что уже видел
-          // опрос, — несколько повторов, затем прочитанное опросом. Цена — до 0,9 с на
-          // запуске kilo, упавшем до создания сессии.
+          // Сразу после снятия процесса база kilo может не отдать шаги: чтение через
+          // 200 мс после taskkill даёт «модели нет», хотя шаг в базе есть (прочитан
+          // позже), — при этом опрос уже видел модель. Пока чтение не удалось (null: база
+          // не читается или сессии нет) или не дало того, что уже видел опрос, — несколько
+          // повторов, затем прочитанное опросом. Цена — до 0,9 с на запуске kilo,
+          // упавшем до создания сессии.
           const behindPoll = (r) => r === null || (!r.models.length && Boolean(polled?.models?.length));
           let run = await readKiloRun(dbPath, title);
           for (let i = 0; behindPoll(run) && i < KILO_FINAL_READ_RETRIES; i++) {
@@ -4327,19 +4460,17 @@ class PipelineRunner {
 
       const content = JSON.stringify(approvalData, null, 2);
 
-      // Появление approval-файла обязано быть атомарным для читателей. Раньше
-      // здесь были open(filePath, 'wx') + write: флаг 'wx' даёт эксклюзивное
-      // создание, но между open и write файл лежит в каталоге нулевой длины.
-      // Кто прочитал его в этот момент — получил пустую строку и
-      // «Unexpected end of JSON input»: раннер в polling-цикле падал в
+      // Появление approval-файла обязано быть атомарным для читателей. Флаг 'wx' у
+      // open даёт эксклюзивное создание, но между open и write файл лежит в каталоге
+      // нулевой длины. Кто прочитал его в этот момент — получил пустую строку и
+      // «Unexpected end of JSON input»: раннер в polling-цикле падает в
       // goto.error по «corrupt approval file», а хук move-ticket молча
-      // пропускал auto-approve уже принятого человеком решения. Так упал
-      // QA-37-003 в реальном прогоне набора.
+      // пропускает auto-approve уже принятого человеком решения.
       //
       // Поэтому JSON пишется целиком во временный файл, а в каталог approvals
       // попадает одним hard link'ом: читатель видит либо отсутствие файла,
       // либо весь JSON. link заодно сохраняет эксклюзивность — на уже
-      // существующем пути он падает с EEXIST (проверено запуском на NTFS),
+      // существующем пути он падает с EEXIST (на NTFS),
       // тогда как rename молча затёр бы чужое решение.
       //
       // Временный файл лежит на уровень выше каталога approvals: том тот же
@@ -4347,7 +4478,7 @@ class PipelineRunner {
       // видит — ни шаблон хука ^<ticket>_manual-gate-.*_\d+\.json$, ни
       // readdirSync(approvals)[0] в тестах. Имя не содержит step_id намеренно:
       // id тикета бывает длиной 256 символов (src/tests/edge-ticket-id-long),
-      // а компонент пути длиннее 255 на NTFS не создаётся (проверено запуском).
+      // а компонент пути длиннее 255 на NTFS не создаётся.
       const workflowDir = path.resolve(dir, '..');
       const tmpPath = path.join(
         workflowDir,
@@ -4820,8 +4951,7 @@ class PipelineRunner {
           }
 
           // Прогон, дошедший до end через обработчик ошибки, не завершён
-          // успешно: без endedBy итог читался бы как «Pipeline completed»
-          // (2026-10-04, ревью человеческого маршрута).
+          // успешно: без endedBy итог читался бы как «Pipeline completed».
           if (errorTarget === 'end') {
             this.endedBy = { stage: failedStage, status: 'error', data: { error: err.message } };
           }
@@ -5044,9 +5174,8 @@ class PipelineRunner {
    * plan_id пуст (запуск без --plan), а report_id есть — копии достаётся план отчёта
    * (related_plan, reportPlanId). Только копии: план в контексте раннера сузил бы выбор и
    * проверку тикетов до конца запуска (pick-next-task и check-conditions фильтруют по
-   * plan_id). 2026-09-29/30 decompose-gaps получала вход без plan_id, которого требуют
-   * узлы скила P0R2/P0Q1 (ListeningGlass REPORT-001, PulseProxy REPORT-031): план агент
-   * находил сам, а по ветке «нет» пробелы потерялись бы.
+   * plan_id). Без этого стадии, которой plan_id нужен (узлы скила P0R2/P0Q1), получали бы
+   * вход без него: план агент находил бы сам, а по ветке «нет» пробелы потерялись бы.
    */
   stageContext(stageId, stage) {
     if (stage?.scope !== 'plan') return this.context;
@@ -5144,7 +5273,7 @@ class PipelineRunner {
 
   /**
    * Событие `verify` или `review` журнала запусков по результату стадии
-   * (src/lib/agent-runs.mjs, PLAN-003). Контроль артефактов — поля его блока RESULT;
+   * (src/lib/agent-runs.mjs). Контроль артефактов — поля его блока RESULT;
    * стадия, упавшая без RESULT, события не пишет. Ревью — статус, как вернула стадия,
    * агент и модель: у обмена model_io — из ответа модели, у стадии со скилом — агент и
    * ключ модели запуска. Сбой записи — WARN, ход пайплайна не меняется.
@@ -5390,8 +5519,7 @@ function countModelPlaceholders(args) {
 /**
  * Пул моделей — агент с командой и полем `models`: участники — модели из вывода
  * `models.list`, чей полный id совпал с `models.match`; полный id участника
- * встаёт на место `{model}` в `args` (PLAN-004, «Запись пула в pipeline.yaml»,
- * проверки 2–9).
+ * встаёт на место `{model}` в `args`.
  */
 function validateModelPool(agentId, agent, agents, errors) {
   const placeholders = countModelPlaceholders(agent.args);
@@ -5490,8 +5618,8 @@ function validateAgentEntry(agentId, agent, errors, agents = {}) {
       errors.push(`Agent "${agentId}" missing required field: command`);
     }
     // Опечатка молча выключила бы проверку «ответ без единого вызова инструмента» (railsHost).
-    if (agent.rails_host !== undefined && !['kilo', 'claude'].includes(agent.rails_host)) {
-      errors.push(`Agent "${agentId}" has invalid rails_host: ${agent.rails_host} (expected: kilo, claude)`);
+    if (agent.rails_host !== undefined && !['kilo', 'claude', 'pi'].includes(agent.rails_host)) {
+      errors.push(`Agent "${agentId}" has invalid rails_host: ${agent.rails_host} (expected: kilo, claude, pi)`);
     }
     if (agent.prompt_stdin !== undefined && typeof agent.prompt_stdin !== 'boolean') {
       errors.push(`Agent "${agentId}" has invalid prompt_stdin: must be true or false`);
@@ -5613,10 +5741,10 @@ function validateHttpAgentPlacement(pipeline, errors) {
 }
 
 /**
- * Пул моделей — только место в списке агентов стадии (PLAN-004, проверки 10–11):
+ * Пул моделей — только место в списке агентов стадии:
  * - одиночный `stage.agent` запускает запись агента напрямую, минуя выбор
  *   участника (`execute`, ветка `stage.agent && !stage.agents`) — `{model}` ушёл бы в команду;
- * - на стадии с `model_io` пул запрещён решением В9 плана. Списки такой стадии —
+ * - на стадии с `model_io` пул запрещён. Списки такой стадии —
  *   `agents`, `agents_by_type.*.agents`, а без своего `agents` — ещё и
  *   `default_agents` (источники списка — `resolveAgent`).
  */
@@ -6017,10 +6145,9 @@ async function runPipeline(argv = process.argv.slice(2)) {
   // не выходит: его отрабатывает обработчик раннера (setupGracefulShutdown) —
   // running = false и killCurrentChild, стадия проходит ветку остановки (событие run
   // со статусом aborted, снятие записи открытого запуска), цикл выходит, finally
-  // снимает маркер, процесс выходит с кодом 130. Прежде этот обработчик выходил
-  // process.exit(130) сразу: он зарегистрирован раньше обработчика раннера, и ветки
-  // остановки не исполнялись, а агент оставался работать без раннера (запуски
-  // 2026-09-27, PLAN-003). Одной перестановки мало: слушатель с process.exit на том же
+  // снимает маркер, процесс выходит с кодом 130. Если бы обработчик выходил
+  // process.exit(130) сразу, ветки остановки не исполнялись бы, а агент оставался бы
+  // работать без раннера. Одной перестановки мало: слушатель с process.exit на том же
   // сигнале вывел бы процесс в том же emit, до закрытия агента.
   // Повторный сигнал во время мягкой остановки (эскалация MCP abort_pipeline, второй
   // Ctrl+C) — жёсткое снятие агента и выход 130 без ожидания.
@@ -6034,14 +6161,14 @@ async function runPipeline(argv = process.argv.slice(2)) {
   // сигнал во время мягкой остановки, process.exit и опустевший цикл событий до конца
   // runPipeline. Запуск агента, открытый в этот момент, закрывается событием `run` со
   // статусом `aborted` и `interrupted: true` сразу (closeInterruptedRun), а не следующим
-  // стартом с временем этого старта. Прежде такой раннер не оставлял в логе ни строки, а
-  // stderr раннера, запущенного из workflow-mcp, уходит в 'ignore': 2026-09-30 падение,
-  // жёсткое снятие и потерю родителя по следам различить было нельзя (PulseProxy
-  // 18-55-50, ListeningGlass 18-53-24 и 08-25-19). Снятие без обработчика (`taskkill /F`,
-  // SIGKILL) строки по-прежнему не оставляет — теперь его и отличает её отсутствие.
+  // стартом с временем этого старта. Без этой строки упавший раннер не оставлял бы в
+  // логе ни строки, а stderr раннера, запущенного из workflow-mcp, уходит в 'ignore':
+  // падение, жёсткое снятие и потерю родителя по следам различить было бы нельзя.
+  // Снятие без обработчика (`taskkill /F`, SIGKILL) строки по-прежнему не оставляет —
+  // теперь его и отличает её отсутствие.
   // Lock при падении не снимается: пока процесса нет, а lock лежит, workflow-mcp
   // показывает прогон `stale`, а детектор crashed (мёртвый pid при свежем логе) видит
-  // строку падения как свежую запись; снимает lock следующий старт, как прежде.
+  // строку падения как свежую запись; снимает lock следующий старт.
   let finished = false;
   let deathLogged = false;
   let deathLogger = null;

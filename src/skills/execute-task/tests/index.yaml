@@ -162,3 +162,8 @@ cases:
     origin_chg: ["ad-hoc-2026-10-01-check-stages-read-only"]
     tags: [rails, stage-actions, dod-fill, regression-guard]
     severity: high
+  - id: TC-EXECUTE-TASK-031
+    file: cases/TC-EXECUTE-TASK-031-required-inputs.yaml
+    origin_chg: []
+    tags: [required-inputs, parent-plan, regression-guard]
+    severity: high

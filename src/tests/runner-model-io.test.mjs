@@ -106,6 +106,13 @@ if (lines[0] === 'sleep') {
 console.log('---RESULT---\\n' + lines.join('\\n') + '\\nreason: mock judge\\n---RESULT---');
 `;
 
+// Судья с заданным обоснованием: балл 4 и строка reason как есть. На перегрузке
+// провайдера обёртка судьи собирает reason из хвоста своего вывода (kilo-judge.js),
+// и туда попадает строка лога о разрыве потока — балл есть, обоснования нет.
+const REASON_JUDGE_SCRIPT = `const reason = process.argv[2] ?? '';
+console.log('---RESULT---\\nscore: 4\\nconfidence: 0.9\\nreason: ' + reason + '\\n---RESULT---');
+`;
+
 const FIVE_LEVELS = ['уровень 1', 'уровень 2', 'уровень 3', 'уровень 4', 'уровень 5'];
 const RUBRIC_TABLE = FIVE_LEVELS.map((level, i) => `| ${i + 1} | ${level} |`).join('\n');
 
@@ -118,6 +125,7 @@ function makeProject() {
   writeFileSync(join(root, 'scripts', 'apply.mjs'), APPLY_SCRIPT);
   writeFileSync(join(root, 'scripts', 'cli-agent.mjs'), CLI_AGENT_SCRIPT);
   writeFileSync(join(root, 'scripts', 'judge-agent.mjs'), JUDGE_AGENT_SCRIPT);
+  writeFileSync(join(root, 'scripts', 'reason-judge.mjs'), REASON_JUDGE_SCRIPT);
   return root;
 }
 
@@ -517,6 +525,64 @@ console.log('---RESULT---\\nscore: ' + score + '\\nconfidence: 0.9\\nreason: scr
     assert.equal(isHealthy(root, 'judge-cli'), true);
   });
 
+  // Провайдер отдал балл, но обоснование — строка его сбоя: оценка по существу не
+  // вынесена, вердиктом она быть не должна. Путь — как у ошибки модели (класс server):
+  // агент помечается, оценку продолжает давать следующий судья, а не эта запись.
+  it('обоснование с текстом сбоя провайдера — не вердикт: status error (server), агент помечен', async () => {
+    const root = makeProject();
+    const streamError = 'timestamp=2026-09-27T11:40:25.237Z level=ERROR message="stream error" '
+      + 'providerID=router error.error="AI_APICallError: The service may be temporarily overloaded"';
+    const config = makeConfig(
+      { 'judge-cli': { command: 'node', args: ['scripts/reason-judge.mjs', streamError], capabilities: ['text'] } },
+      ['judge-cli'],
+      { options: { levels: 5, pass_level: 4 } }
+    );
+
+    const { result } = await runStage(root, config);
+
+    assert.equal(result.status, 'error');
+    assert.equal(result.result.error_class, 'server');
+    assert.match(result.result.error, /provider error/);
+    assert.deepEqual(modelIoFiles(root), [], 'оценка не записывается');
+    assert.ok(!existsSync(join(root, '.workflow', 'tmp', 'apply-env.json')), 'вердикт не выносится');
+    assert.equal(isHealthy(root, 'judge-cli'), false, 'сбой провайдера помечает агента');
+  });
+
+  it('то же обоснование содержательно — вердикт по ответу судьи с его reason', async () => {
+    const root = makeProject();
+    const reason = 'пункт подтверждён диффом и логом проверки';
+    const config = makeConfig(
+      { 'judge-cli': { command: 'node', args: ['scripts/reason-judge.mjs', reason], capabilities: ['text'] } },
+      ['judge-cli'],
+      { options: { levels: 5, pass_level: 4 } }
+    );
+
+    const { result } = await runStage(root, config);
+
+    assert.equal(result.status, 'passed');
+    assert.equal(savedResponse(root).answers['dod-1'].reason, reason);
+    assert.equal(isHealthy(root, 'judge-cli'), true);
+  });
+
+  it('сбой провайдера в обосновании первого судьи — оценку даёт следующий судья, вердикт его', async () => {
+    const root = makeProject();
+    const streamError = 'timestamp=2026-09-27T11:40:25.237Z level=ERROR message="stream error" '
+      + 'error.error="AI_APICallError: The service may be temporarily overloaded"';
+    const judge = (reason) => ({ command: 'node', args: ['scripts/reason-judge.mjs', reason], capabilities: ['text'] });
+    const config = makeConfig(
+      { 'judge-bad': judge(streamError), 'judge-ok': judge('пункт подтверждён диффом') },
+      ['judge-bad', 'judge-ok'],
+      { options: { levels: 5, pass_level: 4 } }
+    );
+
+    const { result } = await runStage(root, config);
+
+    assert.equal(result.status, 'passed');
+    assert.equal(result.modelIo.agent, 'judge-ok', 'оценка испорченного ответа вердиктом не стала');
+    assert.equal(savedResponse(root).answers['dod-1'].reason, 'пункт подтверждён диффом');
+    assert.equal(isHealthy(root, 'judge-bad'), false);
+  });
+
   it('вопрос с тремя уровнями — bad_request до запуска агента', async () => {
     const root = makeProject();
     const config = makeConfig({ 'judge-cli': judgeAgent('score: 3') }, ['judge-cli'], { options: { levels: 3 } });
@@ -906,31 +972,39 @@ describe('runner: неуверенная оценка стадии model_io — 
     assert.equal(result.modelIo.response_file, `.workflow/state/model-io/${modelIoFiles(root)[0]}`);
   });
 
-  it('переоценка без вердикта — ответ второго агента без балла: вердикт по ответу первого, без increment-review-errors', async () => {
+  it('судья неуверен, переоценка не состоялась (ответ второго агента без балла) — ошибка ревью, а не failed', async () => {
     const root = uncertainProject();
     const noScore = { 'judge-a': judgeAgent('score: 2'), 'judge-b': judgeAgent('без балла') };
 
     const { result, logger } = await runStage(root, makeConfig(noScore, ['judge-a', 'judge-b'], options));
 
-    assert.equal(result.status, 'failed');
-    assert.equal(result.agentId, 'judge-a');
-    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }, { agent: 'judge-a', retry: null }]);
-    assert.ok(logger.lines.some((l) => l.includes('re-review by "judge-b" gave status=error — verdict by "judge-a"')), logger.lines.join('\n'));
+    // «Неуверен» не превращается в «не прошло»: вердикта нет, стадия уходит путём
+    // сбоя ревью (goto.error → increment-review-errors).
+    assert.equal(result.status, 'error');
+    assert.equal(result.result.error_class, 're_review_failed');
+    assert.equal(result.result.uncertain_agent, 'judge-a');
+    assert.equal(result.agentId, 'judge-a', 'событие ревью — по неуверенному судье');
+    // Вердикт по неуверенному ответу не выносится: повторного apply нет.
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }]);
+    assert.ok(logger.lines.some((l) => l.includes('re-review by "judge-b"') && l.includes('ревью не состоялось')),
+      logger.lines.join('\n'));
   });
 
-  it('переоценка без вердикта — процесс второго агента упал: вердикт по ответу первого', async () => {
+  it('судья неуверен, переоценка упала (процесс второго агента) — ошибка ревью, а не failed', async () => {
     const root = uncertainProject();
     writeFileSync(join(root, 'scripts', 'crash-agent.mjs'), 'process.exit(1);\n');
     const crash = { 'judge-a': judgeAgent('score: 2'), 'judge-b': { command: 'node', args: ['scripts/crash-agent.mjs'], capabilities: ['text'] } };
 
     const { result } = await runStage(root, makeConfig(crash, ['judge-a', 'judge-b'], options));
 
-    assert.equal(result.status, 'failed');
+    assert.equal(result.status, 'error');
+    assert.equal(result.result.error_class, 're_review_failed');
+    assert.equal(result.result.uncertain_agent, 'judge-a');
     assert.equal(result.agentId, 'judge-a');
-    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }, { agent: 'judge-a', retry: null }]);
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }], 'вердикт по неуверенному ответу не выносится');
   });
 
-  it('переоценка без вердикта — второй агент упал без изменений файлов и агентов не осталось: вердикт по ответу первого', async () => {
+  it('судья неуверен, переоценка упала без изменений файлов и агентов не осталось — ошибка ревью', async () => {
     const root = uncertainProject();
     writeFileSync(join(root, 'scripts', 'crash-agent.mjs'), 'process.exit(1);\n');
     const crash = { 'judge-a': judgeAgent('score: 2'), 'judge-b': { command: 'node', args: ['scripts/crash-agent.mjs'], capabilities: ['text'] } };
@@ -940,13 +1014,14 @@ describe('runner: неуверенная оценка стадии model_io — 
 
     const { result, logger } = await runStage(root, config);
 
-    assert.equal(result.status, 'failed');
-    assert.equal(result.agentId, 'judge-a');
-    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }, { agent: 'judge-a', retry: null }]);
+    assert.equal(result.status, 'error');
+    assert.equal(result.result.error_class, 're_review_failed');
+    assert.equal(result.result.uncertain_agent, 'judge-a');
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }]);
     // Крах шага модели — graceful-ошибка обмена (класс server, пометка unhealthy);
-    // агентов не осталось — вердикт по неуверенному ответу первого.
+    // агентов не осталось — переоценка не состоялась, вердикта нет.
     assert.ok(logger.lines.some((l) => l.includes('agent judge-b model error server — falling back in-stage')), logger.lines.join('\n'));
-    assert.ok(logger.lines.some((l) => l.includes('verdict without re-review: status=failed')), logger.lines.join('\n'));
+    assert.ok(logger.lines.some((l) => l.includes('ревью не состоялось, вердикта нет')), logger.lines.join('\n'));
   });
 
   it('второй агент списка не проходит по способностям (пункт visual, текстовый агент) — флага переоценки нет', async () => {
@@ -1002,7 +1077,7 @@ describe('runner: неуверенная оценка стадии model_io — 
     assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }], 'вердикта по неуверенному ответу нет');
   });
 
-  it('переоценка без вердикта — apply второго агента вернул не passed и не failed: вердикт по ответу первого', async () => {
+  it('судья неуверен, переоценка вернула не passed и не failed — ошибка ревью, а не failed', async () => {
     const root = uncertainProject();
     writeFileSync(join(root, 'scripts', 'apply.mjs'), UNCERTAIN_APPLY_SCRIPT.replace(
       "const status = low ?",
@@ -1010,22 +1085,27 @@ describe('runner: неуверенная оценка стадии model_io — 
 
     const { result, logger } = await runStage(root, makeConfig(agents, ['judge-a', 'judge-b'], options));
 
-    assert.equal(result.status, 'failed');
-    assert.equal(result.agentId, 'judge-a');
-    assert.ok(logger.lines.some((l) => l.includes('re-review by "judge-b" gave status=skipped')), logger.lines.join('\n'));
+    assert.equal(result.status, 'error');
+    assert.equal(result.result.error_class, 're_review_failed');
+    assert.equal(result.result.uncertain_agent, 'judge-a');
+    assert.ok(logger.lines.some((l) => l.includes('re-review by "judge-b" gave status=skipped')
+      && l.includes('ревью не состоялось')), logger.lines.join('\n'));
   });
 
-  it('три агента: второй тоже неуверен, третий без балла — вердикт по последнему неуверенному ответу', async () => {
+  it('три агента: первый и второй неуверены, третий без балла — ошибка ревью по последнему неуверенному ответу', async () => {
     const root = uncertainProject();
     const three = { 'judge-a': judgeAgent('score: 2'), 'judge-b': judgeAgent('score: 3'), 'judge-c': judgeAgent('без балла') };
 
     const { result } = await runStage(root, makeConfig(three, ['judge-a', 'judge-b', 'judge-c'], options));
 
-    assert.equal(result.status, 'failed');
-    assert.equal(result.agentId, 'judge-b');
+    assert.equal(result.status, 'error');
+    assert.equal(result.result.error_class, 're_review_failed');
+    assert.equal(result.agentId, 'judge-b', 'вердикт по последнему неуверенному судье');
+    assert.equal(result.result.uncertain_agent, 'judge-b');
     assert.equal(result.modelIo.agent, 'judge-b');
+    // Третий судья вердикта не дал — повторный apply по ответу второго не запускается.
     assert.deepEqual(applyCalls(root), [
-      { agent: 'judge-a', retry: '1' }, { agent: 'judge-b', retry: '1' }, { agent: 'judge-b', retry: null },
+      { agent: 'judge-a', retry: '1' }, { agent: 'judge-b', retry: '1' },
     ]);
   });
 
@@ -1066,15 +1146,25 @@ describe('runner: неуверенная оценка стадии model_io — 
 
   it('остановка пайплайна во время вердикта по неуверенному ответу — стадия прерывается, а не apply_failed', async () => {
     const root = uncertainProject();
-    // apply без флага (вердикт по ответу первого агента) долго думает — его снимает остановка.
+    // Вердикт по неуверенному ответу выносит apply без флага — но только когда
+    // переоценивать некого: второго судью убирает подмена resolveAgent. Этот apply
+    // долго думает, его снимает остановка.
     writeFileSync(join(root, 'scripts', 'apply.mjs'), UNCERTAIN_APPLY_SCRIPT.replace(
       "const levels = request.questions",
       "if (retry === null && process.env.WORKFLOW_MODEL_AGENT === 'judge-a') await new Promise((resolve) => setTimeout(resolve, 15000));\nconst levels = request.questions"));
-    const noScore = { 'judge-a': judgeAgent('score: 2'), 'judge-b': judgeAgent('без балла') };
+    const agents2 = { 'judge-a': judgeAgent('score: 2'), 'judge-b': judgeAgent('score: 5') };
     let executor = null;
 
     const started = Date.now();
-    const stage = runStage(root, makeConfig(noScore, ['judge-a', 'judge-b'], options), {}, { onExecutor: (e) => { executor = e; } });
+    const stage = runStage(root, makeConfig(agents2, ['judge-a', 'judge-b'], options), {}, {
+      onExecutor: (e) => {
+        executor = e;
+        const resolve = e.resolveAgent.bind(e);
+        // После ответа первого агента второго не стало — переоценивать некого.
+        e.resolveAgent = (...args) => (applyCalls(root).length > 0
+          ? { blocked: 'all_unhealthy', reason: 'test' } : resolve(...args));
+      },
+    });
     for (let i = 0; i < 400 && applyCalls(root).length < 2; i++) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
@@ -1085,7 +1175,7 @@ describe('runner: неуверенная оценка стадии model_io — 
     assert.ok(Date.now() - started < 12000, 'apply снят остановкой, а не ожиданием');
   });
 
-  it('prepare следующего агента переписал файл запроса — вердикт по запросу неуверенного ответа, а не по чужому', async () => {
+  it('судья неуверен, prepare переоценки переписал файл запроса — ошибка ревью, вердикт по чужому запросу не выносится', async () => {
     const root = uncertainProject();
     // Запрос по одному пути, но зависит от агента: второму — два вопроса.
     writeFileSync(join(root, 'scripts', 'prepare.mjs'), PREPARE_SCRIPT.replace(
@@ -1095,11 +1185,57 @@ describe('runner: неуверенная оценка стадии model_io — 
 
     const { result } = await runStage(root, makeConfig(noScore, ['judge-a', 'judge-b'], options));
 
-    assert.equal(result.status, 'failed', JSON.stringify(result.result));
+    assert.equal(result.status, 'error', JSON.stringify(result.result));
+    assert.equal(result.result.error_class, 're_review_failed');
+    assert.equal(result.result.uncertain_agent, 'judge-a');
+    // Вердикта нет вовсе — ни по запросу второго агента, ни по чужому.
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }]);
+  });
+
+  // Граница дефекта: инфраструктурный отказ переоценки не превращает «неуверен» в
+  // «не прошло» (тикет отклонялся по вердикту, которого судья не выносил), а отказ
+  // живого судьи по существу остаётся отклонением.
+  it('регрессия (а): судья неуверен, переоценка упала — ошибка ревью, а не failed', async () => {
+    const root = uncertainProject();
+    writeFileSync(join(root, 'scripts', 'crash-agent.mjs'), 'process.exit(1);\n');
+    const crash = { 'judge-a': judgeAgent('score: 2'), 'judge-b': { command: 'node', args: ['scripts/crash-agent.mjs'], capabilities: ['text'] } };
+
+    const { result } = await runStage(root, makeConfig(crash, ['judge-a', 'judge-b'], options));
+
+    assert.equal(result.status, 'error', '«неуверен» не становится «не прошло»');
+    assert.equal(result.result.error_class, 're_review_failed');
+    assert.equal(result.result.uncertain_agent, 'judge-a');
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }]);
+  });
+
+  it('регрессия (б): судья неуверен, переоценка дала failed — вердикт failed', async () => {
+    const root = uncertainProject();
+    // Первому судье переоценивать есть кем (retry='1' — uncertain), второму — некем:
+    // его низкий балл становится уверенным провалом, и вердикт — его.
+    const two = { 'judge-a': judgeAgent('score: 2'), 'judge-b': judgeAgent('score: 3') };
+
+    const { result } = await runStage(root, makeConfig(two, ['judge-a', 'judge-b'], options));
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.agentId, 'judge-b');
+    assert.equal(result.result?.error_class, undefined, 'отказ по существу — не сбой ревью');
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }, { agent: 'judge-b', retry: null }]);
+  });
+
+  it('регрессия (в): первый судья сразу дал failed — вердикт failed, переоценки нет', async () => {
+    const root = uncertainProject();
+    // Второй судья есть, но первый ответил уверенным провалом: неуверенности нет,
+    // переоценка не запускается, вердикт — его failed.
+    writeFileSync(join(root, 'scripts', 'apply.mjs'), UNCERTAIN_APPLY_SCRIPT.replace(
+      "const status = low ? (retry === '1' ? 'uncertain' : 'failed') : 'passed';",
+      "const status = process.env.WORKFLOW_MODEL_AGENT === 'judge-a' ? 'failed' : (low ? 'uncertain' : 'passed');"));
+
+    const { result, logger } = await runStage(root, makeConfig(agents, ['judge-a', 'judge-b'], options));
+
+    assert.equal(result.status, 'failed');
     assert.equal(result.agentId, 'judge-a');
-    const copies = modelIoFiles(root).filter((name) => name.endsWith('.request.json'));
-    assert.equal(copies.length, 1, JSON.stringify(modelIoFiles(root)));
-    assert.equal(readJson(join(root, '.workflow', 'state', 'model-io', copies[0])).questions.length, 1, 'копия — запрос первого агента');
+    assert.deepEqual(applyCalls(root), [{ agent: 'judge-a', retry: '1' }]);
+    assert.ok(!logger.lines.some((l) => l.includes('REVIEW_UNCERTAIN')), logger.lines.join('\n'));
   });
 });
 
@@ -1157,7 +1293,7 @@ describe('runner: судья model_io — первый доступный из �
     assert.equal(result.agentId, 'judge-b');
   });
 
-  it('ошибка переоценки — сначала оставшиеся судьи, вердикт по неуверенному — когда никого', async () => {
+  it('ошибка переоценки — сначала оставшиеся судьи, пока вердикта нет', async () => {
     const root = uncertainProject();
     writeFileSync(join(root, 'scripts', 'error-agent.mjs'),
       "console.log('---RESULT---');\nconsole.log('status: error');\nprocess.exit(1);\n");

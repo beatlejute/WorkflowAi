@@ -3,14 +3,15 @@ import childProcess from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, unlinkSync, linkSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, unlinkSync, linkSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { performance } from 'node:perf_hooks';
 import { startState, saveState, loadState } from '../rails/state.mjs';
 import { loadSkillRuntime, decide } from '../rails/core.mjs';
 import { handleHookInput } from '../rails/claude-hook.mjs';
-import { acquireLifecycleLock, heldLifecycleLock, withLifecycleLock } from '../rails/lifecycle-lock.mjs';
+import { acquireLifecycleLock, heldLifecycleLock, withLifecycleLock, LIFECYCLE_LOCK_WAIT_MS } from '../rails/lifecycle-lock.mjs';
 import { essentialStateDigest, recordCompletion, verifyExit, performExit, grantPath, grantTemplate } from '../rails/completion.mjs';
 import { readJournal } from '../rails/journal.mjs';
 import { verifyHandoff, relinquish, readHandoff } from '../rails/handoff.mjs';
@@ -336,4 +337,83 @@ test('lifecycle lock fails closed when its directory cannot be created', () => {
 test('lifecycle lock rejects malformed session identifiers', () => {
   assert.throws(() => acquireLifecycleLock(tmpdir(), '../invalid'), /недопустимая сессия замка/);
 });
+
+// The rails path is synchronous, so a busy claim sleeps through Atomics.wait; the tests
+// poll a second process the same way instead of turning the event loop.
+const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
+function sleepSync(ms) { Atomics.wait(lockWaitBuffer, 0, 0, ms); }
+
+function lockFilePath(root, session) {
+  return join(root, '.workflow', 'state', 'rails', `.exit-lock-${session}`);
+}
+
+test('lifecycle lock waits out a claim released while waiting', () => fixture(({ root, state }) => {
+  const lockFile = lockFilePath(root, state.session);
+  writeFileSync(lockFile, '4242');
+  const script = `setTimeout(() => { try { require('node:fs').unlinkSync(${JSON.stringify(lockFile)}); } catch {} }, 120);`;
+  const child = spawn(process.execPath, ['-e', script], { stdio: 'ignore' });
+  try {
+    const started = Date.now();
+    assert.equal(withLifecycleLock(root, state.session, () => 'ran'), 'ran');
+    assert.ok(Date.now() - started < LIFECYCLE_LOCK_WAIT_MS, 'claim released inside the bound');
+    assert.equal(existsSync(lockFile), false, 'own claim released');
+  } finally { child.kill(); }
+}));
+
+test('lifecycle lock refuses an unreleased claim with the same text inside the bound', () => fixture(({ root, state }) => {
+  writeFileSync(lockFilePath(root, state.session), '4242');
+  const started = performance.now();
+  assert.throws(
+    () => withLifecycleLock(root, state.session, () => {}),
+    (error) => error.railsFailClosed === true
+      && /замок жизненного цикла занят \(pid 4242, /.test(error.message),
+  );
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed >= LIFECYCLE_LOCK_WAIT_MS, `waited ${elapsed}`);
+  assert.ok(elapsed <= LIFECYCLE_LOCK_WAIT_MS + 800, `waited ${elapsed}`);
+}));
+
+test('lifecycle lock wait ceiling uses monotonic time despite wall-clock jumps', () => fixture(({ root, state }) => {
+  writeFileSync(lockFilePath(root, state.session), '4242');
+  const originalNow = Date.now;
+  let clockReads = 0;
+  Date.now = () => {
+    clockReads += 1;
+    const now = originalNow();
+    return clockReads === 1 ? now : now + 60_000;
+  };
+  const started = performance.now();
+  try {
+    assert.throws(
+      () => withLifecycleLock(root, state.session, () => {}),
+      (error) => error.railsFailClosed === true
+        && /замок жизненного цикла занят \(pid 4242, /.test(error.message),
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed >= LIFECYCLE_LOCK_WAIT_MS, `waited ${elapsed}`);
+  assert.ok(elapsed <= LIFECYCLE_LOCK_WAIT_MS + 800, `waited ${elapsed}`);
+}));
+
+test('lifecycle lock waits out a live second process holding the claim', () => fixture(({ root, state }) => {
+  const lockUrl = new URL('../rails/lifecycle-lock.mjs', import.meta.url).href;
+  const lockFile = lockFilePath(root, state.session);
+  const script = `
+    import { withLifecycleLock } from ${JSON.stringify(lockUrl)};
+    withLifecycleLock(${JSON.stringify(root)}, ${JSON.stringify(state.session)}, () => {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+    });
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: 'ignore' });
+  try {
+    const deadline = Date.now() + 5000;
+    while (!existsSync(lockFile) && Date.now() < deadline) sleepSync(20);
+    assert.ok(existsSync(lockFile), 'second process holds the claim');
+    const started = Date.now();
+    assert.equal(withLifecycleLock(root, state.session, () => 'ran'), 'ran');
+    assert.ok(Date.now() - started < LIFECYCLE_LOCK_WAIT_MS, 'waited out the live holder');
+  } finally { child.kill(); }
+}));
 

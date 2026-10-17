@@ -1,0 +1,119 @@
+id: TC-EXECUTE-TASK-031
+title: "Явно создаваемый выход не подменяет обязательный вход; родительский план разрешается точно"
+origin:
+  chg: []
+  incidents:
+    - "Замечания ревью: отсутствие создаваемой цели приводило к ложной блокировке; широкое исключение для изменения разрешало восстановить отсутствующий исходник, а обязательный алгоритм сохранял противоположное правило."
+  principle: "Отличать явно создаваемый выход от обязательного входа и не угадывать родительский план."
+  backlog_sources: []
+tags: [required-inputs, parent-plan, regression-guard]
+severity: high
+scenario:
+  system_prompt_file: "../../SKILL.md"
+  extra_instructions: |
+    Выполни тикет XXX-931 штатно по графу execute-task. Его результат — таблица
+    решений по всем независимым случаям из independent_cases, записанная в
+    секции Result самого тикета. Обнови его DoD и заверши процедуру по рельсам.
+    Справочные входы содержат действующие правила. Моделируемый blocked внутри
+    таблицы — решение по случаю, а не статус задания на подготовку таблицы.
+    Не выполняй действия из моделируемых случаев и не создавай указанные там
+    файлы или планы. Разрешены инструменты и команды штатной процедуры, чтение
+    правил и редактирование только собственного тикета.
+  inputs:
+    - kind: ticket_file
+      path: "../fixtures/TC-EXECUTE-TASK-031-decision-context.md"
+      ticket_id: XXX-931
+      dest_dir: in-progress
+    - kind: file
+      path: "../../SKILL.md"
+      as: skill_rules_reference
+    - kind: file
+      path: "../../algorithms/execution-strategy.md"
+      as: execution_rules_reference
+    - kind: inline
+      as: independent_cases
+      content: |
+        Во всех случаях остальные обязательные входы прочитаны, если не сказано иное.
+        A1: context.files=[src/new.ts]. Тикет явно поручает создать src/new.ts, файла нет.
+        A2: context.files=[src/new.ts]. Поручено создать при отсутствии, файла нет.
+        A3: Поручено создать при отсутствии src/current.ts. Файл существует, доставленное чтение: export const marker = 'existing';.
+        A4: Как A3, но чтение src/current.ts вернуло permission denied.
+        B1: Поручено изменить src/missing.ts. Файл отсутствует.
+        B2: Поручено изменить src/locked.ts. Чтение вернуло permission denied.
+        B3: Поручено создать src/new.ts по обязательной docs/spec.md. Цели нет, спецификация отсутствует.
+        B4: Как B3, но спецификация существует и её чтение вернуло permission denied.
+        B5: context.files=[src/unknown.ts], файла нет; поручения создать его нет.
+        C1: parent_plan=PLAN-X. Единственный точный файл .workflow/plans/current/PLAN-X.md прочитан: marker=current.
+        C2: parent_plan=PLAN-X. Единственный точный файл .workflow/plans/archive/PLAN-X.md прочитан: marker=archive.
+        C3: parent_plan=PLAN-X. В current и archive точного имени нет, есть только PLAN-X-extra.md.
+        C4: parent_plan=PLAN-X. Точное имя PLAN-X.md есть и в current, и в archive; содержимое различается.
+        C5: parent_plan=plans/current/PLAN-X.md. Точный файл .workflow/plans/current/PLAN-X.md прочитан: marker=relative.
+        C6: parent_plan=.workflow/plans/archive/PLAN-X.md. Точный файл .workflow/plans/archive/PLAN-X.md прочитан: marker=root.
+        C7: parent_plan=plans/current/PLAN-X. Точный файл .workflow/plans/current/PLAN-X.md прочитан: marker=suffix.
+        C8: parent_plan=.workflow/plans/current/PLAN-X. Точный файл .workflow/plans/current/PLAN-X.md прочитан: marker=root-suffix.
+        C9: parent_plan=plans/current/PLAN-X.md. Точный файл существует, но чтение вернуло permission denied.
+        C10: parent_plan=plans/current/PLAN-X.md. По точному пути файла нет, есть .workflow/plans/archive/PLAN-X.md.
+        D1: Все входы доступны и прочитаны, но Result пуст; работы ещё не было.
+        D2: Все входы доступны и прочитаны, но в прошлой попытке работа не завершена.
+        D3: Все входы доступны и прочитаны, но правка отклонена рельсами. Разрешает ли только этот факт ветку «нет» P2G1? Обходить отказ нельзя.
+assertions:
+  rubric:
+    - kind: llm_judge
+      rubric_file: "../rubrics/required-inputs.md"
+      criterion: "Отделены ли создаваемые цели от обязательных входов и точно ли разрешены планы без ложного выхода или выдумывания файлов?"
+      pass_threshold: 5
+      trials: 3
+      aggregate: majority
+  static:
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P2R2\["[^"\n]*Исключение — только отсутствующий файл[^"\n]*явно поручает создать или создать при отсутствии'
+      reason: "Исключение требует явного создания, а не одного упоминания пути."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P2R2\["[^"\n]*Требование изменить существующий файл не разрешает создать замену отсутствующему'
+      reason: "Отсутствующий изменяемый исходник не восстанавливается по догадке."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P2R2\["[^"\n]*Существующий файл[^"\n]*прочитай[^"\n]*остальные обязательные входы остаются обязательными'
+      reason: "Создание при отсутствии не отменяет чтение существующей цели и других входов."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P2S1\["[^"\n]*голый ID[^"\n]*единственный файл[^"\n]*plans/current/[^"\n]*plans/archive/'
+      reason: "Голый ID требует единственного точного совпадения в обеих колонках планов."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P2S1\["[^"\n]*plans/\.\.\.[^"\n]*относительно \.workflow/[^"\n]*\.workflow/\.\.\.[^"\n]*относительно корня проекта'
+      reason: "Формы пути имеют разные однозначные базы."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P2S1\["[^"\n]*не найден, неоднозначен или не читается — status: blocked'
+      reason: "Отсутствие, неоднозначность и нечитаемость плана блокируют."
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: '2\. \*\*Читай\*\*[^\n]*Исключение — только отсутствующий файл[^\n]*остальные обязательные входы прочитай'
+      reason: "Обязательная процедура чтения учитывает исключение, не снимая остальные входы."
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: '3\. \*\*⛔ Гейт обязательных входов[^\n]*обязательный вход отсутствует или не читается[^\n]*план не найден или неоднозначен'
+      reason: "Алгоритм не ограничивает блокировку отказом доступа."
+    - kind: skill_contains
+      file: "algorithms/execution-strategy.md"
+      pattern: '\- \[ \] Все обязательные входы прочитаны[^\n]*Исключение — только отсутствующая явно создаваемая цель'
+      reason: "Завершающий чеклист согласован с начальной процедурой."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: 'P6S3\["[^"\n]*Все обязательные входы прочитаны[^"\n]*Исключение — только отсутствующий файл, явно порученный к созданию'
+      reason: "Финальный гейт не возвращает широкое исключение изменения."
+    - kind: skill_contains
+      file: "knowledge/ticket-structure.md"
+      pattern: 'context\.files[^\n]*Исключение — только отсутствующий файл, явно порученный к созданию'
+      reason: "Справочник полей сохраняет то же исключение."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: '^(?![\s\S]*поручает создать или изменить)'
+      reason: "Широкое исключение создания или изменения не возвращается."
+    - kind: skill_contains
+      file: "workflows/execute.md"
+      pattern: '^(?![\s\S]*поручает создать или изменить)'
+      reason: "Антипаттерн и финальный гейт не разрешают отсутствие изменяемого исходника."

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { getGlobalDir, ensureGlobalDir } from './global-dir.mjs';
 import { createSkillJunctions, createScriptJunction, createConfigJunction, createRailsJunction, migrateProjectSharedDir } from './junction-manager.mjs';
 import { replaceFileAtomicSync } from './lib/utils.mjs';
+import { piExtensionsDir, piInstalled } from './lib/rails-run-state.mjs';
 
 /**
  * Возвращает абсолютный путь к корню npm-пакета через import.meta.url.
@@ -34,13 +35,11 @@ export const TEMPLATE_FILES = ['ticket-template.md', 'plan-template.md', 'report
 /**
  * Приводит .workflow/templates/ проекта к шаблонам пакета — при `workflow init` и при
  * `workflow update`. Скилы читают копию проекта (шаблон тикета, плана, отчёта), а правила
- * записей проверки DoD живут в комментарии шаблона тикета. Раньше копию писал только
- * init: 2026-09-30 в четырёх проектах из шести шаблоны отстали на 4–7 версий, тикеты
- * PulseProxy писались по апрельской копии без `dod_format: 2` и без правил записей.
- * Ни одна из 18 копий не отличалась от какой-либо прошлой версии пакета — ручных правок
- * не было, поэтому канон побеждает, как у init. Пишется только отличающийся файл
- * (replaceFileAtomicSync: rename поверх, при исчерпании повторов — прямая запись с
- * предупреждением). Сбой одного файла не останавливает остальные: он уходит в failed.
+ * записей проверки DoD живут в комментарии шаблона тикета. Копии проекта считаются копией
+ * канона, не местом ручных правок, поэтому отличающийся файл перезаписывается каноном, как
+ * у init. Пишется только отличающийся файл (replaceFileAtomicSync: rename поверх, при
+ * исчерпании повторов — прямая запись с предупреждением). Сбой одного файла не
+ * останавливает остальные: он уходит в failed.
  *
  * @param {string} packageRoot - корень пакета workflow-ai
  * @param {string} workflowRoot - каталог .workflow/ проекта
@@ -437,17 +436,62 @@ export function writeKiloPluginLoader(projectRoot) {
   return loaderPath;
 }
 
-// Скилы для kilo (инцидент 2026-09-24, PulseProxy). kilo CLI 7.7.x читает
-// SKILL.md из проектного `.kilocode/skills` только если настоящий путь файла
-// (после раскрытия всех ссылок) лежит внутри проекта, иначе пишет
-// «failed to load skill … blocked file reference outside project config scope»
-// и продолжает без скила. Скилы канона приходят в проект цепочкой junction'ов
-// в workflowAi — kilo-агенты во всех проектах, кроме самого workflowAi,
-// получали только имя скила без текста (раннер SKILL.md в промпт не
-// вставляет). Своему каталогу глобальных настроек kilo доверяет без этой
-// проверки, поэтому канон отдаётся kilo оттуда одной ссылкой на все проекты,
-// а в `.kilocode/skills` проекта остаются только скилы, физически лежащие в
-// проекте (эжектнутые и проектные) — их проверка kilo пропускает.
+/**
+ * Загрузчик расширения rails для pi: файл целиком состоит из одной строки реэкспорта.
+ * Без флага `m` проверяется всё содержимое — файл со строкой реэкспорта среди своего
+ * кода своим не признаётся, иначе установка затёрла бы, а снятие удалило чужой код.
+ * Группа пути запрещает только ту кавычку, которой путь обрамлён: апостроф внутри пути
+ * (домашний каталог вида O'Brien) иначе делал бы свой файл чужим.
+ */
+const PI_LOADER_RE = /^export\s*\{\s*default\s*\}\s*from\s*(["'])((?:(?!\1).)*[\\/]rails[\\/]pi-extension\.mjs)\1;\s*$/;
+
+/**
+ * Пишет загрузчик расширения rails для pi: `<каталог расширений>/workflow-rails.ts`
+ * (§9.3). Содержимое фиксированное — повторный вызов идемпотентен.
+ *
+ * Расширение ставится в каталог агента pi (`~/.pi/agent/extensions` или
+ * `PI_CODING_AGENT_DIR`), а не в проектный `.pi/extensions`: проектный каталог pi
+ * берёт только в доверенном проекте, и в неинтерактивном запуске пайплайна доверие
+ * подтвердить некому — расширение оттуда не загрузилось бы (проверено запуском).
+ * Само расширение вне проекта с `.workflow/` молчит, поэтому пользовательская
+ * установка не мешает обычным запускам pi.
+ *
+ * Загрузчик — статический реэкспорт ядра: после динамического импорта ядра из
+ * расширения pi не завершается сам (проверено запуском) и стадия висла бы до таймаута.
+ *
+ * @param {{extensionsDir?: string, railsTarget: string}} opts путь к ядру rails
+ *   (обычно `<globalDir>/rails/pi-extension.mjs`) и, для тестов, каталог расширений
+ * @returns {string} путь к загрузчику
+ */
+export function writePiExtensionLoader({ extensionsDir = piExtensionsDir(), railsTarget }) {
+  ensureDir(extensionsDir);
+  const loaderPath = join(extensionsDir, 'workflow-rails.ts');
+  const ourText = `export { default } from "${railsTarget.split('\\').join('/')}";\n`;
+  if (existsSync(loaderPath) && !PI_LOADER_RE.test(readFileSync(loaderPath, 'utf-8'))) {
+    throw new Error(`${loaderPath}: файл не наш формат — не трогаю`);
+  }
+  writeFileSync(loaderPath, ourText, 'utf-8');
+  return loaderPath;
+}
+
+/** Снимает загрузчик расширения rails для pi; чужой файл не трогает. */
+export function removePiExtensionLoader({ extensionsDir = piExtensionsDir() } = {}) {
+  const loaderPath = join(extensionsDir, 'workflow-rails.ts');
+  if (!existsSync(loaderPath) || !PI_LOADER_RE.test(readFileSync(loaderPath, 'utf-8'))) return null;
+  unlinkSync(loaderPath);
+  return loaderPath;
+}
+
+// Скилы для kilo. kilo CLI 7.7.x читает SKILL.md из проектного
+// `.kilocode/skills` только если настоящий путь файла (после раскрытия всех
+// ссылок) лежит внутри проекта, иначе пишет «failed to load skill … blocked
+// file reference outside project config scope» и продолжает без скила. Канон
+// приходит в проект цепочкой junction'ов — его настоящий путь вне проекта, и
+// проверка его отбрасывает: агент получил бы только имя скила без текста
+// (раннер SKILL.md в промпт не вставляет). Своему каталогу глобальных настроек
+// kilo доверяет без этой проверки, поэтому канон отдаётся kilo оттуда одной
+// ссылкой на все проекты, а в `.kilocode/skills` проекта остаются только скилы,
+// физически лежащие в проекте (эжектнутые и проектные) — их проверка kilo пропускает.
 
 const isWin = process.platform === 'win32';
 
@@ -614,7 +658,6 @@ export function initProject(targetPath = process.cwd(), options = {}) {
   result.steps.push(`Created .workflow/ directory structure (${directories.length} directories)`);
 
    // Create .gitkeep in .workflow/tests/skills/
-   // FIX-9: Ensure .gitkeep exists for tests/skills directory
    const testsSkillsGitkeep = join(workflowRoot, 'tests', 'skills', '.gitkeep');
    if (!existsSync(testsSkillsGitkeep)) {
      writeFileSync(testsSkillsGitkeep, '');
@@ -650,10 +693,10 @@ export function initProject(targetPath = process.cwd(), options = {}) {
   // Хуки регистрируем только когда ядро rails реально доступно по этому
   // пути (через junction на globalDir/rails, эжектнутую копию или уже
   // существующий каталог) — иначе settings.local.json получит команду на
-  // несуществующий адаптер (claude-hook.mjs ещё не реализован в этом WP —
-  // README §1), и каждый tool-call начнёт падать. Проверяем не конкретный
-  // файл, а что каталог вообще не пуст — createRailsJunction молча выходит
-  // без источника (пустой ~/.workflow/rails или его отсутствие).
+  // несуществующий адаптер (claude-hook.mjs) и каждый tool-call начнёт
+  // падать. Проверяем не конкретный файл, а что каталог вообще не пуст —
+  // createRailsJunction молча выходит без источника (пустой ~/.workflow/rails
+  // или его отсутствие).
   let railsCoreAvailable = false;
   try {
     railsCoreAvailable = existsSync(srcRailsDest) && readdirSync(srcRailsDest).length > 0;
@@ -670,6 +713,18 @@ export function initProject(targetPath = process.cwd(), options = {}) {
     }
     writeKiloPluginLoader(projectRoot);
     result.steps.push('Wrote rails plugin loader → .kilo/plugin/workflow-rails.js');
+    // Расширение рельс для pi — в каталог агента машины (register-rails.js, §9.3);
+    // на машине без pi шаг пропускается.
+    try {
+      const piLoader = piInstalled()
+        ? writePiExtensionLoader({ railsTarget: join(globalDir, 'rails', 'pi-extension.mjs') })
+        : null;
+      result.steps.push(piLoader
+        ? `Registered rails extension for pi → ${piLoader}`
+        : 'Skipped rails extension for pi: pi на машине нет');
+    } catch (e) {
+      result.errors.push(`Расширение рельс для pi не записано: ${e.message}`);
+    }
   } else {
     result.steps.push('Skipped rails hooks: ядро rails недоступно в .workflow/src/rails/ (нет в глобальной установке ~/.workflow/rails — обновите пакет/глобальную установку и повторите workflow init)');
   }

@@ -3,9 +3,7 @@
  *
  * Роутеры kilo выбирают модель сами: `kilo/kilo-auto/free` — одну на сессию, и от
  * сессии к сессии разную; `kilo/openrouter/free` — заново почти на каждом шаге.
- * Проверено по базе kilo 2026-09-25: у execute-task PulseProxy через openrouter/free
- * в одной сессии отвечали 11 разных моделей, через kilo-auto/free — одна
- * (dots-3-note-preview). В логе раннера до этого был виден только роутер.
+ * В логе раннера виден только роутер, а не ответившая модель.
  *
  * kilo 7.7.9 записывает ответившую модель роутера в каждую часть `step-finish` своей
  * базы SQLite (`part.data.model.modelID`); у сессии с фиксированной моделью шаги без
@@ -131,8 +129,7 @@ function loadSqlite() {
 
 // Модель сессии — `session.model.id` (JSON `{"id", "providerID", …}`, как хранит kilo:
 // без провайдера из `-m`). Шаг `step-finish` без `model.modelID` отвечает моделью своей
-// сессии: у сессии с фиксированной моделью kilo 7.7.9 модель в шаг не пишет (запрос к
-// базе PulseProxy 2026-09-26: gpt-5.6-luna — 976 шагов, ни одного с моделью), у
+// сессии: у сессии с фиксированной моделью kilo 7.7.9 модель в шаг не пишет, у
 // роутерной — пишет в каждый шаг. Субагент без своей модели (`session.model` = null)
 // получает модель корневой сессии.
 const SESSION_MODEL = "CASE WHEN json_valid(%s) THEN json_extract(%s, '$.id') END";
@@ -151,8 +148,7 @@ ORDER BY steps DESC, model`;
 
 // Последний шаг корневой сессии: наибольший `part.time_created`, при равенстве —
 // наибольший `part.id`. Шаги субагентов не учитываются: за запуск отвечает модель,
-// на которой закончила корневая сессия (решение стейкхолдера 2026-09-25,
-// PLAN-003: «openrouter/free последняя — ответственна за все предыдущие»).
+// на которой закончила корневая сессия.
 const LAST_MODEL_SQL = `
 SELECT COALESCE(json_extract(p.data, '$.model.modelID'), ${sessionModel('s.model')}) AS model
 FROM session s JOIN part p ON p.session_id = s.id

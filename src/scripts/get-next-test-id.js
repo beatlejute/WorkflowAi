@@ -33,8 +33,8 @@ function parseArgs() {
 }
 
 // Кейсы называются `TC-<SKILL>-NNN-<slug>.yaml`, артефакты прогонов лежат в каталоге
-// `TC-<SKILL>-NNN/`. Прежний шаблон `^TC-<SKILL>-NNN\.yaml$` не видел ни того, ни другого:
-// на скиле с кейсами 001–004 скрипт вернул TC-ANALYZE-REPORT-001 (2026-09-22) — занятый ID.
+// `TC-<SKILL>-NNN/`. Прежний шаблон `^TC-<SKILL>-NNN\.yaml$` не видел ни того, ни другого
+// и возвращал занятый ID (номер уже существующего кейса).
 function findMaxNumber(skillLower, skillUpper) {
   let maxNum = 0;
   const fileRegex = new RegExp(`^TC-${skillUpper}-(\\d+)(?:-[^/\\\\]*)?\\.yaml$`, "i");

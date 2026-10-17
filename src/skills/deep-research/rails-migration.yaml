@@ -3,9 +3,9 @@
 # если её подстрока ≥ 25 символов есть в текущих файлах скила или она перечислена здесь.
 #
 # Судьбы фраз-инвариантов baseline (51):
-# - роль, «Ты делаешь», «Ты НЕ делаешь», границы компетенции, взаимодействие -> P0E1, P0R1–P0R3;
+# - роль, «Ты делаешь», «Ты НЕ делаешь», границы компетенции, взаимодействие -> P0E1, P0R1;
 # - ⛔ perplexity-research.js и fallback -> P0R4, загрузка knowledge/perplexity-config.md -> P0S4;
-# - принципы Source-First, Multi-Source, Recency, честность неопределённости, Scope -> P0R5–P0R8;
+# - принципы Source-First, Multi-Source, Recency, честность неопределённости, Scope -> P0R5;
 # - маршрутизация MARKET…CUSTOM -> P0Q1 (рёбра на входы фрагментов П10–П60);
 # - загрузка knowledge/research-methodology.md -> P0S3, shared -> P0S2 (каноническая строка);
 # - source-evaluation, source-scoring, data-validation -> шаги веток; synthesis и шаблоны -> П3;

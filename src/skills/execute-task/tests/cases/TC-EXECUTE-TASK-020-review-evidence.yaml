@@ -102,7 +102,7 @@ assertions:
       reason: "Справочник есть в таблице загрузки."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: 'P3R2\["[^"]*пункт с записью prose, недоказуемый в тикете: его текст — вопрос модели ревью, в строку ничего не дописывай'
+      pattern: 'P3R1\["[^"]*пункт с записью prose, недоказуемый в тикете: его текст — вопрос модели ревью, в строку ничего не дописывай'
       reason: "Пометка «не применимо» у пункта prose попадает в вопрос модели ревью."
     - kind: skill_contains
       file: "templates/result-template.md"

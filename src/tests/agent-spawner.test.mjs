@@ -278,6 +278,57 @@ multiline:
 });
 
 // ============================================================================
+// Test: нормализация статуса с пояснением
+// ============================================================================
+// Правило то же, что у ResultParser раннера (src/runner.mjs). Значение строки `status:`
+// может нести пояснение (`blocked — причина`) — так отвечает, например, execute-task.
+// Целиком оно не совпадает ни с синонимом, ни с ключом перехода стадии: без разбора шаг
+// уходит по ветке default, и отказ исполнителя читается как успех. По этому пути идут
+// прогоны тестов скилов и судья — через spawnAgent.
+describe('ResultParser.normalizeStatus — пояснение после статуса', () => {
+  const norm = (status) => ResultParser.normalizeStatus(status);
+
+  it('синоним с пояснением приводится к каноническому значению', () => {
+    assert.strictEqual(norm('ok — всё сходится'), 'passed');
+    assert.strictEqual(norm('rejected: не прошло'), 'failed');
+  });
+
+  it('пояснение отделяется по тире, двоеточию и пробелу', () => {
+    assert.strictEqual(norm('blocked — причина'), 'blocked');
+    assert.strictEqual(norm('blocked: причина'), 'blocked');
+    assert.strictEqual(norm('blocked - причина'), 'blocked');
+  });
+
+  it('дефис и подчёркивание остаются частью ключа', () => {
+    assert.strictEqual(norm('needs-review — причина'), 'needs-review');
+    assert.strictEqual(norm('needs-review: причина'), 'needs-review');
+    assert.strictEqual(norm('needs-review'), 'needs-review');
+    assert.strictEqual(norm('has_gaps — 3'), 'has_gaps');
+  });
+
+  it('регистр неизвестного значения сохраняется — и с пояснением, и без', () => {
+    assert.strictEqual(norm('BLOCKED — причина'), 'BLOCKED');
+    assert.strictEqual(norm('CustomStatus — причина'), 'CustomStatus');
+    assert.strictEqual(norm('CustomStatus'), 'CustomStatus');
+  });
+
+  it('пустое значение и пробелы дают пустую строку', () => {
+    assert.strictEqual(norm(''), '');
+    assert.strictEqual(norm('   '), '');
+    assert.strictEqual(norm(undefined), '');
+  });
+
+  it('через parse: статус с пояснением доходит до ключа перехода стадии', () => {
+    const output = `---RESULT---
+status: blocked — причина
+---RESULT---`;
+
+    const result = ResultParser.parse(output, 'test-stage');
+    assert.strictEqual(result.status, 'blocked');
+  });
+});
+
+// ============================================================================
 // Test: Early-kill по онлайн-детекции stderr (hung process на HTTP 429)
 // ============================================================================
 describe('spawnAgent — Early kill по stderr паттерну', () => {

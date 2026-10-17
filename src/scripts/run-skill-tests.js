@@ -8,6 +8,7 @@ import { spawn } from 'child_process';
 import YAML from '../lib/js-yaml.mjs';
 import { findProjectRoot } from '../lib/find-root.mjs';
 import { spawnAgent } from '../lib/agent-spawner.mjs';
+import { buildAgentEnv } from '../lib/agent-env.mjs';
 import { writeClaudeHooks, writeKiloPluginLoader, userHasRailsHooks } from '../init.mjs';
 import { loadRailsConfig } from '../rails/rails-config.mjs';
 import { loadSkillRuntime } from '../rails/core.mjs';
@@ -44,9 +45,8 @@ const projectRoot = findProjectRoot(process.cwd());
 // `.workflow/`, а мок-агенты и configs/ задаются путями от корня. Скилы-фикстуры
 // при этом приходилось создавать прямо в каноническом src/skills, на который
 // junction'ятся все проекты: при снятии файла по таймауту каталог `__test-*`
-// оставался в репозитории (так попали __test-runner-1777553217483 и
-// __test-cal-001-1777553217513), а 2026-09-23 полный набор упал, поймав живую
-// фикстуру в skill-test-index-agents.test.mjs. Переменная разводит две вещи:
+// оставался в репозитории, а полный набор ловил живую фикстуру
+// (skill-test-index-agents.test.mjs) и падал. Переменная разводит две вещи:
 // корень проекта (cwd) и каталог скилов.
 const skillsDirOverride = process.env.WORKFLOW_SKILLS_DIR
   ? path.resolve(process.env.WORKFLOW_SKILLS_DIR)
@@ -87,12 +87,11 @@ function resolveAgentScriptArgs(agentConfig) {
 // ============================================================================
 // Rails integration (src/rails/README.md §11) — окружение целевого агента и
 // output-check по завершении. Ядро rails — отдельный пакет работ; здесь
-// только интеграция раннера тестов скилов (wp5).
+// только интеграция раннера тестов скилов.
 // ============================================================================
 
 // Таймаут судьи (сек): `execution.judge_timeout_s` в tests/index.yaml скила, иначе 180.
-// Был жёстко 60 с — на длинных ответах коуча судья не успевал (TC-COACH-001/002, 2026-09-21/22),
-// trial оставался без оценки.
+// Жёсткие 60 с на длинных ответах коуча не выдерживались, и trial оставался без оценки.
 let JUDGE_TIMEOUT_S = 180;
 
 // Состояние судей на весь прогон: предупреждение о судье без балла печатается
@@ -122,7 +121,7 @@ function railsYamlExists(root, skill) {
  * Тикет запуска кейса для WORKFLOW_RAILS_TICKET (`{ticket}` в стражах рёбер, rails/README.md
  * §4, §11): `ticket_id` первого входа `ticket_file`, который кладётся в in-progress/
  * (`dest_dir` не задан — это in-progress/), иначе первого входа `ticket_file`; входов нет —
- * null. Ревью стража 2026-09-27: брался первый вход при любом `dest_dir`, и чужой тикет из
+ * null. Иначе брался бы первый вход при любом `dest_dir`, и чужой тикет из
  * review/ или done/, записанный в кейсе первым, открыл бы страж `{ticket}` молча.
  *
  * @param {Array<object>|undefined} inputs `scenario.inputs` кейса
@@ -138,7 +137,7 @@ function caseRunTicket(inputs) {
  * Вызывает целевого агента (`WORKFLOW_RAILS_ROLE=coordinator`) и, если у
  * скила есть `rails.yaml`, проверяет финальный ответ через output-check по
  * состоянию с этим `run`; при нарушении — один повтор с вердиктом в начале
- * промпта (§8, §11). Без rails.yaml у скила — поведение как раньше.
+ * промпта (§8, §11). Без rails.yaml у скила рельсы не проверяются.
  *
  * Состояния с этим `run` в песочнице нет — рельсы не зацепились; попытка
  * отмечается в `result.rails` (`escaped` — состояние нашлось в настоящем
@@ -148,9 +147,9 @@ function caseRunTicket(inputs) {
  * от start». Иначе повтор не обосновать — только предупреждение
  * (railsNotEngagedMessage). Судится вывод повтора, поэтому `result.rails`
  * повтора — по его собственному `run`; повтор без состояния при хуках на месте —
- * `rails.failed`: попытка не проходит при любой оценке судьи. Прежде такие
- * попытки проходили молча: 2026-09-25 gpt-luna без единого вызова инструмента
- * получила высший балл.
+ * `rails.failed`: попытка не проходит при любой оценке судьи. Иначе такая
+ * попытка прошла бы молча: агент без единого вызова инструмента мог получить
+ * высший балл.
  *
  * `ticket` — id тикета кейса (caseRunTicket): агент и повтор получают его в
  * WORKFLOW_RAILS_TICKET, как у раннера стадии, — для `{ticket}` в стражах рёбер (§4).
@@ -170,6 +169,14 @@ async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, ro
   const result = await spawnAgent(agentConfig, prompt, { ...spawnOpts, ...railsOpts });
   if (!hasRails) return result;
 
+  const engagement = railsEngagement({ sandboxRoot: root, projectRoot, run: runId });
+  if (engagement.ambiguous) {
+    result.rails = { engaged: false, escaped: engagement.escaped, failed: true, outcome: 'state_ambiguous' };
+    result.railsVerdict = { ok: false, reason: 'ambiguous rails session state' };
+    console.log(`[Runner] ✖ rails: ${spawnOpts.stageId || agentConfig.command} — ambiguous session state (${engagement.escaped ? 'outside sandbox' : 'sandbox'}); output-check stopped`);
+    return result;
+  }
+
   // Приостановка не даёт PASS и не запускает другого исполнителя.
   const suspension = checkRailsOutput(result.output || '', {}, null);
   if (suspension.outcome && suspension.outcome !== 'out_of_scope') {
@@ -180,14 +187,17 @@ async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, ro
 
   const who = spawnOpts.stageId || agentConfig.command;
   const host = railsHost(agentConfig);
-  // хуки ищутся там же, где агент запускается (spawnAgent: projectRoot + workdir)
-  const hooks = Boolean(host) && railsHooksPresent(host, path.resolve(root, agentConfig.workdir || '.'));
-  const { state, engaged, escaped } = railsEngagement({ sandboxRoot: root, projectRoot, run: runId });
+  // Хуки ищутся там же, где агент запускается (spawnAgent: projectRoot + workdir), и в том же
+  // окружении: каталог агента pi бывает задан только машинным agent.env (lib/agent-env.mjs).
+  const agentCwd = path.resolve(root, agentConfig.workdir || '.');
+  const agentEnv = buildAgentEnv(process.env, spawnOpts.env || null, { cwd: agentCwd });
+  const hooks = Boolean(host) && railsHooksPresent(host, agentCwd, { env: agentEnv });
+  const { state, engaged, escaped } = engagement;
   result.rails = { engaged, escaped };
   let config;
   try {
     // Состояние чужого проекта (escaped) привязано к запуску в его корне — здесь его не закреплять.
-    // Состояние без привязки runtime — legacy до внедрения: живой конфиг, как раньше.
+    // Состояние без привязки runtime — legacy: конфиг берётся живой (loadRailsConfig).
     config = state && !escaped && state.runtime
       ? loadSkillRuntime(root, skill, state).config
       : loadRailsConfig(path.join(root, '.workflow', 'src', 'skills', skill));
@@ -254,13 +264,19 @@ async function spawnTargetAgentWithRailsCheck(agentConfig, prompt, spawnOpts, ro
   });
   retryResult.railsRetried = true;
   retryResult.railsVerdict = verdict;
+  const retry = railsEngagement({ sandboxRoot: root, projectRoot, run: retryRunId });
+  if (retry.ambiguous) {
+    retryResult.rails = { engaged: false, escaped: retry.escaped, failed: true, outcome: 'state_ambiguous' };
+    retryResult.railsRetryVerdict = { ok: false, reason: 'ambiguous rails session state' };
+    console.log(`[Runner] ✖ rails: ${who} (retry) — ambiguous session state (${retry.escaped ? 'outside sandbox' : 'sandbox'}); output-check stopped`);
+    return retryResult;
+  }
   const retrySuspension = checkRailsOutput(retryResult.output || '', {}, null);
   if (retrySuspension.outcome && retrySuspension.outcome !== 'out_of_scope') {
     retryResult.rails = { failed: true, outcome: retrySuspension.outcome };
     retryResult.railsRetryVerdict = retrySuspension;
     return retryResult;
   }
-  const retry = railsEngagement({ sandboxRoot: root, projectRoot, run: retryRunId });
   retryResult.rails = { engaged: retry.engaged, escaped: retry.escaped };
   if (retry.state && !retry.escaped) {
     try {
@@ -379,8 +395,8 @@ function cleanupTestWorkdir(tmpRoot) {
 }
 
 // Вход сценария kind: dir — каталог фикстуры раскладывается в рабочий каталог
-// прогона, dest_dir отсчитывается от его корня. До 2026-09-24 такой вход молча
-// пропускался: агент TC-EXECUTE-TASK-008 не находил файлов проекта.
+// прогона, dest_dir отсчитывается от его корня. Иначе такой вход молча
+// пропускается, и агент не находит файлов проекта.
 // В рабочем каталоге лежат junction'ы на настоящие src/scripts, src/rails и
 // configs (createTestWorkdir): запись сквозь них попала бы в репозиторий. Поэтому
 // путь назначения строится по одному сегменту, и любая ссылка на нём — ошибка;
@@ -908,6 +924,8 @@ function runL0Assertions(skillName, testCase) {
         results.push({
           passed: false,
           kind: assertion.kind,
+          file: assertion.file || 'SKILL.md',
+          pattern: assertion.pattern,
           reason: assertion.reason,
           error: `Skill file not found: ${skillFile}`
         });
@@ -921,6 +939,7 @@ function runL0Assertions(skillName, testCase) {
       results.push({
         passed: matches,
         kind: assertion.kind,
+        file: assertion.file || 'SKILL.md',
         reason: assertion.reason,
         pattern: assertion.pattern
       });
@@ -1124,8 +1143,8 @@ async function runCalibrationCheck(skillName, rubricName, calibrationFiles, pipe
     try { fs.rmSync(calibSandbox, { recursive: true, force: true }); } catch {}
   }
 
-  // Ответ без балла — ошибка калибровки, а не тройка: прежде сломанный судья
-  // проваливал калибровку как «miscalibrated».
+  // Ответ без балла — ошибка калибровки, а не тройка: иначе сломанный судья
+  // проваливает калибровку как «miscalibrated».
   const errors = [good.error && `good: ${good.error}`, bad.error && `bad: ${bad.error}`].filter(Boolean);
 
   return {
@@ -1251,9 +1270,7 @@ function removeStaleJudgeRecords(skillName, caseId, agentId, trials) {
  * уносил с собой всю историю отказов прогона.
  *
  * Улики прошлого прогона той же попытки снимаются всегда: попытка без журнала и
- * состояния иначе оставляла чужие файлы, и они читались как улики текущего прогона
- * (2026-09-25: rails-state-trial-1.json claude-haiku от прогона 14:13 лежал рядом с
- * trial-1.md прогона 16:09, у которого состояния не было вовсе).
+ * состояния иначе оставляла чужие файлы, и они читались как улики текущего прогона.
  */
 function persistRailsArtifacts(taskWorkdir, skillName, caseId, agentId, trialNum) {
   try {
@@ -1321,8 +1338,7 @@ async function writeJudgeResults(skillName, caseId, results) {
 }
 
 // Цена вызова судьи — `cost_per_call` записи агента-судьи (skill-judge.mjs,
-// judgeCallCost); прежняя константа $0.02 была в 11 раз ниже замера claude-opus
-// ($0.222 за вызов, 207 вызовов 2026-09-22).
+// judgeCallCost); фиксированная константа занижала оценку дорогого судьи.
 async function preFlightApproval(targetCalls, judgeCalls, judgeAgentCost = DEFAULT_JUDGE_CALL_COST, targetAgentCost = 0.01) {
   const totalLlms = targetCalls + judgeCalls;
   const judgeCost = judgeCalls * judgeAgentCost;
@@ -1362,8 +1378,8 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
 
   let rubricName = 'default';
   // Вопрос, на который отвечает судья: кейсы объявляют его рядом с rubric_file.
-  // До 2026-09-24 он в промпт не попадал — судья получал заглушку «Evaluate the
-  // response» и оценивал по одной рубрике (замер: все 201 сохранённых вызова).
+  // Без него в промпт попадает заглушка «Evaluate the response», и судья
+  // оценивает по одной рубрике.
   let rubricCriterion = '';
   if (testCase.assertions?.rubric && testCase.assertions.rubric.length > 0) {
     const rubricPath = testCase.assertions.rubric[0].rubric_file;
@@ -1432,8 +1448,8 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
           const fixtureDir = path.join(testsDir, caseDir, input.path);
           copyFixtureDir(fixtureDir, taskWorkdir, input.dest_dir || '.', caseId);
         } else {
-          // Незнакомый вид входа раньше пропускался молча — агент работал без
-          // данных, а кейс выглядел как провал скила.
+          // Незнакомый вид входа иначе пропускается молча — агент работает без
+          // данных, а кейс выглядит как провал скила.
           throw new Error(`unknown scenario input kind "${input.kind}" (case ${caseId})`);
         }
       }
@@ -1485,8 +1501,8 @@ async function runL2Evaluation(skillName, testCase, caseDef, targetAgents, judge
         taskWorkdir = createTestWorkdir(skillName, taskSuffix);
         const targetPrompt = buildTargetPrompt(taskWorkdir);
         // WORKFLOW_SANDBOX_ROOT — граница записи для хука рельс (core.decide,
-        // «песочница тестов»): 2026-09-23 агенты кейсов create-plan и decompose-plan
-        // записали планы и тикеты в настоящий проект.
+        // «песочница тестов»): без неё агенты кейсов пишут планы и тикеты
+        // в настоящий проект.
         const caseTicket = caseRunTicket(task.testCase.scenario?.inputs);
         const targetOutput = await spawnTargetAgentWithRailsCheck(task.agentConfig, targetPrompt, {
           timeout,
@@ -1754,11 +1770,11 @@ function aggregateResults(results, testCase) {
 }
 
 // `currentAgents` — агенты текущего прогона (target_agents кейса или скила, либо --agent).
-// Инцидент 2026-09-22: per_model сливался с прошлым прогоном без фильтра, и записи агентов,
-// убранных из configs/pipeline.yaml (kilo-glm, kilo-minimax, kilo-deepseek), навсегда держали
-// кейс красным: их прогоны падали с «Agent exited with code 1», новые модели проходили, а
-// status считался по объединению. Теперь запись агента, которого нет в текущем списке,
-// из meta.json выбрасывается (артефакты его проб остаются в каталоге кейса).
+// Без фильтра per_model сливается с прошлым прогоном, и записи агентов, убранных из
+// configs/pipeline.yaml, навсегда держат кейс красным: их прогоны падают с «Agent exited
+// with code 1», новые модели проходят, а status считается по объединению. Запись агента,
+// которого нет в текущем списке, из meta.json выбрасывается (артефакты его проб остаются
+// в каталоге кейса).
 async function writeMetaJson(caseId, skillName, status, durationMs, l2Results = null, l1_skipped = null, currentAgents = null) {
   if (skipMetaWrite) return;
 
@@ -1836,7 +1852,8 @@ async function runTestsForSkill(skillName, opts) {
     baseline_ref: 'origin/main',
     target_agents: [],
     judge_agent: null,
-    rails_warnings: []
+    rails_warnings: [],
+    l0_failures: []
   };
   let cases = [];
   const currentRunStatuses = {};
@@ -2028,6 +2045,14 @@ async function runTestsForSkill(skillName, opts) {
           const l0Results = runL0Assertions(skillName, testCase);
           const l0Failed = l0Results.filter(r => !r.passed);
           if (l0Failed.length > 0) {
+            result.l0_failures.push(...l0Failed.map(failure => ({
+              skill: skillName,
+              case_id: caseDef.id,
+              file: failure.file,
+              pattern: failure.pattern,
+              reason: failure.reason,
+              ...(failure.error ? { error: failure.error } : {})
+            })));
             result.current_run.failed++;
             result.status = 'failed';
             currentRunStatuses[caseDef.id] = 'failed';
@@ -2232,6 +2257,7 @@ async function runSkillTests(opts) {
       if (skillResult.error) results.error = skillResult.error;
       if (skillResult.calibration) results.calibration = skillResult.calibration;
       if (skillResult.rails_warnings?.length) results.rails_warnings = skillResult.rails_warnings;
+      if (skillResult.l0_failures?.length) results.l0_failures = skillResult.l0_failures;
 
       // Prepare for git comparison (if applicable)
       const cases = skillResult.cases;
@@ -2284,6 +2310,7 @@ async function runSkillTests(opts) {
       let failed = 0;
       let overallStatus = 'passed';
       const railsWarnings = [];
+      const l0Failures = [];
 
       for (const skillName of skillNames) {
         const skillResult = await runTestsForSkill(skillName, opts);
@@ -2295,8 +2322,10 @@ async function runSkillTests(opts) {
         }
         // Имя скила префиксом: одноимённые TC разных скилов иначе неразличимы.
         for (const w of skillResult.rails_warnings || []) railsWarnings.push(`${skillName} ${w}`);
+        l0Failures.push(...(skillResult.l0_failures || []));
       }
       if (railsWarnings.length) results.rails_warnings = railsWarnings;
+      if (l0Failures.length) results.l0_failures = l0Failures;
 
       results.total = total;
       results.current_run.passed = passed;
@@ -2326,6 +2355,9 @@ function printResult(result) {
   console.log(`current_run.failed: ${result.current_run.failed}`);
   if (result.current_run.no_coverage) {
     console.log(`current_run.no_coverage: ${result.current_run.no_coverage}`);
+  }
+  if (result.l0_failures?.length) {
+    console.log(`l0_failures: ${JSON.stringify(result.l0_failures)}`);
   }
 
   if (result.baseline_ref) {

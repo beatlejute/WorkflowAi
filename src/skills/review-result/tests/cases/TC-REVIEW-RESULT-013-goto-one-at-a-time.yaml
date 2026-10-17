@@ -31,7 +31,7 @@ assertions:
       reason: "Цитата берётся из ответа goto, а не набирается по памяти и не сокращается."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "`<узел>`\\s+—\\s+ID\\s+узла\\s+\\(например\\s+`P0R2`\\),\\s+а\\s+не\\s+текст\\s+лейбла\\s+и\\s+не\\s+`next`\\."
+      pattern: "`<узел>`\\s+—\\s+ID\\s+узла\\s+\\(например\\s+`P0R1`\\),\\s+а\\s+не\\s+текст\\s+лейбла\\s+и\\s+не\\s+`next`\\."
       reason: "Целевой узел — ID, не текст лейбла и не next."
     - kind: skill_contains
       file: "SKILL.md"

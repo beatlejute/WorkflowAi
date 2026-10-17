@@ -15,7 +15,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'url';
-import { parseFrontmatter } from 'workflow-ai/lib/utils.mjs';
+import { parseFrontmatter, getLastReviewStatus } from 'workflow-ai/lib/utils.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -95,6 +95,18 @@ function readFrontmatter(filePath) {
   return frontmatter;
 }
 
+// getLastReviewStatus на тикете без вердикта предупреждает в консоль — это ожидаемое
+// состояние, а не шум теста.
+function quiet(fn) {
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    return fn();
+  } finally {
+    console.warn = warn;
+  }
+}
+
 // ============================================================================
 // Часть A — move-ticket.js синхронизирует frontmatter.status
 // ============================================================================
@@ -130,6 +142,82 @@ test('FIX-69 A: move-ticket review → done проставляет status: done 
     const frontmatter = readFrontmatter(path.join(ticketsDir, 'done', 'IMPL-A02.md'));
     assert.equal(frontmatter.status, 'done', 'В done/ не должно оставаться фантомного status: ready');
     assert(frontmatter.completed_at, 'completed_at должен быть проставлен');
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+// ============================================================================
+// Часть A' — вердикт ревью при закрытии в done/ не подделывается
+// ============================================================================
+
+test('A\': review → done без секции «## Ревью» — заметка без вердикта, а не passed', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fix69-move-'));
+  try {
+    const { ticketsDir } = createTempWorkflow(tempDir);
+    writeTicket(ticketsDir, 'review', 'IMPL-R01', { frontmatterStatus: 'review', reviewStatus: null });
+
+    const result = await runScript(MOVE_TICKET_PATH, tempDir, ['IMPL-R01', 'done']);
+    assert.equal(result.code, 0, `move-ticket должен завершиться успешно: ${result.stdout}${result.stderr}`);
+
+    const movedPath = path.join(ticketsDir, 'done', 'IMPL-R01.md');
+    assert(fs.existsSync(movedPath), 'Тикет должен лежать в done/');
+
+    const content = fs.readFileSync(movedPath, 'utf8');
+    assert.match(content, /Ревью не записано/, 'Строка должна прямо называть причину');
+    assert.doesNotMatch(content, /✅\s*passed/, 'Строки passed в тикете быть не должно');
+    // Вердикта нет вовсе: иначе запись о несостоявшемся ревью читалась бы как пройденная
+    // (passed) или, что хуже, как пропуск (check-relevance.js: skipped → тикет неактуален).
+    assert.equal(quiet(() => getLastReviewStatus(content)), null, 'Ревью не должно читаться как вердикт');
+    assert.doesNotMatch(content, /⏭️|skipped/, 'Отметки skipped быть не должно');
+    assert.match(result.stdout + result.stderr, /ревью не записано/, 'Пропуск ревью должен быть слышен в выводе');
+
+    const frontmatter = readFrontmatter(movedPath);
+    assert.equal(frontmatter.status, 'done');
+    assert(frontmatter.completed_at, 'completed_at должен быть проставлен');
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('A\': review → done с последней строкой ❌ failed — закрытие отменено', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fix69-move-'));
+  try {
+    const { ticketsDir } = createTempWorkflow(tempDir);
+    writeTicket(ticketsDir, 'review', 'IMPL-R02', { frontmatterStatus: 'review', reviewStatus: 'failed' });
+
+    const result = await runScript(MOVE_TICKET_PATH, tempDir, ['IMPL-R02', 'done']);
+
+    assert.notEqual(result.code, 0, 'Провальное ревью не должно закрываться молча');
+    assert(
+      fs.existsSync(path.join(ticketsDir, 'review', 'IMPL-R02.md')),
+      'Тикет должен остаться в review/'
+    );
+    assert(
+      !fs.existsSync(path.join(ticketsDir, 'done', 'IMPL-R02.md')),
+      'В done/ тикет попасть не должен'
+    );
+    assert.match(
+      result.stdout + result.stderr,
+      /провалено/,
+      'Отказ должен называть причину — провальное ревью'
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('A\': review → done с последней строкой ✅ passed — закрывается как раньше', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fix69-move-'));
+  try {
+    const { ticketsDir } = createTempWorkflow(tempDir);
+    writeTicket(ticketsDir, 'review', 'IMPL-R03', { frontmatterStatus: 'review', reviewStatus: 'passed' });
+
+    const result = await runScript(MOVE_TICKET_PATH, tempDir, ['IMPL-R03', 'done']);
+    assert.equal(result.code, 0, `Штатное закрытие должно проходить: ${result.stdout}${result.stderr}`);
+
+    const content = fs.readFileSync(path.join(ticketsDir, 'done', 'IMPL-R03.md'), 'utf8');
+    assert.equal(getLastReviewStatus(content), 'passed');
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

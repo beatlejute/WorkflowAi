@@ -119,11 +119,11 @@ export function appendAgentRun(ticketPath, entry) {
 
   // Публикация — общим помощником, а не своим temp + rename: своя версия на NTFS
   // падала EPERM, как только тикет держал открытым любой другой читатель (скан доски,
-  // MCP get_ticket), — rename поверх открытого файла там запрещён, а повторов не было.
-  // Проверено запуском 2026-09-24: при открытом дескрипторе чтения возвращался
-  // WRITE_ERROR, строка истории терялась, а раннер (src/runner.mjs, audit-log)
-  // только писал предупреждение в лог — журнал запусков агентов молча становился
-  // неполным. Тот же дефект закрыт в appendReviewEntry (src/lib/review-section.mjs).
+  // MCP get_ticket), — rename поверх открытого файла там запрещён. При таком отказе
+  // возвращался WRITE_ERROR, строка истории терялась, а раннер (src/runner.mjs,
+  // audit-log) только писал предупреждение в лог — журнал запусков агентов молча
+  // становился неполным. Тот же дефект закрыт в appendReviewEntry
+  // (src/lib/review-section.mjs).
   try {
     replaceFileAtomicSync(ticketPath, updated);
     return { ok: true };
@@ -204,8 +204,7 @@ export function classifyAgentResult({ exitCode, stderr, stdout, timedOut, signal
     return 'network_error';
   }
   // Без «permission denied»: это не отказ провайдера, а файловая ошибка или текст скила
-  // execute-task, который рельсы печатают в stderr. 2026-09-25 PulseProxy: gpt-luna
-  // выполнил IMPL-107 и получил в истории auth_error. Настоящий отказ kilo — 403.
+  // execute-task, который рельсы печатают в stderr. Настоящий отказ провайдера — 403.
   if (/\b401\b|\b403\b|invalid api key|unauthor/i.test(stderr)) {
     return 'auth_error';
   }

@@ -12,7 +12,7 @@
  *
  * План закрывает только эта стадия — после разбора со статусом completed (configs/pipeline.yaml:
  * analyze-report.completed и check-report-needed.close_plan). pick-next-task план только
- * считает (2026-09-30 PulseProxy PLAN-020: закрыл до отчёта и разбора).
+ * считает.
  *
  * Результаты:
  *   - status: completed  — план закрыт; повторный вызов на закрытом плане — тоже completed
@@ -27,8 +27,8 @@
  *   - status: error      — ошибка
  *
  * Использование:
- *   node complete-plan.js "plan_id: PLAN-009"
- *   node complete-plan.js PLAN-009
+ *   node complete-plan.js "plan_id: <ID>"
+ *   node complete-plan.js <ID>
  *   node complete-plan.js   (найдёт единственный активный план)
  */
 
@@ -39,7 +39,7 @@ import { parseFrontmatter, printResult, normalizePlanId, extractPlanId, checkAnd
 
 // Корень проекта ищется в вызываемых функциях, а не при импорте: тест импортирует
 // скрипт из каталога без .workflow (чистый checkout CI), и вызов при импорте падал
-// «Could not find .workflow/ directory» до выполнения самих проверок (CI 1.25.2/1.25.3).
+// «Could not find .workflow/ directory» до выполнения самих проверок (CI).
 
 /**
  * Находит активный план в plans/current/ (status: active).
@@ -72,7 +72,7 @@ export function findActivePlan(projectRoot = null) {
 
 /**
  * Достаёт plan_id из аргумента: пайплайн передаёт весь контекст стадии строкой
- * («plan_id: PLAN-009 …»), человек — сам ID или его номер.
+ * («plan_id: <ID> …»), человек — сам ID или его номер.
  *
  * Экспортируется для теста.
  */
@@ -86,9 +86,9 @@ export function parsePlanArg(arg) {
 const TABLE_SEPARATOR_RE = /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/;
 
 /**
- * Строка записи дефекта для журнала: первая непустая, а у таблицы — первая строка данных.
- * 2026-10-01 ревью: PulseProxy QA-002, QA-007 и QA-010 записали дефекты таблицей, и в
- * журнал шла шапка «| ID | Severity | Описание | Статус |» без самого дефекта.
+ * Строка записи дефекта для журнала: первая непустая, а у таблицы — первая строка данных:
+ * запись дефекта таблицей иначе отдала бы в журнал шапку «| ID | Severity | Описание | Статус |»
+ * без самого дефекта.
  *
  * Экспортируется для теста.
  */
@@ -125,7 +125,7 @@ function main() {
 
   // Доска читается целиком (readBoardTickets) и ошибку чтения не глушит: недоступный каталог
   // тикетов или битый frontmatter — это не «план готов», а отказ. Контракт стадии —
-  // status: error, а не стектрейс (2026-10-11 ревью).
+  // status: error, а не стектрейс.
   let WORKFLOW_DIR;
   let result;
   try {

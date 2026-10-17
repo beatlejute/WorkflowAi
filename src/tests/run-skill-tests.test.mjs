@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { TEST_KEY, startModelServer, sendJson, decisionsResponse } from './_model-server.mjs';
+import { agentEnvPath } from '../lib/agent-env.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -121,10 +122,10 @@ const TESTS_DIR = join(SKILL_DIR, 'tests');
 // Helpers
 // ============================================================================
 
-function runRunner(args, env = {}) {
+function runRunner(args, env = {}, cwd = PROJECT_ROOT) {
   return new Promise((resolve) => {
     const proc = spawn(process.execPath, [RUNNER_PATH, ...args], {
-      cwd: PROJECT_ROOT,
+      cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       // cwd — корень репозитория: оттуда раннер берёт .workflow/, мок-агентов и
       // configs/. Скилы он берёт из каталога фикстур, а не из канона.
@@ -264,6 +265,16 @@ before(() => {
     )
   );
 
+  writeFileSync(join(TESTS_DIR, 'tc-008-missing-file.yaml'),
+    buildCaseYaml([{ kind: 'skill_contains', file: 'missing.md', pattern: 'REQUIRED_MARKER', reason: 'Missing source' }])
+  );
+  writeFileSync(join(TESTS_DIR, 'tc-009-multiple-failures.yaml'),
+    buildCaseYaml([
+      { kind: 'skill_contains', pattern: 'ABSENT_ONE', reason: 'First missing marker' },
+      { kind: 'skill_contains', pattern: 'ABSENT_TWO', reason: 'Second missing marker' }
+    ])
+  );
+
   // index.yaml: все тест-кейсы
   const indexYaml = [
     'cases:',
@@ -288,6 +299,10 @@ before(() => {
     '  - id: TC-007',
     '    file: tc-007-short-circuit.yaml',
     '    tags: [smoke]',
+    '  - id: TC-008',
+    '    file: tc-008-missing-file.yaml',
+    '  - id: TC-009',
+    '    file: tc-009-multiple-failures.yaml',
   ].join('\n');
 
   writeFileSync(join(TESTS_DIR, 'index.yaml'), indexYaml);
@@ -307,7 +322,7 @@ describe('Discovery — кейсы из index.yaml', () => {
   it('--skill запускает все кейсы из index.yaml', async () => {
     const { stdout } = await runRunner(['--skill', TEST_SKILL, '--layer', 'static']);
 
-    assert.match(stdout, /total: 7/, 'должно быть 7 кейсов');
+    assert.match(stdout, /total: 9/, 'должно быть 9 кейсов');
   });
 
   it('--case TC-001 фильтрует один кейс', async () => {
@@ -353,11 +368,58 @@ describe('L0 Static assertions', () => {
     assert.match(stdout, /current_run.failed: 0/);
   });
 
-  it('skill_contains → FAIL когда pattern не найден в SKILL.md', async () => {
-    const { stdout } = await runRunner(['--skill', TEST_SKILL, '--case', 'TC-002', '--layer', 'static']);
+  it('skill_contains → FAIL сохраняет диагностику при --skip-meta-write', async () => {
+    const metaPath = join(SKILL_DIR, 'tests', 'cases', 'TC-002', 'current', 'meta.json');
+    mkdirSync(dirname(metaPath), { recursive: true });
+    writeFileSync(metaPath, '{"status":"previous"}\n');
+    const metaBefore = readFileSync(metaPath, 'utf8');
+
+    const { stdout } = await runRunner([
+      '--skill', TEST_SKILL, '--case', 'TC-002', '--layer', 'static', '--skip-meta-write',
+      '--pipeline', TEST_PIPELINE_PATH
+    ]);
 
     assert.match(stdout, /status: failed/);
     assert.match(stdout, /current_run.failed: 1/);
+    const diagnostics = JSON.parse(stdout.match(/^l0_failures: (.+)$/m)[1]);
+    assert.deepEqual(diagnostics, [{
+      skill: TEST_SKILL,
+      case_id: 'TC-002',
+      file: 'SKILL.md',
+      pattern: 'SIGNATURE_MISSING',
+      reason: 'Should fail'
+    }]);
+    assert.equal(readFileSync(metaPath, 'utf8'), metaBefore, 'skip-meta-write must preserve existing meta');
+    assert.equal(existsSync(join(TESTS_DIR, 'cases', 'TC-002', 'current', 'meta.json')), true);
+    assert.equal(existsSync(join(TESTS_DIR, 'cases', 'TC-002', 'current', 'agent-a', 'trial-1.md')), false,
+      'static-only must not invoke the target agent');
+    assert.equal(existsSync(join(TESTS_DIR, 'cases', 'TC-002', 'current', 'judge.json')), false,
+      'static-only must not invoke the judge');
+  });
+
+  it('missing skill file сохраняет pattern и error в L0-диагностике', async () => {
+    const { stdout } = await runRunner(['--skill', TEST_SKILL, '--case', 'TC-008', '--layer', 'static']);
+
+    assert.match(stdout, /current_run.failed: 1/);
+    const diagnostics = JSON.parse(stdout.match(/^l0_failures: (.+)$/m)[1]);
+    const missingFileError = `Skill file not found: ${join(SKILLS_DIR, TEST_SKILL, 'missing.md')}`;
+    assert.deepEqual(diagnostics, [{
+      skill: TEST_SKILL,
+      case_id: 'TC-008',
+      file: 'missing.md',
+      pattern: 'REQUIRED_MARKER',
+      reason: 'Missing source',
+      error: missingFileError
+    }]);
+  });
+
+  it('несколько проваленных L0 assertions считаются одним failed case', async () => {
+    const { stdout } = await runRunner(['--skill', TEST_SKILL, '--case', 'TC-009', '--layer', 'static']);
+
+    assert.match(stdout, /current_run.failed: 1/);
+    const diagnostics = JSON.parse(stdout.match(/^l0_failures: (.+)$/m)[1]);
+    assert.equal(diagnostics.length, 2);
+    assert.deepEqual(diagnostics.map(failure => failure.pattern), ['ABSENT_ONE', 'ABSENT_TWO']);
   });
 
   it('regex-паттерн работает корректно — PASS когда совпадение найдено', async () => {
@@ -1700,6 +1762,15 @@ describe('All skills aggregation', () => {
       const { stdout } = await runRunner(['--all', '--layer', 'static'], { WORKFLOW_SKILLS_DIR: AGG_SKILLS_DIR });
       assert.match(stdout, /verdict: aggregated_failed/);
       assert.match(stdout, /outcome_message: Some skills failed/);
+      assert.match(stdout, /current_run.failed: 1/);
+      const diagnostics = JSON.parse(stdout.match(/^l0_failures: (.+)$/m)[1]);
+      assert.deepEqual(diagnostics, [{
+        skill,
+        case_id: 'TC-FAIL',
+        file: 'SKILL.md',
+        pattern: 'MISSING_AGGREGATE_MARKER',
+        reason: 'aggregate failure'
+      }]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2650,6 +2721,49 @@ describe('Скил на рельсах: рельсы не зацепились �
     ].join('\n'));
   }
 
+  function ambiguityPipeline(agentId, retryAmbiguity = false, externalAmbiguity = false) {
+    const agentScript = join(RAILS_SKILLS_DIR, 'ambiguous-agent.mjs');
+    const pipelinePath = join(RAILS_SKILLS_DIR, 'ambiguous-pipeline.yaml');
+    writeFileSync(agentScript, [
+      "import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';",
+      "import { join } from 'node:path';",
+      `const root = process.env.${externalAmbiguity ? 'WORKFLOW_EXTERNAL_ROOT' : 'WORKFLOW_SANDBOX_ROOT'};`,
+      "const dir = join(root, '.workflow', 'state', 'rails');",
+      "mkdirSync(dir, { recursive: true });",
+      "const countPath = join(root, '.workflow', 'ambiguity-count');",
+      "const count = existsSync(countPath) ? Number(readFileSync(countPath, 'utf8')) + 1 : 1;",
+      "writeFileSync(countPath, String(count));",
+      `const makeAmbiguous = ${!retryAmbiguity} || count > 1;`,
+      "const states = makeAmbiguous ? [['active', 'P0E1'], ['terminal', 'P0S1']] : [['initial', 'P0E1']];",
+      "for (const [session, node] of states) {",
+      "  writeFileSync(join(dir, session + '.json'), JSON.stringify({ session, run: process.env.WORKFLOW_RAILS_RUN, node }));",
+      "}",
+      "console.log('CALL_COUNT_' + count);",
+      "console.log('---RESULT---\\nstatus: passed\\noutput: fixture\\n---RESULT---');",
+      ''
+    ].join('\n'));
+    //waswo
+    writeFileSync(pipelinePath, [
+      'pipeline:',
+      '  name: "ambiguous-rails-pipeline"',
+      '  version: "1.0"',
+      '  agents:',
+      `    ${agentId}:`,
+      '      command: "node"',
+      `      args: ${JSON.stringify([agentScript.replace(/\\/g, '/')])}`,
+      '      workdir: "."',
+      '      capabilities: [text]',
+      '    mock-judge:',
+      '      command: "node"',
+      `      args: ["${join(PROJECT_ROOT, 'src', 'tests', 'fixtures', 'mock-judge.js').replace(/\\/g, '/')}"]`,
+      '      workdir: "."',
+      '      capabilities: [text]',
+      `  default_agents: [${agentId}]`,
+      ''
+    ].join('\n'));
+    return pipelinePath;
+  }
+
   function lastResultBlock(stdout) {
     return stdout.slice(stdout.lastIndexOf('---RESULT---', stdout.lastIndexOf('---RESULT---') - 1));
   }
@@ -2745,6 +2859,60 @@ describe('Скил на рельсах: рельсы не зацепились �
     assert.equal(readMeta().per_model['agent-a'].rails_escaped, 0);
   });
 
+  it('initial ambiguity in the sandbox fails closed before no-hooks handling', async () => {
+    const agentId = 'agent-rails-ambiguous';
+    useAgent(agentId);
+    const pipelinePath = ambiguityPipeline(agentId);
+    const { stdout } = await runRunner(
+      ['--skill', RAILS_SKILL, ...RUN_ARGS.slice(0, -2), '--pipeline', pipelinePath],
+      { WORKFLOW_SKILLS_DIR: RAILS_SKILLS_DIR }
+    );
+
+    assert.match(stdout, /ambiguous session state \(sandbox\); output-check stopped/, stdout);
+    assert.match(stdout, /status: failed/, stdout);
+    assert.equal(readMeta().per_model[agentId].rails_failed, 1);
+    assert.equal(readMeta().per_model[agentId].pass_count, 0);
+    const trialDir = join(skillDir, 'tests', 'cases', CASE_ID, 'current', agentId);
+    assert.equal(existsSync(join(trialDir, 'trial-2.md')), false, 'ambiguous initial state must not retry');
+  });
+
+  it('external ambiguity is reported as escaped and fails closed', async () => {
+    const agentId = 'agent-rails-ambiguous-external';
+    useAgent(agentId);
+    const externalRoot = makeSkillsDir('wf-rails-external-root-');
+    mkdirSync(join(externalRoot, '.workflow'), { recursive: true });
+    const pipelinePath = ambiguityPipeline(agentId, false, true);
+    const { stdout } = await runRunner(
+      ['--skill', RAILS_SKILL, ...RUN_ARGS.slice(0, -2), '--pipeline', pipelinePath],
+      { WORKFLOW_SKILLS_DIR: RAILS_SKILLS_DIR, WORKFLOW_EXTERNAL_ROOT: externalRoot },
+      externalRoot
+    );
+
+    assert.match(stdout, /ambiguous session state \(outside sandbox\); output-check stopped/, stdout);
+    assert.equal(readMeta().per_model[agentId].rails_failed, 1);
+    assert.equal(readMeta().per_model[agentId].rails_escaped, 1);
+    assert.equal(readMeta().per_model[agentId].pass_count, 0);
+    const trialDir = join(skillDir, 'tests', 'cases', CASE_ID, 'current', agentId);
+    assert.equal(existsSync(join(trialDir, 'trial-2.md')), false, 'external ambiguity must not retry');
+  });
+
+  it('ambiguous retry fails closed and does not spawn again', async () => {
+    const agentId = 'agent-rails-ambiguous-retry';
+    useAgent(agentId);
+    const pipelinePath = ambiguityPipeline(agentId, true);
+    const { stdout } = await runRunner(
+      ['--skill', RAILS_SKILL, ...RUN_ARGS.slice(0, -2), '--pipeline', pipelinePath],
+      { WORKFLOW_SKILLS_DIR: RAILS_SKILLS_DIR }
+    );
+
+    assert.match(stdout, /ambiguous session state \(sandbox\); output-check stopped/, stdout);
+    assert.equal(readMeta().per_model[agentId].rails_failed, 1);
+    assert.equal(readMeta().per_model[agentId].pass_count, 0);
+    const trial = readFileSync(join(skillDir, 'tests', 'cases', CASE_ID, 'current', agentId, 'trial-1.md'), 'utf8');
+    assert.match(trial, /CALL_COUNT_2/, 'one initial call and one retry');
+    assert.doesNotMatch(trial, /CALL_COUNT_3/, 'ambiguous retry stops without another spawn');
+  });
+
   it('повтор по output-check без состояния в песочнице — отмечен по повтору, а не по первой попытке', async () => {
     useAgent('agent-rails-once');
     const { stdout } = await runRunner(['--skill', RAILS_SKILL, ...RUN_ARGS], { WORKFLOW_SKILLS_DIR: RAILS_SKILLS_DIR });
@@ -2771,6 +2939,100 @@ describe('Скил на рельсах: рельсы не зацепились �
 
     const trialOut = readFileSync(join(skillDir, 'tests', 'cases', CASE_ID, 'current', 'agent-rails-silent', 'trial-1.md'), 'utf8');
     assert.match(trialOut, new RegExp(`SAW_START_VERDICT node \\.workflow/src/rails/cli\\.mjs start ${RAILS_SKILL}`), 'повтор получил вердикт с командой start');
+  });
+
+  // Каталог агента pi (`PI_CODING_AGENT_DIR`) задаётся машинным `agent.env`
+  // (lib/agent-env.mjs): его получает запускаемый агент, а окружение процесса
+  // раннера тестов скилов его не видит. Проверка хуков в этом прогоне обязана
+  // смотреть туда же, куда смотрит агент, — иначе расширение в каталоге агента
+  // не находится, отсутствие состояния принимается за «хуков нет», и попытка без
+  // единого вызова инструмента уходит молча, без повтора по вердикту.
+  const PI_RAILS_AGENT = 'agent-rails-silent-pi';
+  const piSlashes = (p) => p.replace(/\\/g, '/');
+
+  /** Каталог агента с установленным расширением рельс (загрузчик + ядро на месте). */
+  function makePiAgentDir(name) {
+    const agentDir = join(RAILS_SKILLS_DIR, name);
+    const core = join(RAILS_SKILLS_DIR, 'pi-rails-core', 'pi-extension.mjs');
+    mkdirSync(dirname(core), { recursive: true });
+    writeFileSync(core, 'export default function () {}\n', 'utf8');
+    const extensions = join(agentDir, 'extensions');
+    mkdirSync(extensions, { recursive: true });
+    writeFileSync(join(extensions, 'workflow-rails.ts'), `export { default } from "${piSlashes(core)}";\n`, 'utf8');
+    return agentDir;
+  }
+
+  /** Конвейер с исполнителем-хостом pi (rails_host) и мок-судьёй; хост — мок без вызовов инструментов. */
+  function piRailsPipelinePath() {
+    const pipelinePath = join(RAILS_SKILLS_DIR, 'pi-rails-pipeline.yaml');
+    writeFileSync(pipelinePath, [
+      'pipeline:',
+      '  name: "pi-rails-pipeline"',
+      '  version: "1.0"',
+      '  agents:',
+      `    ${PI_RAILS_AGENT}:`,
+      '      command: "node"',
+      `      args: ${JSON.stringify([piSlashes(join(PROJECT_ROOT, 'src', 'tests', 'fixtures', 'mock-agent-rails-silent.js'))])}`,
+      '      workdir: "."',
+      '      rails_host: pi',
+      '      capabilities: [text]',
+      '    mock-judge:',
+      '      command: "node"',
+      '      args: ["src/tests/fixtures/mock-judge.js"]',
+      '      workdir: "."',
+      '      capabilities: [text]',
+      `  default_agents: [${PI_RAILS_AGENT}]`,
+      ''
+    ].join('\n'));
+    return pipelinePath;
+  }
+
+  /**
+   * Прогон кейса с машинным agent.env во временном WORKFLOW_HOME и с окружением
+   * раннера, где `PI_CODING_AGENT_DIR` указывает в другое место: расхождение двух
+   * окружений и есть предмет проверки.
+   */
+  async function runPiRailsCase(agentDirFromEnv, runnerPiDir) {
+    const home = mkdtempSync(join(tmpdir(), 'wf-skill-rails-home-'));
+    const savedHome = process.env.WORKFLOW_HOME;
+    process.env.WORKFLOW_HOME = home;
+    try {
+      writeFileSync(agentEnvPath(), `PI_CODING_AGENT_DIR=${agentDirFromEnv}\n`, 'utf8');
+      return await runRunner(
+        ['--skill', RAILS_SKILL, '--layer', 'l2', '--skip-secret-scan', '--fast', '--yes', '--pipeline', piRailsPipelinePath()],
+        { WORKFLOW_SKILLS_DIR: RAILS_SKILLS_DIR, PI_CODING_AGENT_DIR: runnerPiDir }
+      );
+    } finally {
+      if (savedHome === undefined) delete process.env.WORKFLOW_HOME; else process.env.WORKFLOW_HOME = savedHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  it('pi: каталог агента задан только в agent.env — расширение найдено, повтор с вердиктом', async () => {
+    useAgent(PI_RAILS_AGENT);
+    const agentDir = makePiAgentDir('pi-agent-from-env');
+    // Окружение раннера смотрит в пустой каталог: без учёта agent.env расширение не нашлось бы.
+    const runnerDir = join(RAILS_SKILLS_DIR, 'pi-runner-env-empty');
+    mkdirSync(runnerDir, { recursive: true });
+
+    const { stdout } = await runPiRailsCase(agentDir, runnerDir);
+
+    assert.match(stdout, /хуки рельс \(pi\) на месте, а вызовов инструментов под рельсами нет: повтор с вердиктом/, stdout);
+    const trialOut = readFileSync(join(skillDir, 'tests', 'cases', CASE_ID, 'current', PI_RAILS_AGENT, 'trial-1.md'), 'utf8');
+    assert.match(trialOut, new RegExp(`SAW_START_VERDICT node \\.workflow/src/rails/cli\\.mjs start ${RAILS_SKILL}`), 'повтор получил вердикт с командой start');
+  });
+
+  it('pi: каталога агента из agent.env нет — хуков нет, повтор не обоснован', async () => {
+    useAgent(PI_RAILS_AGENT);
+    // Каталог назван в agent.env, но не создан; в окружении раннера расширение есть —
+    // подмена одного окружения другим дала бы ложное «хуки на месте».
+    const missingDir = join(RAILS_SKILLS_DIR, 'pi-agent-not-created');
+    const runnerDir = makePiAgentDir('pi-runner-env-with-extension');
+
+    const { stdout } = await runPiRailsCase(missingDir, runnerDir);
+
+    assert.doesNotMatch(stdout, /хуки рельс \(pi\) на месте/, stdout);
+    assert.match(stdout, /⚠ rails: \S* — состояния сессии этого запуска нет ни в песочнице/, stdout);
   });
 
   it('executor-only L1 cannot pass when rails procedure failed', async () => {

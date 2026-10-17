@@ -13,6 +13,8 @@
  *   2. Сверяет с .claude/settings.local.json (enabledMcpjsonServers / enableAllProjectMcpServers).
  *   3. Для http(s)-эндпоинтов делает GET-пинг и сообщает reachability.
  *   4. Для stdio-серверов проверяет, что бинарь резолвится в PATH.
+ *   5. Требует, чтобы весь набор серверов давал один хост: серверы, доступные
+ *      только разным хостам по отдельности, успешной проверкой не считаются.
  *
  * ВАЖНО: «может ли сервер быть доступен» (эндпоинт жив + harness разрешает) ≠
  * «доступен ли он прямо сейчас в чате». Последнее знает только harness в момент
@@ -37,7 +39,8 @@
  *   - task_type ∉ require_for → пропуск               → status: skipped
  *
  * Отсутствие .mcp.json или пустой список серверов — это ok (нечего проверять).
- * Fail — только когда настроенные серверы недоступны или не разрешены.
+ * Fail — когда настроенные серверы недоступны или не разрешены, а также когда каждый
+ * сервер доступен, но весь набор не даёт ни один хост (см. п. 5 выше).
  *
  * Вывод (для runner'а):
  *   ---RESULT---
@@ -54,6 +57,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import http from 'http';
 import https from 'https';
 import { exec } from 'child_process';
@@ -98,7 +102,10 @@ function readJson(p) {
   }
 }
 
-function findHttpUrl(args) {
+// Адрес http-сервера: поле url самой записи (встроенный транспорт http) или строка-адрес в
+// args — так адрес передаёт обёртка вроде mcp-remote, у которой своей команды запуска нет.
+function findHttpUrl(args, url) {
+  if (typeof url === 'string' && /^https?:\/\//.test(url)) return url;
   if (!Array.isArray(args)) return null;
   return args.find((a) => typeof a === 'string' && /^https?:\/\//.test(a)) || null;
 }
@@ -166,31 +173,127 @@ function isEnabled(name, settings) {
   return { enabled: false, source: 'not in enabledMcpjsonServers' };
 }
 
-async function checkServer(name, cfg, settings) {
-  const enabled = isEnabled(name, settings);
-  const httpUrl = findHttpUrl(cfg.args);
-  const result = {
-    name,
-    enabled: enabled.enabled,
-    enabledSource: enabled.source,
-    transport: httpUrl ? 'http' : 'stdio',
-    command: cfg.command,
-    url: httpUrl,
-  };
+/**
+ * Каталог агента pi: `PI_CODING_AGENT_DIR` или `~/.pi/agent` — как считает сам pi.
+ * Оттуда он берёт глобальный `mcp.json`, а проектный `.pi/mcp.json` — только в
+ * доверенном проекте (запись в `trust.json`, ближайший предок каталога).
+ */
+function piAgentDir() {
+  const override = typeof process.env.PI_CODING_AGENT_DIR === 'string' ? process.env.PI_CODING_AGENT_DIR.trim() : '';
+  return override || path.join(os.homedir(), '.pi', 'agent');
+}
 
+/** Доверен ли проект pi: ближайшая запись `trust.json` со значением true. */
+function piProjectTrusted(projectRoot, agentDir) {
+  const trust = readJson(path.join(agentDir, 'trust.json')).data;
+  if (!trust || typeof trust !== 'object' || Array.isArray(trust)) return false;
+  const same = (a, b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+  let dir = path.resolve(projectRoot);
+  for (;;) {
+    const key = Object.keys(trust).find((k) => same(path.resolve(k), dir));
+    if (key !== undefined && typeof trust[key] === 'boolean') return trust[key];
+    const parent = path.dirname(dir);
+    if (parent === dir) return false;
+    dir = parent;
+  }
+}
+
+/** Серверы MCP из конфигов pi: глобальный `mcp.json` и проектный `.pi/mcp.json`. */
+function piServers(projectRoot, agentDir) {
+  const global = readJson(path.join(agentDir, 'mcp.json')).data;
+  const globalServers = global && global.mcpServers && typeof global.mcpServers === 'object' ? global.mcpServers : {};
+  const project = piProjectTrusted(projectRoot, agentDir)
+    ? readJson(path.join(projectRoot, '.pi', 'mcp.json')).data
+    : null;
+  const projectServers = project && project.mcpServers && typeof project.mcpServers === 'object' ? project.mcpServers : {};
+  return { globalServers, projectServers };
+}
+
+/**
+ * Разрешение сервера в конфигах pi: запись проекта перекрывает глобальную, а запись
+ * без команды, адреса и типа — только переопределение `enabled`. Отключённый сервер
+ * (`enabled: false`) не подключается, даже если он есть в проекте.
+ *
+ * `entry` — та же запись, по которой вынесено разрешение: у pi своя команда и свои
+ * args, и проверять доступность по чужому конфигу нельзя.
+ */
+function piEnabled(name, { globalServers, projectServers }) {
+  const project = projectServers[name];
+  const global = globalServers[name];
+  const isServer = (e) => Boolean(e && (e.command || e.url || e.type));
+  if (project && typeof project === 'object' && project.enabled === false) {
+    return { enabled: false, source: '.pi/mcp.json: enabled false', entry: project };
+  }
+  if (isServer(project)) return { enabled: true, source: '.pi/mcp.json', entry: project };
+  if (project && typeof project === 'object') {
+    // Переопределение без собственного сервера: работает поверх глобальной записи.
+    if (isServer(global)) return { enabled: global.enabled !== false, source: 'глобальный mcp.json pi', entry: global };
+    return { enabled: false, source: '.pi/mcp.json: сервер не описан', entry: null };
+  }
+  if (isServer(global)) {
+    return global.enabled === false
+      ? { enabled: false, source: 'глобальный mcp.json pi: enabled false', entry: global }
+      : { enabled: true, source: 'глобальный mcp.json pi', entry: global };
+  }
+  return { enabled: false, source: 'нет в конфигах pi', entry: null };
+}
+
+/** Доступность одной записи сервера: пинг адреса http или поиск stdio-команды в PATH. */
+async function probeRecord(record) {
+  const httpUrl = findHttpUrl(record.args, record.url);
   if (httpUrl) {
     // Пинг стартует следующим витком цикла, когда поиски stdio-команд уже запущены:
     // сам запуск процесса синхронный, и его пауза иначе попала бы в таймаут пинга.
     await new Promise((resolve) => setImmediate(resolve));
     const ping = await pingHttp(httpUrl);
-    result.reachable = ping.ok;
-    result.detail = ping.ok ? `HTTP ${ping.status}` : ping.reason;
-  } else {
-    const ok = await commandExists(cfg.command);
-    result.reachable = ok;
-    result.detail = ok ? 'command found in PATH' : 'command not in PATH';
+    return { transport: 'http', url: httpUrl, reachable: ping.ok, detail: ping.ok ? `HTTP ${ping.status}` : ping.reason };
   }
-  return result;
+  const ok = await commandExists(record.command);
+  return { transport: 'stdio', url: null, reachable: ok, detail: ok ? 'command found in PATH' : 'command not in PATH' };
+}
+
+async function checkServer(name, cfg, settings, pi) {
+  const claude = isEnabled(name, settings);
+  const piState = piEnabled(name, pi);
+  // Хосты стадии бывают разные (claude и pi): сервер считается доступным, если его
+  // разрешает хотя бы один из них — иначе сервер, разрешённый только для pi, блокировал бы
+  // тикет. Запись для проверки берётся от того хоста, что разрешил сервер: у pi своя
+  // команда и свои args, и чужая запись дала бы вердикт о сервере, которого у этого хоста
+  // нет. Если разрешают оба, вердикт берётся по первой рабочей записи: неудача одного хоста
+  // не должна скрывать рабочую запись другого. Когда не разрешает никто, причина остаётся
+  // прежней (от Claude): она привычнее и по ней видно, чего не хватает в настройках проекта.
+  const candidates = [];
+  if (claude.enabled) candidates.push({ host: 'claude', state: claude, record: cfg });
+  if (piState.enabled) candidates.push({ host: 'pi', state: piState, record: piState.entry });
+  if (candidates.length === 0) candidates.push({ host: 'claude', state: claude, record: cfg });
+
+  // Проверяются все кандидаты, а не до первой доступной записи: строка берёт вердикт
+  // первой доступной (как раньше), а свод по хостам — вердикт каждой записи отдельно.
+  const probes = [];
+  for (const c of candidates) probes.push({ c, probe: await probeRecord(c.record) });
+
+  const chosen = probes.find((p) => p.probe.reachable) || probes[0];
+  const { c: host, probe } = chosen;
+
+  // hostOk — хост даёт сервер целиком: запись хоста и разрешена, и доступна. Запись
+  // хоста, который сервер не разрешает (в том числе запасная запись Claude, взятая
+  // только ради причины отказа), сервер не даёт, даже если команда резолвится.
+  const hostOk = { claude: false, pi: false };
+  for (const p of probes) {
+    if (p.c.state.enabled && p.probe.reachable) hostOk[p.c.host] = true;
+  }
+
+  return {
+    name,
+    hostOk,
+    enabled: host.state.enabled,
+    enabledSource: host.state.source,
+    transport: probe.transport,
+    command: host.record.command,
+    url: probe.url,
+    reachable: probe.reachable,
+    detail: probe.detail,
+  };
 }
 
 function formatRow(r) {
@@ -249,24 +352,58 @@ function formatRow(r) {
   }
 
   const settings = readJson(settingsPath).data || null;
+  const pi = piServers(projectRoot, piAgentDir());
   const names = Object.keys(servers);
 
   console.log(`[check-mcp] task_type=${taskType}, проверяю ${names.length} MCP-серверов:\n`);
 
   const results = await Promise.all(
-    names.map((n) => checkServer(n, servers[n], settings))
+    names.map((n) => checkServer(n, servers[n], settings, pi))
   );
   for (const r of results) console.log(formatRow(r));
 
   const failed = results.filter((r) => !r.enabled || !r.reachable);
+  // Итог — по набору целиком, а не по сумме вердиктов: сервер A может быть доступен
+  // только Claude, сервер B — только pi, и тогда «все OK» не значит, что хоть один
+  // исполнитель получит набор. Проверка проходит, только если весь набор даёт один хост.
+  const hostNames = [...new Set(results.flatMap((r) => Object.keys(r.hostOk)))];
+  const hosts = hostNames.map((host) => ({
+    host,
+    missing: results.filter((r) => !r.hostOk[host]).map((r) => r.name),
+  }));
+  const covering = hosts.filter((h) => h.missing.length === 0);
+  // Свод по хостам печатается, когда в наборе участвуют оба: при одном хосте он
+  // повторял бы строки серверов.
+  const inPlay = hosts.filter((h) => h.missing.length < results.length);
+  const printCoverage = () => {
+    if (inPlay.length < 2) return;
+    console.log('[check-mcp] Покрытие набора по хостам:');
+    for (const h of hosts) {
+      const have = results.length - h.missing.length;
+      const gaps = h.missing.length ? `, нет: ${h.missing.join(', ')}` : '';
+      console.log(`  ${h.host}: ${have}/${results.length}${gaps}`);
+    }
+  };
   console.log('');
 
-  if (failed.length === 0) {
+  if (covering.length > 0) {
     console.log(`[check-mcp] Все ${results.length} серверов OK`);
-    emitResult('ok', `${results.length} servers reachable`);
+    emitResult('ok', `${results.length} servers reachable (host: ${covering.map((h) => h.host).join(', ')})`);
     process.exit(0);
   }
 
+  // Набора нет ни у одного хоста. Каждый сервер при этом доступен кому-то — иначе
+  // ветка ниже назвала бы недоступные; здесь порознь доступные серверы собраны разными
+  // хостами, и ни один исполнитель не получает набор целиком.
+  if (failed.length === 0) {
+    printCoverage();
+    console.log(`[check-mcp] Ни один хост не располагает набором целиком (${results.length} серверов).`);
+    const gaps = hosts.map((h) => `${h.host} lacks ${h.missing.join(', ')}`).join('; ');
+    emitResult('fail', `incomplete coverage: ${gaps}`);
+    process.exit(0);
+  }
+
+  printCoverage();
   console.log(`[check-mcp] Проблемы: ${failed.length}/${results.length}`);
   for (const f of failed) {
     const reasons = [];

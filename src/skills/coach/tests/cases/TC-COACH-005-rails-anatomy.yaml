@@ -108,12 +108,32 @@ assertions:
     # 7. Прогон и verdict (первый проход коуча по графу 2026-09-22)
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "P5S5\\[\"[^\\n]*--case TC-SKILL-NNN --yes[^\\n]*не --relevant"
-      reason: "--relevant гонял все кейсы скила на всех моделях (kilo в том числе) ради одного изменённого кейса — прогон обязан быть точечным."
+      pattern: 'P5S5\["[^\n]*по умолчанию[^\n]*--case TC-SKILL-NNN --yes[^\n]*не --relevant'
+      reason: "По умолчанию запускается только затронутый кейс; --relevant не подменяет точечный прогон."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "P5Q1\\{\"[^\\n]*no_baseline_failures при current_run\\.failed 0[^\\n]*зелёный"
-      reason: "Для нового или изменённого кейса раннер отдаёт no_baseline_failures — это не провал, если current_run.failed = 0; старая формулировка гнала на лишний круг правки."
+      pattern: 'P5Q1\{"[^\n]*Точечный прогон: ready_for_user_review или no_baseline_failures при current_run\.failed 0[^\n]*зелёный[^\n]*выбери ready_for_user_review[^\n]*regression_detected, relevant_case_failed, no_baseline_failures с current_run\.failed больше 0 — «доработать»'
+      reason: "Существующие успешные и неуспешные verdict точечного прогона сохраняют прежнюю маршрутизацию."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5S5\["[^\n]*Исключение — только по явному разрешению владельца на общий статический прогон:[^\n]*run-skill-tests\.js --all --layer static --skip-meta-write --yes[^\n]*Исключение снимает только требование точечного кейса'
+      reason: "Общий прогон допустим только с явным разрешением владельца, только для static и без записи baseline; исключение ограничено охватом кейсов."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5S5\["[^\n]*Гард H3 разрешает прогон только на этом этапе, потолок — 3 прогона за сессию[^\n]*лимиты циклов остаются в силе'
+      reason: "Разрешение общего статического прогона не снимает привязку к этапу теста, потолок прогонов и ограничения циклов."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5Q1\{"[^\n]*Для явно разрешённого общего статического прогона успех — только status passed, verdict all_passed, current_run\.failed 0 и отсутствие ошибок[^\n]*выбери all_passed'
+      reason: "Общий статический прогон успешен только при одновременном выполнении всех условий, а не по одному verdict."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5Q1\{"[^\n]*aggregated_failed, status failed/error, current_run\.failed больше 0 или ошибки — разбери диагностику и выбери «доработать»[^\n]*доработка скила или теста только в разрешённой области'
+      reason: "Неуспешный общий прогон требует разбора диагностики и возвращает к доработке без расширения области записи."
+    - kind: skill_contains
+      file: "SKILL.md"
+      pattern: 'P5S4 --> P5S5 --> P5Q1[\s\S]*P5Q1 -->\|"ready_for_user_review"\| P5Q2[\s\S]*P5Q1 -->\|"all_passed"\| P5Q2[\s\S]*P5Q1 -->\|"доработать"\| P4E1'
+      reason: "Оба вида успешного прогона продолжают существующий граф после теста, а доработка возвращается в существующий цикл правки."
     # 8. Термин концепции в выводе (коррекция стейкхолдера 2026-09-22: «не под рельсами, а на рельсах»)
     - kind: skill_contains
       file: "SKILL.md"

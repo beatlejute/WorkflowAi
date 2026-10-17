@@ -775,3 +775,99 @@ test('предпроверка human тоже использует общий fa
     'increment-legacy-review-errors',
   );
 });
+
+// ============================================================================
+// Причина отказа human-тикета доходит до blocked_reason
+// ============================================================================
+//
+// Стадии manual-gate-human и mark-human-rejected берутся из канона как есть, поэтому
+// проверяется вся связка: параметры ветки отказа → промпт раннера → боевой mark-blocked.js.
+// Подменена только move-ticket: перенос тикета из ready/ к записи причины отношения не
+// имеет, а тикет здесь остаётся на месте.
+
+/**
+ * Конфиг с настоящими стадиями human-ворот и записи причины. У агента остаётся command
+ * `node`: только с ним раннер отдаёт промпт аргументом командной строки, а не в stdin —
+ * так же, как в бою, где mark-blocked.js читает argv.
+ */
+function realRejectConfig() {
+  const stages = {};
+  for (const id of ['manual-gate-human', 'mark-human-rejected']) {
+    stages[id] = structuredClone(CANON.stages[id]);
+  }
+  stages['manual-gate-human'].poll_interval_ms = 100;
+  stages['manual-gate-human'].timeout_seconds = 1;
+  stages['move-ticket'] = {
+    type: 'update-counter',
+    counter: 'visited_move-ticket',
+    goto: { default: 'end' },
+  };
+
+  const agent = structuredClone(CANON.agents['script-mark-human-rejected']);
+  agent.args = [path.join(ROOT, 'src/scripts/mark-blocked.js')];
+
+  return {
+    pipeline: {
+      name: 'human-reject-reason-test',
+      version: '1.0',
+      entry: 'manual-gate-human',
+      agents: { 'script-mark-human-rejected': agent },
+      stages,
+      context: { ticket_id: 'HUMAN-1' },
+      execution: { max_steps: 20, delay_between_stages: 1 },
+    },
+  };
+}
+
+function makeRealRejectRunner(root) {
+  const runner = new PipelineRunner(
+    realRejectConfig(),
+    { project: root },
+    { logFilePath: path.join(root, '.workflow', 'test.log') },
+  );
+  // Убираем только межстадийную задержку. Polling gate остаётся рабочим.
+  runner.sleep = async () => {};
+  return runner;
+}
+
+function gateApprovalPath(root) {
+  return path.join(
+    root, '.workflow', 'approvals', 'HUMAN-1_manual-gate-human_0.json',
+  );
+}
+
+test('отказ человека на gate доходит до blocked_reason', async (t) => {
+  const root = setup(t);
+  writeTicket(root, 'ready');
+  const runner = makeRealRejectRunner(root);
+
+  const running = runner.run();
+  const approvalPath = gateApprovalPath(root);
+  await waitForFile(approvalPath);
+  const approval = JSON.parse(fs.readFileSync(approvalPath, 'utf8'));
+  approval.status = 'rejected';
+  fs.writeFileSync(approvalPath, JSON.stringify(approval, null, 2));
+  const result = await running;
+
+  assert.equal(result.failed, false);
+  assert.equal(runner.counters['visited_move-ticket'], 1, 'ветка rejected уходит в move-ticket');
+  const { frontmatter } = parseFrontmatter(
+    fs.readFileSync(ticketPath(root, 'ready'), 'utf8'),
+  );
+  assert.equal(frontmatter.blocked_reason, 'human_gate_rejected');
+});
+
+test('истечение ожидания gate доходит до blocked_reason', async (t) => {
+  const root = setup(t);
+  writeTicket(root, 'ready');
+  const runner = makeRealRejectRunner(root);
+
+  const result = await runner.run();
+
+  assert.equal(result.failed, false);
+  assert.equal(runner.counters['visited_move-ticket'], 1, 'ветка timeout уходит в move-ticket');
+  const { frontmatter } = parseFrontmatter(
+    fs.readFileSync(ticketPath(root, 'ready'), 'utf8'),
+  );
+  assert.equal(frontmatter.blocked_reason, 'human_gate_timeout');
+});

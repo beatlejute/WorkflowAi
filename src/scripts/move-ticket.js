@@ -51,7 +51,7 @@ const VALID_STATUSES = [
 // Таблица допустимых переходов
 const VALID_TRANSITIONS = {
   backlog: ["ready", "blocked", "done"],
-  ready: ["in-progress", "review", "backlog"],
+  ready: ["in-progress", "review", "backlog", "blocked"],
   "in-progress": ["done", "blocked", "review"],
   blocked: ["ready"],
   review: ["done", "ready", "in-progress", "blocked"],
@@ -182,14 +182,14 @@ async function moveTicket(ticketId, target) {
   const now = new Date().toISOString();
   frontmatter.updated_at = now;
 
-  // FIX-69: синхронизируем frontmatter.status с целевой папкой.
+  // Синхронизируем frontmatter.status с целевой папкой.
   // Без этого в done/ оказывались тикеты со status: ready / in-progress, и все потребители
   // frontmatter (MCP get_ticket_stats, check-conditions, валидатор расширения) видели
   // фантомное состояние.
   frontmatter.status = target;
 
   // Машинная метка начала работы — точка отсчёта гейта file_unchanged вместо
-  // created_at, который пишет модель (PulseProxy PLAN-020, 2026-09-30).
+  // created_at, который пишет модель.
   stampStartedAt(frontmatter, target, now);
 
   // Если переход в done, добавляем completed_at
@@ -197,21 +197,41 @@ async function moveTicket(ticketId, target) {
     frontmatter.completed_at = now;
   }
 
-  // Fallback: если тикет идёт в done из review, но агент не записал секцию "## Ревью" — дописываем
-  // IMPL-88: используем appendReviewEntry вместо ручного markdown-write.
+  // Последняя строка «## Ревью» — вердикт, по которому тикет читает и человек, и метрики.
+  const lastReview = getLastReviewStatus(content);
+
+  // Провальное ревью закрытию не подлежит: тикет с последним вердиктом ❌ failed в done/
+  // не пускаем. Раньше он закрывался молча — completed_at, который ставит этот же переход,
+  // выключает откат done/ → backlog у pick-next-task, и провальный тикет оставался закрытым.
+  // Пайплайн сюда не ходит: ветка failed обеих стадий ревью ведёт в review-failure-route.
+  if (target === "done" && lastReview === "failed") {
+    return {
+      status: "error",
+      ticket_id: ticketId,
+      from: currentStatus,
+      to: target,
+      error:
+        `Ревью тикета ${ticketId} провалено (последняя строка «## Ревью» — ❌ failed): ` +
+        "закрытие в done/ отменено, устраните причины или проведите ревью заново",
+    };
+  }
+
+  // Секции «## Ревью» нет: вердикт passed стадии ревью уходит наружу и при неудачной записи
+  // строки (apply-review.js), либо тикет в done/ двигает человек. Вердикт не выдумываем:
+  // passed, failed и skipped — утверждения о ревью, а его не было. Пустая секция с заметкой
+  // читается как «ревью не было» (getLastReviewStatus → null), и поэтому не становится ни
+  // пропуском (check-relevance.js: skipped — тикет неактуален), ни пройденным ревью в метриках.
+  // Заметку заменит таблица, когда по тикету пройдёт настоящее ревью: appendReviewEntry
+  // пересоздаёт секцию без таблицы.
   // ВАЖНО: пишем напрямую через body manipulation (а не file rewrite через appendReviewEntry),
   // потому что move-ticket в этой же транзакции serializeFrontmatter(...) + renameSync — иначе
-  // запись в исходный файл потеряется при rename. Используем те же поля что и appendReviewEntry.
-  if (
-    target === "done" &&
-    currentStatus === "review" &&
-    getLastReviewStatus(content) === null
-  ) {
-    const date = now.slice(0, 16).replace("T", " ");
-    const summary = "Pipeline fallback: агент не записал секцию ревью";
-    const agent = "script-move-fallback";
-    const reviewSection = `\n## Ревью\n\n| Дата | Статус | Самари | Агент |\n|------|--------|--------|-------|\n| ${date} | ✅ passed | ${summary} | ${agent} |\n`;
-    body = body.trimEnd() + "\n" + reviewSection;
+  // запись в исходный файл потеряется при rename.
+  if (target === "done" && currentStatus === "review" && lastReview === null) {
+    body = body.trimEnd() + "\n\n## Ревью\n\nРевью не записано: вердикта в тикете нет — " +
+      "тикет закрыт без пройденного ревью.\n";
+    logger.warn(
+      `${ticketId}: ревью не записано (вердикта в тикете не было) — в «## Ревью» добавлена заметка`,
+    );
   }
 
   // Если переход из blocked, удаляем blocked_reason

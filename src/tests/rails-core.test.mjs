@@ -3114,6 +3114,211 @@ test('executor: shell-редирект в канонический файл — 
   assert.match(r.reason, /каноническая цель защищена/);
 }));
 
+function withCoachBudgetFixture(fn) {
+  withProject(({ root }) => {
+    const skillDir = join(root, '.workflow', 'src', 'skills', 'coach');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, 'SKILL.md'), SKILL_MD.replace('coretest', 'coach'), 'utf8');
+    writeFileSync(join(skillDir, 'rails.yaml'), [
+      'version: 1', 'skill: coach', 'entry: P4E1', 'terminal: [P5S1]', 'pause_nodes: []', 'quote_min: 25',
+      'write_scope:', '  - ".workflow/work/**"', 'allow_temp: false',
+      'deny_shell:', '  - pattern: "\\\\bgit\\\\s+(commit|push)\\\\b"', '    reason: "owner fixture denies git"',
+      'stage_actions:', '  run_tests:', '    kind: [shell]', '    match: "run-skill-tests\\\\.js"',
+      '    stages: [4]', '    max_per_session: 1', 'output:', '  final_requires: []', '  max_stop_blocks: 2', '',
+    ].join('\n'), 'utf8');
+    const sessionId = uuid();
+    const state = startFixtureState({ root, sessionId, skill: 'coach', entry: 'P4E1' });
+    state.node = 'P4S1';
+    loadSkillRuntime(root, 'coach', state);
+    saveState(root, state);
+    const policyPath = join(root, '.workflow', 'rails-policy.yaml');
+    const grant = (overrides = {}) => writeFileSync(policyPath, JSON.stringify({ version: 1, ...overrides }), 'utf8');
+    const action = { tool: 'Bash', kind: 'shell', command: 'node run-skill-tests.js --skill coach' };
+    const ctx = { cwd: root, sessionId };
+    fn({ root, sessionId, state, grant, action, ctx });
+  });
+}
+
+function budgetGrant(state, overrides = {}) {
+  return {
+    session: state.session, runtime_id: state.runtime.id, skill: 'coach', action: 'run_tests',
+    expires_at: new Date(Date.now() + 60_000).toISOString(), additional_calls: 2, ...overrides,
+  };
+}
+
+test('decide: exhausted coach test budget denies without an owner grant', () => {
+  withCoachBudgetFixture(({ root, sessionId, state, action, ctx }) => {
+    state.counters['action:run_tests'] = 1;
+    saveState(root, state);
+    const result = decide({ action, ctx });
+    assert.equal(result.decision, 'deny');
+    assert.match(result.reason, /потолок действия «run_tests»/);
+    assert.equal(loadState(root, sessionId).counters['action:run_tests'], 1);
+  });
+});
+
+test('decide: matching owner grant admits exactly additional calls and audits each use', () => {
+  withCoachBudgetFixture(({ root, sessionId, state, grant, action, ctx }) => {
+    state.counters['action:run_tests'] = 1;
+    saveState(root, state);
+    grant({ test_budget: budgetGrant(state) });
+    assert.equal(decide({ action, ctx }).decision, 'allow');
+    assert.equal(decide({ action, ctx }).decision, 'allow');
+    const denied = decide({ action, ctx });
+    assert.equal(denied.decision, 'deny');
+    assert.match(denied.reason, /потолок действия «run_tests»/);
+    assert.equal(loadState(root, sessionId).counters['action:run_tests'], 3);
+    const uses = readJournal(root, {}).filter((event) => event.type === 'test_budget_use' && event.session === sessionId);
+    assert.equal(uses.length, 2);
+    assert.deepEqual(uses.map((event) => [event.count_before, event.count_after]), [[1, 2], [2, 3]]);
+  });
+});
+
+test('decide: malformed owner policy fails closed at the exhausted test budget', () => {
+  withCoachBudgetFixture(({ root, state, grant, action, ctx }) => {
+    state.counters['action:run_tests'] = 1;
+    saveState(root, state);
+    grant();
+    writeFileSync(join(root, '.workflow', 'rails-policy.yaml'), 'version: [', 'utf8');
+    const result = decide({ action, ctx });
+    assert.equal(result.decision, 'deny');
+    assert.match(result.reason, /не удалось прочитать внешнюю политику/);
+  });
+});
+
+test('decide: owner grant bound to another session/runtime or expired is not used', () => {
+  withCoachBudgetFixture(({ root, state, grant, action, ctx }) => {
+    state.counters['action:run_tests'] = 1;
+    saveState(root, state);
+    for (const testBudget of [
+      budgetGrant(state, { session: 'another-session' }),
+      budgetGrant(state, { runtime_id: '0'.repeat(64) }),
+      budgetGrant(state, { expires_at: new Date(Date.now() - 1000).toISOString() }),
+    ]) {
+      grant({ test_budget: testBudget });
+      const result = decide({ action, ctx });
+      assert.equal(result.decision, 'deny');
+      assert.match(result.reason, /потолок действия «run_tests»/);
+    }
+  });
+});
+
+test('decide: reissuing the same owner grant does not reset consumed calls', () => {
+  withCoachBudgetFixture(({ root, sessionId, state, grant, action, ctx }) => {
+    state.counters['action:run_tests'] = 2;
+    saveState(root, state);
+    grant({ test_budget: budgetGrant(state) });
+    assert.equal(decide({ action, ctx }).decision, 'allow');
+    grant({ test_budget: budgetGrant(state) });
+    const exhausted = decide({ action, ctx });
+    assert.equal(exhausted.decision, 'deny');
+    assert.equal(loadState(root, sessionId).counters['action:run_tests'], 3);
+  });
+});
+
+test('decide: stronger stage and deny_shell rules still deny despite owner grant', () => {
+  withCoachBudgetFixture(({ root, state, grant, action, ctx }) => {
+    state.counters['action:run_tests'] = 1;
+    state.node = 'P5S1';
+    saveState(root, state);
+    grant({ test_budget: budgetGrant(state) });
+    const stageDenied = decide({ action, ctx });
+    assert.equal(stageDenied.decision, 'deny');
+    assert.match(stageDenied.reason, /разрешено только на этапах/);
+
+    state.node = 'P4S1';
+    saveState(root, state);
+    const shellDeniedAction = { ...action, command: 'git commit -m x; node run-skill-tests.js' };
+    const shellDenied = decide({ action: shellDeniedAction, ctx });
+    assert.equal(shellDenied.decision, 'deny');
+    assert.match(shellDenied.reason, /owner fixture denies git/);
+  });
+});
+
+test('decide: owner budget expires before reservation without consuming a call', () => {
+  withCoachBudgetFixture(({ root, sessionId, state, grant, action, ctx }) => {
+    state.counters['action:run_tests'] = 1;
+    saveState(root, state);
+    const expiry = Date.now() + 60_000;
+    grant({ test_budget: budgetGrant(state, { expires_at: new Date(expiry).toISOString() }) });
+    const clock = mock.method(Date, 'now', () => expiry - 1);
+    const originalRead = fs.readFileSync;
+    let policyReads = 0;
+    const reader = mock.method(fs, 'readFileSync', function (path, ...args) {
+      const value = originalRead.call(this, path, ...args);
+      if (String(path) === join(root, '.workflow', 'rails-policy.yaml') && ++policyReads === 2) {
+        clock.mock.mockImplementationOnce(() => expiry - 1);
+        clock.mock.mockImplementation(() => expiry);
+      }
+      return value;
+    });
+    syncBuiltinESMExports();
+    try {
+      const result = decide({ action, ctx });
+      assert.equal(result.decision, 'deny');
+      assert.equal(loadState(root, sessionId).counters['action:run_tests'], 1);
+      assert.equal(readJournal(root, {}).filter((event) => event.type === 'test_budget_use').length, 0);
+    } finally {
+      reader.mock.restore();
+      clock.mock.restore();
+      syncBuiltinESMExports();
+    }
+  });
+});
+
+test('decide: owner budget state save failure denies without auditing a reservation', () => {
+  withCoachBudgetFixture(({ root, sessionId, state, grant, action, ctx }) => {
+    state.counters['action:run_tests'] = 1;
+    saveState(root, state);
+    grant({ test_budget: budgetGrant(state) });
+    const originalOpen = fs.openSync;
+    const stateFile = join(root, '.workflow', 'state', 'rails', `${sessionId}.json`);
+    const writer = mock.method(fs, 'openSync', function (path, flags, ...args) {
+      if (String(path) === stateFile && flags === 'r+') throw new Error('state unavailable');
+      return originalOpen.call(this, path, flags, ...args);
+    });
+    try {
+      const result = decide({ action, ctx });
+      assert.equal(result.decision, 'deny');
+      assert.match(result.reason, /не удалось сохранить расход бюджета проверок/);
+    } finally { writer.mock.restore(); }
+    assert.equal(loadState(root, sessionId).counters['action:run_tests'], 1);
+    assert.equal(readJournal(root, {}).filter((event) => event.type === 'test_budget_use').length, 0);
+  });
+});
+
+test('decide: owner budget audit failure denies and never refunds saved consumption', () => {
+  withCoachBudgetFixture(({ root, sessionId, state, grant, action, ctx }) => {
+    state.counters['action:run_tests'] = 1;
+    saveState(root, state);
+    grant({ test_budget: budgetGrant(state, { additional_calls: 1 }) });
+    const append = mock.method(fs, 'appendFileSync', () => { throw new Error('audit unavailable'); });
+    let result;
+    try {
+      result = decide({ action, ctx });
+      assert.equal(result.decision, 'deny');
+      assert.match(result.reason, /не удалось сохранить расход бюджета проверок/);
+    } finally { append.mock.restore(); }
+    assert.equal(loadState(root, sessionId).counters['action:run_tests'], 2);
+    assert.equal(decide({ action, ctx }).decision, 'deny');
+  });
+});
+
+test('decide: duplicate toolUseId consumes an owner-granted call only once', () => {
+  withCoachBudgetFixture(({ root, sessionId, state, grant, action, ctx }) => {
+    state.counters['action:run_tests'] = 1;
+    saveState(root, state);
+    grant({ test_budget: budgetGrant(state) });
+    const first = decide({ action, ctx: { ...ctx, toolUseId: 'budget-use-1', event: 'PreToolUse' } });
+    const duplicate = decide({ action, ctx: { ...ctx, toolUseId: 'budget-use-1', event: 'PreToolUse' } });
+    assert.equal(first.decision, 'allow');
+    assert.equal(duplicate.decision, 'allow');
+    assert.equal(duplicate.deduped, true);
+    assert.equal(loadState(root, sessionId).counters['action:run_tests'], 2);
+    assert.equal(readJournal(root, {}).filter((event) => event.type === 'test_budget_use' && event.session === sessionId).length, 1);
+  });
+});
+
 test('decide: mocked Linux interactive handoff enters neutral mode on every OS and still guards skill writes', () => {
   const root = mkdtempSync(join(tmpdir(), 'rails-core-handoff-'));
   mkdirSync(join(root, '.workflow'), { recursive: true });

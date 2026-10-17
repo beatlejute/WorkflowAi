@@ -4,18 +4,21 @@
  * mark-blocked.js - Скрипт для обновления frontmatter тикета и записи в alerts.jsonl
  *
  * Использование:
- *   node mark-blocked.js <ticket_id> --attempts=N --reason=<str>
+ *   node mark-blocked.js <ticket_id> [--attempts=N] --reason=<str>
  *
  * Примеры:
  *   node mark-blocked.js IMPL-59 --attempts=6 --reason=max_review_attempts
- *   node mark-blocked.js QA-40 --attempts=3 --reason=human_gate_rejected
+ *   node mark-blocked.js HUMAN-60 --reason=human_gate_rejected
+ *
+ * --attempts необязателен: ядро пишет blocked_reason и без него, без приписки о попытках.
+ * У тикета, который ждёт человека, счётчика попыток исполнения нет — подставлять туда
+ * номер попытки было бы вымыслом.
  *
  * Стадия пайплайна (агент script-mark-blocked) зовёт скрипт одним аргументом — промптом
  * «mark-blocked\n\nContext:\n  ticket_id: X\n  attempts: N\n  reason: R\n…», как и
- * move-ticket.js. Этот вид разбирается в те же три поля. До 2026-09-28 скрипт понимал
- * только флаги и на стадии падал «недостаточно аргументов» в каждом пайплайне: тикет уходил
- * в blocked/ обработчиком ошибки стадии, без причины и без алерта (PulseProxy, QA-160 и
- * DOCS-10, прогон pipeline_2026-09-27_17-20-03).
+ * move-ticket.js. Этот вид разбирается в те же три поля. Скрипт, понимающий только флаги,
+ * на стадии падал бы «недостаточно аргументов» в каждом пайплайне: тикет уходил бы
+ * в blocked/ обработчиком ошибки стадии, без причины и без алерта.
  */
 
 import path from "path";
@@ -56,9 +59,12 @@ const rawArgs = process.argv.slice(2);
 const args = rawArgs.length === 1 && /\bContext:/.test(rawArgs[0])
   ? argsFromStagePrompt(rawArgs[0])
   : rawArgs;
-if (args.length < 3) {
+// Обязательны id тикета и причина (--reason ниже), число попыток — нет: ядро пишет
+// blocked_reason и при attempts == null. Вызов без id узнаётся по первому аргументу-флагу:
+// промпту стадии без ticket_id разбирать нечего, и принимать --reason=… за id нельзя.
+if (args.length < 2 || args[0].startsWith("--")) {
   console.error("Ошибка: недостаточно аргументов");
-  console.error("Использование: node mark-blocked.js <ticket_id> --attempts=N --reason=<str>");
+  console.error("Использование: node mark-blocked.js <ticket_id> [--attempts=N] --reason=<str>");
   process.exit(1);
 }
 

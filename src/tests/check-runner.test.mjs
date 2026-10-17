@@ -26,6 +26,8 @@ import {
   dodStartProblems,
   isDodFormat2,
   CHECK_TIMEOUT_MS,
+  CHECK_TIMEOUT_ENV,
+  CHECK_TIMEOUT_CEILING_MS,
   CHECK_OUTPUT_LIMIT,
   CHECK_CAPTURE_LIMIT
 } from '../lib/check-runner.mjs';
@@ -118,6 +120,75 @@ test('команда дольше таймаута даёт timeout, проце�
   assert.equal(fs.existsSync(path.join(root, 'late-marker')), false, 'процесс пережил таймаут');
 });
 
+// Предел проверки настраивается без правки кода. Разрешение: аргумент runCheck →
+// CHECK_TIMEOUT_ENV → CHECK_TIMEOUT_MS. Тест читает переменную при каждом запуске,
+// а не при импорте модуля, поэтому она действует и после загрузки.
+test('предел проверки переопределяется переменной окружения, аргумент сильнее неё', async () => {
+  assert.equal(CHECK_TIMEOUT_MS, 120_000, 'значение по умолчанию не изменилось');
+  const LATE_MS = 8000;
+  const check = `node -e "setTimeout(() => require('fs').writeFileSync('env-late-marker', ''), ${LATE_MS})"`;
+  const prev = process.env[CHECK_TIMEOUT_ENV];
+
+  try {
+    process.env[CHECK_TIMEOUT_ENV] = '300';
+    const byEnv = await run(check, 'exit 0');
+    assert.equal(byEnv.status, 'timeout');
+    assert.equal(byEnv.reason, 'timeout_ms: 300');
+
+    // Аргумент сильнее переменной: предел 1000, а не 300 из окружения.
+    const argStarted = Date.now();
+    const byArg = await run(check, 'exit 0', { timeoutMs: 1000 });
+    assert.equal(byArg.status, 'timeout');
+    assert.equal(byArg.reason, 'timeout_ms: 1000');
+
+    // Неположительное и нечисловое значение переменной — предел по умолчанию.
+    process.env[CHECK_TIMEOUT_ENV] = '0';
+    assert.equal((await run('node -e "process.exit(0)"', 'exit 0')).status, 'passed');
+    process.env[CHECK_TIMEOUT_ENV] = 'нечисло';
+    assert.equal((await run('node -e "process.exit(0)"', 'exit 0')).status, 'passed');
+
+    // Поздний маркер — от запуска с самым большим сроком: ждём от его старта.
+    await sleep(Math.max(0, LATE_MS + 500 - (Date.now() - argStarted)));
+    assert.equal(fs.existsSync(path.join(root, 'env-late-marker')), false, 'процесс пережил таймаут');
+  } finally {
+    if (prev === undefined) delete process.env[CHECK_TIMEOUT_ENV];
+    else process.env[CHECK_TIMEOUT_ENV] = prev;
+  }
+});
+
+// Предел сверх потолка таймера Node (2^31-1 мс) в setTimeout отдать нельзя: Node
+// принимает его с предупреждением TimeoutOverflowWarning и ставит таймер на 1 мс —
+// исправная проверка кончалась бы как timeout. Значение приводится к потолку, поэтому
+// проверка с таким пределом живёт.
+test('предел сверх потолка таймера не превращается в мгновенный таймер', async () => {
+  const OVERFLOW_MS = 2_592_000_000; // 30 суток — значение, переполняющее таймер
+  const prev = process.env[CHECK_TIMEOUT_ENV];
+  const delays = [];
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, delay, ...rest) => {
+    delays.push(delay);
+    return realSetTimeout(callback, delay, ...rest);
+  };
+  try {
+    // Проверка идёт дольше 1 мс: при таймере в 1 мс она кончилась бы как timeout.
+    process.env[CHECK_TIMEOUT_ENV] = String(OVERFLOW_MS);
+    delays.length = 0;
+    const fromEnv = await run('node -e "setTimeout(() => process.exit(0), 1500)"');
+    assert.equal(fromEnv.status, 'passed', JSON.stringify(fromEnv));
+    assert.equal(delays[0], CHECK_TIMEOUT_CEILING_MS, 'предел из переменной не приведён к потолку таймера');
+
+    // Аргумент сильнее переменной, но ограничен тем же потолком.
+    delays.length = 0;
+    const fromArg = await run('node -e "process.exit(0)"', 'exit 0', { timeoutMs: OVERFLOW_MS });
+    assert.equal(fromArg.status, 'passed', JSON.stringify(fromArg));
+    assert.equal(delays[0], CHECK_TIMEOUT_CEILING_MS, 'аргумент не приведён к потолку таймера');
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    if (prev === undefined) delete process.env[CHECK_TIMEOUT_ENV];
+    else process.env[CHECK_TIMEOUT_ENV] = prev;
+  }
+});
+
 test('таймаут снимает дерево процессов: дочерний node под npm тоже завершается', async () => {
   // Внук пишет маркер через 8 с — с запасом над таймаутом и снятием дерева под
   // нагрузкой (taskkill под c8 занимал больше 2 с, см. тест выше).
@@ -151,7 +222,7 @@ test('git: каждая разрешённая подкоманда проход
 });
 
 test('pytest, python, dotnet, rg, grep проходят ограничения', async () => {
-  // Установлены они не везде: отсутствующий файл даёт failed (spawn_failed), а не denied.
+  // Установлены они не везде: отсутствующий файл даёт spawn_failed, а не denied.
   for (const executable of ['pytest', 'python', 'dotnet', 'rg', 'grep']) {
     const result = await run(`${executable} --version`, 'exit 0');
     assert.notEqual(result.status, 'denied', `${executable}: ${result.reason}`);
@@ -268,13 +339,15 @@ test('рабочий каталог — корень проекта', async () =
   assert.equal(result.status, 'passed', JSON.stringify(result));
 });
 
-test('процесс не стартовал — failed с причиной spawn_failed', async () => {
+test('процесс не стартовал — spawn_failed с причиной spawn_failed', async () => {
   const result = await runCheck({
     check: 'node -e "process.exit(0)"',
     expect: 'exit 0',
     projectRoot: path.join(root, 'no-such-dir')
   });
-  assert.equal(result.status, 'failed');
+  // Отдельный статус, а не `failed`: команда не исполнялась, и приёмка (verify-artifacts)
+  // относит такой пункт к классу «не удалось исполнить», а не «проверка не совпала».
+  assert.equal(result.status, 'spawn_failed');
   assert.ok(result.reason.startsWith('spawn_failed: '), result.reason);
   assert.equal(result.exit_code, null);
 });

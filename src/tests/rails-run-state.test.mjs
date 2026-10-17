@@ -15,6 +15,7 @@ import path from 'node:path';
 
 import {
   findRailsStateByRun,
+  resolveRailsStateByRun,
   railsStatesByRun,
   railsEngagement,
   railsNotEngagedMessage,
@@ -74,9 +75,41 @@ describe('railsStatesByRun', () => {
     fs.writeFileSync(path.join(sandbox, '.workflow', 'state', 'rails', 'broken.json'), '{', 'utf8');
     assert.deepEqual(railsStatesByRun(sandbox, 'r1').map((s) => s.session).sort(), ['ses_a', 'ses_b']);
     assert.equal(railsStatesByRun(sandbox, 'r2').length, 1);
-    assert.equal(findRailsStateByRun(sandbox, 'r1').session, railsStatesByRun(sandbox, 'r1')[0].session,
-      'findRailsStateByRun — первое из railsStatesByRun');
+    assert.deepEqual(resolveRailsStateByRun(sandbox, 'r1'), {
+      status: 'ambiguous', state: null, states: railsStatesByRun(sandbox, 'r1'),
+    });
+    assert.equal(findRailsStateByRun(sandbox, 'r1'), null, 'неоднозначность не выбирает первую сессию');
+    assert.equal(resolveRailsStateByRun(sandbox, 'r2').status, 'unique');
+    assert.equal(resolveRailsStateByRun(sandbox, 'r2').state.session, 'ses_c');
+    assert.equal(resolveRailsStateByRun(sandbox, 'r1', 'ses_b').state.session, 'ses_b', 'точная identity выбирает сессию');
+    assert.equal(resolveRailsStateByRun(sandbox, 'r1', 'not-present').status, 'ambiguous', 'несовпадение identity не выбирает соседа');
   }));
+
+  test('ambiguous resolution does not depend on filename order or node position', withRoots(({ sandbox }) => {
+    writeState(sandbox, 'z-terminal.json', { session: 'terminal', run: 'r1', node: 'P1S1' });
+    writeState(sandbox, 'a-active.json', { session: 'active', run: 'r1', node: 'P1E1' });
+    const first = resolveRailsStateByRun(sandbox, 'r1');
+    assert.equal(first.status, 'ambiguous');
+    assert.deepEqual(first.states.map((state) => state.session).sort(), ['active', 'terminal']);
+    assert.equal(first.states.find((state) => state.session === 'terminal').node, 'P1S1');
+    assert.equal(first.states.find((state) => state.session === 'active').node, 'P1E1');
+    fs.renameSync(
+      path.join(sandbox, '.workflow', 'state', 'rails', 'a-active.json'),
+      path.join(sandbox, '.workflow', 'state', 'rails', '0-active.json'),
+    );
+    const reordered = resolveRailsStateByRun(sandbox, 'r1');
+    assert.equal(reordered.status, 'ambiguous', 'filename order cannot select one candidate');
+    assert.deepEqual(reordered.states.map((state) => state.session).sort(), ['active', 'terminal']);
+    assert.equal(resolveRailsStateByRun(sandbox, 'r1', 'terminal').state.session, 'terminal');
+  }));
+
+  test('zero and one candidate have explicit outcomes', withRoots(({ sandbox }) => {
+    assert.deepEqual(resolveRailsStateByRun(sandbox, 'r1'), { status: 'missing', state: null, states: [] });
+    writeState(sandbox, 'one.json', { session: 'one', run: 'r1', node: 'P1E1' });
+    assert.equal(resolveRailsStateByRun(sandbox, 'r1').status, 'unique');
+    assert.equal(resolveRailsStateByRun(sandbox, 'r1').state.session, 'one');
+  }));
+
 
   test('нет run, нет каталога состояния — пусто', withRoots(({ sandbox }) => {
     assert.deepEqual(railsStatesByRun(sandbox, null), []);
@@ -146,6 +179,18 @@ describe('railsEngagement', () => {
   test('чужой run в настоящем проекте — не побег', withRoots(({ sandbox, project }) => {
     writeState(project, 'ses_y.json', { run: 'other', node: 'P0E1' });
     assert.equal(railsEngagement({ sandboxRoot: sandbox, projectRoot: project, run: 'r1' }).escaped, false);
+  }));
+
+  test('неоднозначность в песочнице и внешнем проекте явно отличается от отсутствия и побега', withRoots(({ sandbox, project }) => {
+    writeState(sandbox, 'a.json', { session: 'a', run: 'sandbox-run', node: 'P1E1' });
+    writeState(sandbox, 'b.json', { session: 'b', run: 'sandbox-run', node: 'P3S1' });
+    const local = railsEngagement({ sandboxRoot: sandbox, projectRoot: project, run: 'sandbox-run' });
+    assert.deepEqual(local, { state: null, engaged: false, escaped: false, ambiguous: true });
+
+    writeState(project, 'a.json', { session: 'a', run: 'external-run', node: 'P1E1' });
+    writeState(project, 'b.json', { session: 'b', run: 'external-run', node: 'P3S1' });
+    const external = railsEngagement({ sandboxRoot: sandbox, projectRoot: project, run: 'external-run' });
+    assert.deepEqual(external, { state: null, engaged: false, escaped: true, ambiguous: true });
   }));
 
   test('без projectRoot — только песочница', withRoots(({ sandbox }) => {

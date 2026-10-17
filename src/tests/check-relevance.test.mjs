@@ -38,6 +38,7 @@ for (const dir of ['backlog', 'ready', 'in-progress', 'blocked', 'review', 'done
   fs.mkdirSync(path.join(TICKETS, dir), { recursive: true });
 }
 fs.mkdirSync(path.join(WF, 'plans', 'current'), { recursive: true });
+fs.mkdirSync(path.join(WF, 'plans', 'archive'), { recursive: true });
 process.on('exit', () => fs.rmSync(ROOT, { recursive: true, force: true }));
 const cwdBefore = process.cwd();
 process.chdir(ROOT);
@@ -60,8 +61,12 @@ function put(dir, id, content) {
   return file;
 }
 
-function putPlan(id, status) {
-  fs.writeFileSync(path.join(WF, 'plans', 'current', `${id}.md`), `---\nid: "${id}"\nstatus: ${status}\n---\n`, 'utf8');
+function putPlan(id, status, directory = 'current') {
+  fs.writeFileSync(path.join(WF, 'plans', directory, `${id}.md`), `---\nid: "${id}"\nstatus: ${status}\n---\n`, 'utf8');
+}
+
+function planTicket(id, planId) {
+  return put('in-progress', id, ticket({ fm: { parent_plan: planId } }));
 }
 
 function quiet(fn) {
@@ -142,6 +147,16 @@ test('последнее ревью failed — relevant: нужна дорабо
   assert.deepEqual(await checkRelevance(file), { verdict: 'relevant', reason: 'review_failed_needs_rework' });
 });
 
+test('запись «ревью не записано» без вердикта — relevant, а не пропуск', async () => {
+  // Такую заметку дописывает move-ticket, когда тикет закрывают без строки ревью
+  // (вердикта passed стадии ревью и ручное закрытие). Вердикта в ней нет: иначе запись о
+  // несостоявшемся ревью читалась бы как «уже пропущено», и тикет молча не выполнялся бы.
+  const note = '# Тикет\n\n## Ревью\n\nРевью не записано: вердикта в тикете нет — тикет закрыт без пройденного ревью.\n';
+  const file = put('in-progress', 'IMPL-015', ticket({ body: note }));
+  assert.equal(quiet(() => getLastReviewStatus(note)), null, 'предпосылка: вердикта в заметке нет');
+  assert.deepEqual(await quiet(() => checkRelevance(file)), { verdict: 'relevant', reason: 'all_checks_passed' });
+});
+
 test('флаг blocked и непустая секция блокировок — relevant/blocked', async () => {
   const flagged = put('in-progress', 'IMPL-013', ticket({ fm: { blocked: true } }));
   assert.deepEqual(await checkRelevance(flagged), { verdict: 'relevant', reason: 'blocked' });
@@ -151,12 +166,63 @@ test('флаг blocked и непустая секция блокировок —
 
 test('план закрыт — irrelevant/plan_inactive; план активен — дальше по правилам', async () => {
   putPlan('PLAN-020', 'completed');
-  const closed = put('in-progress', 'IMPL-020', ticket({ fm: { parent_plan: 'PLAN-020' } }));
+  const closed = planTicket('IMPL-020', 'PLAN-020');
   assert.deepEqual(await checkRelevance(closed), { verdict: 'irrelevant', reason: 'plan_inactive' });
 
   putPlan('PLAN-021', 'active');
-  const open = put('in-progress', 'IMPL-021', ticket({ fm: { parent_plan: 'PLAN-021' } }));
+  const open = planTicket('IMPL-021', 'PLAN-021');
   assert.deepEqual(await checkRelevance(open), { verdict: 'relevant', reason: 'all_checks_passed' });
+});
+
+test('закрытый архивный родительский план делает тикет неактуальным', async () => {
+  putPlan('PLAN-022', 'archived', 'archive');
+  const file = planTicket('IMPL-022', 'plans/archive/PLAN-22.md');
+  assert.deepEqual(await checkRelevance(file), { verdict: 'irrelevant', reason: 'plan_inactive' });
+});
+
+test('активный архивный родительский план оставляет тикет актуальным', async () => {
+  putPlan('PLAN-023', 'active', 'archive');
+  const file = planTicket('IMPL-023', 'PLAN-023');
+  assert.deepEqual(await checkRelevance(file), { verdict: 'relevant', reason: 'all_checks_passed' });
+});
+
+test('дубликаты плана в current и archive — relevant с предупреждением', async () => {
+  putPlan('PLAN-024', 'completed');
+  putPlan('PLAN-024', 'active', 'archive');
+  const file = planTicket('IMPL-024', 'PLAN-024');
+  const result = await checkRelevance(file);
+  assert.equal(result.verdict, 'relevant');
+  assert.equal(result.reason, 'plan_ambiguous');
+  assert.match(result.warning, /Multiple matching plan files/);
+});
+
+test('отсутствующий родительский план оставляет тикет актуальным', async () => {
+  const file = planTicket('IMPL-025', 'PLAN-999');
+  assert.deepEqual(await checkRelevance(file), { verdict: 'relevant', reason: 'all_checks_passed' });
+});
+
+test('нечитаемый родительский план оставляет тикет актуальным', async () => {
+  fs.mkdirSync(path.join(WF, 'plans', 'current', 'PLAN-026.md'));
+  const file = planTicket('IMPL-026', 'PLAN-026');
+  assert.deepEqual(await checkRelevance(file), { verdict: 'relevant', reason: 'all_checks_passed' });
+});
+
+test('некорректный родительский план оставляет тикет актуальным', async () => {
+  fs.writeFileSync(path.join(WF, 'plans', 'current', 'PLAN-027.md'), '---\nstatus: [broken\n---\n', 'utf8');
+  const file = planTicket('IMPL-027', 'PLAN-027');
+  assert.deepEqual(await checkRelevance(file), { verdict: 'relevant', reason: 'all_checks_passed' });
+});
+
+test('предохранители failed review и blocked остаются раньше проверки родительского плана', async () => {
+  putPlan('PLAN-028', 'completed');
+  const failed = put('in-progress', 'IMPL-028', ticket({ fm: { parent_plan: 'PLAN-028' }, body: `# Тикет\n\n${REVIEW('❌ failed')}` }));
+  assert.deepEqual(await checkRelevance(failed), { verdict: 'relevant', reason: 'review_failed_needs_rework' });
+
+  const blocked = put('in-progress', 'IMPL-029', ticket({ fm: { parent_plan: 'PLAN-028', blocked: true } }));
+  assert.deepEqual(await checkRelevance(blocked), { verdict: 'relevant', reason: 'blocked' });
+
+  const skipped = put('in-progress', 'IMPL-029B', ticket({ fm: { parent_plan: 'PLAN-028' }, body: `# Тикет\n\n${REVIEW('⏭️ skipped')}` }));
+  assert.deepEqual(await checkRelevance(skipped), { verdict: 'irrelevant', reason: 'already_skipped' });
 });
 
 test('критерии выполнены и результат есть: с пройденным ревью — irrelevant, без ревью — на ревью', async () => {

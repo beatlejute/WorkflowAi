@@ -12,10 +12,10 @@
  * код (`core.mjs`) вызывает её сам для `kind === "shell"`, если ему нужен
  * `writesTo`.
  *
- * `shell: 'posix' | 'powershell'` (ЗАДАЧА C, 2026-09-22: инструмент
- * PowerShell маппился в kind 'other' — вся shell-защита его не видела) —
+ * `shell: 'posix' | 'powershell'` (инструмент PowerShell иначе маппился бы в kind
+ * 'other' — вся shell-защита его не видела) —
  * диалект команды; `core.collectWriteTargets` передаёт его в `detectShellWrites`.
- * Строку команды разбирает только shell-scan.mjs (ЗАДАЧА C2, 2026-09-22).
+ * Строку команды разбирает только shell-scan.mjs.
  */
 
 import { readFileSync } from 'node:fs';
@@ -29,7 +29,7 @@ const READ_TOOLS_KILO = new Set(['read', 'glob', 'grep', 'list']);
 const EDIT_TOOLS_CLAUDE = new Set(['Edit', 'MultiEdit', 'NotebookEdit']);
 const EDIT_TOOLS_KILO = new Set(['edit', 'patch', 'multiedit']);
 const AGENT_TOOLS_CLAUDE = new Set(['Agent', 'Task']);
-// Встроенные инструменты Kilo 7.7.9 с «_» в имени (kilo.exe, ревью 2026-09-24). Без этого
+// Встроенные инструменты Kilo 7.7.x с «_» в имени. Без этого
 // списка fromKilo делил имя по «_» и принимал их за MCP-сервер «apply», «background» и т. д.:
 // apply_patch (правка файлов у моделей gpt-*) и background_process (запуск команды) проходили
 // мимо write_scope и песочницы тестов.
@@ -37,12 +37,12 @@ const KILO_BUILTIN_OTHER = new Set(['agent_manager', 'cron_create', 'schedule_wa
 const PATCH_PATH_RE = /^\*\*\* (?:Add File|Update File|Delete File|Move to):\s*(.+?)\s*$/gm;
 
 // Shell-действие Kilo (bash, background_process).
-// - workdir — каталог запуска вместо cd (схема инструмента в kilo.exe, проверено 2026-09-24):
-//   без него цели записи разрешались от каталога проекта, а команда шла в workdir.
+// - workdir — каталог запуска вместо cd (схема инструмента в kilo.exe): без него цели
+//   записи разрешались бы от каталога проекта, а команда шла бы в workdir.
 // - dialects: на Windows Kilo сам выбирает shell — shell из конфига, SHELL, затем pwsh →
-//   powershell → Git Bash (kilo.exe; журнал kilo 2026-09-22 и 2026-09-24 — powershell.exe).
+//   powershell → Git Bash (kilo.exe).
 //   Какой выбран, хук не знает, поэтому цели записи берутся по обоим диалектам: разбор только
-//   как POSIX пропускал `Set-Location D:\…; Set-Content f x` (ревью 2026-09-24).
+//   как POSIX пропускал бы `Set-Location D:\…; Set-Content f x`.
 function kiloShellAction(tool, args) {
   const dialects = kiloShellDialects();
   const action = { tool, kind: 'shell', command: args.command, shell: dialects[0] };
@@ -95,6 +95,7 @@ function patchPaths(patchText) {
   return paths.length > 0 ? paths : null;
 }
 
+const READ_TOOLS_PI = new Set(['read', 'grep', 'find', 'ls']);
 const MCP_NAME_RE = /^mcp__(.+?)__(.+)$/;
 
 /**
@@ -111,8 +112,8 @@ export function fromClaude(hookInput) {
   if (toolName === 'Bash') {
     return { tool: toolName, kind: 'shell', command: input.command, shell: 'posix' };
   }
-  // ЗАДАЧА C (2026-09-22): инструмент PowerShell маппился в kind 'other' —
-  // канарейка/deny_shell/stage_actions/write_scope его не видели (обход рельс).
+  // Инструмент PowerShell иначе маппился бы в kind 'other' —
+  // канарейка/deny_shell/stage_actions/write_scope его не видели бы (обход рельс).
   if (toolName === 'PowerShell') {
     return { tool: toolName, kind: 'shell', command: input.command, shell: 'powershell' };
   }
@@ -198,18 +199,62 @@ export function fromKilo(input, output) {
   return { tool, kind: 'other' };
 }
 
+/**
+ * Действие из расширения pi (`tool_call`): `{ toolName, input, toolCallId }`.
+ *
+ * Встроенные инструменты pi: `bash`, `powershell`, `read`, `edit`, `write`,
+ * `grep`, `find`, `ls`; у MCP — `mcp__<сервер>__<инструмент>`. Поля аргументов
+ * свои: у правки, записи и чтения путь — `path` (не `file_path` из Claude и не
+ * `filePath` из Kilo), содержимое правок — список `edits[]` с `oldText`/`newText`.
+ * Инструмента делегирования у pi нет: подзадачу может завести только
+ * пользовательский инструмент, и он попадает в `other`.
+ *
+ * Имя MCP-инструмента pi чистит: всё, кроме букв, цифр и `_`, заменяется на `_`,
+ * а длинное имя обрезается с хвостом хеша. Сервер и инструмент из такого имени
+ * восстанавливаются неточно, поэтому правило, привязанное к точному имени, может
+ * не сработать; вид действия при этом остаётся `mcp`.
+ *
+ * @param {{toolName?: string, input?: object}} event
+ * @returns {{tool: string, kind: string, command?: string, path?: string, server?: string, mcpTool?: string}}
+ */
+export function fromPi(event) {
+  const tool = String(event?.toolName ?? '');
+  const input = event?.input ?? {};
+
+  if (tool === 'bash') {
+    return { tool, kind: 'shell', command: input.command, shell: 'posix' };
+  }
+  if (tool === 'powershell') {
+    return { tool, kind: 'shell', command: input.command, shell: 'powershell' };
+  }
+  if (tool === 'edit') {
+    return { tool, kind: 'edit', path: input.path };
+  }
+  if (tool === 'write') {
+    return { tool, kind: 'write', path: input.path };
+  }
+  if (READ_TOOLS_PI.has(tool)) {
+    return { tool, kind: 'read' };
+  }
+  const mcpMatch = MCP_NAME_RE.exec(tool);
+  if (mcpMatch) {
+    return { tool, kind: 'mcp', server: mcpMatch[1], mcpTool: mcpMatch[2] };
+  }
+  return { tool, kind: 'other' };
+}
+
 // --- detectShellWrites: консервативный разбор записи через shell --------------------------
 //
-// ЗАДАЧА C2, 2026-09-22. Первая версия (ЗАДАЧА C) отклонена обоими ревью — регрессии
-// deny→allow: свой сплиттер/трекер кавычек (`\"` в "…" прятал редирект после `;`), сегмент-
-// присваивание целиком «съедал» команду (`X=$(touch …)`, `FOO=bar > f`, `$x = (Remove-Item …)`),
-// cd брал весь остаток сегмента (`cd X & touch …`), popd и `cd -` не знала, нераскрытый `$`
-// оставался буквой пути. Теперь разбор строки — только shell-scan.mjs, а всё, что нельзя
-// вычислить однозначно, даёт маркер '?' (ложный отказ допустим, ложное разрешение — нет).
+// Свой сплиттер/трекер кавычек даёт регрессии
+// deny→allow: `\"` в "…" прячет редирект после `;`, сегмент-
+// присваивание целиком «съедает» команду (`X=$(touch …)`, `FOO=bar > f`, `$x = (Remove-Item …)`),
+// cd берёт весь остаток сегмента (`cd X & touch …`), popd и `cd -` остаются неучтёнными,
+// нераскрытый `$` остаётся буквой пути. Поэтому разбор строки — только shell-scan.mjs, а всё,
+// что нельзя вычислить однозначно, даёт маркер '?' (ложный отказ допустим, ложное разрешение — нет).
 //
 // Модель — «миры»: возможные состояния shell'а перед очередным сегментом (каталог, переменные,
 // статус последней команды S/F/?). Каталог: абсолютный путь; '' — cwd вызывающего (путь цели
-// остаётся относительным, как до ЗАДАЧИ C); null — неизвестен (относительная запись → '?').
+// остаётся относительным); null — неизвестен (относительная запись → '?').
 // cd может не удаться, а bash и PowerShell после `;`/перевода строки/`||` продолжают в прежнем
 // каталоге (проверено запуском), поэтому трекаемый cd даёт два мира — успех и неудачу, а
 // `&&`/`||` выбирают, в каких мирах выполняется следующий сегмент. Цель записи проверяется
@@ -223,9 +268,8 @@ export function fromKilo(input, output) {
 const IS_WIN32 = process.platform === 'win32';
 const MARK = '?';
 const MARKER_ITEM = Object.freeze({ marker: true });
-// Причина маркера '?' — для текста отказа. Инцидент 2026-09-30 (журналы отказов PulseProxy и
-// ListeningGlass за 29–30.09): из 18 отказов «команда похожа на запись» ни один не называл, что
-// именно принято за запись, и агент не узнавал настоящую ошибку — `2>$null` в bash (редирект в
+// Причина маркера '?' — для текста отказа: без неё отказ «команда похожа на запись» не называет,
+// что именно принято за запись, и агент не узнаёт настоящую ошибку — `2>$null` в bash (редирект в
 // пустую переменную), `\"` в конце пути (строка не закрыта), незаданная `$SCRATCH`.
 const MAX_WHY = 3;
 
@@ -256,14 +300,14 @@ const MAX_NESTED_RUNS = 64; // вложенных интерпретаторов
 const NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ASSIGN_WORD_RE = /^([A-Za-z_][A-Za-z0-9_]*)(\+?)=/;
 // Имя, которому присваивают внутри слова: `S=`, `S+=`, `a[S=1]`, `((x=S=5))`, `S++`, `--S`.
-// Ревью C2 r3 (2026-09-22, HIGH): без `(?<![A-Za-z0-9_])` сопоставление начиналось с КАЖДОЙ
-// позиции пробега букв, и жадный класс имени откатывался до конца — O(n^2): слово из 24 000
-// букв разбиралось 4 с, из 96 000 — 64 с (HEAD — 14 мс). Хук на каждый вызов инструмента
-// висел секунды-минуты, а убитый по таймауту хук = allow. Внутри пробега имя начаться не
+// Без `(?<![A-Za-z0-9_])` сопоставление начиналось бы с КАЖДОЙ
+// позиции пробега букв, и жадный класс имени откатывался бы до конца — O(n^2) на длинном
+// слове. Хук на каждый вызов инструмента висел бы секунды-минуты, а убитый по таймауту
+// хук = allow. Внутри пробега имя начаться не
 // может (для bash имя считается от границы), так что запрет старта в середине ничего не меняет.
 const ASSIGNISH_RE = /(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*(?:[-+*/%&|^]|<<|>>)?=(?!=)|(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+\+|--)|(?:\+\+|--)\s*(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)/g;
 const DOT_DOT_RE = /(?:^|[\\/])\.\.(?:[\\/]|$)/;
-// Раунд 2 ревью C2 (2026-09-22). `NAME[i]=…` — присваивание элементу массива: `$S` — это
+// `NAME[i]=…` — присваивание элементу массива: `$S` — это
 // `${S[0]}`, а перед командой bash считает такое слово префиксом-присваиванием и команду
 // выполняет (`S[0]=x touch f` создаёт f, проверено запуском).
 const ARRAY_ASSIGN_RE = /^[A-Za-z_][A-Za-z0-9_]*\[[^\]]*\]\+?=/;
@@ -312,10 +356,10 @@ const POSIX_TESTS = new Set(['[', '[[', 'test']);
 // Обёртки POSIX: следующее за ними слово — команда. value — флаги со значением отдельным словом,
 // chdir — флаги смены каталога для обёрнутой команды (её относительные цели неизвестны).
 // Ключевые слова, после которых идёт команда (`then rm …`, `do rm …`), — тоже обёртки
-// (ревью ЗАДАЧИ C: `for …; do rm /outside; done` HEAD не видел — `rm` не в позиции команды).
+// (иначе `for …; do rm /outside; done` не разбирался бы — `rm` не в позиции команды).
 const WRAPPERS = {
-  // sudo(8): `sudo [-u user] [VAR=value] [command]` (синопсис `sudo -h` в WSL). Ревью 2026-10-01:
-  // `sudo X=1 rm -rf <вне области>` давал имя команды «x=1» и пустой список записей (и в HEAD).
+  // sudo(8): `sudo [-u user] [VAR=value] [command]` (синопсис `sudo -h` в WSL). Без `assigns`
+  // `sudo X=1 rm -rf <вне области>` давал бы имя команды «x=1» и пустой список записей.
   // `-R DIR` (chroot) и `-e` (sudoedit правит файлы-аргументы) — цели не вычислить: opaque.
   sudo: { value: ['-u', '-g', '-p', '-C', '-D', '-r', '-t', '-U', '-T', '-h', '-R'], chdir: ['-D', '--chdir'], assigns: true, opaque: ['-R', '--chroot', '-e', '--edit'] },
   doas: { value: ['-u', '-C'] },
@@ -329,12 +373,12 @@ const WRAPPERS = {
   // env: присваивание — любое слово с `=` (`env ./x=y touch f` создаёт f, проверено запуском)
   env: { value: ['-u', '-C'], chdir: ['-C', '--chdir'], assigns: true },
   nice: { value: ['-n'] },
-  // Обёртки того же вида, что coproc (раунд 3 ревью C2): следующее слово (у flock — после
+  // Обёртки того же вида, что coproc: следующее слово (у flock — после
   // файла блокировки) команда. В Git Bash на этой машине обеих утилит нет (проверено
   // `command -v` — not found), поведение взято из их документированной формы; правило только
   // расширяет детект записи, ложного разрешения из него не возникает.
   //
-  // Раунд 5 (2026-09-22, LOW-3): у setsid `-c`/`--ctty` значения НЕТ (это переключатель, как
+  // У setsid `-c`/`--ctty` значения НЕТ (это переключатель, как
   // -f/-w, util-linux setsid(1)) — он съедал имя обёрнутой команды, и `setsid -c touch <вне
   // области>` давал commandName 'f' без записи. У flock `-c`/`--command <строка>` значение
   // есть, но это СКРИПТ: flock выполняет его через `${SHELL:-/bin/sh} -c` (flock(1)) — общий
@@ -352,7 +396,7 @@ const WRAPPERS = {
   until: {},
   do: {},
   '{': {},
-  // Раунд 3 ревью C2 (2026-09-22): `coproc touch f` и `function f { touch f; }` записи не
+  // `coproc touch f` и `function f { touch f; }` записи не
   // показывали — coproc не был обёрткой, `function` считался именем команды (проверено
   // запуском bash 5.2: оба создают файл; тело функции — `{…}`, `(…)`, if/while/for).
   // skipName: 'always' — следующее слово — имя функции; 'compound' — имя корутины, но только
@@ -444,8 +488,8 @@ function makeContext(dialect, env) {
       let r = splits.get(cmd);
       if (!r) {
         r = splitRedirects(cmd, dialect);
-        // PowerShell: тире – — ― в начале слова — префикс параметра, как `-` (раунд 2 ревью C2,
-        // 2026-09-22: `Set-Content –Path <вне области>` считался позиционным путём `–Path`).
+        // PowerShell: тире – — ― в начале слова — префикс параметра, как `-`
+        // (`Set-Content –Path <вне области>` иначе считался бы позиционным путём `–Path`).
         if (dialect === 'powershell') r = { ...r, words: r.words.map(psWord) };
         splits.set(cmd, r);
       }
@@ -511,13 +555,12 @@ function envValue(env, name, ci) {
   return typeof env[key] === 'string' ? env[key] : null;
 }
 
-// Домашний каталог POSIX. Источник — переменная окружения HOME (раунд 5, LOW-2: раньше
-// ведущая `~` шла через os.homedir() и игнорировала HOME, а `$HOME` брался из env — два
-// источника для одного значения). Проверено запуском bash 5.2 msys: `~` следует $HOME, и
+// Домашний каталог POSIX. Источник — переменная окружения HOME (ведущая `~` и `$HOME`
+// идут из одного источника). Проверено запуском bash 5.2 msys: `~` следует $HOME, и
 // заданному в окружении вызова (`HOME=<dir> bash -c 'touch ~/a'` пишет в <dir>), и
 // переназначенному внутри команды — поэтому переназначение (taint) даёт null → '?'.
 //
-// Ревью C2 r5 (2026-09-22, MEDIUM): различие `~` и `$HOME` при ОТСУТСТВУЮЩЕМ HOME — не два
+// Различие `~` и `$HOME` при ОТСУТСТВУЮЩЕМ HOME — не два
 // источника, а правило самого bash, и снимать его нельзя. Проверено запуском:
 //   env -u HOME bash -c 'echo ~'     -> /c/Users/Denis  (каталог пользователя из passwd)
 //   env -u HOME bash -c 'echo $HOME' -> пусто
@@ -530,7 +573,7 @@ function envValue(env, name, ci) {
 // core.mjs — безусловный deny. `$HOME` запасного источника не получает: у bash он в этом
 // случае пуст, а пустой путь честнее показать неизвестностью.
 // `envValue` возвращает null только когда ключа НЕТ; HOME='' даёт '' и запасной источник не
-// включается — это и есть третья строка замера выше.
+// включается — это и есть третья строка примеров выше.
 function posixHome(ctx, tilde = false) {
   if (ctx.taint.has('HOME')) return null;
   const value = envValue(ctx.env, 'HOME', false);
@@ -576,7 +619,7 @@ function lookupFor(w, ctx) {
 // Абсолютная форма значения: строка — путь; null — не вычислить; undefined — относительный.
 // Git Bash (msys, POSIX под win32): `/c/…` — диск C:, прочие `/…` — каталоги самого Git
 // (`/tmp` → %TEMP%, `/usr` → Program Files\Git\usr — проверено `cygpath -w`), `/c/..` — корень
-// Git (ревью B3). PowerShell: `\x` — от корня диска текущего каталога. `C:x` (относительно
+// Git. PowerShell: `\x` — от корня диска текущего каталога. `C:x` (относительно
 // каталога диска), `env:`/`HKLM:` (провайдеры) — не путь файла.
 function absoluteForm(value, dir, ctx) {
   if (IS_WIN32) {
@@ -613,8 +656,8 @@ export function shellAbsolutePath(value) {
   return absoluteForm(value, '', { ps: false });
 }
 
-// PowerShell на POSIX: `\` в пути — разделитель, как `/`. Проверено запуском pwsh 7.6.6 на Linux
-// (2026-09-25): `Set-Location src\skills` уходит в src/skills, `New-Item ..\..\x` создаёт и
+// PowerShell на POSIX: `\` в пути — разделитель, как `/`. Проверено запуском pwsh на Linux:
+// `Set-Location src\skills` уходит в src/skills, `New-Item ..\..\x` создаёт и
 // `Remove-Item ..\..\x` удаляет файл двумя каталогами выше. node:path на POSIX читал `..\..\x`
 // как имя файла в текущем каталоге — запись вне области выглядела записью внутри.
 function psPosixPath(value, ctx) {
@@ -645,13 +688,13 @@ function resolveTarget(dir, value, ctx) {
   return physical === logical ? [logical] : [logical, physical];
 }
 
-// Возможные каталоги после `cd <value>`; null — неизвестен. Не литерал (ревью B3, проверено
+// Возможные каталоги после `cd <value>`; null — неизвестен. Не литерал (проверено
 // запуском): `*?[]{}` (шаблон/brace; Set-Location — wildcard даже в '…'), бэктик, `-` в начале
 // (`cd -`, опции), `~` из кавычек (POSIX).
 //
 // POSIX-относительный каталог без `./`/`../` bash ищет по CDPATH, а при `shopt -s cdable_vars`
-// несуществующий каталог берёт из одноимённой переменной. Раунд 2 ревью C2 (2026-09-22):
-// безусловный '?' отклонял частое `cd skills/coach && sed -i …` — теперь каталог неизвестен,
+// несуществующий каталог берёт из одноимённой переменной. Безусловный '?' отклонял бы частое
+// `cd skills/coach && sed -i …`: каталог считается неизвестным,
 // только если CDPATH задан в окружении или присваивается в команде, в BASHOPTS есть
 // cdable_vars или в команде есть shopt (проверено запуском: без CDPATH и при CDPATH=
 // `cd sub` идёт в ./sub, при CDPATH=<dir> — в <dir>/sub; snapshot оболочки Claude Code на этой
@@ -659,8 +702,8 @@ function resolveTarget(dir, value, ctx) {
 //
 // `..`: bash по умолчанию разрешает логически, а после `set -P`/`set -o physical` — физически
 // (`cd ./lnk/..` уводит к родителю ЦЕЛИ ссылки, проверено запуском Git Bash). Если варианты
-// различаются, возвращаются оба — запись проверяется в каждом (раунд 2 ревью C2, low).
-// Раунд 3 ревью C2 (2026-09-22): аргумент с `+`/`-` в начале — не каталог, а запись стека
+// различаются, возвращаются оба — запись проверяется в каждом.
+// Аргумент с `+`/`-` в начале — не каталог, а запись стека
 // (`pushd +1` вращает стек и уходит в каталог, который в нём лежал; после `pushd <область> &&
 // pushd +1` bash стоит в исходном cwd, а трекер считал каталогом `<область>/+1` — регресс
 // deny→allow). Проверено запуском bash 5.2: `pushd w && pushd +1` печатает исходный каталог,
@@ -805,7 +848,7 @@ function describeWord(word, w, ctx) {
 // Совет вместо редиректа в пустоту. ctx.mixed — shell исполнителя неизвестен (Kilo на Windows:
 // команду выполнит bash или PowerShell): там `/dev/null` в PowerShell — путь от корня диска
 // (`C:\dev\null`), а `$null` в bash — пустая переменная, и совет «/dev/null» вёл в следующий
-// отказ (ревью 2026-10-01, проверено через decide). Без записи в обоих — только `2>&1` или
+// отказ. Без записи в обоих — только `2>&1` или
 // без редиректа.
 function nullAdvice(ctx) {
   return ctx.mixed ? 'команду выполнит bash или PowerShell, и ни $null, ни /dev/null не годятся в обоих — перенаправь в 2>&1 или убери редирект' : 'используй /dev/null';
@@ -833,7 +876,7 @@ function describeVar(name, env, ctx) {
 
 // «Плоский» сегмент: без подоболочки, фона, группы, условия, цикла, функции и алиаса — только
 // в таком cd и присваивание трекаются (внутри `(…)`, `{…}`, if/for/while они условны или
-// повторяются; ревью ЗАДАЧИ C: `(cd X && touch y)`, `for …; do cd …`).
+// повторяются, как в `(cd X && touch y)`, `for …; do cd …`).
 function segIsPlain(seg, ctx) {
   if (STRUCTURAL_SEPS.has(seg.sepBefore)) return false;
   for (const cmd of seg.commands) {
@@ -850,9 +893,9 @@ function segIsPlain(seg, ctx) {
 
 // Плоское начало команды: сегменты до первой составной команды или структурного разделителя.
 // Они выполняются по одному разу и по порядку, как плоская команда, и cd/присваивание в них
-// трекаются. Инцидент 2026-09-30 (ListeningGlass, P3S1): `SCRATCH="…"` перед циклом очистки
-// scratchpad не трекался, потому что ниже по тексту стоял `for`, и `rm -rf "$SCRATCH/$d"`
-// давал «?». plain — число плоских сегментов с начала, prefix — сколько из них трекается.
+// трекаются. Строка присваивания перед циклом очистки scratchpad не должна теряться из-за
+// стоящего ниже `for`: иначе `SCRATCH="…"` не трекается и `rm -rf "$SCRATCH/$d"` даёт «?».
+// plain — число плоских сегментов с начала, prefix — сколько из них трекается.
 //
 // Последний and-or список начала трекается, только если он кончается в этом же shell'е:
 // `S=x && for …; done &` и `S=x & …` уходят в фон целиком, и присваивание до этого shell'а
@@ -906,8 +949,8 @@ function keywordAt(cmd) {
 
 // `for NAME in <литеральные слова>; do … done` сразу после плоского начала на верхнем уровне:
 // у переменной цикла конечный набор значений — по миру на значение (предел MAX_WORLDS).
-// Инцидент 2026-09-30 (ListeningGlass, узел P3S1): очистка scratchpad `for d in qa-profile …;
-// do rm -rf "$SCRATCH/$d"; done` отклонялась маркером «?», хотя пути однозначны.
+// Цикл по литеральным словам, например очистка scratchpad `for d in qa-profile …;
+// do rm -rf "$SCRATCH/$d"; done`, не должен отклоняться маркером «?» — пути однозначны.
 // Переменная не трекается, если ей уже присвоено в начале команды (значение до цикла нужно
 // после него) или она не имя. После `done` к мирам тела добавляются миры до цикла: цикл в
 // конвейере или в фоне идёт в подоболочке, и переменная в этом shell'е остаётся прежней.
@@ -953,9 +996,8 @@ function startsLoop(seg, ctx) {
 // Ровно `cd|pushd <каталог>` (POSIX, допустим `--`) или `cd|chdir|sl|Set-Location|pushd|
 // Push-Location [-Path|-LiteralPath] <каталог>` (PowerShell).
 //
-// Раунд 5 (2026-09-22, LOW-1, регресс allow→deny против HEAD): условие `redirects.length === 0`
-// отнимало каталог у частой идиомы `cd sub >/dev/null && …` — вся команда пишет внутри области,
-// а decide отказывал. Редирект в псевдоустройство переход НЕ отменяет (проверено запуском
+// Условие `redirects.length === 0` отнимало бы каталог у частой идиомы `cd sub >/dev/null && …`:
+// вся команда пишет внутри области, а decide отказывал бы. Редирект в псевдоустройство переход НЕ отменяет (проверено запуском
 // bash 5.2 msys: после `cd sub >/dev/null`, `pushd sub >/dev/null`, `cd sub 2>/dev/null` pwd —
 // …/sub; PS 5.1: после `Set-Location sub > $null` — тоже). Любой другой редирект оставлен
 // неизвестностью: bash и с ним переходит, но ложный отказ допустим, а неудавшийся редирект
@@ -968,7 +1010,7 @@ function cdForm(words, redirects, ctx) {
   if (ctx.ps) {
     if (!CD_PS.has(name.toLowerCase())) return null;
     if (words.length === 3 && (!words[1].psParam || !['-path', '-literalpath'].includes((words[1].value ?? '').toLowerCase()))) return null;
-    // `cd @p` — сплаттинг: каталог из хэш-таблицы (раунд 2 ревью C2)
+    // `cd @p` — сплаттинг: каталог из хэш-таблицы
     if (words[words.length - 1].psParam || /^[@,]/.test(words[words.length - 1].text)) return null;
   } else {
     if (!CD_POSIX.has(name)) return null;
@@ -1025,7 +1067,7 @@ function psAssignForm(cmd, redirects) {
 const OTHER = Object.freeze({ kind: 'other' });
 
 function classify(seg, ctx, { flat, afterHeredoc, nextSep, top }) {
-  // cd после heredoc — каталог неизвестен (ЗАДАЧА C2): граница тела heredoc — место, где
+  // cd после heredoc — каталог неизвестен: граница тела heredoc — место, где
   // разбор чаще всего расходится с shell'ом.
   if (!flat || afterHeredoc || seg.commands.length !== 1) return OTHER;
   if (nextSep !== null && !CHAIN_SEPS.has(nextSep)) return OTHER;
@@ -1047,7 +1089,7 @@ function unknownResult(ctx, worlds, why) {
 }
 
 // Почему сканер не разобрал текст. `\"` в конце пути Windows (`ls "D:\…\"`) в bash экранирует
-// кавычку, и строка не закрыта — «unexpected EOF» (журнал PulseProxy 2026-09-30, P0E1/P0S3).
+// кавычку, и строка не закрыта — «unexpected EOF».
 function describeScanFailure(text, ctx) {
   if (!ctx.ps && /[^\\]\\"/.test(text)) {
     return 'в «…\\"» обратная косая перед кавычкой экранирует её, и строка не закрыта — пиши путь через / или без \\ перед кавычкой';
@@ -1186,7 +1228,7 @@ function commandIO(cmd, w, ctx, depth, arith = false) {
 
 function redirectWrite(r, world, ctx) {
   const { op } = r;
-  // `<<<` — here-string: ввод из слова, не запись (раунд 3 ревью C2, 2026-09-22)
+  // `<<<` — here-string: ввод из слова, не запись
   if (op === '<' || op === '<&' || op === '<<' || op === '<<-' || op === '<<<') return;
   if (!r.target) {
     mark(ctx, `редирект ${op} без цели`);
@@ -1194,7 +1236,7 @@ function redirectWrite(r, world, ctx) {
   }
   if (op === '>&') {
     // `>&2`, `2>&1`, `>&-` — дескриптор; иное слово — файл (bash: `>&f` и `1>&f` создают f,
-    // проверено запуском; ревью B2 round 3: `status >&<root>/PWNED.txt` проходил как allow).
+    // проверено запуском).
     const x = expandWord(r.target, ctx.dialect, lookupFor(world, ctx));
     if (x && /^(?:\d+|-)$/.test(x.value)) return;
   }
@@ -1205,10 +1247,10 @@ function redirectWrite(r, world, ctx) {
 // Псевдоустройства — не запись: POSIX — /dev/null, /dev/stdout, /dev/stderr; PowerShell —
 // $null и NUL (там `/dev/null` — обычный путь от корня диска).
 //
-// Раунд 5 (2026-09-22), ЛОЖНОЕ РАЗРЕШЕНИЕ (было и в HEAD): POSIX-ветка считала псевдоустройством
-// и `NUL`. В Git Bash (msys) на этой машине NUL — ОБЫЧНЫЙ файл: `echo HELLOWORLD > NUL` создаёт
+// POSIX-ветка не должна считать псевдоустройством и `NUL`: в Git Bash (msys) на этой машине
+// NUL — ОБЫЧНЫЙ файл: `echo HELLOWORLD > NUL` создаёт
 // в текущем каталоге файл NUL с этим содержимым (`stat` — regular file, 11 байт; проверено
-// запуском). Запись вне области проходила как allow. В PowerShell 5.1 `> NUL` — устройство:
+// запуском). Иначе запись вне области проходит как allow. В PowerShell 5.1 `> NUL` — устройство:
 // Out-File падает «asked to open a device that was not a file», файла нет (проверено запуском).
 function isNullTarget(word, world, ctx) {
   if (ctx.ps) return word.text.toLowerCase() === '$null' || (word.value ?? '').toLowerCase() === 'nul';
@@ -1220,7 +1262,7 @@ function isNullTarget(word, world, ctx) {
 // Цель редиректа — псевдоустройство, видное БЕЗ раскрытий (литерал). Нужна cdForm: `cd` с
 // редиректом в /dev/null каталог всё-таки меняет, а с любым другим редиректом трекер
 // консервативно отказывается. Подстановка в цели снова даёт неизвестность.
-// Ревью раунда 5 (2026-09-22, LOW, проверено запуском PowerShell 5.1.26100.9444): `> NUL` в
+// Проверено запуском: `> NUL` в
 // PowerShell — устройство, и Out-File падает на его открытии ДО выполнения команды, поэтому
 // `Set-Location sub > NUL` каталог НЕ меняет (в отличие от `> $null`, который меняет).
 // Для трекера каталога годится только `$null`; `NUL` рядом с cd оставляет каталог неизвестным.
@@ -1236,7 +1278,7 @@ function commandName(v, ctx) {
   if (ctx.ps || IS_WIN32) n = n.toLowerCase().replace(/\.(?:exe|com|cmd|bat)$/, '');
   // POSIX: `X.exe` — программа Windows через interop WSL, имя без учёта регистра
   // (`powershell.exe -Command …`, `PowerShell.EXE …`, `cmd.exe /c …` в WSL выполняются —
-  // проверено запуском 2026-09-25). Без этого вложенный интерпретатор на POSIX не разбирался.
+  // проверено запуском). Без этого вложенный интерпретатор на POSIX не разбирался.
   else if (/\.exe$/i.test(n)) n = n.toLowerCase().slice(0, -'.exe'.length);
   return n;
 }
@@ -1247,9 +1289,9 @@ function isAssignWord(w) {
 }
 
 // Ключевые слова, после которых bash принимает префикс-присваивание (`do n=$(…)`, `then X=1 cmd`).
-// Инцидент 2026-09-30 (PulseProxy, узел P2S1): `for l in …; do tot=$(grep -c …); …; done` давал
-// «?» — после `do` присваивание считалось именем команды через подстановку, а `do X=1 rm <вне
-// области>` — командой «x=1», и rm запись не показывал.
+// Без этого `for l in …; do tot=$(grep -c …); …; done` давал бы
+// «?» — после `do` присваивание считалось бы именем команды через подстановку, а `do X=1 rm <вне
+// области>` — командой «x=1», и rm запись не показывал бы.
 const KEYWORD_WRAPPERS = new Set(['if', 'then', 'elif', 'else', 'while', 'until', 'do', '{', '!', 'time']);
 // Команда через переменную (`R=…; "$R" --help`) вычисляется вторым проходом и только на месте
 // команды (первое слово или после ключевого слова; после обёртки — «?», см. commandInfo); первый
@@ -1270,10 +1312,10 @@ function commandInfo(words, cmd, seg, ctx, resolveName = null) {
   let appends = false;
   // Слово стоит на месте команды: первое после присваиваний или после ключевого слова
   // (`do "$R" …`). После обёртки невычисленное слово может быть её аргументом, и имя через
-  // переменную там не вычисляется. Ревью 2026-10-01: `T=5; timeout "$T" rm …`, `F=-p; command
+  // переменную там не вычисляется. Без этого `T=5; timeout "$T" rm …`, `F=-p; command
   // "$F" rm …`, `F=--; nohup "$F" rm …`, `A=X=1; env "$A" rm …` выполняют rm (проверено запуском
-  // Git Bash: файлы удалены), а разбор брал значение переменной (5, -p, --, X=1) за имя команды,
-  // rm уходил в её аргументы, и записи не было видно; то же `flock "$L" rm`, `sudo "$F" rm`
+  // Git Bash: файлы удалены), а разбор берёт значение переменной (5, -p, --, X=1) за имя команды,
+  // rm уходит в её аргументы, и записи не видно; то же `flock "$L" rm`, `sudo "$F" rm`
   // (F=-E) — flock и рабочего sudo на машине нет, их форма взята из документации.
   let commandSlot = true;
   let wrapper = null;
@@ -1319,11 +1361,11 @@ function commandInfo(words, cmd, seg, ctx, resolveName = null) {
           return { kind: 'unknown', word: words[i], why: `${name} ${shown(a)}: цели обёрнутой команды не вычислить (chroot или правка файлов-аргументов)` };
         }
         if (name === 'env' && (flag === '-S' || flag === '--split-string' || short === '-S')) return { kind: 'unknown' };
-        // `flock файл -c '<скрипт>'` — строку выполняет шелл: разбираем как `sh -c` (раунд 5).
-        // Ревью раунда 5 (2026-09-22, LOW): короткие флаги склеиваются в группу, и `-c` в ней
+        // `flock файл -c '<скрипт>'` — строку выполняет шелл: разбираем как `sh -c`.
+        // Короткие флаги склеиваются в группу, и `-c` в ней
         // не обязан быть первым (`flock -xc '<скрипт>' f`, `-nc`). Без разбора группы строка
-        // уходила в позиционный аргумент, именем команды становился файл блокировки, а список
-        // записей выходил ПУСТЫМ — ложное разрешение того же класса, что закрывала правка.
+        // уходила бы в позиционный аргумент, именем команды становился бы файл блокировки, а
+        // список записей выходил бы ПУСТЫМ — ложное разрешение того же класса.
         if (wr.script && !a.startsWith('--') && eq === -1) {
           const cluster = a.slice(1);
           const k = [...cluster].findIndex((c) => wr.script.includes(`-${c}`));
@@ -1363,8 +1405,8 @@ function commandInfo(words, cmd, seg, ctx, resolveName = null) {
   return { kind: 'none' };
 }
 
-// Имя команды через переменную, присвоенную литералом или взятую из окружения. Инцидент
-// 2026-09-29 (PulseProxy, create-plan P6S2): `R="C:/…/rtk.exe"; "$R" --help` давал «?», а в
+// Имя команды через переменную, присвоенную литералом или взятую из окружения: без этого
+// `R="C:/…/rtk.exe"; "$R" --help` давал бы «?», а в
 // первом проходе — «переменные неизвестны все». Подстановка команды (`$(which rm)`) — не вычислить.
 function resolveCommandWord(word, world, ctx) {
   if (ctx.ps || word.hasSubstitution) return undefined;
@@ -1385,7 +1427,10 @@ function psCommandInfo(words, cmd, seg, ctx) {
   const first = words[0];
   if (!first) return { kind: 'none' };
   const p0 = first.parts[0];
-  if (p0.kind !== 'bare' || /^[$[(@\d]/.test(p0.raw)) {
+  const quotedCall = seg.sepBefore === '&' && seg.commands[0] === cmd
+    && first.parts.length === 1 && (p0.kind === 'single' || p0.kind === 'double')
+    && first.value !== null;
+  if (!quotedCall && (p0.kind !== 'bare' || /^[$[(@\d]/.test(p0.raw))) {
     // выражение (`$x.Delete()`, `'a' > f`, `(…)`) — не вызов; `& $x …` — вызов неизвестного
     if (seg.sepBefore === '&' && seg.commands[0] === cmd) return { kind: 'unknown' };
     return { kind: 'none' };
@@ -1416,7 +1461,7 @@ function taintWords(ctx, words, name, args, arithText) {
     const lead = w.value ?? (w.parts[0]?.kind === 'bare' ? w.parts[0].raw : '');
     if (NAME_RE.test(lead)) ctx.taint.add(lead); // read S, for S in, unset S, (( S = 1 ))
     for (const m of raw.matchAll(ASSIGNISH_RE)) ctx.taint.add(m[1] ?? m[2] ?? m[3]);
-    // `S[0]=…`, `(( S[i] = 1 ))` — элемент массива: `$S` — это `${S[0]}` (раунд 2 ревью C2)
+    // `S[0]=…`, `(( S[i] = 1 ))` — элемент массива: `$S` — это `${S[0]}`
     for (const m of raw.matchAll(ARRAY_REF_RE)) ctx.taint.add(m[1]);
   }
   if (ctx.ps) {
@@ -1434,8 +1479,8 @@ function taintWords(ctx, words, name, args, arithText) {
     return;
   }
   // Имя присваивания из подстановки в арифметике — `(( $n = 5 ))`, `$(( x=1, $n=5 ))`,
-  // `let "x=1, $n=1"`: bash присваивает переменной, имя которой в $n (раунд 2 ревью C2,
-  // проверено запуском) — неизвестны все. arithText — текст команды в `(…)` или `let`.
+  // `let "x=1, $n=1"`: bash присваивает переменной, имя которой в $n (проверено запуском) —
+  // неизвестны все. arithText — текст команды в `(…)` или `let`.
   if (!POSIX_TESTS.has(name ?? '') && DYN_ASSIGN_RE.test(arithText ?? '')) ctx.taintAll = true;
   if (!name) return;
   if (name === 'shopt') ctx.shopt = true; // cdable_vars и т.п. — см. cdTargets
@@ -1453,8 +1498,8 @@ function taintWords(ctx, words, name, args, arithText) {
 }
 
 // Имя переменной, которой присваивает встроенная, — из подстановки: `declare|export "$n=…"`,
-// `read -r "$n"`, `printf -v "$n"`, `unset "$n"` (раунд 2 ревью C2: трекер считал `$S`
-// прежним, bash уже переписал её — проверено запуском). Имя — текст до `=` (declare/let) или
+// `read -r "$n"`, `printf -v "$n"`, `unset "$n"` (иначе трекер считал бы `$S`
+// прежней, а bash уже переписал её — проверено запуском). Имя — текст до `=` (declare/let) или
 // всё слово; для printf — значение -v, для wait — только с -p, compgen — только с -V.
 function dynamicAssignName(name, args) {
   const dyn = (t) => t === undefined || /[$`]/.test(t);
@@ -1513,9 +1558,9 @@ function analyzeCommand(cmd, w, ctx, depth, seg) {
     else if (!ctx.taintPass) mark(ctx, `${name} нелитеральной строки — что выполнится, не вычислить`);
   }
   // `trap '<скрипт>' SIG` — скрипт выполнится позже (EXIT — в конце, DEBUG — перед каждой
-  // командой), в неизвестном каталоге и с неизвестными значениями переменных. Раунд 3 ревью C2
-  // (2026-09-22): текст скрипта не разбирался вовсе, и `trap 'touch <вне области>' EXIT`
-  // проходил как allow (проверено запуском bash 5.2: файл создаётся).
+  // командой), в неизвестном каталоге и с неизвестными значениями переменных. Без разбора текста
+  // скрипта `trap 'touch <вне области>' EXIT`
+  // проходил бы как allow (проверено запуском bash 5.2: файл создаётся).
   if (!ctx.ps && name === 'trap') {
     const later = { ...world, dir: null, lost: true };
     for (const a of ci.args) {
@@ -1598,7 +1643,7 @@ const SED_LONG = ['--in-place', '--expression', '--file', '--line-length'];
 
 // Слово, которое после раскрытия может оказаться флагом или распасться на несколько слов:
 // значение не вычислено, и начало не литерал либо есть незакавыченное раскрытие/подстановка
-// (`cp "$o" a b` при o=--target-directory=/x копирует в /x). Раунд 2 ревью C2, 2026-09-22.
+// (`cp "$o" a b` при o=--target-directory=/x копирует в /x).
 function mayBeFlag(w) {
   if (w.value !== null) return w.value.startsWith('-');
   if (w.parts.some((p) => (p.kind === 'bare' && p.hasExpansion) || p.kind === 'subst')) return true;
@@ -1625,7 +1670,7 @@ function sedFiles(args) {
     }
     if (!end && v === null && mayBeFlag(w)) unknown = true;
     if (!end && v !== null && v.startsWith('--')) {
-      // `sed --in s/a/b/ f` правит f (раунд 2 ревью C2: префиксы длинных флагов, проверено запуском)
+      // `sed --in s/a/b/ f` правит f (префиксы длинных флагов, проверено запуском)
       const flag = longFlag(v.split('=')[0], SED_LONG) ?? v;
       if (flag === '--in-place') inPlace = true;
       else if (flag === '--expression' || flag === '--file') {
@@ -1668,7 +1713,7 @@ function findFlagMarker(w) {
 
 // find: `-delete` удаляет под стартовыми точками; `-fprint* FILE` пишет FILE; `-exec[dir]/-ok[dir]
 // CMD … ;|+` — команда, `{}` — найденный путь (лежит под стартовой точкой). Невычисленное слово,
-// которое может быть флагом (`find "$X"` при X=-delete), — '?' (раунд 2 ревью C2).
+// которое может быть флагом (`find "$X"` при X=-delete), — '?'.
 function findTargets(args, world, ctx) {
   let i = 0;
   while (i < args.length) {
@@ -1739,8 +1784,7 @@ function ddTargets(args) {
   return items.length > 0 ? items : null;
 }
 
-// Вложенный интерпретатор (low из ревью раунда 2 C2, 2026-09-22: HEAD и первая версия записи
-// внутри не видели): `bash|sh -c '<скрипт>'`, `powershell|pwsh -Command <скрипт>`,
+// Вложенный интерпретатор: `bash|sh -c '<скрипт>'`, `powershell|pwsh -Command <скрипт>`,
 // `-EncodedCommand <base64>`, `cmd /c …`. Это отдельный процесс: каталог — текущий,
 // переменные — только экспортированные, поэтому скрипт разбирается тем же detectShellWrites с
 // пустым окружением (любая переменная окружения — неизвестна, '?'). Не литерал — '?'.
@@ -1756,10 +1800,10 @@ function nestedShellWrites(name, args, world, ctx, cmd) {
     // окружение дочернего процесса — окружение хука без имён, которые команда присваивает
     // (экспортированы ли они — неизвестно); cdSearch — CDPATH/cdable_vars могли измениться.
     // Переменная цикла `for NAME in …` — тоже присваивание: у экспортированной bash отдаёт
-    // дочернему процессу значение из цикла (ревью 2026-10-01, проверено запуском: `Z=old bash
-    // -c 'for Z in new; do bash -c "echo \$Z"; done'` печатает new), а разбор брал значение из
+    // дочернему процессу значение из цикла (проверено запуском: `Z=old bash
+    // -c 'for Z in new; do bash -c "echo \$Z"; done'` печатает new), а разбор брал бы значение из
     // окружения хука, и `for TMPDIR in <вне>; do bash -c 'rm -rf "$TMPDIR/x"'; done` у Bash
-    // Claude давал цель во временном каталоге.
+    // Claude дал бы цель во временном каталоге.
     const drop = (k) => [k, k.toLowerCase(), `env:${k.toLowerCase()}`].some((n) => ctx.tracked.has(n) || ctx.taint.has(n) || ctx.loopVars.has(n));
     const env = ctx.taintAll ? {} : Object.fromEntries(Object.entries(ctx.env).filter(([k]) => !drop(k)));
     ctx.shared.runs += 1;
@@ -1876,8 +1920,8 @@ function nestedShellWrites(name, args, world, ctx, cmd) {
 // Интерпретаторы скриптов: код аргументом (`node -e`, `python -c`, `perl -e`, `ruby -e`,
 // `php -r`, `deno eval`, `bun -e`), из heredoc/stdin или файлом во временном каталоге. Путь
 // записи из кода не вычислить: вызов API записи файла или запуска процесса в коде — '?'.
-// Инцидент 2026-09-30: коуч на рельсах переписал 17 файлов канона одной командой `node -e`
-// с `fs.writeFileSync` по списку путей, и гард write_scope промолчал. Файл скрипта вне
+// Команда `node -e` с `fs.writeFileSync` по списку путей переписала бы много файлов, а гард
+// write_scope не увидел бы целей. Файл скрипта вне
 // временного каталога не разбирается — это инструменты проекта (`node .workflow/src/scripts/…`,
 // `node build.js`), как и файл скрипта bash; во временном каталоге — разовый скрипт агента,
 // его текст читается. Разбор кода — поиск имён API, не исполнение: обход переименованием
@@ -2064,7 +2108,7 @@ const PS_DOTNET_WRITE_RE = /\[(?:System\.)?IO\.(?:File|Directory|FileInfo|Direct
 // Цели записи команды `name` с аргументами `args`; null — команда не пишет.
 function commandTargets(name, args, world, ctx) {
   const cmdlet = PS_CMDLETS[name.toLowerCase()];
-  // командлет в Bash (HEAD распознавал и его): параметры размечаются по правилам PowerShell
+  // Командлет в Bash: параметры размечаются по правилам PowerShell
   if (cmdlet) return psCmdletTargets(cmdlet, ctx.ps ? args : args.map(psWord));
   if (POSIX_DELETE.has(name)) {
     const { pos } = posixArgs(args, []);
@@ -2110,8 +2154,8 @@ function commandTargets(name, args, world, ctx) {
     const files = sedFiles(args);
     if (files === null) return null;
     if (files.length > 0) return files.map((w) => ({ word: w }));
-    // Инцидент 2026-09-30 (PulseProxy, P1S1): `f=$(ls … | head -1); sed -n … "$f"` — отказ
-    // верный (значение может оказаться -i), но причина не называла слово.
+    // `f=$(ls … | head -1); sed -n … "$f"` — отказ
+    // верный (значение может оказаться -i), но причина должна называть слово.
     const flagLike = args.find((w) => w.value === null && mayBeFlag(w));
     return [markerItem(flagLike
       ? `аргумент ${shown(flagLike.text)} у sed не вычислен и может оказаться флагом -i — подставь путь литералом или читай через Read`
@@ -2138,7 +2182,7 @@ function endsWithComma(w) {
 
 // PowerShell-командлет: путь — -Path/-LiteralPath/-FilePath (и их префиксы) или первый
 // позиционный; назначение Copy/Move — -Destination или следующий позиционный.
-// Раунд 2 ревью C2 (2026-09-22): массив через запятую отдельным словом (`a ,b`, `a , b`) и
+// Массив через запятую отдельным словом (`a ,b`, `a , b`) и
 // сплаттинг `@p` — '?' (PowerShell 5.1 удаляет и второй элемент, и путь из хэш-таблицы —
 // проверено запуском); `-Path:a,b` — '?'; параметр не из известных классов (или неоднозначный
 // префикс) может быть и переключателем, и параметром со значением — раскладку позиционных
@@ -2246,7 +2290,7 @@ function commandWrites(name, ci, world, ctx) {
  * -exec/-fprint`, командлеты Remove-Item/Set-Content/Add-Content/Clear-Content/Out-File/Tee-Object/
  * Export-Csv/New-Item/Copy-Item/Move-Item и их алиасы — в том числе внутри `$(…)`, `` `…` ``,
  * `<(…)`, `>(…)`, тел heredoc с незакавыченным разделителем, PowerShell `(…)`, `$(…)`, `{…}`.
- * Раунд 2 ревью C2 (2026-09-22): ещё `truncate`, `ln`, `install`, `dd of=`, вложенные
+ * Ещё `truncate`, `ln`, `install`, `dd of=`, вложенные
  * интерпретаторы (`bash|sh -c`, скрипт bash из heredoc, `powershell|pwsh -Command`,
  * `-EncodedCommand`) — разбираются этой же функцией; `cmd /c` с записью, .NET-запись в
  * PowerShell (`[IO.File]::Write…`, `.Delete()`), stdin-скрипт из пайпа — `"?"`.

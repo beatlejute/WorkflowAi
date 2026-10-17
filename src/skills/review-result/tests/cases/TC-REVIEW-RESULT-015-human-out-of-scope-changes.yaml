@@ -69,7 +69,7 @@ assertions:
       reason: "Область тикета человека строится из context.files (и масок visual, путей после -- в проверках check)."
     - kind: skill_contains
       file: "scripts/verify-artifacts.js"
-      pattern: '\[\.\.\.new Set\(\[\.\.\.filePaths, \.\.\.unparsedPaths\]\)\]\.filter\(\s*\(filePath\) => isInsideProject\(path\.resolve\(PROJECT_DIR, filePath\)\) && !inHumanScope\(filePath, humanScope\)'
+      pattern: '\[\.\.\.new Set\(\[\.\.\.filePaths, \.\.\.unparsedPaths\]\)\]\.filter\(\s*\(filePath\) => \(isInsideProject\(path\.resolve\(PROJECT_DIR, filePath\)\) \|\| normalizeScopePath\(filePath\) !== null\)\s*&& !inHumanScope\(filePath, humanScope\)'
       reason: "С областью сравниваются и пути не в формате строки (правку вне области не прячет отсутствие кавычек), а путь вне корня проекта область не нарушает."
     - kind: skill_contains
       file: "scripts/verify-artifacts.js"

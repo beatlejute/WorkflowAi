@@ -59,7 +59,7 @@ assertions:
       reason: "Ветка «Result нет» не пропускает оставленные правки."
     - kind: skill_contains
       file: "workflows/execute.md"
-      pattern: 'P3R6\["[^"]*Вывод команд \(tee, перенаправление >, запись отчёта в файл\) в файлы проекта не пиши'
+      pattern: 'P3R4\["[^"]*Вывод команд \(tee, перенаправление >, запись отчёта в файл\) в файлы проекта не пиши'
       reason: "Вывод команд — во временный каталог вне проекта."
     - kind: skill_contains
       file: "workflows/execute.md"

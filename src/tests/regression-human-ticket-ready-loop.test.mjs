@@ -24,6 +24,8 @@ import { fileURLToPath } from 'url';
 import { spawnSync } from 'node:child_process';
 
 import { PipelineRunner } from '../runner.mjs';
+import { moveTicket } from '../lib/operations/tickets.mjs';
+import { parseFrontmatter } from '../lib/utils.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '../..');
@@ -101,6 +103,59 @@ function createMinimalRunner(tmpDir, context, counters, logs) {
     : null;
   return runner;
 }
+
+// ============================================================================
+// Переход human-тикетов из ready в blocked
+// ============================================================================
+
+test('ready → blocked через CLI сохраняет причину отказа human-ревью', () => {
+  const { tmpDir, ticketsDir } = createTestEnv('human-ready-blocked-cli-');
+  try {
+    const reason = 'human_review_failed: требуется исправить замечания';
+    createTicket(ticketsDir, 'ready', 'HUMAN-REJECTED', {
+      type: 'human',
+      status: 'ready',
+      blocked_reason: reason
+    });
+
+    const result = runScript(path.join(PROJECT_ROOT, 'src', 'scripts', 'move-ticket.js'),
+      ['HUMAN-REJECTED', 'blocked'], tmpDir);
+
+    assert.strictEqual(result.code, 0, `ready → blocked должен пройти: ${result.stderr}`);
+    assert.strictEqual(resultField(result.stdout, 'status'), 'moved');
+    const moved = path.join(ticketsDir, 'blocked', 'HUMAN-REJECTED.md');
+    assert.ok(fs.existsSync(moved), 'тикет должен оказаться в blocked/');
+    const { frontmatter } = parseFrontmatter(fs.readFileSync(moved, 'utf8'));
+    assert.strictEqual(frontmatter.status, 'blocked');
+    assert.strictEqual(frontmatter.blocked_reason, reason);
+  } finally {
+    cleanup(tmpDir);
+  }
+});
+
+test('ready → blocked через operations API сохраняет причину таймаута human-gate', async () => {
+  const { tmpDir, ticketsDir } = createTestEnv('human-ready-blocked-api-');
+  try {
+    const reason = 'human_gate_timeout: решение не получено';
+    createTicket(ticketsDir, 'ready', 'HUMAN-TIMEOUT', {
+      type: 'human',
+      status: 'ready',
+      blocked_reason: reason
+    });
+
+    const result = await moveTicket(tmpDir, 'HUMAN-TIMEOUT', 'blocked');
+
+    assert.strictEqual(result.from, 'ready');
+    assert.strictEqual(result.to, 'blocked');
+    const moved = path.join(ticketsDir, 'blocked', 'HUMAN-TIMEOUT.md');
+    assert.ok(fs.existsSync(moved), 'тикет должен оказаться в blocked/');
+    const { frontmatter } = parseFrontmatter(fs.readFileSync(moved, 'utf8'));
+    assert.strictEqual(frontmatter.status, 'blocked');
+    assert.strictEqual(frontmatter.blocked_reason, reason);
+  } finally {
+    cleanup(tmpDir);
+  }
+});
 
 // ============================================================================
 // Баг 1: холостой цикл вокруг human-тикета

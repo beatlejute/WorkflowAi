@@ -1,6 +1,5 @@
 /**
- * Журнал запусков агентов `.workflow/metrics/agent-runs.jsonl` и отсев моделей по нему
- * (PLAN-003).
+ * Журнал запусков агентов `.workflow/metrics/agent-runs.jsonl` и отсев моделей по нему.
  *
  * Журнал — файл проекта, только дописывание, одна строка — один JSON-объект, одна
  * строка на событие. Виды событий (`type`):
@@ -10,7 +9,7 @@
  *   - `verify` — завершилась стадия контроля артефактов с блоком RESULT;
  *   - `review` — завершилась стадия ревью;
  *   - `unban`  — человек снял запрет;
- *   - `reset`  — человек обнулил историю модели (PLAN-004, решение 1): запуски модели,
+ *   - `reset`  — человек обнулил историю модели: запуски модели,
  *                записанные раньше её последнего `reset`, в градации не идут (gradeRuns).
  * Промптов, вывода агента и содержимого файлов в журнале нет. Строка, не разбираемая
  * как JSON, при чтении пропускается.
@@ -21,8 +20,12 @@
  * Градация — только у запуска исполнителя (стадия со скилом `execute-task`), первая
  * ступень, на которой остановилась его работа: `crashed`, `refused`, `stopped`,
  * `throttled`, `empty`, `artifacts_failed`, `review_failed`, `accepted`, `pending`
- * (gradeRuns). Неудача модели — `empty` и `artifacts_failed`; успех — пройденный
- * контроль артефактов (`artifacts_passed: true`), даже если потом не пройдено ревью.
+ * (gradeRuns). В счёт запрета идёт только то, что относится к самой модели: неудача —
+ * `empty` (модель не сделала ничего), успех — пройденный контроль артефактов
+ * (`artifacts_passed: true`), даже если потом не пройдено ревью. Провал контроля
+ * (`artifacts_failed`) и отклонённое ревью — исходы проверки работы, не модели: в неудачи
+ * не идут и окна правила 2 не занимают, иначе поломка контроля запрещала бы модель с
+ * исправным журналом.
  * `stopped` и `throttled` (агент упал на ограничении провайдера, статус `rate_limit`)
  * модели не засчитываются: ни неудачи, ни успеха, ни временного запрета за сбой, ни
  * серии «модель недоступна».
@@ -30,7 +33,8 @@
  * Запреты:
  *   - постоянный, модель + тип тикета, с последнего снятия (`unban` с этим типом):
  *     правило 1 — неудач ≥ 3 и ни одного успеха; правило 2 — не меньше 10 оценённых
- *     запусков и среди последних 10 успехов < 3 (permanentBans);
+ *     запусков и среди последних 10 успехов < 3 (permanentBans); оценённый запуск —
+ *     неудача или успех;
  *   - временный, модель целиком: последний запуск модели, кроме `stopped` и
  *     `throttled`, после последнего снятия (`unban` без типа) — сбой, и его TTL ещё
  *     не истёк (crashBans);
@@ -67,28 +71,25 @@ export const OPEN_RUN_FILE = '.workflow/state/agent-run-open.json';
 /** Скил стадии исполнителя: только его запуски получают градацию и отсеиваются. */
 export const EXECUTOR_SKILL = 'execute-task';
 
-// Числа правил — решение стейкхолдера 2026-09-25 и 2026-09-26 (PLAN-003).
 export const RULE1_MIN_FAILURES = 3;
 export const RULE2_WINDOW = 10;
 export const RULE2_MIN_SUCCESS = 3;
 export const CRASH_TTL_DEFAULT_MS = 60 * 60 * 1000;
-// Запрет «модель недоступна» (unavailableBans) — 2026-10-01, разбор прогонов PulseProxy
-// PLAN-020 и ListeningGlass PLAN-001 29–30.09: модели без единого успеха снова и снова
-// шли в пул — в журнале PulseProxy у nemotron-3-super 5 сбоев подряд. Временный запрет
-// за сбой смотрит только на последний запуск, его TTL — TTL сработавшего правила health,
-// без правила — час (CRASH_TTL_DEFAULT_MS), и сбои между собой не складывались. Серия —
-// только сбои процесса `error` и `timeout` (UNAVAILABLE_STATUSES; PLAN-004 «rate_limit
-// запрета модели не даёт»). Модель, которая упирается в ограничение провайдера, правило
-// не покрывает: у gemini-3.5-flash-lite там же 11 запусков `rate_limit` подряд, и запрета
-// нет. Такую модель выводят из выбора только health-реестр (общее правило
-// `provider-rate-limit`, 15 мин) и шлагбаум места-пула `models.gate`, если он настроен.
+// Запрет «модель недоступна» (unavailableBans): временный запрет за сбой смотрит только
+// на последний запуск, его TTL — TTL сработавшего правила health, без правила — час
+// (CRASH_TTL_DEFAULT_MS), и сбои между собой не складывались: модель без единого успеха
+// снова и снова шла в пул. Серия — только сбои процесса `error` и `timeout`
+// (UNAVAILABLE_STATUSES: `rate_limit` запрета модели не даёт). Модель, которая упирается
+// в ограничение провайдера, правило не покрывает: её выводят из выбора только
+// health-реестр (общее правило `provider-rate-limit`, 15 мин) и шлагбаум места-пула
+// `models.gate`, если он настроен.
 export const UNAVAILABLE_MIN_FAILURES = 3;
 export const UNAVAILABLE_TTL_BASE_MS = 60 * 60 * 1000;
 export const UNAVAILABLE_TTL_MAX_MS = 24 * 60 * 60 * 1000;
 // Доказательства запрета «модель недоступна» — последние запуски серии, не вся серия:
 // у модели, которая не отвечает сутками, серия — десятки запусков, а запрет
 // get_model_stats повторяет в каждой строке модели (по строке на тип тикета). Полная
-// длина серии — в `failures` (ревью 2026-10-01).
+// длина серии — в `failures`.
 export const UNAVAILABLE_EVIDENCE_MAX = 10;
 // Наибольшее время, которое представимо в Date (ECMAScript: ±8.64e15 мс).
 const MAX_DATE_MS = 8.64e15;
@@ -96,7 +97,7 @@ const MAX_DATE_MS = 8.64e15;
 /**
  * Статусы запуска, которые считаются сбоем процесса. `aborted` — только без признака
  * остановки пайплайна (`stop_requested`, `interrupted`): агент снят сигналом мимо
- * остановки (решение 2026-09-27, вопрос 7: «Да, временный запрет»).
+ * остановки.
  */
 const CRASH_STATUSES = new Set(['error', 'timeout', 'network_error', 'auth_error', 'aborted']);
 
@@ -104,11 +105,8 @@ const CRASH_STATUSES = new Set(['error', 'timeout', 'network_error', 'auth_error
  * Сбои процесса, которые идут в серию «модель недоступна» (unavailableBans): `error`
  * (агент вышел с ошибкой, в том числе снят раннером досрочно по правилу health),
  * `timeout` (не уложился в лимит стадии — и тогда, когда модель отвечала и правила
- * файлы) и `network_error` (решение владельца 2026-10-03 «считать одинаково»: в
- * PulseProxy 29–30.09 все 3 запуска исполнителя с `network_error` — досрочные снятия
- * kilo по перегрузке провайдера, как и 5 запусков с `error`; за сутки по журналам
- * сетевых сбоев у исполнителей не было, ночной сбой прокси бил по HTTP-клиенту
- * селектора и ревью, а не по ним). Остальные сбои процесса — `auth_error` и `aborted`
+ * файлы) и `network_error` (у исполнителя это чаще досрочное снятие kilo по перегрузке
+ * провайдера, чем сбой сети). Остальные сбои процесса — `auth_error` и `aborted`
  * без остановки (агента сняли сигналом извне) — серию не продолжают и не прерывают;
  * временный запрет за сбой (crashBans) они по-прежнему дают.
  *
@@ -125,12 +123,10 @@ const UNAVAILABLE_STATUSES = new Set(['error', 'timeout', 'network_error']);
  * exceeded в конце stderr — класс classifyAgentResult, PROVIDER_RATE_LIMIT_PATTERN;
  * 429 из середины, после которых агент продолжил работу, не в счёт). Это не дефект
  * модели: градация `throttled`, без временного запрета за сбой, вне правил 1 и 2 и вне
- * серии «модель недоступна» (unavailableBans: не продолжает и не прерывает её; PLAN-004
- * «rate_limit запрета модели не даёт»). Случай 2026-09-27, PulseProxy: kilo-роутер
- * 15 минут работал на модели, провайдер которой отвечал «Rate limit exceeded»; запуск
- * записан сбоем, и часовой временный запрет модели снимал второй роутер всякий раз,
- * когда тот выбирал ту же модель. Агента на это время выводит из выбора health-реестр:
- * CLI-агента — общее правило `provider-rate-limit` (configs/agent-health-rules.yaml),
+ * серии «модель недоступна» (unavailableBans: не продолжает и не прерывает её;
+ * `rate_limit` запрета модели не даёт). Иначе часовой временный запрет модели ронял бы
+ * всякий агент (в том числе роутер), который выбирал ту же модель. Агента на это время
+ * выводит из выбора health-реестр: CLI-агента — общее правило `provider-rate-limit` (configs/agent-health-rules.yaml),
  * агента `kind: http` и шага model_io — ошибка клиента модели `rate_limit` (src/runner.mjs).
  */
 const THROTTLED_STATUS = 'rate_limit';
@@ -143,7 +139,12 @@ export const GRADES = Object.freeze([
 // за сбой, ни в серию «модель недоступна» (и не закрывают их — последним запуском модели
 // не считаются, серию не прерывают).
 const UNCOUNTED_GRADES = new Set(['stopped', 'throttled']);
-const FAILURE_GRADES = new Set(['empty', 'artifacts_failed']);
+// Неудача в правилах 1 и 2 — провал самой модели: пустой результат (модель не сделала
+// ничего). Провал контроля артефактов (`artifacts_failed`) и отклонённое ревью — исходы
+// проверки работы, не модели: в правилах не идут ни в неудачи, ни в окно правила 2 (успех
+// там — только пройденный контроль). Иначе поломка контроля (путь тикета, механика
+// проверки) запрещала бы модель с исправным журналом и оставляла тип тикета без агентов.
+const FAILURE_GRADES = new Set(['empty']);
 const ARTIFACTS_PASSED = new Set(['all_green', 'passed', 'legacy']);
 const REVIEW_VERDICTS = new Set(['passed', 'failed']);
 
@@ -189,7 +190,7 @@ export function appendRunEvent(projectRoot, event) {
     // из MCP отвечало бы «снято», а запрет оставался).
     const lead = endsWithoutNewline(file) ? '\n' : '';
     // Одна запись одним вызовом: строка события не делится между двумя писателями
-    // (раннер и снятие запрета из MCP) — проверено одновременной записью из двух
+    // (раннер и снятие запрета из MCP). Охраняет это одновременная запись из двух
     // процессов (src/tests/agent-runs.test.mjs).
     fs.appendFileSync(file, `${lead}${JSON.stringify(full)}\n`, 'utf8');
     return { ok: true, event: full };
@@ -315,9 +316,9 @@ function gradeOf(run, verify, review) {
   if (isStopped(run)) return { grade: 'stopped', crashed_after_work: false, artifacts_passed: null };
   // Отказ исполнителя — и класс запуска `blocked`, и `status: blocked` блока RESULT
   // (`result_status`): статус RESULT раннер держит вне данных ответа, и класс
-  // `blocked` агенту не достаётся никогда. Без второго условия отказ оценивался по
-  // изменениям: PulseProxy FIX-032 2026-09-28 (claude-haiku, `result_status: blocked`,
-  // 3 изменённых файла) — `pending`, отказ без изменений был бы `empty` — провалом.
+  // `blocked` агенту не достаётся никогда. Без второго условия отказ оценивался бы по
+  // изменениям: заблокированный запуск с изменениями — `pending`, без изменений —
+  // `empty` (провал).
   if (run.status === 'blocked' || run.result_status === 'blocked') {
     return { grade: 'refused', crashed_after_work: false, artifacts_passed: null };
   }
@@ -424,8 +425,13 @@ function lastUnbanIndex(events, match) {
 /**
  * Постоянные запреты пар «модель + тип тикета» по правилам 1 и 2. Счёт — с последнего
  * `unban` этой пары. Правило 2 — только при не меньше 10 оценённых запусках пары с
- * последнего снятия (решение 2026-09-26, вопрос 1: «С десяти запусков»). Запуски
- * `stopped` и `throttled` не оцениваются.
+ * последнего снятия. Запуски `stopped` и `throttled` не оцениваются.
+ *
+ * Оценённый запуск — тот, где видна сама модель: неудача (`empty`) или успех (пройденный
+ * контроль артефактов). Запуски без этого (провал контроля `artifacts_failed`, отклонённое
+ * ревью, отказ `refused`, сбой без работы, запуск без вердикта контроля) не оцениваются:
+ * неудач правила 1 не дают и места в окне правила 2 не занимают — исход проверки работы
+ * запрещать модель не должен.
  * @returns {Array<{model, ticket_type, rule: 1|2, failures, successes, evidence}>}
  */
 export function permanentBans(events) {
@@ -708,6 +714,8 @@ function runStartTimestamp(event) {
  *
  * `openRun` — необязательная запись из agent-run-open.json: добавляется как `pending`, если
  * соответствующего `run_key` ещё нет в журнале. `project` помечает вклад журнала в строках.
+ * `rails_unverified` в строке и в `totals` — запуски с признаком события (`rails_unverified:
+ * true`): ответ принят стадией, дважды не пройдя выходной слой рельс.
  * @param {Array<object>} events — полный журнал одного проекта
  * @param {{fromMs?: number, toMs?: number, openRun?: object|null, project?: string|null}} options
  * @returns {{rows: Array<object>, totals: object, unplaced_starts: number}}
@@ -740,6 +748,7 @@ export function runStatsTable(events, {
     executor_ungraded: 0,
     executor_grades: Object.fromEntries(GRADES.map((grade) => [grade, 0])),
     open_starts: 0,
+    rails_unverified: 0,
   };
   let unplacedStarts = 0;
   const unplacedByModel = new Map();
@@ -782,6 +791,7 @@ export function runStatsTable(events, {
         executor_ungraded: 0,
         executor_grades: Object.fromEntries(GRADES.map((item) => [item, 0])),
         open_starts: 0,
+        rails_unverified: 0,
       });
     }
     const row = rows.get(key);
@@ -803,6 +813,12 @@ export function runStatsTable(events, {
     if (event.open === true) {
       row.open_starts += 1;
       totals.open_starts += 1;
+    }
+    // Ответ принят стадией, дважды не пройдя выходной слой рельс: счётчик показывает,
+    // сколько таких запусков модели (statsTable их не считает — там события градаций).
+    if (event.rails_unverified === true) {
+      row.rails_unverified += 1;
+      totals.rails_unverified += 1;
     }
     if (isExecutor) {
       row.executor_starts += 1;
@@ -877,8 +893,8 @@ export function recordUnban(projectRoot, { model, ticket_type = null, reason } =
 }
 
 /**
- * Обнуление истории модели человеком (PLAN-004, решение 1): дописывает `reset`. Запуски
- * модели до него выпадают из градаций, запретов и таблицы статистики (gradeRuns). В
+ * Обнуление истории модели человеком: дописывает `reset`. Запуски модели до него
+ * выпадают из градаций, запретов и таблицы статистики (gradeRuns). В
  * отличие от `unban`, запрет не нужен; нужен хотя бы один `run` с этим `model` — защита
  * от опечатки в ключе. Нет — отказ, строка не пишется.
  * @returns {{ok: true, event: object} | {ok: false, code: string, error: string}}

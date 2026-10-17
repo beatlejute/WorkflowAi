@@ -26,7 +26,7 @@
  *
  * Вывод (для runner'а):
  *   ---RESULT---
- *   status: all_green|passed|legacy|failed
+ *   status: all_green|passed|legacy|not_executed|failed
  *     all_green — dod_format: 2, все пункты DoD — зелёные `check`, прежние гейты
  *                 пройдены; в `## Ревью` дописана строка passed с путём evidence
  *     passed    — dod_format: 2, проверки зелёные, есть пункты prose или visual
@@ -34,11 +34,29 @@
  *     legacy    — тикет без dod_format: 2 или тикет executor_type: human с файлами
  *                 проекта вне своей области (humanScopeEntries), прежние гейты
  *                 пройдены — ревью агентом со скилом
- *     failed    — провален прежний гейт или пункт DoD (проверка не прошла,
- *                 у visual нет изображений, запись проверки не разобрана)
+ *     not_executed — проверки пунктов DoD не удалось ИСПОЛНИТЬ (предел времени, отказ
+ *                 исполнителя, незапустившийся процесс), и это единственная причина
+ *                 провала: среда, а не результат работы. Попытка исполнения на такой
+ *                 исход не тратится — повтор с тем же входом упрётся в тот же предел;
+ *                 в `## Ревью` дописана строка failed, поле not_executed несёт причину
+ *                 для blocked_reason тикета
+ *     failed    — провален прежний гейт или пункт DoD. Пункт DoD проваливает по двум
+ *                 классам: проверка исполнена и не совпала (`fail_reasons:
+ *                 dod_items_failed=…`) либо проверку не удалось исполнить — предел
+ *                 времени, отказ исполнителя, незапустившийся процесс (`fail_reasons:
+ *                 dod_items_not_executed=…`);
+ *                 сюда же пункт без разобранной записи и visual без изображений.
+ *                 Есть настоящий провал — вердикт failed даже рядом с неисполненными
+ *                 пунктами: иначе провал работы замаскировался бы под проблему среды.
+ *                 Файл, не тронутый после начала тикета, вердикт не валит: см.
+ *                 `unchanged_files` и emitGhostMarker
  *   dod_completion_pct: <int>
  *   result_filled: <bool>
  *   missing_files: <comma-separated list or empty>
+ *   unchanged_files: <comma-separated list or empty; гейт не валит, признак призрака>
+ *   not_executed: <пункты класса «не удалось исполнить» через "; ", каждый — номер
+ *                 пункта, исход проверки и её команда; строка печатается только при
+ *                 таких пунктах>
  *   Только у тикета dod_format: 2:
  *   evidence_file: <путь файла evidence от корня проекта>
  *   required_capabilities: <JSON-массив одной строкой — способности агента стадии
@@ -657,9 +675,19 @@ const DIFF_LIMIT_CHARS = 60000;
 const GIT_BUFFER_BYTES = 64 * 1024 * 1024;
 const SOURCE_REF_CONTEXT_LINES = 5;
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
-// Статусы пункта, которые валят тикет; passed бывает только у check,
-// pending — у prose и visual с изображениями.
-const DOD_FAILED_STATUSES = new Set(['failed', 'timeout', 'denied', 'image_missing']);
+// Статусы пункта DoD, при которых вердикт приёмки не `passed`, разделены по классу.
+// `DOD_FAILED_STATUSES` — проверка исполнена и не совпала с ожиданием либо пункт нечем
+// закрыть: это доказательство невыполнения. `DOD_NOT_EXECUTED_STATUSES` — проверку не
+// удалось исполнить (предел времени, отказ исполнителя, процесс не запустился): среда,
+// а не результат работы, и не доказательство невыполнения. Приёмку такой пункт не
+// пропускает (ложный успех недопустим), но в причинах называется отдельно —
+// `dod_items_not_executed` — чтобы пайплайн и человек видели класс. `pending` — у
+// prose и visual с изображениями.
+const DOD_FAILED_STATUSES = new Set(['failed', 'image_missing']);
+const DOD_NOT_EXECUTED_STATUSES = new Set(['timeout', 'denied', 'spawn_failed']);
+// Ключ причины провала класса «проверку не удалось исполнить» в fail_reasons: по нему
+// вердикт отличает среду от настоящего провала работы.
+const NOT_EXECUTED_FAIL_REASON = 'dod_items_not_executed=';
 
 // Ссылка `file:line` или `file:start-end` — SOURCE_REF_FILE_LINE с диапазоном,
 // все вхождения.
@@ -960,6 +988,17 @@ function describeFailedItem(item) {
   return `пункт ${item.index} — ${item.status}: ${item.reason}`;
 }
 
+/**
+ * Пункт класса «не удалось исполнить» называет то, чем его проверяли: номер пункта,
+ * исход проверки (предел времени с его значением, отказ исполнителя, код незапуска) и
+ * саму команду. По одному исходу без команды человек и следующий запуск не знают, что
+ * именно не смогло исполниться, и не могут ни починить среду, ни переписать проверку.
+ */
+function describeNotExecutedItem(item) {
+  const command = item.command ? `, команда: \`${item.command}\`` : '';
+  return `пункт ${item.index} — ${item.status}: ${item.reason}${command}`;
+}
+
 function verifyTicket(ticketPath) {
   if (!fs.existsSync(ticketPath)) {
     throw new Error(`Ticket file not found: ${ticketPath}`);
@@ -1079,10 +1118,14 @@ function formatVerdict(result, evidence) {
   //   - result_filled == false (секция Result пуста)
   //   - dod_completion_pct == 0 (ни один пункт DoD не отмечен)
   //   - есть отсутствующие файлы из "Изменённые файлы"
-  //   - есть неизменённые файлы (file_unchanged)
-  //   - у тикета dod_format: 2 провален пункт DoD (DOD_FAILED_STATUSES)
+  //   - у тикета dod_format: 2 провален пункт DoD (DOD_FAILED_STATUSES — проверка
+  //     исполнена и не совпала; DOD_NOT_EXECUTED_STATUSES — проверку не удалось
+  //     исполнить: вердикт тоже failed, но причина названа отдельно)
+  // Неизменённый файл (file_unchanged) в этом списке отсутствует намеренно — см. notices.
   const failReasons = [];
   const humanIssues = [];
+  // Признаки, которые идут в отчёт и в предупреждения, но вердикт не валят.
+  const notices = [];
   if (!result.result_filled) {
     failReasons.push('result_filled=false');
     humanIssues.push(result.result_exists
@@ -1097,11 +1140,14 @@ function formatVerdict(result, evidence) {
     failReasons.push(`missing_files=${missingFiles.join(',')}`);
     humanIssues.push(`не найдены заявленные файлы: ${missingFiles.join(', ')}`);
   }
+  // Файл, не тронутый после начала тикета, — не доказательство невыполнения работы:
+  // правка могла лежать в дереве с прошлого тикета, а тикет по существу этот файл не
+  // меняет (зелёная проверка держится на исправлении, уже бывшем в рабочем дереве).
+  // Вердикт валит провал проверки DoD — по существу, а не по времени файла. Признак
+  // остаётся в отчёте (`unchanged_files` в RESULT и в legacy_gates evidence) и в
+  // предупреждениях; призрачное выполнение по нему по-прежнему называет emitGhostMarker.
   if (unchangedFiles.length > 0) {
-    failReasons.push(`file_unchanged=${unchangedFiles.join(',')}`);
-    humanIssues.push(
-      `файлы не были изменены после начала выполнения тикета: ${unchangedFiles.join(', ')}`
-    );
+    notices.push(`file_unchanged=${unchangedFiles.join(',')}`);
   }
 
   if (result.source_grounding?.required && !result.source_grounding?.satisfied) {
@@ -1133,10 +1179,25 @@ function formatVerdict(result, evidence) {
     failReasons.push(`dod_items_failed=${failedItems.map((item) => item.index).join(',')}`);
     humanIssues.push(`не пройдены пункты DoD: ${failedItems.map(describeFailedItem).join('; ')}`);
   }
+  // Пункт, который не удалось исполнить, валит приёмку так же, но другой причиной:
+  // это среда, а не доказательство невыполнения. Отдельный класс нужен маршрутизации —
+  // повтор с тем же входом упрётся в тот же предел, и попытку тратить не за что.
+  const notExecutedItems = (evidence?.items || []).filter((item) => DOD_NOT_EXECUTED_STATUSES.has(item.status));
+  const notExecuted = notExecutedItems.map(describeNotExecutedItem);
+  if (notExecutedItems.length > 0) {
+    failReasons.push(`${NOT_EXECUTED_FAIL_REASON}${notExecutedItems.map((item) => item.index).join(',')}`);
+    humanIssues.push(`пункты DoD не удалось исполнить (среда, не результат работы): ${notExecuted.join('; ')}`);
+  }
+
+  // Класс среды отдельным статусом — только когда он единственная причина провала:
+  // тогда стадия конфига блокирует тикет, не расходуя попытку исполнения. Рядом с
+  // настоящим провалом работы он статус не меняет: иначе неисполненная проверка
+  // прикрыла бы провал пункта, который исполнился и не совпал (ложный успех).
+  const workFailures = failReasons.filter((reason) => !reason.startsWith(NOT_EXECUTED_FAIL_REASON));
 
   let status;
   if (failReasons.length > 0) {
-    status = 'failed';
+    status = workFailures.length === 0 ? 'not_executed' : 'failed';
   } else if (!evidence || (result.human_out_of_scope || []).length > 0) {
     // Тикет без dod_format: 2 — прежний маршрут, ревью агентом со скилом. Туда же тикет
     // человека с файлами вне своей области (humanScopeEntries): правку продукта смотрит
@@ -1150,7 +1211,7 @@ function formatVerdict(result, evidence) {
     status = 'passed';
   }
 
-  return { status, missingFiles, unchangedFiles, failReasons, humanIssues };
+  return { status, missingFiles, unchangedFiles, failReasons, humanIssues, notices, notExecuted };
 }
 
 /**
@@ -1237,10 +1298,13 @@ function appendReviewNote(ticketPath, status, text) {
   const summary = text.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
   const date = new Date().toISOString().slice(0, 10);
 
-  // Idempotency check
+  // Idempotency check. Смотрится последняя секция «## Ревью» — та же, из которой
+  // getLastReviewStatus берёт вердикт: в первой могла остаться строка прошлого прогона,
+  // и тогда повтор пропускал бы запись, а вердикт читался бы из другой секции.
   try {
     const content = fs.readFileSync(ticketPath, 'utf8');
-    const sectionMatch = content.match(/(?:^|\n)\s*##\s+Ревью\s*\r?\n([\s\S]*?)(?=\r?\n##\s+|$)/i);
+    const sections = [...content.matchAll(/(?:^|\n)\s*##\s+Ревью\s*\r?\n([\s\S]*?)(?=\r?\n##\s+|$)/gi)];
+    const sectionMatch = sections[sections.length - 1];
     if (sectionMatch) {
       const lines = sectionMatch[1].split('\n').map(l => l.trim()).filter(Boolean);
       const lastRow = [...lines].reverse().find(l => l.startsWith('|') && !/^\|[-:|\s]+\|$/.test(l));
@@ -1292,12 +1356,15 @@ async function main() {
     result.assertionResults = await runImplementationAssertions(result.assertions || []);
     const evidence = result.dod_format_2 ? await collectEvidence(result, ticketPath, parsePromptAttempt(arg)) : null;
 
+    const verdict = formatVerdict(result, evidence);
+
+    // Предупреждения печатаются после вердикта: он добавляет к ним признаки, которых он
+    // не валит (`file_unchanged`), и им место в том же списке, что видят лог и отчёт.
     const warnings = result.warnings || [];
+    warnings.push(...verdict.notices);
     for (const warning of warnings) {
       console.error(`Warning: ${warning}`);
     }
-
-    const verdict = formatVerdict(result, evidence);
 
     const assertionsTotal = result.assertionResults.length;
     const assertionsFailed = result.assertionResults.filter(r => !r.ok).length;
@@ -1311,7 +1378,11 @@ async function main() {
     }
 
     let reviewNoteWritten = false;
-    if (verdict.status === 'failed' && verdict.humanIssues.length > 0) {
+    // Строка ревью — и у not_executed: тикет приёмку не прошёл, и причина (пункт,
+    // исход проверки, команда) должна пережить разблокировку тикета, когда
+    // blocked_reason снимет move-ticket. Вердикт в таблице — failed: статус класс
+    // среды не различает, а getLastReviewStatus читает только passed|failed|skipped.
+    if ((verdict.status === 'failed' || verdict.status === 'not_executed') && verdict.humanIssues.length > 0) {
       const issues = evidenceFile ? [...verdict.humanIssues, `evidence: ${evidenceFile}`] : verdict.humanIssues;
       reviewNoteWritten = appendReviewNote(ticketPath, 'failed', `verify-artifacts: ${issues.join('; ')}`);
     } else if (verdict.status === 'all_green') {
@@ -1356,6 +1427,13 @@ async function main() {
     if (verdict.failReasons.length > 0) {
       console.log(`fail_reasons: ${verdict.failReasons.join('; ')}`);
       console.log(`issues: ${verdict.humanIssues.join('; ')}`);
+    }
+    // Поле несёт причину класса «не удалось исполнить» для ветки not_executed: стадия
+    // кладёт его в params.reason стадии mark-blocked, и та пишет его в blocked_reason
+    // тикета. Одна строка — так поле и разбирают (parseResultBlock), и читает его
+    // mark-blocked.js (поле reason блока Context берётся построчно).
+    if (verdict.notExecuted.length > 0) {
+      console.log(`not_executed: ${verdict.notExecuted.join('; ')}`);
     }
     if (verdict.failReasons.length > 0 || verdict.status === 'all_green') {
       console.log(`review_note_written: ${reviewNoteWritten}`);

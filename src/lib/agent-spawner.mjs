@@ -31,13 +31,30 @@ const ResultParser = {
     timeout: 'error',
   },
 
+  // Правило разбора то же, что у ResultParser раннера (src/runner.mjs): значение блока
+  // RESULT может нести пояснение после статуса (`blocked — причина`), и целиком оно не
+  // совпадает ни с синонимом, ни с ключом перехода стадии — стадия уходит по ветке default,
+  // а отказ исполнителя читается как успех. Пояснение отделяется только по разделителю,
+  // которого не бывает внутри ключа (тире, двоеточие, точка с запятой, запятая, точка или
+  // пробел): дефис и подчёркивание остаются частью слова, иначе `needs-review — причина` не
+  // сводится к ключу `needs-review`. Неизвестное значение без пояснения возвращается как
+  // есть, с исходным регистром.
+  //
+  // Копия, а не общий модуль: раннер тянет этот файл через lib/skill-judge.mjs, и обратный
+  // импорт замкнул бы цикл. Расхождение с раннером ловит
+  // src/tests/agent-spawner.test.mjs («normalizeStatus — пояснение после статуса»).
   normalizeStatus(status) {
-    const lower = status.toLowerCase();
-    const canonical = ResultParser.STATUS_ALIASES[lower];
-    if (canonical) {
-      return canonical;
+    const raw = String(status ?? '').trim();
+    const alias = ResultParser.STATUS_ALIASES[raw.toLowerCase()];
+    if (alias) {
+      return alias;
     }
-    return status;
+    const withReason = /^([\p{L}\p{N}_-]+)\s*(?:[—–;:,.]|\s)\s*\S/u.exec(raw);
+    if (withReason && withReason[1] !== raw) {
+      const head = withReason[1];
+      return ResultParser.STATUS_ALIASES[head.toLowerCase()] || head;
+    }
+    return raw;
   },
 
   parse(output, stageId) {
@@ -300,7 +317,7 @@ export async function spawnAgent(agentConfig, prompt, options = {}) {
 
     // Ранний kill по фатальному правилу — через арбитр с grace-окном: 429 из
     // середины stderr, после которого агент сам повторил и продолжил, снятия
-    // не даёт (решение владельца, Telegram975 2026-10-10); см. runner.mjs.
+    // не даёт; см. runner.mjs.
     const fatalArbiter = createFatalStderrArbiter(rules, agentId, (match) => {
       if (earlyKilled || timedOut) return;
       earlyKilled = true;

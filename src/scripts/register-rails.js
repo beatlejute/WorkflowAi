@@ -19,7 +19,8 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getGlobalDir } from '../global-dir.mjs';
 import { createRailsJunction } from '../junction-manager.mjs';
-import { writeClaudeHooks, writeKiloPluginLoader, removeClaudeHooks } from '../init.mjs';
+import { writeClaudeHooks, writeKiloPluginLoader, removeClaudeHooks, writePiExtensionLoader, removePiExtensionLoader } from '../init.mjs';
+import { piInstalled } from '../lib/rails-run-state.mjs';
 import { realpathDeep } from '../rails/paths.mjs';
 
 /** Пользовательский settings Claude Code — одна регистрация на машину. */
@@ -31,7 +32,14 @@ export function userSettingsPath() {
 export function unregisterRails(projectRoot, { user = false } = {}) {
   const root = user ? homedir() : resolve(projectRoot);
   const settingsPath = user ? userSettingsPath() : null;
-  return removeClaudeHooks(root, settingsPath ? { settingsPath } : {});
+  const settings = removeClaudeHooks(root, settingsPath ? { settingsPath } : {});
+  // Расширение pi живёт в каталоге агента машины — снимается только вместе с машинной
+  // регистрацией (`--user`), как и машинные хуки Claude.
+  // Расширение pi — один файл на машину, общий для всех проектов: снятие проекта его не
+  // трогает (иначе снятие одного проекта выключило бы рельсы pi везде). Убирается вместе с
+  // машинной регистрацией — `--user --unregister`, как машинные хуки Claude.
+  const piLoader = user ? removePiExtensionLoader() : null;
+  return settings || piLoader;
 }
 
 export function registerRails(projectRoot, { umbrella = false, user = false } = {}) {
@@ -46,7 +54,8 @@ export function registerRails(projectRoot, { umbrella = false, user = false } = 
     // с .workflow/ и для делегатов. Путь — глобальное ядро.
     const settings = writeClaudeHooks(root, { hookScript: join(globalRails, 'claude-hook.mjs'), settingsPath: userSettingsPath() });
     if (!settings) throw new Error(`${userSettingsPath()}: не удалось слить hooks (битый JSON или чужой формат hooks)`);
-    return { root, railsDir: null, settings, loader: null, umbrella: true, user: true };
+    const piLoader = piInstalled() ? writePiExtensionLoader({ railsTarget: join(globalRails, 'pi-extension.mjs') }) : null;
+    return { root, railsDir: null, settings, loader: null, piLoader, umbrella: true, user: true };
   }
   if (umbrella) {
     // Каталог-зонтик над проектами (сессия Claude Code стартует из него): только хуки
@@ -66,13 +75,21 @@ export function registerRails(projectRoot, { umbrella = false, user = false } = 
   }
   const settings = writeClaudeHooks(root);
   const loader = writeKiloPluginLoader(root);
+  // Расширение рельс для pi ставится в каталог агента машины, а не в проект: проектный
+  // `.pi/extensions` pi берёт только в доверенном проекте, а неинтерактивный запуск
+  // пайплайна доверие подтвердить не может — расширение оттуда не загрузилось бы
+  // (проверено запуском). Само расширение молчит вне проектов с .workflow/, поэтому
+  // ставится здесь же: иначе о шаге забывают, и pi-агенты идут без рельс — их канарейка
+  // выполняется, а скил по своему правилу останавливает работу. На машине без pi шаг
+  // пропускается: чужой каталог настроек не заводим.
+  const piLoader = piInstalled() ? writePiExtensionLoader({ railsTarget: join(globalRails, 'pi-extension.mjs') }) : null;
 
   const gitignore = join(root, '.gitignore');
   const line = '.workflow/state/';
   const has = existsSync(gitignore) && readFileSync(gitignore, 'utf8').split(/\r?\n/).some((l) => l.trim() === line);
   if (!has) appendFileSync(gitignore, `${line}\n`);
 
-  return { root, railsDir, settings, loader };
+  return { root, railsDir, settings, loader, piLoader };
 }
 
 // realpath обеих сторон: в проектах src/scripts подключён junction'ом, а Node реалпасит
@@ -87,6 +104,11 @@ function isDirectRun() {
     return false;
   }
 }
+/** Строка отчёта CLI про расширение рельс для pi. */
+function piLine(piLoader) {
+  return piLoader || '— (pi на машине нет, шаг пропущен)';
+}
+
 const isMain = isDirectRun();
 if (isMain) {
   try {
@@ -101,8 +123,8 @@ if (isMain) {
     } else {
       const r = registerRails(target, { umbrella, user });
       console.log(r.umbrella
-        ? `rails зарегистрированы на уровне ${r.user ? 'пользователя' : 'зонтика ' + r.root}:\n  claude:   ${r.settings}\nПерезапусти сессию Claude Code, чтобы хуки загрузились.`
-        : `rails зарегистрированы:\n  junction: ${r.railsDir}\n  claude:   ${r.settings}\n  kilo:     ${r.loader}\nПерезапусти сессию Claude Code, чтобы хуки загрузились.`);
+        ? `rails зарегистрированы на уровне ${r.user ? 'пользователя' : 'зонтика ' + r.root}:\n  claude:   ${r.settings}\n  pi:       ${piLine(r.piLoader)}\nПерезапусти сессию Claude Code, чтобы хуки загрузились.`
+        : `rails зарегистрированы:\n  junction: ${r.railsDir}\n  claude:   ${r.settings}\n  kilo:     ${r.loader}\n  pi:       ${piLine(r.piLoader)}\nПерезапусти сессию Claude Code, чтобы хуки загрузились.`);
     }
   } catch (e) {
     console.error(`register-rails: ${e.message}`);

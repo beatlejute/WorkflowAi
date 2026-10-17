@@ -28,6 +28,10 @@ if (isMainThread) {
   // (init.mjs, ensureKiloGlobalSkillsLink) — без изоляции тесты init
   // писали бы в настоящий ~/.config/kilo ссылку на временный WORKFLOW_HOME.
   process.env.KILO_CONFIG_DIR = join(home, 'kilo-config');
+  // Регистрация рельс пишет расширение pi в каталог агента на машине
+  // (`~/.pi/agent/extensions`, register-rails.js): без изоляции тесты init и
+  // регистрации оставляли бы файл в настоящих настройках pi.
+  process.env.PI_CODING_AGENT_DIR = join(home, 'pi-agent');
   process.on('exit', () => rmSync(home, { recursive: true, force: true }));
 
   armWorkerWatchdog();

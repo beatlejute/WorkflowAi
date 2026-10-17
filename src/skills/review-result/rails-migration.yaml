@@ -20,9 +20,9 @@ skill: review-result
 baseline: e4891f5
 entries:
   - phrase: "Последние строки твоего ответа ВСЕГДА должны быть блоком"
-    target: P0R3
+    target: P0R1
   - phrase: "Допустимы ТОЛЬКО два статуса"
-    target: P0R2
+    target: P0R1
   - phrase: "Последняя строка = последнее ревью."
     target: P0R7
   - phrase: "Создание планов/тикетов"

@@ -12,6 +12,9 @@
  *    удаляет, а переходы pick-* evidence_file не задают — иначе в промпт стадии
  *    попал бы файл evidence предыдущего тикета прогона. Ветка error обнуляет и
  *    required_capabilities (PLAN-002, задача 16);
+ *  - not_executed — проверки пунктов DoD не удалось исполнить (среда): сразу
+ *    mark-blocked с причиной из RESULT-блока, мимо increment-task-attempts —
+ *    попытка исполнения не тратится;
  *  - failed — increment-task-attempts, без ревью.
  *
  * Стадия review-result (PLAN-002, задача 29) — обмен model_io, скрипты prepare и
@@ -88,6 +91,14 @@ function transitionProblems(config, stageId, status, { stage, params = {} }) {
 
 const TICKET = { ticket_id: '$context.ticket_id' };
 const ATTEMPT = { ...TICKET, attempt: '$counter.task_attempts' };
+// Причина блокировки класса «среда»: стадия mark-blocked пишет её в blocked_reason
+// тикета, поэтому она должна прийти из RESULT-блока предпроверки, а не быть строкой
+// константой. attempts — поле, которое разбирает mark-blocked.js из промпта стадии.
+const NOT_EXECUTED_BLOCK = {
+  ...TICKET,
+  attempts: '$counter.task_attempts',
+  reason: 'dod_items_not_executed: $result.not_executed',
+};
 const EVIDENCE = { evidence_file: '$result.evidence_file', required_capabilities: '$result.required_capabilities' };
 
 /** Нарушения маршрута предпроверки verify-artifacts. */
@@ -98,6 +109,9 @@ function verifyArtifactsProblems(config) {
     ...check('passed', { stage: 'review-result', params: { ...ATTEMPT, ...EVIDENCE } }),
     ...check('default', { stage: 'review-result', params: { ...ATTEMPT, ...EVIDENCE } }),
     ...check('legacy', { stage: 'review-result-legacy', params: { ...ATTEMPT, evidence_file: '' } }),
+    // Класс среды: проверки не исполнились — блокировка сразу, попытка исполнения
+    // не тратится (increment-task-attempts на этом пути нет).
+    ...check('not_executed', { stage: 'mark-blocked', params: NOT_EXECUTED_BLOCK }),
     ...check('error', { stage: 'review-result-legacy', params: { ...ATTEMPT, evidence_file: '', required_capabilities: '' } }),
     // 2026-10-04: failed ведёт в общий маршрутизатор отказа — human-тикет не
     // возвращается молча в ready/, агентский уходит в счётчик попыток.
@@ -224,6 +238,28 @@ describe('pipeline-review-route: маршрут ревью в configs/pipeline.y
 
   it('verify-artifacts: all_green → done, legacy и error → review-result-legacy, в ревью — evidence', () => {
     assert.deepEqual(verifyArtifactsProblems(loadConfig()), []);
+  });
+
+  // Проверку не удалось исполнить (предел времени, отказ исполнителя, незапустившийся
+  // процесс) — это среда: повтор с тем же входом упрётся в тот же предел, поэтому
+  // попытка исполнения не тратится, и тикет блокируется сразу с причиной из
+  // RESULT-блока предпроверки (номер пункта, исход проверки, команда).
+  it('verify-artifacts: not_executed → mark-blocked мимо счётчика попыток, причина — из результата', () => {
+    const config = loadConfig();
+    const transition = findStage(config, 'verify-artifacts').goto.not_executed;
+    assert.deepEqual(verifyArtifactsProblems(config), []);
+    assert.equal(transition.stage, 'mark-blocked', 'not_executed идёт в блокировку, а не в повтор');
+    assert.match(transition.params.reason, /\$result\./, 'причина — из RESULT-блока стадии, а не строка-константа');
+    assert.notEqual(
+      findStage(config, transition.stage).counter,
+      'task_attempts',
+      'стадия блокировки не трогает счётчик попыток исполнения'
+    );
+  });
+
+  it('копия конфига без goto.not_executed у verify-artifacts — нарушение', () => {
+    const config = loadMutatedCopy((c) => { delete c.pipeline.stages['verify-artifacts'].goto.not_executed; });
+    assert.deepEqual(verifyArtifactsProblems(config), ['verify-artifacts.goto.not_executed: перехода нет']);
   });
 
   it('review-result-legacy — ревью агентом со скилом review-result, без model_io', () => {

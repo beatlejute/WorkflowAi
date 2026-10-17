@@ -10,24 +10,42 @@ import { isJunction } from '../junction-manager.mjs';
 let testGlobalDir;
 let originalWorkflowHome;
 let originalKiloConfigDir;
+let originalPiAgentDir;
 
-// KILO_CONFIG_DIR — рядом с WORKFLOW_HOME теста: initProject ставит туда
-// ссылку на канон скилов, а без подмены (запуск файла без преднагрузки)
-// это был бы настоящий ~/.config/kilo.
+// Каталоги CLI изолированы: регистрация ссылок и расширений в тесте
+// не должна менять пользовательскую установку.
 beforeEach(() => {
   originalWorkflowHome = process.env.WORKFLOW_HOME;
   originalKiloConfigDir = process.env.KILO_CONFIG_DIR;
+  originalPiAgentDir = process.env.PI_CODING_AGENT_DIR;
   testGlobalDir = join(tmpdir(), `workflow-init-global-${Date.now()}`);
   process.env.WORKFLOW_HOME = testGlobalDir;
   process.env.KILO_CONFIG_DIR = join(testGlobalDir, 'kilo-config');
+  process.env.PI_CODING_AGENT_DIR = join(testGlobalDir, 'pi-agent');
 });
 
 afterEach(() => {
-  for (const [key, value] of [['WORKFLOW_HOME', originalWorkflowHome], ['KILO_CONFIG_DIR', originalKiloConfigDir]]) {
+  for (const [key, value] of [
+    ['WORKFLOW_HOME', originalWorkflowHome],
+    ['KILO_CONFIG_DIR', originalKiloConfigDir],
+    ['PI_CODING_AGENT_DIR', originalPiAgentDir],
+  ]) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
   rmSync(testGlobalDir, { recursive: true, force: true });
+});
+
+test('initProject writes the pi loader only into the isolated agent directory', () => {
+  const root = join(testGlobalDir, 'project');
+  const rails = join(testGlobalDir, 'rails');
+  mkdirSync(rails, { recursive: true });
+  writeFileSync(join(rails, 'pi-extension.mjs'), 'export default function () {}\n');
+  const result = initProject(root, { force: true });
+  assert.equal(result.errors.length, 0, result.errors.join(', '));
+  const loader = join(testGlobalDir, 'pi-agent', 'extensions', 'workflow-rails.ts');
+  assert.ok(existsSync(loader));
+  assert.ok(readFileSync(loader, 'utf8').includes(join(rails, 'pi-extension.mjs').replaceAll('\\', '/')));
 });
 
 test('initProject creates 16 directories', () => {

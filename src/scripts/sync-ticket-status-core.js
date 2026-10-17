@@ -82,8 +82,8 @@ export function syncProject(projectRoot, apply) {
         // frontmatter целиком (статус и parent_plan пропадают, id подставляется из
         // имени файла), обрезанный теряет хвост тела — секцию Result, по которой
         // findCompletedInProgress решает, что тикет доделан. Ни одна из этих функций
-        // не падает — все считают неправду. Тот же класс, что инциденты 2026-09-24:
-        // маркер запущенного пайплайна и approval-файл ручного гейта.
+        // не падает — все считают неправду. Тот же класс, что маркер запущенного
+        // пайплайна и approval-файл ручного гейта.
         replaceFileAtomicSync(filePath, serializeFrontmatter(frontmatter) + body);
       }
     }

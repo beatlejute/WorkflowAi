@@ -162,7 +162,7 @@ const AGENTS = {
 
 const iso = (ms) => new Date(ms).toISOString();
 
-/** Три запуска модели с проваленным контролем артефактов — постоянный запрет пары по правилу 1. */
+/** Три пустых запуска модели (модель не сделала ничего) — постоянный запрет пары по правилу 1. */
 function permanentBanJournal(model, ticketType) {
   const t0 = Date.now() - 3 * 60 * 60 * 1000;
   const events = [];
@@ -171,13 +171,7 @@ function permanentBanJournal(model, ticketType) {
     events.push({
       type: 'run', ts: iso(t0 + i * 60000), run_key: `seed-${i}`, pipeline_run: 'seed', stage: 'execute-task',
       skill: 'execute-task', ticket, ticket_type: ticketType, attempt: 1, agent: 'agent-z', requested: null,
-      models: null, model, status: 'ok', exit_code: 0, changed_files: 2, duration_ms: 1000,
-    });
-    events.push({
-      type: 'verify', ts: iso(t0 + i * 60000 + 1000), pipeline_run: 'seed', ticket, ticket_type: ticketType,
-      status: 'failed', reason: null, dod_completion_pct: 50, result_filled: true, missing_files: ['src/x.mjs'],
-      unchanged_files: [], evidence_file: null, dod_check_total: null, dod_check_failed: null,
-      fail_reasons: ['missing_files'],
+      models: null, model, status: 'ok', exit_code: 0, changed_files: 0, duration_ms: 1000,
     });
   }
   return events;

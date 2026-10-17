@@ -5,6 +5,7 @@ import { dirname, join, resolve as resolvePathAbs } from 'node:path';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fromClaude, fromKilo, detectShellWrites, explainShellWrites } from '../rails/actions.mjs';
+import { decide } from '../rails/core.mjs';
 
 // Настоящий bash (Git/MSYS), а не заглушки: у bash из System32 (WSL) /tmp линуксовый и
 // node недоступен, bash из WindowsApps — заглушка установщика (2026-10-04).
@@ -768,6 +769,56 @@ test('detectShellWrites (C2 r2, LOW): вложенный интерпретат�
   // контроль: без записи внутри — пусто; файл скрипта не разбирается (как до ЗАДАЧИ C2)
   for (const command of ['bash --version', "powershell -c 'Get-ChildItem'", 'cmd //c dir', 'bash script.sh', 'pwsh -File x.ps1']) {
     assert.deepEqual(writes(command), [], command);
+  }
+});
+
+test('PowerShell call operator: quoted executable literals use normal command analysis', () => {
+  const executable = String.raw`C:\Users\Denis\.vscode-oss\extensions\anthropic.claude-code-2.1.296-win32-x64\resources\native-binary\claude.exe`;
+  for (const quote of ["'", '"']) {
+    for (const command of [
+      `& ${quote}${executable}${quote} --version`,
+      `& ${quote}Get-ChildItem${quote}`,
+      `& ${quote}C:\\Program Files\\tools\\BASH.EXE${quote} --version`,
+    ]) assert.deepEqual(psWrites(command), [], command);
+    assert.deepEqual(psWrites(`& ${quote}Set-Content${quote} '${O}/quoted.txt' x`), [`${O}/quoted.txt`]);
+    assert.deepEqual(psWrites(`& ${quote}C:\\Program Files\\tools\\TOUCH.EXE${quote} '${O}/native.txt'`), [`${O}/native.txt`]);
+    assert.deepEqual(psWrites(`& ${quote}powershell.exe${quote} -Command 'Set-Content ${O}/nested.txt x'`), [`${O}/nested.txt`]);
+    assert.deepEqual(psWrites(`& ${quote}Get-ChildItem${quote} > '${O}/redirect.txt'`), [`${O}/redirect.txt`]);
+  }
+});
+
+test('PowerShell call operator: dynamic targets remain unknown and plain quoted expressions stay expressions', () => {
+  for (const command of [
+    '& $command --version',
+    '& "$command" --version',
+    '& "$(Get-Command claude)" --version',
+    '& (Get-Command claude) --version',
+    '& @("claude") --version',
+    '& "claude"$suffix --version',
+  ]) assert.deepEqual(psWrites(command), ['?'], command);
+  for (const quote of ["'", '"']) {
+    assert.deepEqual(psWrites(`${quote}Set-Content${quote} '${O}/not-a-call.txt' x`), []);
+    assert.deepEqual(psWrites(`${quote}text${quote} > '${O}/expression.txt'`), [`${O}/expression.txt`]);
+  }
+});
+
+test('PowerShell call operator: quoted writers remain scope-restricted and dynamic calls denied', () => {
+  const sandbox = mkdtempSync(join(tmpdir(), 'rails-quoted-call-'));
+  const outside = fwd(join(homedir(), 'rails-quoted-call-outside.txt'));
+  try {
+    for (const command of [
+      `& 'Set-Content' '${outside}' x`,
+      `& "C:\\Program Files\\tools\\TOUCH.EXE" '${outside}'`,
+      '& "$command" --version',
+    ]) {
+      const result = decide({
+        action: fromClaude({ tool_name: 'PowerShell', tool_input: { command } }),
+        ctx: { cwd: sandbox, sandboxRoot: sandbox },
+      });
+      assert.equal(result.decision, 'deny', command);
+    }
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
   }
 });
 

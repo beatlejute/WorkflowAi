@@ -2,6 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { normalizePlanId, parseFrontmatter, readBoardTickets } from './utils.mjs';
 
+function isMapping(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 // Inputs come from the runner's project, never from the agent's search results.
 export function prepareReportInput(projectRoot, context, stage = context.report_id ? 'analyze-report' : 'create-report') {
   const analyzing = stage === 'analyze-report';
@@ -11,20 +17,29 @@ export function prepareReportInput(projectRoot, context, stage = context.report_
   const tickets = readBoardTickets(path.join(workflow, 'tickets'));
   const plansDir = path.join(workflow, 'plans', 'current');
   const plans = fs.readdirSync(plansDir).filter(f => f.endsWith('.md') && !f.startsWith('.')).map(file => {
-    // Рядом с планом в каталоге лежат не-планы (например, справочник PLAN-001-reference.md,
-    // вынесенный из плана): имя не вида PLAN-NNN — это не испорченный план, а чужой файл,
-    // и падать на нём стадия не должна (HegelCodec 2026-10-11: create-report ронял прогон).
+    // Рядом с планом в каталоге лежат не-планы (справочник PLAN-NNN-reference.md, вынесенный
+    // из плана): имя не вида PLAN-NNN — это не испорченный план, а чужой файл, и падать на нём
+    // стадия не должна.
     const id = normalizePlanId(file);
     if (!id) return null;
     const { frontmatter } = parseFrontmatter(fs.readFileSync(path.join(plansDir, file), 'utf8'));
-    if (!frontmatter.status) throw new Error(`Invalid plan: ${file}`);
+    if (!isMapping(frontmatter)) {
+      throw new Error(`Invalid plan frontmatter: ${file}`);
+    }
+    if (typeof frontmatter.status !== 'string' || !frontmatter.status.trim()) {
+      throw new Error(`Invalid plan status: ${file}`);
+    }
     return { id, status: frontmatter.status };
   }).filter(Boolean);
   let planId = context.plan_id ? normalizePlanId(context.plan_id) : null;
   if (context.plan_id && !planId) throw new Error('Invalid report plan_id');
   if (analyzing) {
     if (!/^REPORT-\d+$/.test(context.report_id)) throw new Error('Invalid report_id');
-    const { frontmatter } = parseFrontmatter(fs.readFileSync(path.join(workflow, 'reports', `${context.report_id}.md`), 'utf8'));
+    const reportFile = `${context.report_id}.md`;
+    const { frontmatter } = parseFrontmatter(fs.readFileSync(path.join(workflow, 'reports', reportFile), 'utf8'));
+    if (!isMapping(frontmatter)) {
+      throw new Error(`Invalid report frontmatter: ${reportFile}`);
+    }
     const related = frontmatter.related_plan ? normalizePlanId(frontmatter.related_plan) : null;
     if (frontmatter.related_plan && !related) throw new Error('Invalid report related_plan');
     if (planId && !related) throw new Error('Requested plan requires report binding');

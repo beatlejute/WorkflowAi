@@ -8,8 +8,10 @@
  *    снятия («С десяти запусков», решение 2026-09-26, вопрос 1) — при 9 и меньше
  *    запрета нет, даже с одним успехом; в полном окне из 10 запрет даёт меньше 3
  *    успехов, 3 успеха уже снимают запрет;
- *  - провал проверки пункта DoD (`fail_reasons: ["dod_items_failed=…"]`) — неудача
- *    наравне с провалом контроля по отсутствующим файлам (решение 2026-09-26, вопрос 2);
+ *  - в счёт неудач идёт только провал самой модели (`empty`); провал контроля артефактов
+ *    (`artifacts_failed`, в том числе проваленная проверка пункта DoD) и отклонённое
+ *    ревью — исходы проверки работы, не модели: серия таких запусков запрета не даёт ни
+ *    по правилу 1, ни по правилу 2 и окна правила 2 не занимает;
  *  - для правил достаточно, что контроль артефактов пройден (`artifacts_passed: true`),
  *    даже если итоговая градация — `pending` (ревью ещё не было) или `review_failed`
  *    (ревью не прошло);
@@ -73,7 +75,8 @@ function failureEmpty(model, ticketType) {
   return [runEvent(model, ticketType, { changed_files: 0 })];
 }
 
-// Неудача — контроль артефактов failed с причинами (в т.ч. провал пункта DoD).
+// Провал контроля артефактов (градация artifacts_failed) — исход проверки работы, не
+// неудача модели: в правила запрета такие запуски не идут.
 function failureArtifacts(model, ticketType, failReasons = ['missing_files']) {
   const ticket = nextTicket();
   return [
@@ -272,17 +275,44 @@ describe('permanentBans: неполное окно после unban', () => {
   });
 });
 
-describe('permanentBans: провал проверки DoD — неудача наравне с отсутствующими файлами', () => {
-  test('запрет по правилу 1 из смеси dod_items_failed, отсутствующих файлов и пустого запуска', () => {
+describe('permanentBans: провал контроля артефактов — не неудача модели', () => {
+  test('серия провалов приёмки (в т.ч. по одному тикету) запрета не даёт', () => {
+    // Тот же тикет, три попытки, ни одна не прошла проверку DoD; следом провалы по
+    // отсутствующим файлам. Работу обрывала проверка, а не модель: неудач у пары нет,
+    // запрета — ни по правилу 1, ни по правилу 2.
     const events = flat(
-      failureArtifacts('model-a', 'code', ['dod_items_failed=2,3']),
-      failureArtifacts('model-a', 'code', ['missing_files']),
-      failureEmpty('model-a', 'code'),
+      repeat(RULE1_MIN_FAILURES, () => failureArtifacts('model-a', 'code', ['dod_items_failed=2,3'])),
+      repeat(RULE1_MIN_FAILURES, () => failureArtifacts('model-a', 'code', ['missing_files'])),
     );
+    assert.deepEqual(permanentBans(events), []);
+  });
+
+  test('контроль: та же серия пустых запусков модели — запрет по правилу 1', () => {
+    const events = repeat(RULE1_MIN_FAILURES, () => failureEmpty('model-a', 'code'));
     const bans = permanentBans(events);
     assert.equal(bans.length, 1);
     assert.equal(bans[0].rule, 1);
-    assert.equal(bans[0].failures, 3);
+    assert.equal(bans[0].failures, RULE1_MIN_FAILURES);
+    assert.deepEqual(bans[0].evidence.map((e) => e.grade), repeat(RULE1_MIN_FAILURES, () => 'empty'));
+  });
+
+  test('провалы приёмки не занимают места в окне правила 2: успех модели остаётся в счёте', () => {
+    // 1 успех и 12 провалов приёмки — оценённых запусков у пары нет и окна нет; тот же
+    // журнал с пустыми запусками вместо провалов приёмки запрещается по правилу 2.
+    const artifacts = flat(
+      successAccepted('model-a', 'code'),
+      repeat(RULE2_WINDOW + RULE2_MIN_SUCCESS - 1, () => failureArtifacts('model-a', 'code')),
+    );
+    assert.deepEqual(permanentBans(artifacts), []);
+
+    const empty = flat(
+      successAccepted('model-a', 'code'),
+      repeat(RULE2_WINDOW - 1, () => failureEmpty('model-a', 'code')),
+    );
+    const bans = permanentBans(empty);
+    assert.equal(bans.length, 1);
+    assert.equal(bans[0].rule, 2);
+    assert.equal(bans[0].successes, 1);
   });
 });
 

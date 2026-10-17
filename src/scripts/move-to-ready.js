@@ -99,6 +99,7 @@ async function moveToReady(ticketId) {
     console.log(`[INFO] ${ticketId}: created_at → ${now} (метка была пустой, неразбираемой или в будущем)`);
   }
   frontmatter.updated_at = now;
+  frontmatter.status = targetDir === BLOCKED_DIR ? 'blocked' : 'ready';
 
   const newContent = serializeFrontmatter(frontmatter) + body;
   const targetPath = path.join(targetDir, `${ticketId}.md`);

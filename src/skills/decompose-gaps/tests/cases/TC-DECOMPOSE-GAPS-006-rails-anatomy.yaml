@@ -34,7 +34,7 @@ assertions:
       reason: "Проверка живости рельс — узел графа (принцип 15)."
     - kind: skill_contains
       file: "SKILL.md"
-      pattern: "P0R5\\[\"П0 ПРАВИЛО: parent_plan обязателен для КАЖДОГО тикета"
+      pattern: 'P0R4\["[^"\r\n]*parent_plan обязателен для КАЖДОГО тикета'
       reason: "Обязательность привязки к плану — правило ядра с названной ценой."
     - kind: skill_contains
       file: "SKILL.md"

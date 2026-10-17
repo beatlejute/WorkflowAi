@@ -563,4 +563,52 @@ describe('стадия ревью через раннер: prepare-review.js →
       `| ✅ passed | review-result: пункты DoD 2, 3 пройдены; evidence ${EVIDENCE_FILE}; модель test/second | judge-second |`);
     assert.equal(readJson(root, EVIDENCE_FILE).review.agent, 'judge-second');
   });
+
+  it('первый агент неуверен, переоценка упала — исход error: тикет не отклонён, строки ревью нет', async () => {
+    const root = makeProject();
+    mkdirSync(join(root, '.workflow', 'config'), { recursive: true });
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    writeFileSync(join(root, 'scripts', 'judge.mjs'), JUDGE_AGENT_SCRIPT);
+    writeFileSync(join(root, 'scripts', 'crash.mjs'), 'process.exit(1);\n');
+    const outcome = (status) => ({ stage: 'end', params: { review_outcome: status, review_error: '$result.reason' } });
+    const config = {
+      pipeline: {
+        name: 'review-model-io-re-review-failed',
+        version: '1.0',
+        entry: 'review-result',
+        execution: { timeout_per_stage: 60, delay_between_stages: 0, artifact_snapshot_enabled: false },
+        context: CONTEXT,
+        agents: {
+          // Первый судья отвечает уровнем 5 при уверенности ниже порога — неуверенно;
+          // второй процесс умирает без ответа.
+          'judge-first': {
+            command: 'node',
+            args: ['scripts/judge.mjs', 'score: 5;confidence: 0.79;model: test/first', 'score: 5;confidence: 0.79;model: test/first'],
+            prompt_stdin: true,
+            capabilities: ['text', 'multimodal'],
+          },
+          'judge-second': { command: 'node', args: ['scripts/crash.mjs'], prompt_stdin: true, capabilities: ['text', 'multimodal'] },
+        },
+        stages: {
+          'review-result': {
+            agents: ['judge-first', 'judge-second'],
+            model_io: { prepare: PREPARE, apply: APPLY, options: { pass_level: 4, min_confidence: 0.8 } },
+            goto: { passed: outcome('passed'), failed: outcome('failed'), error: outcome('error') },
+          },
+        },
+      },
+    };
+    writeFileSync(join(root, '.workflow', 'config', 'pipeline.yaml'), JSON.stringify(config, null, 2));
+
+    const run = await runPipeline(['--project', root]);
+
+    // Инфраструктурный отказ переоценки — сбой ревью, а не отклоняющий вердикт:
+    // «неуверен» не превращается в «не прошло». Стадия завершается error и в бою
+    // уходит по goto.error в increment-review-errors (здесь goto.error — end).
+    assert.equal(run.result.context.review_outcome, 'error');
+    assert.equal(run.result.context.review_error, 're_review_failed');
+    const reviewRows = ticketText(root).split('\n').filter((line) => /^\| \d{4}-\d{2}-\d{2} \|/.test(line));
+    assert.equal(reviewRows.length, 0, 'строки ревью нет — тикет не отклонён и не принят');
+    assert.deepEqual(readJson(root, EVIDENCE_FILE).review, { agent: null, model: null, items: {} }, 'оценки не записаны');
+  });
 });

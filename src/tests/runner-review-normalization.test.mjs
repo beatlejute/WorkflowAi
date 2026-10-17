@@ -20,6 +20,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'url';
 
 import { StageExecutor } from '../runner.mjs';
+import { getLastReviewStatus, REVIEW_SECTION_RE } from '../lib/review-section.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -106,14 +107,31 @@ ${initialReviewEntry}
 }
 
 /**
+ * Пишет тикет с произвольным телом (секции ревью в нём задаёт вызывающий)
+ */
+function createTicket(projectRoot, ticketId, body) {
+  const ticketsDir = path.join(projectRoot, '.workflow', 'tickets', 'in-progress');
+  fs.mkdirSync(ticketsDir, { recursive: true });
+
+  const ticketPath = path.join(ticketsDir, `${ticketId}.md`);
+  fs.writeFileSync(ticketPath, `---\nid: ${ticketId}\ntitle: Test Ticket\n---\n\n${body}`, 'utf8');
+  return ticketPath;
+}
+
+/**
  * Читает последнюю строку ## Ревью секции из тикета
  */
 function getLastReviewLine(ticketPath) {
   const content = fs.readFileSync(ticketPath, 'utf8');
-  const reviewMatch = content.match(/##\s+Ревью\s*\r?\n([\s\S]*?)(?=\r?\n##\s+|$)/i);
+  // Тот же шаблон и то же правило выбора, что у читателя вердикта (REVIEW_SECTION_RE,
+  // src/lib/review-section.mjs): без привязки к началу строки помощник принимал за секцию
+  // подраздел `### Ревью`, а первым совпадением читал первую секцию — то есть не ту,
+  // которую правит нормализация.
+  const matches = [...content.matchAll(REVIEW_SECTION_RE)];
+  const reviewMatch = matches[matches.length - 1];
   if (!reviewMatch) return null;
 
-  const sectionBody = reviewMatch[1];
+  const sectionBody = reviewMatch[2];
   const lines = sectionBody.split('\n').filter(l => l.trim());
 
   // Ищем последнюю data-строку (пропускаем header и separator)
@@ -292,6 +310,78 @@ test('TC-REVIEW-NORM-003: hook НЕ срабатывает для non-review-res
     assert.strictEqual(beforeLine, afterLine, 'Строка ## Ревью должна остаться неизменной для non-review-result стейджа');
 
     console.log('✅ TC-REVIEW-NORM-003 PASSED');
+  } finally {
+    cleanupDir(projectRoot);
+  }
+});
+
+// Секция, которую правит нормализация, обязана совпадать с той, которую читают остальные
+// (getLastReviewStatus, appendReviewEntry): иначе id агента уходит в одну секцию, а вердикт
+// читается из другой. Прежний шаблон без привязки к началу строки принимал за секцию
+// подраздел `### Ревью` (совпадали его вторые два символа `#`), а первое совпадение —
+// первую секцию второго уровня.
+const REVIEW_TABLE =
+  '| Дата | Статус | Самари | Агент |\n|------|--------|--------|-------|\n';
+
+async function runReviewStage(projectRoot, ticketId, agentIds = ['claude-sonnet']) {
+  const executor = makeExecutor(makeConfig(agentIds), projectRoot, { ticket_id: ticketId });
+  executor.callAgent = async () => ({
+    status: 'passed',
+    output: '---RESULT---\nstatus: passed\n---RESULT---',
+    exitCode: 0,
+    parsed: true,
+    result: { status: 'passed' },
+  });
+  return executor;
+}
+
+test('TC-REVIEW-NORM-004: подраздел ### Ревью не принимается за секцию — правится настоящая ## Ревью', async () => {
+  const projectRoot = makeTmpDir();
+  try {
+    const ticketId = 'TEST-REVIEW-004';
+    const body = `## Приложение\n\n### Ревью\n\n${REVIEW_TABLE}| 2026-05-01 | ✅ passed | подраздел | wrong-name |\n\n## Ревью\n\n${REVIEW_TABLE}| 2026-05-02 | ✅ passed | настоящая секция | wrong-name |\n`;
+    const ticketPath = createTicket(projectRoot, ticketId, body);
+
+    const executor = await runReviewStage(projectRoot, ticketId);
+    const result = await executor.executeWithFallback('review-result', makeStage(['claude-sonnet']));
+
+    assert.strictEqual(result.status, 'passed', 'Stage должен завершиться с passed');
+
+    const content = fs.readFileSync(ticketPath, 'utf8');
+    assert.match(content, /\| 2026-05-02 \| ✅ passed \| настоящая секция \| claude-sonnet \|/,
+      'колонка «Агент» нормализована в настоящей секции');
+    assert.match(content, /\| 2026-05-01 \| ✅ passed \| подраздел \| wrong-name \|/,
+      'подраздел ### Ревью не тронут');
+    assert.strictEqual(getLastReviewStatus(content), 'passed', 'вердикт читается из настоящей секции');
+
+    console.log('✅ TC-REVIEW-NORM-004 PASSED');
+  } finally {
+    cleanupDir(projectRoot);
+  }
+});
+
+test('TC-REVIEW-NORM-005: при двух секциях ## Ревью правится последняя — та же, что читает вердикт', async () => {
+  const projectRoot = makeTmpDir();
+  try {
+    const ticketId = 'TEST-REVIEW-005';
+    const body = `## Ревью\n\n${REVIEW_TABLE}| 2026-05-01 | ❌ failed | первая секция | wrong-name |\n\n## Заметки\n\nхвост\n\n## Ревью\n\n${REVIEW_TABLE}| 2026-05-02 | ✅ passed | последняя секция | wrong-name |\n`;
+    const ticketPath = createTicket(projectRoot, ticketId, body);
+
+    const executor = await runReviewStage(projectRoot, ticketId);
+    const result = await executor.executeWithFallback('review-result', makeStage(['claude-sonnet']));
+
+    assert.strictEqual(result.status, 'passed', 'Stage должен завершиться с passed');
+
+    const content = fs.readFileSync(ticketPath, 'utf8');
+    assert.match(content, /\| 2026-05-01 \| ❌ failed \| первая секция \| wrong-name \|/,
+      'первая секция не задета');
+    assert.match(content, /\| 2026-05-02 \| ✅ passed \| последняя секция \| claude-sonnet \|/,
+      'колонка «Агент» нормализована в последней секции');
+    assert.strictEqual(getLastReviewStatus(content), 'passed', 'вердикт читается из последней секции');
+    assert.strictEqual(extractAgentFromReviewLine(getLastReviewLine(ticketPath)), 'claude-sonnet',
+      'id агента в строке, которую читают остальные');
+
+    console.log('✅ TC-REVIEW-NORM-005 PASSED');
   } finally {
     cleanupDir(projectRoot);
   }

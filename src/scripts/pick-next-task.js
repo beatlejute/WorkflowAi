@@ -42,8 +42,8 @@ const ARCHIVE_DIR = path.join(TICKETS_DIR, 'archive');
 const BACKLOG_DIR = path.join(TICKETS_DIR, 'backlog');
 
 // Контекст ядра: те же пути, тот же логгер. Ядро лежит в pick-next-task-core.js,
-// чтобы замеры звали боевую функцию, а не свою копию: копия в замере была легче
-// (без дедупликации, условий и зависимостей) и регресс здесь не ловила.
+// чтобы замеры звали боевую функцию, а не свою копию: копия тут легче (без
+// дедупликации, условий и зависимостей) и регресс не ловит.
 const CTX = core.createTicketContext(PROJECT_DIR, { logger });
 
 
@@ -84,7 +84,7 @@ function autoCorrectTickets(config) {
 
       frontmatter.updated_at = new Date().toISOString();
       // Правило конфига может вести и в in_progress: метка начала работы ставится
-      // на любом пути в колонку (PulseProxy PLAN-020, 2026-09-30).
+      // на любом пути в колонку.
       stampStartedAt(frontmatter, path.basename(toDir), frontmatter.updated_at);
 
       if (toDir === DONE_DIR && !frontmatter.completed_at) {
@@ -98,8 +98,7 @@ function autoCorrectTickets(config) {
       // которого закрытый тикет защищён от отката на новый круг.
       // Цель — свободное имя в другой колонке, поэтому лестница повторов
       // внутри помощника здесь не платится: rename на имя, которого нет,
-      // открытого файла не встречает и EPERM не даёт (проверено запуском:
-      // 300 публикаций под двумя сканерами каталога — 0 повторов).
+      // открытого файла не встречает и EPERM не даёт.
       replaceFileAtomicSync(toPath, newContent);
 
       fs.unlinkSync(fromPath);
@@ -138,11 +137,11 @@ function autoCorrectTickets(config) {
 
         const reviewStatus = getLastReviewStatus(content);
 
-        // FIX-69: не откатываем из done/ тикет, закрытый штатно пайплайном.
+        // Не откатываем из done/ тикет, закрытый штатно пайплайном.
         // Признак штатного закрытия — заполненный completed_at (его проставляет move-ticket).
         // Review-агент может вынести passed-вердикт и не дописать строку в таблицу "## Ревью"
         // (наблюдалось у claude-haiku и при пустом выводе стейджа) — тогда без этой защиты
-        // закрытый тикет уезжал на новый круг (HUMAN-4 2026-08-04, HUMAN-5 2026-08-04).
+        // закрытый тикет уезжал бы на новый круг.
         if (dir === DONE_DIR && frontmatter.completed_at) {
           logger.info(`[AUTO-CORRECT] ${ticketId}: skipped (completed_at=${frontmatter.completed_at}, review=${reviewStatus || 'none'})`);
           continue;
@@ -281,9 +280,9 @@ async function main() {
   }
 
   // Выбор задачи план только считает: закрывает его стадия complete-plan после разбора
-  // completed. 2026-09-30 PulseProxy PLAN-020: здесь стоял checkAndClosePlan — план закрыт и
-  // 36 тикетов архивированы в 17:33, до create-report и analyze-report, в обход гейта
-  // критериев успеха разбора, и complete-plan после разбора ответил not_ready.
+  // completed. Иначе план закрывается и тикеты архивируются до create-report и
+  // analyze-report, в обход гейта критериев успеха разбора, и complete-plan после
+  // разбора отвечает not_ready.
   if (planId) {
     const progress = countPlanTickets(WORKFLOW_DIR, planId);
     if (progress.total > 0 && progress.done === progress.total) {

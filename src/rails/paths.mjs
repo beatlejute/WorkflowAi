@@ -39,8 +39,8 @@ const IS_WIN32 = process.platform === 'win32';
 
 // Предохранители от патологического обхода (циклы через symlink, огромные
 // поддеревья под `**`): дерево скила — маленькое, этого с запасом хватает.
-// Замер 2026-09-22: при 2000 каталогах / глубине 16 промах `isInside(<файл вне temp>, os.tmpdir())`
-// стоил 9 с (обход всего %TEMP%). Скил-дерево укладывается в сотни каталогов и глубину < 8.
+// Промах `isInside(<файл вне temp>, os.tmpdir())` обошёл бы весь %TEMP% — слишком дорого.
+// Скил-дерево укладывается в сотни каталогов и глубину < 8.
 const MAX_EXPAND_DEPTH = 8;
 const MAX_EXPAND_CANDIDATES = 400;
 // Каталоги, в которых ссылок на скилы не бывает, а записей — тысячи.
@@ -121,7 +121,7 @@ function normalizedIsInside(realP, realCandidate) {
  *   ничего глубже junction'а на скил (основной случай §2). Цикл
  *   (ссылка на своего предка) отсекается множеством посещённых realpath
  *   ссылок; для обычных (не-ссылка) каталогов вместо этого работает
- *   предохранитель `MAX_EXPAND_DEPTH`, как и раньше — на них realpath не
+ *   предохранитель `MAX_EXPAND_DEPTH` — на них realpath не
  *   считается вовсе (см. ниже), так что зацикливание через них и так
  *   исключено. Когда `**` — ПОСЛЕДНИЙ сегмент паттерна (хвостовой случай:
  *   `isInside`, `matchesGlob('scope/**')`), обычный подкаталог кандидатом
@@ -193,7 +193,7 @@ function* expandGlobToFsRoots(patternPath) {
         } else {
           // Хвостовой "**" (rest.length===0): обычный каталог кандидата не
           // даёт (см. комментарий функции выше) — спускаемся только искать
-          // ссылки глубже. Не в хвосте — кандидат нужен как раньше.
+          // ссылки глубже. Не в хвосте — обычный каталог остаётся кандидатом.
           yield* matchFrom(childDir, remaining, depth + 1, rest.length === 0);
         }
       }
@@ -267,7 +267,7 @@ export function isInside(p, dir, { followLinks = true } = {}) {
   }
   if (normalizedIsInside(normalizeForCompare(resolve(p)), normalizeForCompare(resolve(dir)))) return true;
   // `followLinks: false` — только префиксы (для `allow_temp`: ссылки внутри
-  // os.tmpdir() не нужны, а обход %TEMP% стоил до 9 с — замер 2026-09-22).
+  // os.tmpdir() не нужны, а полный обход %TEMP% слишком дорог).
   if (!followLinks) return false;
   const patternPath = join(resolve(dir), '**');
   for (const candidate of expandGlobToFsRoots(patternPath)) {

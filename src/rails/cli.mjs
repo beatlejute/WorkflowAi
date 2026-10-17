@@ -131,11 +131,11 @@ function requirementLiteral(pattern) {
 }
 
 // Требования выходного слоя к ответу в терминальном узле (литералы output.final_requires) или
-// в узле паузы (output.pause_requires) — рядом с лейблом узла, куда пришёл goto. Анализ
-// 2026-10-01 (final-answer-split): строки final_requires стояли в лейбле предыдущего узла,
-// терминал говорил только «Остановиться», и Stop-хук отклонял ответ; goto печатал лейбл
-// терминала и «Переходы: нет». Узел паузы требует тех же литералов, только из pause_requires
-// (output-check берёт набор по положению): без подсказки агент в P6S3 не знает строки RAILS.
+// в узле паузы (output.pause_requires) — рядом с лейблом узла, куда пришёл goto. Без них строки
+// final_requires оставались бы в лейбле предыдущего узла, терминал говорил бы только
+// «Остановиться», и Stop-хук отклонял ответ. Узел паузы требует тех же литералов, только из
+// pause_requires (output-check берёт набор по положению): без подсказки агент в P6S3 не знает
+// строки RAILS.
 function formatFinalRequirements(state, config) {
   const node = state?.node;
   const terminal = Array.isArray(config?.terminal) ? config.terminal : [];
@@ -155,7 +155,7 @@ function formatFinalRequirements(state, config) {
 }
 
 // Хвост вывода по текущему узлу — одинаковый у goto и status: требования выходного слоя в
-// терминале или узле паузы и допустимые переходы. QA-178: `status | grep «Переходы»` давал
+// терминале или узле паузы и допустимые переходы. Без него `status | grep «Переходы»` даёт
 // пусто — перечень переходов печатали только start и goto.
 function nodeFooter(state, graph, config, guardCtx) {
   const lines = [];
@@ -167,11 +167,10 @@ function nodeFooter(state, graph, config, guardCtx) {
 
 // §5: --session, иначе WORKFLOW_RAILS_SESSION, иначе самый свежий файл
 // состояния проекта (с предупреждением в stderr — забота CLI).
-// Инцидент 2026-09-23: в проекте работали две сессии коуча, команда `goto` без `--session`
-// взяла самую свежую сессию (чужую) и записала в её журнал отказ по чужому узлу. Теперь
-// угадывание допустимо только при ОДНОЙ сессии проекта; при двух и более — отказ с перечнем
-// (ложный отказ дешевле правки чужого состояния). Явные `--session` и WORKFLOW_RAILS_SESSION
-// работают всегда.
+// Угадывание допустимо только при ОДНОЙ сессии проекта; при двух и более — отказ с перечнем
+// (без `--session` команда взяла бы самую свежую сессию, возможно чужую, и записала бы отказ
+// по чужому узлу; ложный отказ дешевле правки чужого состояния). Явные `--session` и
+// WORKFLOW_RAILS_SESSION работают всегда.
 function resolveSessionId(root, flags, env) {
   if (flags.session) return { sessionId: String(flags.session), guessed: false, sessions: [] };
   if (env && env.WORKFLOW_RAILS_SESSION) return { sessionId: String(env.WORKFLOW_RAILS_SESSION), guessed: false, sessions: [] };
@@ -202,10 +201,9 @@ function ambiguousSessionError(sessions) {
 // Тикет запуска для `{ticket}` в стражах рёбер (§4 edge_guards): сначала из состояния
 // сессии — его пишет хук из окружения хоста при первом действии агента, раньше, чем
 // выполнится `start` (§5), и команда агента его не меняет; WORKFLOW_RAILS_TICKET окружения
-// CLI — только если в состоянии тикета нет (состояние создано без хука). Ревью стража
-// 2026-09-27: окружение CLI агент подменяет — `WORKFLOW_RAILS_TICKET=… node …cli.mjs goto`,
-// `export`/`env`/`unset` перед вызовом хук не считает cli-вызовом, но на P0Q1 execute-task
-// их пропускают общие правила (проверено decide()), а пустой или чужой тикет открывает страж.
+// CLI — только если в состоянии тикета нет (состояние создано без хука). Окружение CLI агент
+// подменяет — `WORKFLOW_RAILS_TICKET=… node …cli.mjs goto`; `export`/`env`/`unset` перед
+// вызовом хук не считает cli-вызовом, а пустой или чужой тикет открывает страж.
 function runTicket(state, env) {
   return (state && state.ticket) || (env && env.WORKFLOW_RAILS_TICKET) || null;
 }
@@ -220,13 +218,9 @@ function guardContext(root, env, state) {
 
 // Скил запуска — WORKFLOW_RAILS_SKILL (ставят раннер стадии и раннер тестов скилов): по нему
 // хук создаёт состояние сессии при первом действии, по нему раннер после выхода агента
-// проверяет финальный ответ (output-check, терминал этого скила). Прогон PulseProxy
-// 2026-09-27: claude-haiku на QA-тикете стадии execute-task принял подсказку «Твоя роль:
-// manual-testing» за скил, `start manual-testing` получил «сессия уже привязана к
-// execute-task, используй --force», повторил с --force и прошёл граф manual-testing — раннер
-// отклонил ответ: узел P9S2 не терминал execute-task. Поэтому при заданном скиле запуска
-// (с rails.yaml) другой скил не стартует и с --force; отказ называет скил запуска и как
-// продолжить. Скил запуска без rails.yaml раннер не проверяет — там отказа нет.
+// проверяет финальный ответ (output-check, терминал этого скила). Поэтому при заданном скиле
+// запуска (с rails.yaml) другой скил не стартует и с --force; отказ называет скил запуска и
+// как продолжить. Скил запуска без rails.yaml раннер не проверяет — там отказа нет.
 //
 // Признаков скила запуска два, отказ — по любому: переменная окружения процесса CLI и
 // состояние сессии, привязанное к запуску раннера (`run`). Его хук создаёт при первом
@@ -722,7 +716,7 @@ function cmdReport(root, positional, flags, cwd = process.cwd()) {
   lines.push(`Подтверждения завершения: ${summary.completions}; штатные выходы: ${summary.exits}`);
   lines.push(`Stop-блоки: ${summary.stopBlocks.total} (${JSON.stringify(summary.stopBlocks.byNode)})`);
   // Канарейка — проверка живости, а не отказ: summarize() не кладёт её в «Отказы по узлу» и в
-  // узлы с повторами (журнал 2026-09-30: четверть–треть записей «отказов»), число — здесь.
+  // узлы с повторами, поэтому число печатается здесь отдельно.
   lines.push(`Канарейка (проверка живости, не отказ): ${summary.canaries.total} (${JSON.stringify(summary.canaries.byNode)})`);
   lines.push(`Ошибки хука: ${summary.errors}`);
 
@@ -791,7 +785,7 @@ function skillHasErrors(r) {
   return Boolean(r.loadError) || r.configErrors.length > 0 || r.graphErrors.length > 0;
 }
 
-// Скил без rails.yaml (major-находка ревью wp4): `--all`/`selfcheck` обходят
+// Скил без rails.yaml: `--all`/`selfcheck` обходят
 // ВСЕ каталоги `.workflow/src/skills`, но не у каждого скила есть rails.yaml —
 // он мог ещё не быть переведён на рельсы. Явный `check --skill <name>`
 // (пользователь назвал скил прямо) этим фильтром не затрагивается: там
@@ -832,11 +826,10 @@ function cmdCoverage(root, positional, flags, env, cwd) {
     return { code: 1, stdout: 'Ошибка: нужны --skill <name> и --baseline <git-ref>.\n' };
   }
 
-  // Карта миграции. Прогон коуча 2026-09-22: `--map rails-migration.yaml` из корня проекта
-  // резолвился от cwd в несуществующий файл, loadMap молча отдавал пустую карту — 151/200
-  // вместо 200/200 без единого слова об ошибке. Теперь: относительный путь — от cwd, затем
-  // от каталога скила; без --map — `<скил>/rails-migration.yaml`, если он есть; явная карта,
-  // которой нет ни там, ни там, — ошибка. Какая карта взята — печатается строкой «Карта:».
+  // Карта миграции: относительный путь — от cwd, затем от каталога скила; без --map —
+  // `<скил>/rails-migration.yaml`, если он есть; явная карта, которой нет ни там, ни там, —
+  // ошибка. Иначе относительный `--map` резолвился бы от cwd в несуществующий файл, а loadMap
+  // молча отдавал бы пустую карту. Какая карта взята — печатается строкой «Карта:».
   const skillDir = join(root, '.workflow', 'src', 'skills', skill);
   let mapFile;
   if (typeof flags.map === 'string') {
