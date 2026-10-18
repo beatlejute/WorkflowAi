@@ -4,8 +4,9 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, unlinkSync, linkSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, unlinkSync, linkSync, symlinkSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { realpathDeep } from '../rails/paths.mjs';
 import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { startState, saveState, loadState } from '../rails/state.mjs';
@@ -441,8 +442,19 @@ const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
 function sleepSync(ms) { Atomics.wait(lockWaitBuffer, 0, 0, ms); }
 
 function lockFilePath(root, session) {
-  return join(root, '.workflow', 'state', 'rails', `.exit-lock-${session}`);
+  return join(realpathDeep(root), '.workflow', 'state', 'rails', `.exit-lock-${session}`);
 }
+
+test('lifecycle lock fixture paths resolve temporary directory aliases', () => {
+  const parent = mkdtempSync(join(tmpdir(), 'rails-lock-alias-'));
+  const root = join(parent, 'root');
+  const alias = join(parent, 'alias');
+  mkdirSync(root);
+  try {
+    symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    assert.equal(lockFilePath(alias, 'valid_session'), lockFilePath(root, 'valid_session'));
+  } finally { rmSync(parent, { recursive: true, force: true }); }
+});
 
 test('lifecycle lock waits out a claim released while waiting', () => fixture(({ root, state }) => {
   const lockFile = lockFilePath(root, state.session);
