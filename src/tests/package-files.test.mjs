@@ -43,7 +43,9 @@ describe('npm package contents', () => {
       shell: process.platform === 'win32',
     });
     assert.equal(res.status, 0, `npm pack failed: ${res.stderr}`);
-    packed = new Set(JSON.parse(res.stdout)[0].files.map((f) => f.path).filter((p) => !isTransient(p)));
+    const parsed = JSON.parse(res.stdout);
+    const entry = Array.isArray(parsed) ? parsed[0] : parsed['workflow-ai'];
+    packed = new Set(entry.files.map((f) => f.path).filter((p) => !isTransient(p)));
   });
 
   test('every skill file except tests is packed', () => {
