@@ -629,3 +629,34 @@ test('register-rails.js: подключение модулем без входн
   assert.ok(!existsSync(join(root, '.kilo')), 'импорт модуля не должен создавать загрузчик Kilo');
   assert.ok(!existsSync(join(root, '.gitignore')), 'импорт модуля не должен дописывать чужой .gitignore');
 });
+
+test('register-rails.js: ошибка realpath при проверке entry point не запускает CLI', () => {
+  const globalDir = makeGlobalDir();
+  const root = makeProject();
+  const fakeEntry = join(root, 'entry-under-check');
+  const code = `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const fakeEntry = ${JSON.stringify(fakeEntry)};
+    const original = fs.realpathSync.native;
+    fs.realpathSync.native = (path, ...args) => {
+      if (String(path) === fakeEntry) throw Object.assign(new Error('injected realpath failure'), { code: 'EIO' });
+      return original(path, ...args);
+    };
+    syncBuiltinESMExports();
+    process.argv[1] = fakeEntry;
+    await import(${JSON.stringify(pathToFileURL(SCRIPT).href)});
+    console.log('IMPORT-DONE');
+  `;
+  const stdout = execFileSync(process.execPath, ['--input-type=module', '-e', code], {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, WORKFLOW_HOME: globalDir },
+  });
+
+  assert.match(stdout, /IMPORT-DONE/, 'неопределённый entry point не должен завершать вызывающий процесс');
+  assert.ok(!existsSync(join(root, '.claude')), 'при ошибке проверки entry point CLI не регистрирует хуки');
+  assert.ok(!existsSync(join(root, '.kilo')), 'при ошибке проверки entry point CLI не создаёт загрузчик');
+  assert.ok(!existsSync(join(root, '.gitignore')), 'при ошибке проверки entry point CLI не меняет .gitignore');
+});

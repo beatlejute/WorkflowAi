@@ -338,6 +338,103 @@ test('lifecycle lock rejects malformed session identifiers', () => {
   assert.throws(() => acquireLifecycleLock(tmpdir(), '../invalid'), /недопустимая сессия замка/);
 });
 
+test('lifecycle lock fails closed on non-contention filesystem errors', () => fixture(({ root, state }) => {
+  const lockFile = lockFilePath(root, state.session);
+  const lockUrl = new URL('../rails/lifecycle-lock.mjs', import.meta.url).href;
+  const script = `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const lockFile = ${JSON.stringify(lockFile)};
+    const originalOpen = fs.openSync;
+    fs.openSync = (path, ...args) => {
+      if (String(path) === lockFile) {
+        const error = new Error('injected I/O failure');
+        error.code = 'EIO';
+        throw error;
+      }
+      return originalOpen(path, ...args);
+    };
+    syncBuiltinESMExports();
+    const { withLifecycleLock } = await import(${JSON.stringify(lockUrl)});
+    let result;
+    try { withLifecycleLock(${JSON.stringify(root)}, ${JSON.stringify(state.session)}, () => {}); }
+    catch (error) { result = { failClosed: error.railsFailClosed, code: error.code }; }
+    process.stdout.write(JSON.stringify(result));
+  `;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 15000 });
+  assert.equal(child.status, 0, child.stderr);
+  assert.deepEqual(JSON.parse(child.stdout), { failClosed: true, code: 'EIO' });
+}));
+
+test('lifecycle lock fails closed when a busy claim becomes unreadable during retry', () => fixture(({ root, state }) => {
+  const lockFile = lockFilePath(root, state.session);
+  const lockUrl = new URL('../rails/lifecycle-lock.mjs', import.meta.url).href;
+  writeFileSync(lockFile, '4242');
+  const script = `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const lockFile = ${JSON.stringify(lockFile)};
+    const originalOpen = fs.openSync;
+    let attempts = 0;
+    fs.openSync = (path, ...args) => {
+      if (String(path) === lockFile && ++attempts > 1) {
+        throw Object.assign(new Error('injected retry failure'), { code: 'EIO' });
+      }
+      return originalOpen(path, ...args);
+    };
+    syncBuiltinESMExports();
+    const { withLifecycleLock } = await import(${JSON.stringify(lockUrl)});
+    let result;
+    try { withLifecycleLock(${JSON.stringify(root)}, ${JSON.stringify(state.session)}, () => {}); }
+    catch (error) { result = { failClosed: error.railsFailClosed, code: error.code }; }
+    process.stdout.write(JSON.stringify(result));
+  `;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 15000 });
+  assert.equal(child.status, 0, child.stderr);
+  assert.deepEqual(JSON.parse(child.stdout), { failClosed: true, code: 'EIO' });
+}));
+
+test('lifecycle lock treats unreadable and unremovable claims as busy without taking them', () => fixture(({ root, state }) => {
+  const lockFile = lockFilePath(root, state.session);
+  const lockUrl = new URL('../rails/lifecycle-lock.mjs', import.meta.url).href;
+  writeFileSync(lockFile, '4242');
+  const script = `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const lockFile = ${JSON.stringify(lockFile)};
+    const originalRead = fs.readFileSync;
+    fs.readFileSync = (path, ...args) => {
+      if (String(path) === lockFile) throw Object.assign(new Error('injected read failure'), { code: 'EACCES' });
+      return originalRead(path, ...args);
+    };
+    syncBuiltinESMExports();
+    const { acquireLifecycleLock } = await import(${JSON.stringify(lockUrl)});
+    const busy = acquireLifecycleLock(${JSON.stringify(root)}, ${JSON.stringify(state.session)});
+    fs.readFileSync = originalRead;
+    syncBuiltinESMExports();
+    fs.unlinkSync(lockFile);
+    const lock = acquireLifecycleLock(${JSON.stringify(root)}, ${JSON.stringify(state.session)});
+    fs.readFileSync = (path, ...args) => {
+      if (String(path) === lockFile) throw Object.assign(new Error('injected read failure'), { code: 'EACCES' });
+      return originalRead(path, ...args);
+    };
+    syncBuiltinESMExports();
+    const ownsUnreadable = lock.owns();
+    fs.readFileSync = originalRead;
+    const originalUnlink = fs.unlinkSync;
+    fs.unlinkSync = (path, ...args) => {
+      if (String(path) === lockFile) throw Object.assign(new Error('injected unlink failure'), { code: 'EACCES' });
+      return originalUnlink(path, ...args);
+    };
+    syncBuiltinESMExports();
+    lock.release();
+    process.stdout.write(JSON.stringify({ busy: busy.busy, owner: busy.owner, ownsUnreadable, retained: fs.existsSync(lockFile) }));
+  `;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 15000 });
+  assert.equal(child.status, 0, child.stderr);
+  assert.deepEqual(JSON.parse(child.stdout), { busy: true, ownsUnreadable: false, retained: true });
+}));
+
 // The rails path is synchronous, so a busy claim sleeps through Atomics.wait; the tests
 // poll a second process the same way instead of turning the event loop.
 const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4));

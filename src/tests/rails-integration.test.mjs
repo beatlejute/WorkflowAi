@@ -239,6 +239,36 @@ describe('init.mjs — rails junction и хуки', () => {
     }
   });
 
+  it('writeClaudeHooks сохраняет чужие группы без hooks и фильтрует только собственные записи', () => {
+    const tmp = makeTmpDir('wf-rails-hook-groups-');
+    try {
+      const settingsPath = path.join(tmp, '.claude', 'settings.local.json');
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      const malformed = 'not-a-group';
+      const withoutHooks = { matcher: 'Bash' };
+      const emptyHooks = { matcher: 'Empty', hooks: [] };
+      const ownOnly = { matcher: 'OwnOnlyRegression', hooks: [{ type: 'command', _workflow_rails: true }] };
+      const mixed = { matcher: 'Bash', hooks: [
+        { type: 'command', command: 'echo custom' },
+        { type: 'command', command: 'old rails hook', _workflow_rails: true },
+      ] };
+      fs.writeFileSync(settingsPath, JSON.stringify({ hooks: { Stop: [malformed, withoutHooks, emptyHooks, ownOnly, mixed] } }));
+
+      writeClaudeHooks(tmp);
+
+      const groups = JSON.parse(fs.readFileSync(settingsPath, 'utf8')).hooks.Stop;
+      assert.ok(groups.includes(malformed), 'не-объектная чужая группа остаётся нетронутой');
+      assert.ok(groups.some((group) => group.matcher === 'Bash' && !('hooks' in group)), 'группа без массива hooks остаётся нетронутой');
+      assert.ok(groups.some((group) => group.matcher === 'Empty' && Array.isArray(group.hooks) && group.hooks.length === 0), 'пустая чужая группа остаётся без изменений');
+      assert.ok(!groups.some((group) => group?.matcher === 'OwnOnlyRegression'), 'группа только с нашими записями заменяется');
+      assert.deepEqual(groups.find((group) => group.matcher === 'Bash' && Array.isArray(group.hooks)).hooks, [
+        { type: 'command', command: 'echo custom' },
+      ], 'из смешанной группы удаляется только наша запись');
+    } finally {
+      cleanupDir(tmp);
+    }
+  });
+
   it('matcher не проставляется для Stop/UserPromptSubmit/SessionStart, но есть для PreToolUse/PostToolUse', () => {
     const tmp = makeTmpDir('wf-rails-matcher-');
     try {

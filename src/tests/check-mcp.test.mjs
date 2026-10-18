@@ -34,7 +34,7 @@ const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'sc
 const QA_CONTEXT = 'check-mcp\n\nContext:\n  mcp_require_for: qa, e2e\n  task_type: qa\n  ticket_id: QA-001';
 
 function withProject(fn) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'check-mcp-'));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'check-mcp-')));
   return Promise.resolve(fn(root)).finally(() => fs.rmSync(root, { recursive: true, force: true }));
 }
 

@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, statSync, readdirSync, rmSync, readFileSync, mkdirSync, writeFileSync, lstatSync, realpathSync, symlinkSync, utimesSync } from 'node:fs';
 import { initProject, ensureKiloGlobalSkillsLink, getKiloConfigDir, createKilocodeSymlinks, syncTemplates } from '../init.mjs';
@@ -275,9 +275,10 @@ test('ensureKiloGlobalSkillsLink: повторный вызов — exists, чу
   assert.equal(ensureKiloGlobalSkillsLink(join(testGlobalDir, 'no-such-global')).status, 'skipped');
 });
 
-test('getKiloConfigDir: KILO_CONFIG_DIR, затем XDG_CONFIG_HOME/kilo', () => {
+test('getKiloConfigDir: KILO_CONFIG_DIR, затем XDG_CONFIG_HOME/kilo и домашний каталог', () => {
   assert.equal(getKiloConfigDir({ KILO_CONFIG_DIR: '/k', XDG_CONFIG_HOME: '/x' }), '/k');
   assert.equal(getKiloConfigDir({ XDG_CONFIG_HOME: '/x' }), join('/x', 'kilo'));
+  assert.equal(getKiloConfigDir({}), join(homedir(), '.config', 'kilo'));
 });
 
 test('createKilocodeSymlinks: прежняя ссылка снимается без вреда цели, в каталоге — только проектные скилы', () => {
@@ -311,10 +312,15 @@ test('createKilocodeSymlinks: прежняя ссылка снимается б�
   const stalePath = join(skillsDir, 'gone');
   symlinkSync(join(canon, 'canon-skill'), stalePath, kind);
   mkdirSync(join(skillsDir, 'user-dir'));
+  mkdirSync(join(src, 'occupied-skill'));
+  writeFileSync(join(src, 'occupied-skill', 'SKILL.md'), 'local');
+  mkdirSync(join(skillsDir, 'occupied-skill'));
+  writeFileSync(join(skillsDir, 'occupied-skill', 'keep.txt'), 'user data');
   const again = createKilocodeSymlinks(project, testGlobalDir);
   assert.equal(again.success, true, again.warning);
   assert.deepEqual(again.removed, ['gone']);
-  assert.deepEqual(readdirSync(skillsDir).sort(), ['local-skill', 'user-dir']);
+  assert.deepEqual(readdirSync(skillsDir).sort(), ['local-skill', 'occupied-skill', 'user-dir']);
+  assert.equal(readFileSync(join(skillsDir, 'occupied-skill', 'keep.txt'), 'utf8'), 'user data', 'существующий каталог пользователя не заменяется ссылкой');
   assert.ok(existsSync(join(canon, 'canon-skill', 'SKILL.md')), 'канон цел после снятия ссылки');
 });
 
